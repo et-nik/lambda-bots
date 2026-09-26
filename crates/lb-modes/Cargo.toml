@@ -1,0 +1,19 @@
+[package]
+name = "lb-modes"
+description = "Game modes: FFA, team deathmatch, GunGame"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-game.workspace = true
+lb-knowledge.workspace = true
+lb-decision.workspace = true
+smallvec.workspace = true
+
+[lints]
+workspace = true

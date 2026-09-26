@@ -1,0 +1,19 @@
+[package]
+name = "lb-config"
+description = "YAML configuration: schemas, loading, validation, provenance, snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true
+
+[lints]
+workspace = true

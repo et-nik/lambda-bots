@@ -1,0 +1,5 @@
+_GiveFnptrsToDll
+_Meta_Init
+_Meta_Query
+_Meta_Attach
+_Meta_Detach

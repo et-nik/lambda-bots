@@ -1,0 +1,10 @@
+{
+    global:
+        GiveFnptrsToDll;
+        Meta_Init;
+        Meta_Query;
+        Meta_Attach;
+        Meta_Detach;
+    local:
+        *;
+};

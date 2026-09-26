@@ -1,0 +1,12 @@
+# i686 cross toolchain from Ubuntu's g++-i686-linux-gnu (docker/linux-i386.Dockerfile). Works on amd64 and arm64 hosts.
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR i686)
+set(CMAKE_C_COMPILER i686-linux-gnu-gcc)
+set(CMAKE_CXX_COMPILER i686-linux-gnu-g++)
+set(CMAKE_AR i686-linux-gnu-ar CACHE FILEPATH "")
+set(CMAKE_C_FLAGS_INIT "-msse2 -mfpmath=sse")
+set(CMAKE_CXX_FLAGS_INIT "-msse2 -mfpmath=sse")
+set(CMAKE_FIND_ROOT_PATH /usr/i686-linux-gnu)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)

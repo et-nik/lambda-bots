@@ -1,0 +1,7 @@
+LIBRARY lambdabots_mm
+EXPORTS
+    GiveFnptrsToDll=_GiveFnptrsToDll@8
+    Meta_Init
+    Meta_Query
+    Meta_Attach
+    Meta_Detach

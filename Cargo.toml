@@ -1,0 +1,96 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+authors = ["Nikita <nikita.hldm@gmail.com>"]
+publish = false
+
+[workspace.dependencies]
+lb-ffi = { path = "crates/lb-ffi" }
+lb-core = { path = "crates/lb-core" }
+lb-raw = { path = "crates/lb-raw" }
+lb-worldq = { path = "crates/lb-worldq" }
+lb-config = { path = "crates/lb-config" }
+lb-telemetry = { path = "crates/lb-telemetry" }
+lb-host = { path = "crates/lb-host" }
+lb-game = { path = "crates/lb-game" }
+lb-bsp = { path = "crates/lb-bsp" }
+lb-kin = { path = "crates/lb-kin" }
+lb-nav-api = { path = "crates/lb-nav-api" }
+lb-nav = { path = "crates/lb-nav" }
+lb-navgen = { path = "crates/lb-navgen" }
+lb-mapknow = { path = "crates/lb-mapknow" }
+lb-perception = { path = "crates/lb-perception" }
+lb-knowledge = { path = "crates/lb-knowledge" }
+lb-styles = { path = "crates/lb-styles" }
+lb-motor = { path = "crates/lb-motor" }
+lb-combat = { path = "crates/lb-combat" }
+lb-actions = { path = "crates/lb-actions" }
+lb-decision = { path = "crates/lb-decision" }
+lb-modes = { path = "crates/lb-modes" }
+lb-brain = { path = "crates/lb-brain" }
+lb-ext = { path = "crates/lb-ext" }
+lb-runtime = { path = "crates/lb-runtime" }
+lb-plugin = { path = "crates/lb-plugin" }
+lb-testkit = { path = "crates/lb-testkit" }
+
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry"] }
+tracing-appender = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-saphyr = "1.3"
+rand_core = "0.10"
+rand_pcg = "0.10"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+arc-swap = "1"
+rustc-hash = "2"
+indexmap = "2"
+smallvec = "1"
+arrayvec = "0.7"
+bitflags = "2"
+glam = "0.33"
+blake3 = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+lz4_flex = "0.14"
+crc32c = "0.6"
+rayon = "1"
+hmac = "0.13"
+sha2 = "0.11"
+subtle = "2"
+getrandom = "0.4"
+libc = "0.2"
+proptest = "1"
+insta = "1"
+criterion = "0.8"
+cbindgen = "0.29"
+cargo_metadata = "0.23"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+large_stack_frames = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

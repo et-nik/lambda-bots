@@ -1,0 +1,82 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "dev-macos",
+      "inherits": "base",
+      "displayName": "macOS arm64 debug (Xash3D stand)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "Rust_CARGO_TARGET": "aarch64-apple-darwin"
+      }
+    },
+    {
+      "name": "release-macos",
+      "inherits": "base",
+      "displayName": "macOS arm64 release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "Rust_CARGO_TARGET": "aarch64-apple-darwin"
+      }
+    },
+    {
+      "name": "release-linux-i386",
+      "inherits": "base",
+      "displayName": "Linux i386 release (ReHLDS), cross toolchain from docker/linux-i386.Dockerfile",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-i386-cross.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "Rust_CARGO_TARGET": "i686-unknown-linux-gnu"
+      }
+    },
+    {
+      "name": "release-linux-i386-multilib",
+      "inherits": "base",
+      "displayName": "Linux i386 release on an x86 host with gcc-multilib",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-i386.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "Rust_CARGO_TARGET": "i686-unknown-linux-gnu"
+      }
+    },
+    {
+      "name": "release-windows-x86",
+      "displayName": "Windows x86 release (MSVC)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "Rust_CARGO_TARGET": "i686-pc-windows-msvc"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-macos",
+      "configurePreset": "dev-macos"
+    },
+    {
+      "name": "release-macos",
+      "configurePreset": "release-macos"
+    },
+    {
+      "name": "release-linux-i386",
+      "configurePreset": "release-linux-i386"
+    },
+    {
+      "name": "release-linux-i386-multilib",
+      "configurePreset": "release-linux-i386-multilib"
+    },
+    {
+      "name": "release-windows-x86",
+      "configurePreset": "release-windows-x86",
+      "configuration": "Release"
+    }
+  ]
+}

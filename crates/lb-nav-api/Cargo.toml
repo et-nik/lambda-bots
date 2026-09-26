@@ -1,0 +1,17 @@
+[package]
+name = "lb-nav-api"
+description = "Navigation interface visible to the AI: NavQuery trait and request types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-worldq.workspace = true
+smallvec.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "lb-nav"
+description = "Navigation graph, .lbnav format, yapb import, planner, path following, traversal executors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-worldq.workspace = true
+lb-bsp.workspace = true
+lb-kin.workspace = true
+lb-nav-api.workspace = true
+lb-config.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+postcard.workspace = true
+lz4_flex.workspace = true
+crc32c.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

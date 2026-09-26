@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo xtask abi --check
+      - run: cargo xtask layering
+      - run: cargo run -p lb-cli -- config check data/
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
+
+  linux-i386:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in docker/linux-i386.Dockerfile, check the module, run i686 tests
+        run: scripts/build-linux-i386-docker.sh --test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambdabots-linux-i386
+          path: build/release-linux-i386/lambdabots_mm_i386.so
+          if-no-files-found: error
+
+  windows-x86:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+      - name: Build and check exports
+        shell: pwsh
+        run: scripts/build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambdabots-windows-x86
+          path: build/release-windows-x86/Release/lambdabots_mm.dll
+          if-no-files-found: error
+
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ninja
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cmake --preset release-macos
+      - run: cmake --build --preset release-macos
+      - run: scripts/check-binary.sh build/release-macos/lambdabots_mm.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambdabots-macos-arm64
+          path: build/release-macos/lambdabots_mm.dylib
+          if-no-files-found: error

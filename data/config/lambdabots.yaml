@@ -1,0 +1,71 @@
+schema: lambdabots/main@1
+
+# Bot count. mode: fill = keep `count` players in total (bots leave as humans join),
+# normal = keep `count` bots, match = `match_ratio` bots per human.
+quota:
+  count: 8
+  mode: fill
+  match_ratio: 1.0
+  autovacate: true        # always leave `keep_slots` free for joining humans
+  keep_slots: 1
+  count_connecting: true
+  join_after_player: false
+  join_delay: 5.0         # seconds after map start before the first bot joins
+  join_interval: [0.5, 3.0]
+
+bots:
+  difficulty: normal      # noob | easy | normal | hard | expert
+  style: random
+  name_prefix: ""
+  save_names: true        # the same bots come back after a map change
+  language: en            # names/<language>.yaml
+  use_profiles: true
+  models: [barney, gina, gman, gordon, helmet, hgrunt, recon, robo, scientist, zombie]
+  rotate:
+    enabled: false
+    stay: [360, 3600]
+    rejoin_delay: [20, 90]
+  force_respawn: true
+  respawn_delay: [0.3, 1.2]
+  stuck_kill_time: 20.0
+
+engine:
+  cmd_rate: 100           # commands per second per bot sent to the engine; 0 = every frame
+  max_cmd_debt_ms: 200
+  workers: -1
+  master_seed: 0          # 0 = random per start
+
+telemetry:
+  enabled: false
+  dest: 127.0.0.1
+  port: 27070
+  hz: 10
+  cmd_bind: 127.0.0.1
+  secret: ""              # HMAC secret for remote commands; empty disables the command channel
+  allow_unauthenticated_loopback: false
+  max_kbps: 1024
+
+access:
+  admins: []              # SteamIDs allowed to use `lb` from the client console, e.g. "STEAM_0:1:12345"
+  password: ""
+  password_key: _lbpw
+  editor_enabled: false
+  listen_host_is_admin: true
+
+logging:
+  level: info
+  console_level: warn
+  file: true
+  max_files: 7
+
+gungame:
+  mode: auto              # auto | on | off
+  detect_cvar: gg_enabled
+  frags_per_level: 100
+
+disguise:
+  fake_ping: false
+  scoreboard_bot_flag: false
+  avatars: false
+  fake_steamid: false
+  hide_bots_in_queries: false

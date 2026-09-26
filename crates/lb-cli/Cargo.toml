@@ -1,0 +1,21 @@
+[package]
+name = "lb-cli"
+description = "Command line tools: config, replay, navigation, BSP, ABI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-config.workspace = true
+lb-bsp.workspace = true
+lb-nav.workspace = true
+lb-navgen.workspace = true
+lb-ffi.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

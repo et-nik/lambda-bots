@@ -1,0 +1,19 @@
+[package]
+name = "lb-motor"
+description = "Intents, channel arbiter, look/locomotion/stance/weapon controllers, command encoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-game.workspace = true
+lb-styles.workspace = true
+smallvec.workspace = true
+bitflags.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,207 @@
+//! What a bot knows about itself: its own HUD messages and its own entity state.
+
+use lb_core::Vec3;
+use lb_core::time::SimTime;
+
+use crate::Known;
+use crate::messages::{GameMsg, WeaponInfo};
+use crate::weapons::WeaponId;
+
+pub const MAX_AMMO_TYPES: usize = 32;
+
+/// Body state copied from our own entity every frame by the runtime.
+#[derive(Clone, Debug, Default)]
+pub struct Body {
+    pub origin: Vec3,
+    pub velocity: Vec3,
+    pub v_angle: Vec3,
+    pub punchangle: Vec3,
+    pub view_ofs: Vec3,
+    pub health: f32,
+    pub armor: f32,
+    pub weapons_mask: u32,
+    pub maxspeed: f32,
+    pub fov: f32,
+    pub flags: u32,
+    pub movetype: u8,
+    pub waterlevel: u8,
+    pub deadflag: u8,
+    pub in_duck: bool,
+    pub has_longjump: bool,
+    pub frags: f32,
+}
+
+pub const FL_ONGROUND: u32 = 1 << 9;
+pub const FL_DUCKING: u32 = 1 << 14;
+pub const MOVETYPE_FLY: u8 = 5;
+pub const DEAD_NO: u8 = 0;
+pub const DEAD_RESPAWNABLE: u8 = 3;
+
+#[derive(Clone, Debug, Default)]
+pub struct DamageTaken {
+    pub at: SimTime,
+    pub health: i32,
+    pub armor: i32,
+    pub bits: i32,
+    pub source: Vec3,
+}
+
+#[derive(Clone, Debug)]
+pub struct SelfState {
+    pub body: Body,
+    pub current_weapon: Known<WeaponId>,
+    /// Weapon requested by the weapon controller and not yet confirmed by `CurWeapon`.
+    pub requested_weapon: Option<(WeaponId, SimTime)>,
+    pub clip: [Known<i32>; 32],
+    pub ammo: [Known<i32>; MAX_AMMO_TYPES],
+    pub hud_health: Known<i32>,
+    pub hud_armor: Known<i32>,
+    pub fov: Known<i32>,
+    pub last_damage: Option<DamageTaken>,
+    pub spawned_at: Option<SimTime>,
+    pub deaths: i32,
+}
+
+impl Default for SelfState {
+    fn default() -> Self {
+        SelfState {
+            body: Body::default(),
+            current_weapon: Known::Unknown,
+            requested_weapon: None,
+            clip: [Known::Unknown; 32],
+            ammo: [Known::Unknown; MAX_AMMO_TYPES],
+            hud_health: Known::Unknown,
+            hud_armor: Known::Unknown,
+            fov: Known::Unknown,
+            last_damage: None,
+            spawned_at: None,
+            deaths: 0,
+        }
+    }
+}
+
+impl SelfState {
+    pub fn is_alive(&self) -> bool {
+        self.body.deadflag == DEAD_NO && self.body.health > 0.0
+    }
+
+    pub fn on_ground(&self) -> bool {
+        self.body.flags & FL_ONGROUND != 0
+    }
+
+    pub fn on_ladder(&self) -> bool {
+        self.body.movetype == MOVETYPE_FLY
+    }
+
+    pub fn owns(&self, w: WeaponId) -> bool {
+        self.body.weapons_mask & w.bit() != 0
+    }
+
+    /// Resets per-life state on spawn (weapons, clips and ammo come fresh from the game).
+    pub fn on_spawn(&mut self, now: SimTime) {
+        self.current_weapon = Known::Unknown;
+        self.requested_weapon = None;
+        self.clip = [Known::Unknown; 32];
+        self.ammo = [Known::Unknown; MAX_AMMO_TYPES];
+        self.last_damage = None;
+        self.spawned_at = Some(now);
+    }
+
+    /// Applies a message addressed to this bot.
+    pub fn apply(&mut self, msg: &GameMsg, now: SimTime) {
+        match *msg {
+            GameMsg::CurWeapon { active, id, clip } => {
+                if let Some(w) = WeaponId::from_id(id) {
+                    if active {
+                        self.current_weapon = Known::Value(w);
+                        if matches!(self.requested_weapon, Some((r, _)) if r == w) {
+                            self.requested_weapon = None;
+                        }
+                    }
+                    self.clip[id as usize] = Known::Value(clip);
+                }
+            }
+            GameMsg::AmmoX { index, total } => {
+                if let Some(slot) = self.ammo.get_mut(index as usize) {
+                    *slot = Known::Value(total);
+                }
+            }
+            GameMsg::AmmoPickup { index, delta } => {
+                if let Some(Known::Value(v)) = self.ammo.get_mut(index as usize) {
+                    *v += delta;
+                }
+            }
+            GameMsg::Health(h) => self.hud_health = Known::Value(h),
+            GameMsg::Battery(a) => self.hud_armor = Known::Value(a),
+            GameMsg::SetFov(f) => self.fov = Known::Value(f),
+            GameMsg::Damage {
+                armor,
+                health,
+                bits,
+                source,
+            } => {
+                self.last_damage = Some(DamageTaken {
+                    at: now,
+                    health,
+                    armor,
+                    bits,
+                    source,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Weapon registry built from `WeaponList` (ammo indices and maxima per weapon).
+#[derive(Clone, Debug, Default)]
+pub struct WeaponRegistry {
+    pub entries: Vec<WeaponInfo>,
+}
+
+impl WeaponRegistry {
+    pub fn insert(&mut self, info: WeaponInfo) {
+        match self.entries.iter_mut().find(|e| e.id == info.id) {
+            Some(e) => *e = info,
+            None => self.entries.push(info),
+        }
+    }
+
+    pub fn get(&self, w: WeaponId) -> Option<&WeaponInfo> {
+        self.entries.iter().find(|e| e.id == w as i32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ammo_pickup_is_a_delta_and_needs_a_known_total() {
+        let mut s = SelfState::default();
+        s.apply(&GameMsg::AmmoPickup { index: 1, delta: 17 }, SimTime(1.0));
+        assert_eq!(s.ammo[1], Known::Unknown);
+        s.apply(&GameMsg::AmmoX { index: 1, total: 68 }, SimTime(1.0));
+        s.apply(&GameMsg::AmmoPickup { index: 1, delta: 17 }, SimTime(2.0));
+        assert_eq!(s.ammo[1], Known::Value(85));
+    }
+
+    #[test]
+    fn cur_weapon_confirms_request() {
+        let mut s = SelfState {
+            requested_weapon: Some((WeaponId::Glock, SimTime(0.0))),
+            ..Default::default()
+        };
+        s.apply(
+            &GameMsg::CurWeapon {
+                active: true,
+                id: 2,
+                clip: 17,
+            },
+            SimTime(0.1),
+        );
+        assert_eq!(s.current_weapon, Known::Value(WeaponId::Glock));
+        assert!(s.requested_weapon.is_none());
+        assert_eq!(s.clip[2], Known::Value(17));
+    }
+}

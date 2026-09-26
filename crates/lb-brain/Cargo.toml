@@ -1,0 +1,28 @@
+[package]
+name = "lb-brain"
+description = "Per-bot brain: schedule, perception to command pipeline, decision trace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-raw.workspace = true
+lb-game.workspace = true
+lb-perception.workspace = true
+lb-knowledge.workspace = true
+lb-styles.workspace = true
+lb-motor.workspace = true
+lb-combat.workspace = true
+lb-actions.workspace = true
+lb-decision.workspace = true
+lb-modes.workspace = true
+lb-nav-api.workspace = true
+smallvec.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

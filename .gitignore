@@ -1,0 +1,11 @@
+/target/
+/build/
+/cmake-build-*/
+/dist/
+/stand-runs/
+/.idea/
+.DS_Store
+*.lbrec
+/tools/observer/recordings/*
+!/tools/observer/recordings/.gitkeep
+__pycache__/

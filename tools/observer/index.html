@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>lambdabots observer</title>
+<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* palette: validated dark set from the dataviz reference (series stepped for #1a1a19) */
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255,255,255,0.10);
+
+    --s-blue: #3987e5;    /* roam / path            */
+    --s-green: #008300;   /* pickup / chargers      */
+    --s-magenta: #d55181; /* special moves          */
+    --s-yellow: #c98500;  /* throwables / goal      */
+    --s-aqua: #199e70;    /* camp                   */
+    --s-orange: #d95926;  /* hunt / ladders         */
+    --s-violet: #9085e9;  /* cover / hide / pause   */
+    --s-red: #e66767;     /* attack                 */
+
+    --st-good: #0ca30c;
+    --st-warn: #fab219;
+    --st-serious: #ec835a;
+    --st-critical: #d03b3b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  header .brand { font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--st-critical); display: inline-block; }
+  .dot.live { background: var(--st-good); }
+  .dot.replay { background: var(--s-violet); }
+  .stat { color: var(--ink-2); }
+  .stat b { color: var(--ink); font-weight: 600; }
+  .spacer { flex: 1; }
+
+  button, select, input[type=text] {
+    background: #232322; color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #2d2d2b; }
+  button.rec-on { border-color: var(--st-critical); color: var(--st-critical); }
+  button:disabled { opacity: .4; cursor: default; }
+  input[type=text] { cursor: text; width: 170px; }
+  input[type=range] { accent-color: var(--s-blue); }
+
+  #main { flex: 1; display: flex; min-height: 0; }
+  #canvasWrap { flex: 1; position: relative; min-width: 0; }
+  canvas#view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas#view.dragging { cursor: grabbing; }
+
+  #overlayMsg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    pointer-events: none; color: var(--muted); font-size: 15px; text-align: center; white-space: pre-line;
+  }
+  #tooltip {
+    position: absolute; pointer-events: none; background: #232322; border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px; font-size: 12px; color: var(--ink-2); display: none; z-index: 5;
+  }
+  #zPanel {
+    position: absolute; left: 10px; bottom: 10px; background: rgba(26,26,25,.92);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+    display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--ink-2);
+  }
+  #layerPanel {
+    position: absolute; left: 10px; top: 10px; background: rgba(26,26,25,.92);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    color: var(--ink-2); display: grid; gap: 2px;
+  }
+  #layerPanel label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+
+  #side {
+    width: 320px; background: var(--surface); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #side section { border-bottom: 1px solid var(--border); padding: 8px 12px; overflow: auto; }
+  #side h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #legend { flex: 0 0 auto; }
+  .lg { display: inline-flex; align-items: center; gap: 5px; margin: 0 10px 3px 0; color: var(--ink-2); font-size: 12px; }
+  .sw { width: 10px; height: 10px; border-radius: 50%; }
+
+  #players { flex: 0 1 auto; max-height: 220px; }
+  .prow { display: flex; align-items: center; gap: 7px; padding: 2px 4px; border-radius: 5px; cursor: pointer; }
+  .prow:hover { background: #232322; }
+  .prow.sel { background: #26303f; }
+  .prow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prow .hp { width: 34px; text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .prow .tk { color: var(--muted); font-size: 11px; width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right;}
+  .prow.dead { opacity: .45; }
+
+  #inspector { flex: 0 1 auto; max-height: 34%; font-size: 12px; }
+  #inspector table { border-collapse: collapse; width: 100%; }
+  #inspector td { padding: 1px 4px 1px 0; vertical-align: top; }
+  #inspector td:first-child { color: var(--muted); width: 86px; }
+  #inspector .chips span {
+    display: inline-block; background: #232322; border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 6px; margin: 1px 3px 1px 0; font-size: 11px; color: var(--ink-2);
+  }
+  #inspector pre { background: #141413; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px; max-height: 160px; overflow: auto; font-size: 11px; color: var(--ink-2); }
+
+  #events { flex: 1 1 auto; min-height: 80px; }
+  .ev { padding: 1px 0; color: var(--ink-2); font-size: 12px; }
+  .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+  .ev.kill { color: var(--s-red); }
+  .ev b { font-weight: 600; color: var(--ink); }
+
+  #replayBar {
+    display: none; align-items: center; gap: 10px; padding: 6px 12px;
+    background: var(--surface); border-top: 1px solid var(--border);
+  }
+  #replayBar.on { display: flex; }
+  #timeline { flex: 1; }
+  .mono { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+</style>
+</head>
+<body>
+<header>
+  <span id="statusDot" class="dot"></span>
+  <span class="brand">lambdabots observer</span>
+  <span class="stat">карта <b id="mapName">—</b></span>
+  <span class="stat"><b id="playersCount">0</b> игроков</span>
+  <span class="stat"><b id="nodeCount">0</b> нод</span>
+  <span class="stat"><b id="rate">0</b> снапш/с</span>
+  <span class="spacer"></span>
+  <button id="btnAdd" title="lb add">+ бот</button>
+  <button id="btnKick" title="lb kick">− бот</button>
+  <input type="text" id="cmdInput" placeholder="lb list / lb quota 8 …">
+  <button id="btnSend">→</button>
+  <button id="btnRec">⏺ запись</button>
+  <select id="recList" title="открыть запись"><option value="">записи…</option></select>
+  <input type="file" id="fileInput" accept=".ndjson,.json" style="display:none">
+  <button id="btnOpenFile">открыть файл</button>
+</header>
+
+<div id="main">
+  <div id="canvasWrap">
+    <canvas id="view"></canvas>
+    <div id="layerPanel"></div>
+    <div id="zPanel">
+      <label><input type="checkbox" id="zOn"> высота</label>
+      <input type="range" id="zSlider" min="0" max="100" value="50" style="width:130px">
+      <span id="zLabel" class="mono">—</span>
+    </div>
+    <div id="overlayMsg">ожидание данных…
+запусти сервер с lb_telemetry 1 и bridge.py (или python3 fake_server.py)</div>
+    <div id="tooltip"></div>
+  </div>
+  <div id="side">
+    <section id="legend"></section>
+    <section id="players"><h3>Игроки</h3><div id="playerRows"></div></section>
+    <section id="inspector"><h3>Инспектор</h3><div id="inspBody" class="stat">клик по боту на карте или в списке</div></section>
+    <section id="events"><h3>События</h3><div id="evRows"></div></section>
+  </div>
+</div>
+
+<div id="replayBar">
+  <button id="btnExitReplay">✕ live</button>
+  <button id="btnPlay">▶</button>
+  <select id="speed">
+    <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+    <option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
+  </select>
+  <input type="range" id="timeline" min="0" max="0" value="0">
+  <span id="timeLabel" class="mono">0:00 / 0:00</span>
+</div>
+
+<script>
+"use strict";
+
+/* ---------------------------------------------------------------- consts */
+/* lambdabots bot lifecycle states; bridge.py sends their index as `task` */
+const TASKS = ["alive","dead","respawning","connecting","spawned","leaving","faulted"];
+
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const C = {
+  ink: css('--ink'), ink2: css('--ink-2'), muted: css('--muted'), grid: css('--grid'),
+  baseline: css('--baseline'), surface: css('--surface'),
+  blue: css('--s-blue'), green: css('--s-green'), magenta: css('--s-magenta'),
+  yellow: css('--s-yellow'), aqua: css('--s-aqua'), orange: css('--s-orange'),
+  violet: css('--s-violet'), red: css('--s-red'),
+  good: css('--st-good'), warn: css('--st-warn'), critical: css('--st-critical'),
+};
+
+/* identity color = task group (fixed slots, never cycled) */
+const TASK_GROUPS = {
+  alive:   { color: C.green,   label: "жив",          tasks: [0] },
+  dead:    { color: C.muted,   label: "мёртв/респаун", tasks: [1,2] },
+  joining: { color: C.blue,    label: "заходит",      tasks: [3,4] },
+  leaving: { color: C.red,     label: "уходит/сбой",  tasks: [5,6] },
+};
+const taskGroup = id => {
+  for (const g of Object.values(TASK_GROUPS)) if (g.tasks.includes(id)) return g;
+  return { color: C.muted, label: "?" };
+};
+const taskName = id => (id >= 0 && id < TASKS.length) ? TASKS[id] : "—";
+
+const WEAPONS = { 1:"crowbar",2:"glock",3:"357",4:"mp5",5:"chaingun",6:"crossbow",7:"shotgun",
+  8:"rpg",9:"gauss",10:"egon",11:"hornets",12:"grenade",13:"tripmine",14:"satchel",15:"snark" };
+const PERS = ["normal","rusher","careful"];
+const NF = { button:1<<0, lift:1<<1, crouch:1<<2, goal:1<<4, ladder:1<<5, camp:1<<7, djump:1<<9, narrow:1<<10 };
+
+/* ---------------------------------------------------------------- state */
+const world = {
+  map: "—", nodes: new Map(), links: [], graphReady: false, graphCount: 0,
+  walls: null, wallsTriedFor: null,
+  players: new Map(), trails: new Map(), lastFrame: null, tGame: 0,
+  zMin: 0, zMax: 0,
+};
+const cam = { x: 0, y: 0, scale: 0.5, fitted: false };
+const ui = {
+  selected: -1, follow: false, showRaw: false,
+  layers: { walls: true, links: true, nodes: true, names: true, trails: false, sight: true, spawns: true },
+  zOn: false, zCenter: 0, zRange: 180,
+};
+const replay = { on: false, entries: [], frameIdx: [], pos: 0, playing: false, lastTick: 0, applied: -1 };
+let liveRate = { count: 0, shown: 0, last: performance.now() };
+let staticDirty = true;
+let ws = null, wsOk = false;
+
+/* ---------------------------------------------------------------- helpers */
+const $ = id => document.getElementById(id);
+const view = $("view"), wrap = $("canvasWrap"), ctx = view.getContext("2d");
+const staticCanvas = document.createElement("canvas"), sctx = staticCanvas.getContext("2d");
+const dpr = window.devicePixelRatio || 1;
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  for (const c of [view, staticCanvas]) { c.width = w * dpr; c.height = h * dpr; }
+  view.style.width = w + "px"; view.style.height = h + "px";
+  staticDirty = true;
+}
+window.addEventListener("resize", resize);
+new ResizeObserver(resize).observe(wrap);
+
+const W2S = (x, y) => [ (x - cam.x) * cam.scale + view.width / (2 * dpr),
+                        view.height / (2 * dpr) - (y - cam.y) * cam.scale ];
+const S2W = (sx, sy) => [ (sx - view.width / (2 * dpr)) / cam.scale + cam.x,
+                          cam.y - (sy - view.height / (2 * dpr)) / cam.scale ];
+
+function zAlpha(zlo, zhi = zlo) {
+  if (!ui.zOn) return 1;
+  const lo = ui.zCenter - ui.zRange, hi = ui.zCenter + ui.zRange;
+  return (zhi >= lo && zlo <= hi) ? 1 : 0.10;
+}
+
+function fitView() {
+  let b = null;
+  const grow = (x, y) => {
+    if (!b) b = [x, y, x, y];
+    else { b[0]=Math.min(b[0],x); b[1]=Math.min(b[1],y); b[2]=Math.max(b[2],x); b[3]=Math.max(b[3],y); }
+  };
+  if (world.walls) { grow(world.walls.bounds[0], world.walls.bounds[1]); grow(world.walls.bounds[2], world.walls.bounds[3]); }
+  for (const n of world.nodes.values()) grow(n.x, n.y);
+  for (const p of world.players.values()) grow(p.o[0], p.o[1]);
+  if (!b) return;
+  cam.x = (b[0]+b[2])/2; cam.y = (b[1]+b[3])/2;
+  const w = view.width/dpr, h = view.height/dpr;
+  cam.scale = Math.min(2, 0.92 * Math.min(w / Math.max(200, b[2]-b[0]), h / Math.max(200, b[3]-b[1])));
+  cam.fitted = true; staticDirty = true;
+}
+
+/* ---------------------------------------------------------------- messages */
+function handleMessage(msg) {
+  switch (msg.type) {
+    case "graph_begin":
+      world.nodes.clear(); world.links = []; world.graphReady = false;
+      world.map = msg.map; world.graphCount = msg.count;
+      break;
+    case "graph_nodes":
+      for (const n of msg.nodes) world.nodes.set(n[0], { x:n[1], y:n[2], z:n[3], flags:n[4], radius:n[5] });
+      break;
+    case "graph_links":
+      for (const l of msg.links) world.links.push(l);
+      break;
+    case "graph_end": {
+      world.graphReady = true; staticDirty = true;
+      let zmin = 1e9, zmax = -1e9;
+      for (const n of world.nodes.values()) { zmin = Math.min(zmin, n.z); zmax = Math.max(zmax, n.z); }
+      world.zMin = zmin === 1e9 ? 0 : zmin; world.zMax = zmax === -1e9 ? 0 : zmax;
+      updateZPanel();
+      if (!cam.fitted) fitView();
+      break;
+    }
+    case "frame": {
+      world.lastFrame = msg; world.tGame = msg.t;
+      if (msg.map !== world.map) world.map = msg.map;
+      const seen = new Set();
+      for (const p of msg.players) {
+        world.players.set(p.e, p); seen.add(p.e);
+        if (p.al) {
+          let tr = world.trails.get(p.e);
+          if (!tr) world.trails.set(p.e, tr = []);
+          const last = tr[tr.length - 1];
+          if (!last || Math.hypot(last[0]-p.o[0], last[1]-p.o[1]) > 6) tr.push([p.o[0], p.o[1], msg.t]);
+          while (tr.length && msg.t - tr[0][2] > 15) tr.shift();
+          if (tr.length > 400) tr.shift();
+        } else world.trails.delete(p.e);
+      }
+      for (const e of [...world.players.keys()]) if (!seen.has(e)) { world.players.delete(e); world.trails.delete(e); }
+      for (const ev of msg.ev || []) pushEvent(ev);
+      if (!replay.on) liveRate.count++;
+      maybeLoadWalls();
+      if (!cam.fitted && world.players.size) fitView();
+      updateSidebar();
+      break;
+    }
+    case "bridge_status":
+      setRecUi(msg.recording);
+      break;
+  }
+  updateHud();
+}
+
+function maybeLoadWalls() {
+  if (replay.on) return;
+  if (!world.map || world.map === "—" || world.wallsTriedFor === world.map) return;
+  world.wallsTriedFor = world.map;
+  fetch("/maps/" + encodeURIComponent(world.map) + ".json")
+    .then(r => r.ok ? r.json() : null)
+    .then(d => { if (d && d.map === world.map) { world.walls = d; staticDirty = true; if (!cam.fitted) fitView(); } })
+    .catch(() => {});
+}
+
+/* ---------------------------------------------------------------- events feed */
+const evRows = $("evRows");
+function pname(e) { const p = world.players.get(e); return p ? p.n : "#" + e; }
+function pushEvent(ev) {
+  const div = document.createElement("div");
+  div.className = "ev" + (ev.k === "kill" ? " kill" : "");
+  const t = `<span class="t">${fmtTime(ev.t)}</span>`;
+  if (ev.k === "kill") div.innerHTML = `${t}☠ <b>${esc(pname(ev.a))}</b> убил <b>${esc(pname(ev.v))}</b>`;
+  else div.innerHTML = `${t}<b>${esc(pname(ev.e))}</b>: ${taskName(ev.o)} → <b>${taskName(ev.n)}</b>`;
+  div.onclick = () => select(ev.e ?? ev.v);
+  evRows.prepend(div);
+  while (evRows.childElementCount > 120) evRows.lastChild.remove();
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtTime = t => `${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,"0")}`;
+
+/* ---------------------------------------------------------------- sidebar */
+function select(e) {
+  ui.selected = (ui.selected === e) ? -1 : e;
+  updateSidebar();
+}
+function updateSidebar() {
+  const rows = $("playerRows");
+  const list = [...world.players.values()].sort((a,b) => (b.bot?0:1)-(a.bot?0:1) || a.n.localeCompare(b.n));
+  rows.innerHTML = "";
+  for (const p of list) {
+    const g = p.bot ? taskGroup(p.task) : { color: C.ink };
+    const row = document.createElement("div");
+    row.className = "prow" + (p.e === ui.selected ? " sel" : "") + (p.al ? "" : " dead");
+    row.innerHTML = `<span class="sw" style="background:${g.color}"></span>` +
+      `<span class="nm">${esc(p.n)}${p.bot ? "" : " 👤"}${p.stuck ? " ⚠" : ""}</span>` +
+      `<span class="tk">${p.bot ? taskName(p.task) : ""}</span>` +
+      `<span class="hp">${p.al ? p.hp : "†"}</span>`;
+    row.onclick = () => select(p.e);
+    rows.appendChild(row);
+  }
+  $("playersCount").textContent = world.players.size;
+
+  const insp = $("inspBody");
+  const p = world.players.get(ui.selected);
+  if (!p) { insp.className = "stat"; insp.textContent = "клик по боту на карте или в списке"; return; }
+  insp.className = "";
+  if (!p.bot) {
+    insp.innerHTML = `<table><tr><td>имя</td><td>${esc(p.n)} (человек)</td></tr>
+      <tr><td>hp / ap</td><td>${p.hp} / ${p.ap}</td></tr>
+      <tr><td>позиция</td><td class="mono">${p.o.map(v=>v.toFixed(0)).join(", ")}</td></tr></table>`;
+    return;
+  }
+  const chips = (p.tstk || []).map(t => `<span>${taskName(t)}</span>`).join("");
+  const en = p.en >= 0 ? pname(p.en) : "—";
+  insp.innerHTML = `<table>
+    <tr><td>имя</td><td>${esc(p.n)} <span style="color:${taskGroup(p.task).color}">●</span> ${taskName(p.task)}</td></tr>
+    <tr><td>hp / ap</td><td>${p.al ? p.hp + " / " + p.ap : "мёртв"}</td></tr>
+    <tr><td>оружие</td><td>${WEAPONS[p.w] || p.w}</td></tr>
+    <tr><td>стек задач</td><td class="chips">${chips || "—"}</td></tr>
+    <tr><td>нода / цель</td><td class="mono">${p.cn} → ${p.goal}${p.mtg ? "" : " (не идёт)"}</td></tr>
+    <tr><td>путь</td><td class="mono">${(p.path||[]).length} нод</td></tr>
+    <tr><td>враг</td><td>${esc(en)}${p.see ? ' <span style="color:var(--st-critical)">видит</span>' : ""}${p.le >= 0 ? " (посл.: " + esc(pname(p.le)) + ")" : ""}</td></tr>
+    <tr><td>скорость</td><td class="mono">${p.ms?.toFixed(0)} / ${p.ss?.toFixed(0)}${p.stuck ? ' <span style="color:var(--st-warn)">застрял!</span>' : ""}</td></tr>
+    <tr><td>характер</td><td>${PERS[p.pers] ?? p.pers}, сложн. ${p.diff}, страх ${p.fear?.toFixed(2)}, агр. ${p.agr?.toFixed(2)}</td></tr>
+    <tr><td>позиция</td><td class="mono">${p.o.map(v=>v.toFixed(0)).join(", ")} yaw ${p.ya?.toFixed(0)}°</td></tr>
+    </table>
+    <label style="color:var(--muted);cursor:pointer"><input type="checkbox" id="rawToggle" ${ui.showRaw?"checked":""}> raw json</label>
+    ${ui.showRaw ? `<pre>${esc(JSON.stringify(p, null, 1))}</pre>` : ""}
+    <div style="margin-top:4px"><label style="color:var(--muted);cursor:pointer"><input type="checkbox" id="followToggle" ${ui.follow?"checked":""}> следовать камерой</label></div>`;
+  $("rawToggle").onchange = e => { ui.showRaw = e.target.checked; updateSidebar(); };
+  $("followToggle").onchange = e => { ui.follow = e.target.checked; };
+}
+
+/* legend */
+{
+  const lg = $("legend");
+  let html = "<h3>Легенда — чем занят бот</h3>";
+  for (const g of Object.values(TASK_GROUPS))
+    html += `<span class="lg"><span class="sw" style="background:${g.color}"></span>${g.label}</span>`;
+  html += `<div style="margin-top:4px;color:var(--muted);font-size:11px">
+    ○ человек · клин — направление взгляда · <span style="color:${C.critical}">━</span> линия к врагу ·
+    <span style="color:${C.blue}">━</span> путь выбранного · ★ цель · ◇ память о враге · ⚠ застрял</div>`;
+  lg.innerHTML = html;
+}
+
+/* layers */
+{
+  const defs = [["walls","стены"],["links","рёбра графа"],["nodes","ноды"],["names","имена"],
+                ["trails","хвосты всех"],["sight","линии к врагам"],["spawns","спавны"]];
+  const panel = $("layerPanel");
+  for (const [key, label] of defs) {
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox" ${ui.layers[key]?"checked":""}> ${label}`;
+    l.firstChild.onchange = e => { ui.layers[key] = e.target.checked; staticDirty = true; };
+    panel.appendChild(l);
+  }
+}
+
+/* z filter */
+function updateZPanel() {
+  const s = $("zSlider");
+  s.min = Math.floor(world.zMin - 10); s.max = Math.ceil(world.zMax + 10);
+  if (!ui.zOn) $("zLabel").textContent = "все";
+}
+$("zOn").onchange = e => { ui.zOn = e.target.checked; ui.zCenter = +$("zSlider").value; staticDirty = true; updateZPanel();
+  $("zLabel").textContent = ui.zOn ? `${ui.zCenter}±${ui.zRange}` : "все"; };
+$("zSlider").oninput = e => { ui.zCenter = +e.target.value; if (ui.zOn) { staticDirty = true; $("zLabel").textContent = `${ui.zCenter}±${ui.zRange}`; } };
+
+/* ---------------------------------------------------------------- render */
+function drawStatic() {
+  const w = view.width/dpr, h = view.height/dpr;
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sctx.clearRect(0, 0, w, h);
+
+  /* walls */
+  if (world.walls && ui.layers.walls) {
+    sctx.lineWidth = 1;
+    for (const s of world.walls.segments) {
+      const a = zAlpha(s[4], s[5]);
+      sctx.strokeStyle = C.baseline; sctx.globalAlpha = a * 0.9;
+      const [x1, y1] = W2S(s[0], s[1]), [x2, y2] = W2S(s[2], s[3]);
+      if ((x1 < -50 && x2 < -50) || (x1 > w+50 && x2 > w+50) || (y1 < -50 && y2 < -50) || (y1 > h+50 && y2 > h+50)) continue;
+      sctx.beginPath(); sctx.moveTo(x1, y1); sctx.lineTo(x2, y2); sctx.stroke();
+    }
+    sctx.globalAlpha = 1;
+    if (ui.layers.spawns) {
+      for (const sp of world.walls.spawns) {
+        const [x, y] = W2S(sp[0], sp[1]);
+        sctx.globalAlpha = zAlpha(sp[2]);
+        sctx.strokeStyle = C.muted; sctx.lineWidth = 1;
+        sctx.beginPath(); sctx.moveTo(x-4, y); sctx.lineTo(x+4, y); sctx.moveTo(x, y-4); sctx.lineTo(x, y+4); sctx.stroke();
+      }
+      sctx.globalAlpha = 1;
+    }
+  }
+
+  /* graph links */
+  if (ui.layers.links) {
+    sctx.lineWidth = 1;
+    for (const [a, b, fl] of world.links) {
+      const na = world.nodes.get(a), nb = world.nodes.get(b);
+      if (!na || !nb) continue;
+      sctx.globalAlpha = Math.min(zAlpha(na.z), zAlpha(nb.z)) * 0.55;
+      sctx.strokeStyle = (fl & 1) ? C.orange : C.grid;
+      sctx.setLineDash((fl & 1) ? [4, 3] : []);
+      const [x1, y1] = W2S(na.x, na.y), [x2, y2] = W2S(nb.x, nb.y);
+      sctx.beginPath(); sctx.moveTo(x1, y1); sctx.lineTo(x2, y2); sctx.stroke();
+    }
+    sctx.setLineDash([]); sctx.globalAlpha = 1;
+  }
+
+  /* nodes */
+  if (ui.layers.nodes) {
+    for (const [num, n] of world.nodes) {
+      const [x, y] = W2S(n.x, n.y);
+      if (x < -10 || x > w+10 || y < -10 || y > h+10) continue;
+      sctx.globalAlpha = zAlpha(n.z);
+      let color = C.muted, r = 1.6;
+      if (n.flags & NF.camp) { color = C.aqua; r = 2.5; }
+      else if (n.flags & NF.ladder) { color = C.orange; r = 2.5; }
+      else if (n.flags & NF.djump) { color = C.violet; r = 2.5; }
+      sctx.fillStyle = color;
+      sctx.beginPath(); sctx.arc(x, y, r, 0, 7); sctx.fill();
+      if (n.flags & NF.goal) { sctx.strokeStyle = C.yellow; sctx.lineWidth = 1; sctx.beginPath(); sctx.arc(x, y, 4, 0, 7); sctx.stroke(); }
+    }
+    sctx.globalAlpha = 1;
+  }
+}
+
+function drawDynamic() {
+  const w = view.width/dpr, h = view.height/dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = css('--page');
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(staticCanvas, 0, 0, w, h);
+
+  const sel = world.players.get(ui.selected);
+
+  /* trails */
+  for (const [e, tr] of world.trails) {
+    if (!ui.layers.trails && e !== ui.selected) continue;
+    const p = world.players.get(e);
+    if (!p || tr.length < 2) continue;
+    ctx.strokeStyle = p.bot ? taskGroup(p.task).color : C.ink;
+    ctx.globalAlpha = 0.30; ctx.lineWidth = 1;
+    ctx.beginPath();
+    tr.forEach(([x, y], i) => { const [sx, sy] = W2S(x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+    ctx.stroke(); ctx.globalAlpha = 1;
+  }
+
+  /* selected bot path + goal */
+  if (sel && sel.bot && sel.path && sel.path.length) {
+    ctx.strokeStyle = C.blue; ctx.lineWidth = 2; ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    let [sx, sy] = W2S(sel.o[0], sel.o[1]); ctx.moveTo(sx, sy);
+    for (const num of sel.path) {
+      const n = world.nodes.get(num); if (!n) continue;
+      [sx, sy] = W2S(n.x, n.y); ctx.lineTo(sx, sy);
+    }
+    ctx.stroke(); ctx.globalAlpha = 1;
+    const goal = world.nodes.get(sel.goal);
+    if (goal) drawStar(...W2S(goal.x, goal.y), 6, C.yellow);
+  }
+  if (sel && sel.bot && sel.le >= 0 && sel.leo) {
+    const [x, y] = W2S(sel.leo[0], sel.leo[1]);
+    ctx.strokeStyle = C.violet; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, y-6); ctx.lineTo(x+6, y); ctx.lineTo(x, y+6); ctx.lineTo(x-6, y); ctx.closePath(); ctx.stroke();
+  }
+
+  /* enemy lines */
+  if (ui.layers.sight) {
+    for (const p of world.players.values()) {
+      if (!p.bot || !p.al || p.en < 0) continue;
+      const en = world.players.get(p.en);
+      if (!en) continue;
+      const [x1, y1] = W2S(p.o[0], p.o[1]), [x2, y2] = W2S(en.o[0], en.o[1]);
+      ctx.strokeStyle = css('--st-critical'); ctx.lineWidth = p.see ? 1.5 : 1;
+      ctx.globalAlpha = p.see ? 0.85 : 0.35;
+      ctx.setLineDash(p.see ? [] : [5, 4]);
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+
+  /* players */
+  for (const p of world.players.values()) {
+    const [x, y] = W2S(p.o[0], p.o[1]);
+    const alpha = zAlpha(p.o[2]);
+    ctx.globalAlpha = alpha;
+    if (!p.al) {
+      ctx.strokeStyle = C.muted; ctx.lineWidth = 1.5; ctx.globalAlpha = alpha * 0.5;
+      ctx.beginPath(); ctx.moveTo(x-5, y-5); ctx.lineTo(x+5, y+5); ctx.moveTo(x+5, y-5); ctx.lineTo(x-5, y+5); ctx.stroke();
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    const color = p.bot ? taskGroup(p.task).color : C.ink;
+    /* facing wedge */
+    const a = (p.ya || 0) * Math.PI / 180;
+    ctx.fillStyle = color; ctx.globalAlpha = alpha * 0.45;
+    ctx.beginPath();
+    ctx.moveTo(x + Math.cos(a) * 16, y - Math.sin(a) * 16);
+    ctx.lineTo(x + Math.cos(a + 2.6) * 9, y - Math.sin(a + 2.6) * 9);
+    ctx.lineTo(x + Math.cos(a - 2.6) * 9, y - Math.sin(a - 2.6) * 9);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = alpha;
+    /* body: bots filled, humans hollow — identity is not color-alone */
+    ctx.beginPath(); ctx.arc(x, y, 5.5, 0, 7);
+    if (p.bot) {
+      ctx.fillStyle = color; ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1; ctx.stroke();
+    } else {
+      ctx.strokeStyle = C.ink; ctx.lineWidth = 2; ctx.stroke();
+    }
+    if (p.e === ui.selected) {
+      ctx.strokeStyle = C.ink; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.stroke();
+    }
+    if (p.stuck) {
+      ctx.fillStyle = css('--st-warn'); ctx.font = "bold 11px system-ui";
+      ctx.fillText("⚠", x + 7, y - 7);
+    }
+    /* hp bar */
+    ctx.fillStyle = C.baseline; ctx.fillRect(x - 8, y + 8, 16, 2);
+    ctx.fillStyle = p.hp > 60 ? css('--st-good') : (p.hp > 25 ? css('--st-warn') : css('--st-critical'));
+    ctx.fillRect(x - 8, y + 8, 16 * Math.min(1, p.hp / 100), 2);
+    /* name */
+    if (ui.layers.names) {
+      ctx.fillStyle = p.e === ui.selected ? C.ink : C.ink2;
+      ctx.font = "11px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(p.n, x, y - 10);
+      ctx.textAlign = "left";
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawStar(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 ? r * 0.45 : r;
+    const a = -Math.PI / 2 + i * Math.PI / 5;
+    ctx[i ? "lineTo" : "moveTo"](x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+}
+
+function tick(ts) {
+  requestAnimationFrame(tick);
+  if (ui.follow && ui.selected >= 0) {
+    const p = world.players.get(ui.selected);
+    if (p) { cam.x += (p.o[0] - cam.x) * 0.15; cam.y += (p.o[1] - cam.y) * 0.15; staticDirty = true; }
+  }
+  if (replay.on && replay.playing) replayTick(ts);
+  if (staticDirty) { drawStatic(); staticDirty = false; }
+  drawDynamic();
+  if (ts - liveRate.last > 1000) {
+    liveRate.shown = liveRate.count; liveRate.count = 0; liveRate.last = ts;
+    $("rate").textContent = replay.on ? "—" : liveRate.shown;
+  }
+}
+
+function updateHud() {
+  $("mapName").textContent = world.map;
+  $("nodeCount").textContent = world.nodes.size;
+  $("overlayMsg").style.display = (world.players.size || world.nodes.size) ? "none" : "flex";
+}
+
+/* ---------------------------------------------------------------- input */
+let drag = null;
+view.addEventListener("mousedown", e => { drag = { x: e.offsetX, y: e.offsetY, moved: false }; view.classList.add("dragging"); });
+window.addEventListener("mouseup", () => { view.classList.remove("dragging"); if (drag && !drag.moved) {} drag = null; });
+view.addEventListener("mousemove", e => {
+  if (drag) {
+    const dx = e.offsetX - drag.x, dy = e.offsetY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+    cam.x -= dx / cam.scale; cam.y += dy / cam.scale;
+    drag.x = e.offsetX; drag.y = e.offsetY;
+    staticDirty = true;
+    return;
+  }
+  /* hover tooltip: players first, then nodes */
+  const tip = $("tooltip");
+  let best = null, bestD = 14;
+  for (const p of world.players.values()) {
+    const [x, y] = W2S(p.o[0], p.o[1]);
+    const d = Math.hypot(x - e.offsetX, y - e.offsetY);
+    if (d < bestD) { bestD = d; best = { kind: "p", p }; }
+  }
+  if (!best) {
+    for (const [num, n] of world.nodes) {
+      const [x, y] = W2S(n.x, n.y);
+      const d = Math.hypot(x - e.offsetX, y - e.offsetY);
+      if (d < 8) { best = { kind: "n", num, n }; break; }
+    }
+  }
+  if (best) {
+    tip.style.display = "block";
+    tip.style.left = (e.offsetX + 14) + "px"; tip.style.top = (e.offsetY + 6) + "px";
+    if (best.kind === "p") {
+      const p = best.p;
+      tip.textContent = p.bot ? `${p.n} · ${taskName(p.task)} · hp ${p.hp}` : `${p.n} (человек) · hp ${p.hp}`;
+    } else {
+      const fl = Object.entries(NF).filter(([, bit]) => best.n.flags & bit).map(([nm]) => nm).join(",");
+      tip.textContent = `нода ${best.num} · z ${best.n.z.toFixed(0)}${fl ? " · " + fl : ""}`;
+    }
+  } else tip.style.display = "none";
+});
+view.addEventListener("click", e => {
+  if (drag && drag.moved) return;
+  let best = -1, bestD = 14;
+  for (const p of world.players.values()) {
+    const [x, y] = W2S(p.o[0], p.o[1]);
+    const d = Math.hypot(x - e.offsetX, y - e.offsetY);
+    if (d < bestD) { bestD = d; best = p.e; }
+  }
+  if (best >= 0) select(best); else { ui.selected = -1; updateSidebar(); }
+});
+view.addEventListener("wheel", e => {
+  e.preventDefault();
+  const [wx, wy] = S2W(e.offsetX, e.offsetY);
+  const factor = Math.exp(-e.deltaY * 0.0012);
+  cam.scale = Math.min(8, Math.max(0.05, cam.scale * factor));
+  const [nx, ny] = S2W(e.offsetX, e.offsetY);
+  cam.x += wx - nx; cam.y += wy - ny;
+  staticDirty = true;
+}, { passive: false });
+view.addEventListener("dblclick", () => { cam.fitted = false; fitView(); });
+
+/* ---------------------------------------------------------------- live ws */
+function connect() {
+  if (replay.on) return;
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws" + location.search);
+  ws.onopen = () => { wsOk = true; setDot(); };
+  ws.onclose = () => { wsOk = false; setDot(); setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => { if (!replay.on) { try { handleMessage(JSON.parse(e.data)); } catch {} } };
+}
+function setDot() {
+  const d = $("statusDot");
+  d.className = "dot" + (replay.on ? " replay" : (wsOk ? " live" : ""));
+}
+function sendOp(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+$("btnAdd").onclick = () => sendOp({ op: "cmd", cmd: "lb add" });
+$("btnKick").onclick = () => sendOp({ op: "cmd", cmd: "lb kick" });
+$("btnSend").onclick = () => { const v = $("cmdInput").value.trim(); if (v) sendOp({ op: "cmd", cmd: v }); $("cmdInput").value = ""; };
+$("cmdInput").addEventListener("keydown", e => { if (e.key === "Enter") $("btnSend").click(); });
+
+let recOn = false;
+function setRecUi(on) { recOn = on; const b = $("btnRec"); b.classList.toggle("rec-on", on); b.textContent = on ? "⏹ идёт запись" : "⏺ запись"; }
+$("btnRec").onclick = () => sendOp({ op: "rec", on: !recOn });
+
+/* ---------------------------------------------------------------- replay */
+async function refreshRecList() {
+  try {
+    const files = await (await fetch("/api/recordings")).json();
+    const sel = $("recList");
+    sel.innerHTML = '<option value="">записи…</option>' +
+      files.map(f => `<option value="${esc(f.name)}">${esc(f.name)} (${(f.size/1024).toFixed(0)}к)</option>`).join("");
+  } catch {}
+}
+$("recList").onfocus = refreshRecList;
+$("recList").onchange = async e => {
+  if (!e.target.value) return;
+  const text = await (await fetch("/recordings/" + encodeURIComponent(e.target.value))).text();
+  loadReplay(text, e.target.value);
+  e.target.value = "";
+};
+$("btnOpenFile").onclick = () => $("fileInput").click();
+$("fileInput").onchange = async e => {
+  const f = e.target.files[0];
+  if (f) loadReplay(await f.text(), f.name);
+  e.target.value = "";
+};
+
+function loadReplay(text, name) {
+  const entries = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj.msg) entries.push(obj);
+      else if (obj.type) entries.push({ rt: entries.length * 0.05, msg: obj }); // plain stream dump
+    } catch {}
+  }
+  const frameIdx = entries.map((e, i) => e.msg.type === "frame" ? i : -1).filter(i => i >= 0);
+  if (!frameIdx.length) { alert("в файле нет кадров"); return; }
+  Object.assign(replay, { on: true, entries, frameIdx, pos: 0, playing: false, applied: -1 });
+  $("replayBar").classList.add("on");
+  $("timeline").max = frameIdx.length - 1; $("timeline").value = 0;
+  document.title = "replay: " + name;
+  world.players.clear(); world.trails.clear(); evRows.innerHTML = "";
+  setDot(); applyReplay(0); setPlay(false);
+}
+function exitReplay() {
+  replay.on = false;
+  $("replayBar").classList.remove("on");
+  document.title = "lambdabots observer";
+  world.players.clear(); world.trails.clear(); world.nodes.clear(); world.links = [];
+  world.walls = null; world.wallsTriedFor = null; cam.fitted = false; evRows.innerHTML = "";
+  staticDirty = true; setDot(); sendOp({ op: "graph" }); sendOp({ op: "ping" });
+}
+$("btnExitReplay").onclick = exitReplay;
+
+function applyReplay(framePos) {
+  framePos = Math.max(0, Math.min(replay.frameIdx.length - 1, framePos));
+  const target = replay.frameIdx[framePos];
+  let from = replay.applied + 1;
+  if (target < replay.applied) { // scrub back: rebuild graph from the start, then jump
+    world.nodes.clear(); world.links = []; world.trails.clear();
+    from = 0;
+    for (let i = 0; i <= target; i++) {
+      const t = replay.entries[i].msg.type;
+      if (t !== "frame") handleMessage(replay.entries[i].msg);
+    }
+    handleMessage(replay.entries[target].msg);
+  } else {
+    for (let i = from; i <= target; i++) {
+      const m = replay.entries[i].msg;
+      if (m.type === "frame" && i !== target) {
+        // apply skipped frames lightly: keep events feed meaningful on fast seek
+        for (const ev of m.ev || []) pushEvent(ev);
+        continue;
+      }
+      handleMessage(m);
+    }
+  }
+  replay.applied = target; replay.pos = framePos;
+  $("timeline").value = framePos;
+  const t0 = replay.entries[replay.frameIdx[0]].msg.t;
+  const tEnd = replay.entries[replay.frameIdx[replay.frameIdx.length-1]].msg.t;
+  $("timeLabel").textContent = `${fmtTime(world.tGame - t0)} / ${fmtTime(tEnd - t0)}`;
+}
+function setPlay(on) { replay.playing = on; $("btnPlay").textContent = on ? "⏸" : "▶"; replay.lastTick = performance.now(); }
+$("btnPlay").onclick = () => setPlay(!replay.playing);
+$("timeline").oninput = e => { setPlay(false); applyReplay(+e.target.value); };
+function replayTick(ts) {
+  const speed = +$("speed").value;
+  const dt = (ts - replay.lastTick) / 1000 * speed;
+  if (dt < 0.045) return;
+  replay.lastTick = ts;
+  const cur = replay.entries[replay.frameIdx[replay.pos]].msg.t;
+  let next = replay.pos;
+  while (next < replay.frameIdx.length - 1 &&
+         replay.entries[replay.frameIdx[next + 1]].msg.t - cur <= dt) next++;
+  if (next === replay.pos && replay.pos < replay.frameIdx.length - 1) next = replay.pos + 1;
+  if (next !== replay.pos) applyReplay(next);
+  if (replay.pos >= replay.frameIdx.length - 1) setPlay(false);
+}
+window.addEventListener("keydown", e => {
+  if (!replay.on || e.target.tagName === "INPUT") return;
+  if (e.code === "Space") { e.preventDefault(); setPlay(!replay.playing); }
+  if (e.code === "ArrowRight") applyReplay(replay.pos + (e.shiftKey ? 20 : 1));
+  if (e.code === "ArrowLeft") applyReplay(replay.pos - (e.shiftKey ? 20 : 1));
+});
+
+/* ---------------------------------------------------------------- boot */
+window.__obs = { world, cam, ui, replay, W2S }; // debugging/tests
+resize();
+connect();
+refreshRecList();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
