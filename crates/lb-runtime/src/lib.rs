@@ -17,6 +17,7 @@ pub mod nav_test;
 pub mod perf;
 pub mod record;
 pub mod roster;
+pub mod selftest;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -47,7 +48,7 @@ use lb_host::strings::StringTable;
 use lb_host::{CreateBotOutcome, CreateBotRequest, Host, TrackRule};
 use lb_knowledge::{BeliefParams, ItemSpot, PlayerKey, PublicEvent};
 use lb_nav::known::LinkHealth;
-use lb_perception::items::ItemEntity;
+use lb_perception::items::{ChargerEntity, ItemEntity};
 use lb_perception::projectiles::ProjectileEntity;
 use lb_perception::vision::DEFAULT_ASPECT;
 use lb_perception::{Listener, SoundEvent, StepSynth, Subject, Viewer};
@@ -158,6 +159,8 @@ pub struct Runtime {
     pub compat: CompatibilityProfile,
     pub dev: bool,
     pub freeze: bool,
+    /// `lb selftest` froze the other bots; the freeze to go back to when it ends.
+    pub freeze_before_selftest: Option<bool>,
     pub game_mode_forced: i32,
     feedback: Vec<LbMoveFeedback>,
     cmds: Vec<LbBotCommand>,
@@ -215,6 +218,10 @@ pub struct Runtime {
     explosions_now: Vec<Vec3>,
     /// Where players spawn on this map; `None` until the map is loaded.
     pub spawns: Option<Arc<Vec<Vec3>>>,
+    /// The map's wall chargers; `None` until the map is loaded.
+    pub chargers: Option<Arc<Vec<lb_knowledge::ChargerSpot>>>,
+    /// Charger faces as the server draws them, refreshed with the items.
+    charger_entities: Vec<ChargerEntity>,
     /// Weapons bots may use, as a mask of weapon bits (`lb weapons`, for stand tests).
     pub weapons_allowed: u32,
     /// Weapons every bot is given when it spawns (`lb weapons ... give`; needs `sv_cheats 1`).
@@ -307,6 +314,7 @@ impl Runtime {
             compat: CompatibilityProfile::default(),
             dev: false,
             freeze: false,
+            freeze_before_selftest: None,
             game_mode_forced: -1,
             feedback: Vec::new(),
             cmds: Vec::new(),
@@ -342,6 +350,8 @@ impl Runtime {
             next_projectiles_at: SimTime::ZERO,
             explosions_now: Vec::new(),
             spawns: None,
+            chargers: None,
+            charger_entities: Vec::new(),
             weapons_allowed: u32::MAX,
             weapons_give: Vec::new(),
             arms_stats: arms_stats::ArmsStats::default(),
@@ -577,6 +587,8 @@ impl Runtime {
         self.next_projectiles_at = SimTime::ZERO;
         self.explosions_now.clear();
         self.spawns = None;
+        self.chargers = None;
+        self.charger_entities.clear();
         self.nav_status = format!("loading the graph for {name}");
         self.editor = None;
         self.mechs.set_map(None, max_clients);
@@ -879,8 +891,11 @@ impl Runtime {
                     self.item_spots = Some(loaded.items);
                     for bot in &mut self.bots {
                         bot.brain.spawns = loaded.spawns.to_vec();
+                        bot.brain.set_chargers(&loaded.chargers);
                     }
+                    tracing::info!("{map}: {} wall chargers", loaded.chargers.len());
                     self.spawns = Some(loaded.spawns);
+                    self.chargers = Some(loaded.chargers);
                     let max_clients = self.map.as_ref().map_or(32, |m| m.max_clients);
                     tracing::info!(
                         "{map}: {} movers, {} breakables",
@@ -1009,27 +1024,34 @@ impl Runtime {
         }
     }
 
-    /// Rounds each live bot fired since the last frame, for `lb stats`.
+    /// Rounds each live bot fired since the last frame from the weapon in its hands, for `lb stats` (weapons share
+    /// ammo, so only the one in hand counts; a switch starts its count afresh).
     fn count_rounds(&mut self) {
         for bot in &mut self.bots {
-            if bot.state != BotState::Alive {
-                bot.rounds = [-1; 16];
-                continue;
+            let weapon = bot
+                .self_state
+                .current_weapon
+                .get()
+                .filter(|_| bot.state == BotState::Alive);
+            let rounds = weapon.and_then(|w| {
+                arsenal(&bot.self_state, &self.game.weapons)
+                    .iter()
+                    .find(|a| a.id == w)
+                    .and_then(|a| a.rounds())
+            });
+            if let (Some(w), Some(now_rounds), Some((last_w, last))) = (weapon, rounds, bot.rounds)
+                && last_w == w
+                && last > now_rounds
+            {
+                let distance = bot
+                    .brain
+                    .mind
+                    .target
+                    .and_then(|k| bot.brain.beliefs.track(k))
+                    .map_or(600.0, |t| t.pos.distance(bot.self_state.body.origin));
+                self.arms_stats.fired(w, (last - now_rounds) as u32, distance);
             }
-            let distance = bot
-                .brain
-                .mind
-                .target
-                .and_then(|k| bot.brain.beliefs.track(k))
-                .map_or(600.0, |t| t.pos.distance(bot.self_state.body.origin));
-            for a in arsenal(&bot.self_state, &self.game.weapons) {
-                let Some(now_rounds) = a.rounds() else { continue };
-                let last = &mut bot.rounds[a.id as usize];
-                if *last > now_rounds {
-                    self.arms_stats.fired(a.id, (*last - now_rounds) as u32, distance);
-                }
-                *last = now_rounds;
-            }
+            bot.rounds = weapon.zip(rounds);
         }
     }
 
@@ -1075,10 +1097,23 @@ impl Runtime {
         }
     }
 
-    /// Item entities for perception: where each one is and whether it is there to take.
+    /// Item entities for perception: where each one is and whether it is there to take; charger faces.
     fn refresh_items(&mut self, host: &mut dyn Host) {
         const EF_NODRAW: u32 = 128;
         let mut snapshots = Vec::new();
+        host.snapshot_entities(1 << lb_game::entities::KIND_CHARGER, &mut snapshots);
+        self.charger_entities.clear();
+        for e in &snapshots {
+            let model = self
+                .strings
+                .string_lossy(e.model_id)
+                .strip_prefix('*')
+                .and_then(|m| m.parse::<u16>().ok());
+            if let Some(model) = model {
+                self.charger_entities.push(ChargerEntity { model, frame: e.frame });
+            }
+        }
+        snapshots.clear();
         host.snapshot_entities(1 << lb_game::entities::KIND_ITEM, &mut snapshots);
         self.item_entities.clear();
         for e in &snapshots {
@@ -1592,6 +1627,9 @@ impl Runtime {
                 if let Some(spawns) = &self.spawns {
                     bot.brain.spawns = spawns.to_vec();
                 }
+                if let Some(chargers) = &self.chargers {
+                    bot.brain.set_chargers(chargers);
+                }
                 self.bots.push(bot);
                 self.roster_warned = false;
                 Some(persona.name.clone())
@@ -1842,6 +1880,7 @@ impl Runtime {
             maxspeed: self.game.rules.maxspeed,
             teams: &teams,
             items: &self.item_entities,
+            chargers: &self.charger_entities,
             projectiles: &self.projectile_entities,
             explosions: &self.explosions_now,
         };
@@ -1878,6 +1917,7 @@ impl Runtime {
                     damages,
                     dll,
                     allowed,
+                    projectiles: &self.projectile_entities,
                 };
                 drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
             }));
@@ -1937,6 +1977,24 @@ impl Runtime {
             if fb.status != lb_ffi::LB_MOVE_OK {
                 self.stats.stale_moves += 1;
             }
+        }
+        let mut verdict = None;
+        let testing = self.bots.iter().any(|b| b.selftest.is_some());
+        if !testing && let Some(freeze) = self.freeze_before_selftest.take() {
+            self.freeze = freeze;
+        }
+        for bot in &mut self.bots {
+            if bot.selftest.as_ref().is_some_and(|t| t.finished)
+                && let Some(t) = bot.selftest.take()
+            {
+                verdict = t.verdict.or(verdict);
+            }
+        }
+        if let Some(dll) = verdict
+            && dll.kind != self.game.dll.kind
+        {
+            tracing::warn!("weapon rules switched to {} for this session", dll.kind.as_str());
+            self.game.dll = dll;
         }
         let reports: Vec<String> = self
             .bots
@@ -2127,8 +2185,19 @@ fn drive_one(
                 buttons |= IN_JUMP;
             }
         }
-        BotState::Alive if !ctx.freeze => {
-            if let Some(test) = bot.test.as_mut() {
+        BotState::Alive if !ctx.freeze || bot.selftest.is_some() => {
+            if let Some(test) = bot.selftest.as_mut() {
+                let frame = test.step(now, &bot.self_state, ctx.projectiles, bot.id.slot);
+                for line in &frame.lines {
+                    tracing::info!("{line}");
+                    logging::console_line(format!("[lambdabots] {line}"));
+                }
+                bot.view = frame.view;
+                bot.brain.motor.set_view(frame.view);
+                forward = frame.forward;
+                buttons |= frame.buttons;
+                bot.pending_client_cmds.extend(frame.commands);
+            } else if let Some(test) = bot.test.as_mut() {
                 let body = &bot.self_state.body;
                 let on_ground = body.flags & lb_game::self_state::FL_ONGROUND != 0;
                 let out = test.step(
@@ -2461,6 +2530,7 @@ struct Senses<'a> {
     maxspeed: f32,
     teams: &'a [u8],
     items: &'a [ItemEntity],
+    chargers: &'a [ChargerEntity],
     projectiles: &'a [ProjectileEntity],
     /// Explosions of this frame.
     explosions: &'a [Vec3],
@@ -2482,6 +2552,7 @@ struct DriveCtx<'a> {
     dll: DllProfile,
     /// Weapons bots may use (`lb weapons`).
     allowed: u32,
+    projectiles: &'a [ProjectileEntity],
 }
 
 /// Players as vision gets them: the snapshot plus the weapon they show and their last shot.
@@ -2552,7 +2623,8 @@ fn sense(
                 recognized.push((bot.persona.name.clone(), *r));
             }
             let range = 900.0 + 11.0 * f32::from(bot.persona.skill);
-            bot.brain.see_items(w.now, &viewer, w.items, range, w.vis, tracer);
+            bot.brain
+                .see_items(w.now, &viewer, w.items, w.chargers, range, w.vis, tracer);
             bot.brain.see_projectiles(w.now, &viewer, w.projectiles, w.vis, tracer);
         }
         for &at in w.explosions {

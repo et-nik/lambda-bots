@@ -312,6 +312,7 @@ mod tests {
         while t < secs {
             let mut prediction = Prediction {
                 current: Some(WeaponId::Gauss),
+                primary_ammo: 60,
                 ..Prediction::default()
             };
             prediction.weapons[WeaponId::Gauss as usize] = Some(PredictedWeapon {

@@ -136,3 +136,27 @@ fn landmarks_cut_search_work() {
         assert!(with_alt <= plain);
     }
 }
+
+/// Every wall charger of the standard maps has a spot to use it from.
+#[test]
+fn chargers_can_be_used() {
+    let Some(dir) = lb_bsp::test_maps_dir() else { return };
+    let mut missing = Vec::new();
+    for &(map, _) in MAPS {
+        let Ok(bsp) = std::fs::read(dir.join(format!("{map}.bsp"))) else {
+            continue;
+        };
+        let world = BspWorld::load(&bsp).unwrap();
+        let all = world
+            .entities
+            .iter()
+            .filter(|e| matches!(e.classname(), "func_healthcharger" | "func_recharge"))
+            .count();
+        let found = lb_navgen::site::chargers(&world).len();
+        eprintln!("{map:<14} chargers {found}/{all}");
+        if found < all {
+            missing.push(format!("{map}: {found}/{all}"));
+        }
+    }
+    assert!(missing.is_empty(), "chargers without a spot: {missing:?}");
+}

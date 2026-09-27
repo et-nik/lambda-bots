@@ -13,6 +13,7 @@ use lb_worldq::{TraceQuery, Tracer};
 use super::{Hands, Request, Status, hold, press, settled, stop};
 
 const TIMEOUT: f64 = 6.0;
+/// The press is held until the game shows the mine placed, for this long at most.
 const CONFIRM: f64 = 0.75;
 /// The view's trace must meet the wall this close to the spot.
 const ON_SPOT: f32 = 12.0;
@@ -59,7 +60,7 @@ impl Planter {
                 }
                 let mut weapon = hold(w);
                 if h.ready(w) && settled(h.view, angles, 3.0) && meets_spot(h, self.spot, tracer) {
-                    weapon = press(w, Attack::Primary, Trigger::Tap, 1.0);
+                    weapon = press(w, Attack::Primary, Trigger::Hold, 0.0);
                     self.phase = Phase::Pressed { at: now, before: count };
                 }
                 Status::Running(Request {
@@ -76,7 +77,7 @@ impl Planter {
                     return Status::Failed("the game did not place the mine");
                 }
                 Status::Running(Request {
-                    weapon: Some(hold(w)),
+                    weapon: Some(press(w, Attack::Primary, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: Some(stop()),
                 })

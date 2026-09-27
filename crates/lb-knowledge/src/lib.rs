@@ -3,11 +3,13 @@
 #![forbid(unsafe_code)]
 
 pub mod beliefs;
+pub mod chargers;
 pub mod explosives;
 pub mod items;
 pub mod obs;
 
 pub use beliefs::{BeliefParams, Beliefs, EnemyTrack, Hypothesis, HypothesisKind, TrackState};
+pub use chargers::{ChargerSpot, Chargers};
 pub use explosives::{Blast, Explosives, ProjectileSighting};
 pub use items::{ItemBelief, ItemSpot, ItemState, Items};
 pub use obs::*;

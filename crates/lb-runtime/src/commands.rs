@@ -50,7 +50,14 @@ const HELP: &[(&str, &str)] = &[
         "weapons [all|melee|<weapon>...] [give]",
         "weapons bots may use; with give every bot gets them on spawn (needs sv_cheats 1)",
     ),
-    ("stats [reset]", "weapon statistics: rounds, hit rate by distance, kills, suicides"),
+    (
+        "stats [reset]",
+        "weapon statistics: rounds, hit rate by distance, kills, suicides",
+    ),
+    (
+        "selftest [name|#userid]",
+        "check the game DLL's weapon rules with one bot while the others stand still (needs sv_cheats 1)",
+    ),
     (
         "perf [reset|bots]",
         "core time per frame (p50/p95/p99/max) or command timing per bot",
@@ -100,6 +107,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "profile" => profile(rt, rest),
         "status" => status(rt),
         "weapons" => weapons(rt, rest),
+        "selftest" => selftest(rt, host, rest),
         "stats" => match rest.first().copied() {
             Some("reset") => {
                 rt.arms_stats.reset(rt.now.secs());
@@ -618,6 +626,10 @@ fn goal_text(rt: &Runtime, b: &crate::manager::Bot, kind: lb_decision::GoalKind)
                 .map(|s| s.kind.as_str())
                 .unwrap_or_default()
         ),
+        lb_decision::GoalKind::UseCharger(i) => {
+            let suit = b.brain.chargers.as_ref().and_then(|c| c.spots.get(i)).map(|c| c.suit);
+            format!("charger ({})", if suit == Some(true) { "suit" } else { "health" })
+        }
         k => k.as_str().to_string(),
     }
 }
@@ -722,6 +734,10 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             b.brain.explosives.mines.len(),
             b.brain.explosives.flying.len(),
         ));
+        if !st.failures.is_empty() {
+            let f: Vec<String> = st.failures.iter().map(|(p, w, n)| format!("{p}: {w} ×{n}")).collect();
+            out.push(format!("  failures: {}", f.join("; ")));
+        }
         let i = &b.brain.intents;
         let owner = |p: Option<lb_motor::Prio>| p.map(|p| format!("{p:?}")).unwrap_or_else(|| "-".into());
         out.push(format!(
@@ -1207,7 +1223,11 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
             .filter(|w| rt.weapons_allowed & w.bit() != 0)
             .map(|w| &w.classname()["weapon_".len()..])
             .collect();
-        let given: Vec<&str> = rt.weapons_give.iter().map(|w| &w.classname()["weapon_".len()..]).collect();
+        let given: Vec<&str> = rt
+            .weapons_give
+            .iter()
+            .map(|w| &w.classname()["weapon_".len()..])
+            .collect();
         let allowed = if rt.weapons_allowed == u32::MAX {
             "all".to_string()
         } else {
@@ -1215,14 +1235,22 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
         };
         format!(
             "bots may use: {allowed}; given on spawn: {}",
-            if given.is_empty() { "nothing".into() } else { given.join(", ") }
+            if given.is_empty() {
+                "nothing".into()
+            } else {
+                given.join(", ")
+            }
         )
     };
     let Some(first) = args.first().copied() else {
         return vec![describe(rt)];
     };
     let give = args.last().is_some_and(|a| a.eq_ignore_ascii_case("give"));
-    let names: Vec<&str> = args.iter().copied().filter(|a| !a.eq_ignore_ascii_case("give")).collect();
+    let names: Vec<&str> = args
+        .iter()
+        .copied()
+        .filter(|a| !a.eq_ignore_ascii_case("give"))
+        .collect();
     match first {
         "all" | "standard" => {
             rt.weapons_allowed = u32::MAX;
@@ -1245,4 +1273,27 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
         }
     }
     vec![describe(rt)]
+}
+
+fn selftest(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
+    let target = (!args.is_empty()).then(|| args.join(" "));
+    let Some(i) = find_bots(rt, target.as_deref())
+        .into_iter()
+        .find(|&i| rt.bots[i].state == BotState::Alive)
+    else {
+        return vec!["no live bot to run the self-test".into()];
+    };
+    let yaw = open_yaw(host, rt.bots[i].self_state.body.origin);
+    let (now, dll) = (rt.now, rt.game.dll);
+    if rt.freeze_before_selftest.is_none() {
+        rt.freeze_before_selftest = Some(rt.freeze);
+    }
+    rt.freeze = true;
+    let b = &mut rt.bots[i];
+    b.selftest = Some(crate::selftest::SelfTest::new(now, yaw, dll));
+    vec![format!(
+        "self-test started on {} (profile {}); results go to the console and the log",
+        b.persona.name,
+        dll.kind.as_str()
+    )]
 }

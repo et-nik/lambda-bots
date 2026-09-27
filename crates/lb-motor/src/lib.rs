@@ -69,8 +69,16 @@ pub struct Intents {
     pub movement: Option<(Prio, MoveIntent)>,
     pub stance: Option<(Prio, StanceIntent)>,
     pub weapon: Option<(Prio, WeaponIntent)>,
-    /// A press of the use key (buttons, doors).
-    pub use_key: Option<(Prio, bool)>,
+    /// The use key: a press (buttons, doors) or held (chargers).
+    pub use_key: Option<(Prio, UseKey)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseKey {
+    /// One fresh press.
+    Press,
+    /// Held down, as a charger wants it.
+    Hold,
 }
 
 fn offer<T>(slot: &mut Option<(Prio, T)>, prio: Prio, intent: T) {
@@ -101,7 +109,11 @@ impl Intents {
     }
 
     pub fn use_key(&mut self, prio: Prio) {
-        offer(&mut self.use_key, prio, true);
+        offer(&mut self.use_key, prio, UseKey::Press);
+    }
+
+    pub fn use_hold(&mut self, prio: Prio) {
+        offer(&mut self.use_key, prio, UseKey::Hold);
     }
 }
 
@@ -202,9 +214,11 @@ impl Motor {
                 out.buttons |= IN_DUCK;
             }
         }
-        // Use acts on the press: a held key is released for a command first.
-        if intents.use_key.is_some_and(|(_, u)| u) && self.last_sent & IN_USE == 0 {
-            out.buttons |= IN_USE;
+        // Use acts on the press: a held key is released for a command first, unless it is meant to be held.
+        match intents.use_key {
+            Some((_, UseKey::Press)) if self.last_sent & IN_USE == 0 => out.buttons |= IN_USE,
+            Some((_, UseKey::Hold)) => out.buttons |= IN_USE,
+            _ => {}
         }
         let weapon = intents.weapon.as_ref().map(|(_, w)| w);
         out.buttons |= self.weapon.update(input.now, input.weapon, weapon, &mut out.commands);

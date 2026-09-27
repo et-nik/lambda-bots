@@ -59,6 +59,8 @@ pub struct LoadedMap {
     pub items: Arc<Vec<ItemSpot>>,
     /// Where players spawn.
     pub spawns: Arc<Vec<Vec3>>,
+    /// Wall chargers and where to stand to use them.
+    pub chargers: Arc<Vec<lb_knowledge::ChargerSpot>>,
     pub mechs: Arc<MapMechs>,
     pub graph: Result<Arc<NavGraph>, String>,
     /// Where the graph came from: "cache", "generated" or "yapb".
@@ -201,6 +203,15 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         .filter(|e| matches!(e.classname(), "info_player_deathmatch" | "info_player_start"))
         .map(|e| e.origin())
         .collect();
+    let chargers: Vec<lb_knowledge::ChargerSpot> = lb_navgen::site::chargers(&world)
+        .into_iter()
+        .map(|c| lb_knowledge::ChargerSpot {
+            suit: c.suit,
+            model: c.model as u16,
+            center: (c.mins + c.maxs) * 0.5,
+            spot: c.spot,
+        })
+        .collect();
     let mech = Mechanisms::from_world(&world);
     let mechs = Arc::new(MapMechs::from(&world, &mech));
     let overlays = read_overlays(install, map, world.bsp.fingerprint.1);
@@ -232,6 +243,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         vis,
         items: Arc::new(items),
         spawns: Arc::new(spawns),
+        chargers: Arc::new(chargers),
         mechs,
         graph,
         origin,

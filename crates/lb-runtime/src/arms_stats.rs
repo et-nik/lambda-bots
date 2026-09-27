@@ -82,7 +82,10 @@ impl ArmsStats {
         let mut ids: Vec<&WeaponId> = self.weapons.keys().collect();
         ids.sort();
         if !ids.is_empty() {
-            out.push(format!("  {:<18} {:>8} {:>9}  hit rate by distance {:?}", "weapon", "rounds", "damage", BAND_NAMES));
+            out.push(format!(
+                "  {:<18} {:>8} {:>9}  hit rate by distance {:?}",
+                "weapon", "rounds", "damage", BAND_NAMES
+            ));
         }
         for w in ids {
             let r = &self.weapons[w];
@@ -94,11 +97,19 @@ impl ArmsStats {
                     if r.rounds[i] == 0 {
                         "-".to_string()
                     } else {
-                        format!("{:.0}% of {}", (r.damage[i] / (r.rounds[i] as f32 * per) * 100.0).min(100.0), r.rounds[i])
+                        format!(
+                            "{:.0}% of {}",
+                            (r.damage[i] / (r.rounds[i] as f32 * per) * 100.0).min(100.0),
+                            r.rounds[i]
+                        )
                     }
                 })
                 .collect();
-            out.push(format!("  {:<18} {rounds:>8} {damage:>9.0}  {}", w.classname(), rates.join(", ")));
+            out.push(format!(
+                "  {:<18} {rounds:>8} {damage:>9.0}  {}",
+                w.classname(),
+                rates.join(", ")
+            ));
         }
         let mut names: Vec<(&String, &(u32, u32))> = self.kills.iter().collect();
         names.sort_by(|a, b| (b.1.0 + b.1.1).cmp(&(a.1.0 + a.1.1)).then(a.0.cmp(b.0)));
@@ -128,7 +139,11 @@ mod tests {
         s.death("9mmhandgun", true, false, true);
         s.death("rpg_rocket", false, true, true);
         let r = s.report(60.0, &Damages::default());
-        assert!(r.iter().any(|l| l.contains("weapon_9mmhandgun") && l.contains("50% of 10")), "{r:?}");
+        assert!(
+            r.iter()
+                .any(|l| l.contains("weapon_9mmhandgun") && l.contains("50% of 10")),
+            "{r:?}"
+        );
         assert!(r.iter().any(|l| l.contains("bot suicides 1")), "{r:?}");
         assert_eq!(band(299.0), 0);
         assert_eq!(band(5000.0), 3);

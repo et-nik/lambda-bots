@@ -66,6 +66,8 @@ const SPAWN_CLEAR: f32 = 256.0;
 const QUIET: f64 = 5.0;
 /// A dodge lasts this long once started.
 const DODGE_FOR: f64 = 0.5;
+/// Someone else's snark this close is shot at.
+const SNARK_NEAR: f32 = 300.0;
 const DODGE_MARGIN: f32 = 40.0;
 
 #[derive(Clone, Debug)]
@@ -101,6 +103,18 @@ pub struct ArmsStats {
     pub mine_shots: u32,
     pub dodges: u32,
     pub failed: u32,
+    /// Failures by protocol and reason.
+    pub failures: Vec<(&'static str, &'static str, u32)>,
+}
+
+impl ArmsStats {
+    fn failure(&mut self, protocol: &'static str, why: &'static str) {
+        self.failed += 1;
+        match self.failures.iter_mut().find(|(p, w, _)| *p == protocol && *w == why) {
+            Some(f) => f.2 += 1,
+            None => self.failures.push((protocol, why, 1)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -524,7 +538,7 @@ impl BotBrain {
                 Status::Done => self.finished(&active, body),
                 Status::Failed(why) => {
                     tracing::debug!("{} failed: {why}", active.name());
-                    self.mind.arms.stats.failed += 1;
+                    self.mind.arms.stats.failure(active.name(), why);
                     self.mind.arms.last_failure = Some(why);
                 }
             }
@@ -583,6 +597,55 @@ impl BotBrain {
             }
             Active::Shoot(_) => stats.mine_shots += 1,
         }
+    }
+
+    /// Every frame, with no player in sight: shoot someone else's snark coming within 300 units (yapb shot at its own
+    /// snarks and hornets too).
+    pub(crate) fn snark_defense(&mut self, body: &Body) {
+        let now = body.now;
+        let in_sight = self
+            .mind
+            .target
+            .and_then(|k| self.beliefs.track(k))
+            .is_some_and(|t| t.state == TrackState::Visible);
+        if in_sight || self.mind.arms.busy() {
+            return;
+        }
+        let snark = self
+            .explosives
+            .flying
+            .iter()
+            .filter(|f| f.kind == lb_game::entities::ProjectileKind::Snark && !f.own && now.since(f.seen) <= 0.3)
+            .filter(|f| f.pos.distance(body.origin) <= SNARK_NEAR)
+            .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)));
+        let Some(s) = snark else { return };
+        let Some(w) = self.mind.choice.map(|c| c.weapon()) else {
+            return;
+        };
+        let (forward, _, _) = view_angle_vectors(self.motor.view);
+        let on_it = forward.dot((s.pos - body.eye).normalize_or_zero()) > 0.98;
+        self.intents.look(
+            Prio::Threat,
+            LookIntent::Point {
+                at: s.pos,
+                engaged: true,
+            },
+        );
+        let spec = spec(w);
+        self.intents.weapon(
+            Prio::Threat,
+            lb_motor::WeaponIntent {
+                select: Some(w),
+                fire: if on_it && body.weapon == Some(w) {
+                    lb_motor::Fire::Primary
+                } else {
+                    lb_motor::Fire::None
+                },
+                trigger: spec.trigger,
+                interval: self.mind.click_interval.max(spec.cycle),
+                reload: false,
+            },
+        );
     }
 
     /// Every frame: run from a blast about to go off near the bot.

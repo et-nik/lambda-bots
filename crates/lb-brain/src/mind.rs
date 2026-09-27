@@ -45,6 +45,11 @@ const UNZOOM_AFTER: f64 = 1.5;
 const CALM_DISTANCE: f32 = 600.0;
 /// A rocket flies about this fast on average over its way.
 const ROCKET_AVERAGE: f32 = 1500.0;
+/// At a charger's spot within this, across.
+const CHARGER_SPOT: f32 = 24.0;
+/// A charger that gave nothing for this long is spent; nobody stays at one longer than the timeout.
+const CHARGER_DRY: f64 = 1.5;
+const CHARGER_TIMEOUT: f64 = 15.0;
 const RETREAT_REPLAN: f64 = 2.0;
 /// A melee fighter walks a path to enemies further than this, and charges straight at closer ones.
 const MELEE_CHARGE: f32 = 200.0;
@@ -194,6 +199,8 @@ pub struct Mind {
     pub last_aim: Option<Vec3>,
     /// When the bot last had a target to shoot at.
     target_at: SimTime,
+    /// Using a charger: which, since when, when it last gave something and what the bot had then.
+    charging: Option<(usize, SimTime, SimTime, f32)>,
 }
 
 impl Mind {
@@ -272,6 +279,7 @@ impl BotBrain {
         self.dodge(body, nav);
         self.run_protocols(body, ch, nav, rng);
         self.aim_and_fire(body, ch, rng);
+        self.snark_defense(body);
         self.vigilance(body);
         let input = lb_motor::MotorInput {
             now,
@@ -361,6 +369,7 @@ impl BotBrain {
             affinity: ch.affinity,
             beliefs: &self.beliefs,
             items: self.items.as_ref(),
+            chargers: self.chargers.as_ref(),
             weapons: &body.arsenal,
             ammo_need: &need,
             reloading: now < m.reload_until,
@@ -495,12 +504,80 @@ impl BotBrain {
                 }
                 arrive(status, m);
             }
+            GoalKind::UseCharger(i) => self.use_charger(i, body, nav, rng),
             GoalKind::Roam => {
                 if let Some(step) = nav.roam(&mut rng.decision) {
                     apply_step(&mut self.intents, &step, body.eye, m);
                 }
             }
         }
+        if !matches!(goal.kind, GoalKind::UseCharger(_)) {
+            self.mind.charging = None;
+        }
+    }
+
+    /// Walks to the charger's spot, then faces it holding the use key while it gives; spent when it stops giving.
+    fn use_charger(&mut self, i: usize, body: &Body, nav: &mut dyn NavService, rng: &mut BotRng) {
+        let now = body.now;
+        let Some(c) = self.chargers.as_ref().and_then(|c| c.spots.get(i)).copied() else {
+            self.mind.decider.complete();
+            return;
+        };
+        if !self.chargers.as_ref().is_some_and(|ch| ch.available(i, now)) {
+            self.mind.decider.complete();
+            self.mind.urgent = true;
+            return;
+        }
+        let there =
+            (body.origin - c.spot).truncate().length() < CHARGER_SPOT && (body.origin.z - c.spot.z).abs() < 40.0;
+        let m = &mut self.mind;
+        if !there && m.charging.is_none() {
+            let (status, step) = nav.go_to(c.spot);
+            if let Some(step) = step {
+                apply_step(&mut self.intents, &step, body.eye, m);
+            }
+            if status == NavStatus::NoPath {
+                m.decider.fail(now, &mut rng.decision);
+                m.urgent = true;
+            }
+            return;
+        }
+        let value = if c.suit { body.armor } else { body.health };
+        let (_, since, last_gain, last_value) = *m.charging.get_or_insert((i, now, now, value));
+        let last_gain = if value > last_value { now } else { last_gain };
+        m.charging = Some((i, since, last_gain, value));
+        let full = value >= 99.0;
+        if full || now.since(since) > CHARGER_TIMEOUT {
+            m.decider.complete();
+            m.urgent = true;
+            m.charging = None;
+            return;
+        }
+        if now.since(last_gain) > CHARGER_DRY {
+            if let Some(ch) = self.chargers.as_mut() {
+                ch.drained(i, now);
+            }
+            m.decider.complete();
+            m.urgent = true;
+            m.charging = None;
+            return;
+        }
+        self.intents.movement(
+            Prio::Goal,
+            MoveIntent {
+                dir: lb_core::Vec2::ZERO,
+                speed: 0.0,
+            },
+        );
+        self.intents.look(
+            Prio::Goal,
+            LookIntent::Point {
+                at: c.center,
+                engaged: false,
+            },
+        );
+        self.intents.use_hold(Prio::Goal);
+        m.path_look = None;
     }
 
     fn aim_and_fire(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) {

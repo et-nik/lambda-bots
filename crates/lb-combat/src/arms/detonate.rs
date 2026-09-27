@@ -17,13 +17,20 @@ use lb_motor::LookIntent;
 use super::{Hands, Request, Status, hold, press, settled};
 
 const DRAW_TIMEOUT: f64 = 2.0;
+/// The press is held until the game shows the charges gone off, for this long at most.
 const CONFIRM: f64 = 0.6;
 const SHOOT_FOR: f64 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Draw,
-    Pressed { at: SimTime, before: i32, swapped: bool },
+    /// Pressing `button` since `at`, with `before` satchels in the pocket.
+    Pressed {
+        at: SimTime,
+        before: i32,
+        button: lb_game::mechanics::Attack,
+        swapped: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -62,10 +69,12 @@ impl SatchelTrigger {
                 }
                 let mut weapon = hold(w);
                 if h.ready(w) {
-                    weapon = press(w, h.dll.satchel_detonate(), Trigger::Tap, 1.0);
+                    let button = h.dll.satchel_detonate();
+                    weapon = press(w, button, Trigger::Hold, 0.0);
                     self.phase = Phase::Pressed {
                         at: now,
                         before: count,
+                        button,
                         swapped: false,
                     };
                 }
@@ -74,22 +83,29 @@ impl SatchelTrigger {
                     ..Request::default()
                 })
             }
-            Phase::Pressed { at, before, swapped } => {
+            Phase::Pressed {
+                at,
+                before,
+                button,
+                swapped,
+            } => {
                 if state == 2 {
                     return Status::Done;
                 }
                 if count < before && !swapped {
-                    // A satchel was thrown: the detonate button is the other one here.
+                    // A satchel was thrown: the detonate button is the other one here. Let go first so the game
+                    // takes the other button as a new press.
                     self.learned_swap = true;
                     let mut dll = h.dll;
                     dll.swap_satchel_buttons();
                     self.phase = Phase::Pressed {
                         at: now,
                         before: count,
+                        button: dll.satchel_detonate(),
                         swapped: true,
                     };
                     return Status::Running(Request {
-                        weapon: Some(press(w, dll.satchel_detonate(), Trigger::Tap, 1.0)),
+                        weapon: Some(hold(w)),
                         ..Request::default()
                     });
                 }
@@ -97,7 +113,7 @@ impl SatchelTrigger {
                     return Status::Failed("the satchels did not go off");
                 }
                 Status::Running(Request {
-                    weapon: Some(hold(w)),
+                    weapon: Some(press(w, button, Trigger::Hold, 0.0)),
                     ..Request::default()
                 })
             }
@@ -169,9 +185,10 @@ mod tests {
         }
     }
 
-    fn predicted(state: i32) -> Prediction {
+    fn predicted(state: i32, count: i32) -> Prediction {
         let mut p = Prediction {
             current: Some(WeaponId::Satchel),
+            primary_ammo: count,
             ..Prediction::default()
         };
         p.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon {
@@ -188,18 +205,23 @@ mod tests {
         assert_eq!(dll.satchel_detonate(), Attack::Secondary);
         let mut trigger = SatchelTrigger::new(SimTime(0.0));
         let arsenal = [Armed::new(WeaponId::Satchel, None, Some(3))];
-        let out = predicted(1);
+        let out = predicted(1, 3);
         let Status::Running(r) = trigger.update(&hands(0.0, &arsenal, &out, dll)) else {
             panic!()
         };
         assert_eq!(r.weapon.unwrap().fire, Fire::Secondary);
         let fewer = [Armed::new(WeaponId::Satchel, None, Some(2))];
-        let Status::Running(r) = trigger.update(&hands(0.1, &fewer, &out, dll)) else {
+        let thrown = predicted(1, 2);
+        let Status::Running(r) = trigger.update(&hands(0.1, &fewer, &thrown, dll)) else {
             panic!()
         };
         assert!(trigger.learned_swap);
+        assert_eq!(r.weapon.unwrap().fire, Fire::None, "let go before the other button");
+        let Status::Running(r) = trigger.update(&hands(0.11, &fewer, &thrown, dll)) else {
+            panic!()
+        };
         assert_eq!(r.weapon.unwrap().fire, Fire::Primary, "the other button");
-        let gone = predicted(2);
+        let gone = predicted(2, 2);
         assert_eq!(trigger.update(&hands(0.2, &fewer, &gone, dll)), Status::Done);
     }
 }

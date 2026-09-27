@@ -55,9 +55,13 @@ impl Hands<'_> {
         self.arsenal.iter().find(|a| a.id == w)
     }
 
-    /// Ammo of `w` in reserve (throwables, clip-less weapons); 0 when not carried or not known.
+    /// Ammo of `w` in reserve (throwables, clip-less weapons); 0 when not carried or not known. For the weapon in
+    /// hand the prediction data tells it first.
     pub fn reserve(&self, w: WeaponId) -> i32 {
-        self.armed(w).and_then(|a| a.reserve).unwrap_or(0)
+        match self.prediction {
+            Some(p) if p.current == Some(w) && self.weapon == Some(w) => p.primary_ammo,
+            _ => self.armed(w).and_then(|a| a.reserve).unwrap_or(0),
+        }
     }
 
     pub fn predicted(&self, w: WeaponId) -> Option<PredictedWeapon> {

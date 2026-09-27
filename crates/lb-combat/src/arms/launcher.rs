@@ -11,6 +11,7 @@ use super::{Hands, Request, Status, hold, press, settled};
 use crate::ballistics::Throw;
 
 const TIMEOUT: f64 = 1.5;
+/// The press is held until the game shows the grenade gone, for this long at most.
 const CONFIRM: f64 = 0.6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +48,7 @@ impl Lob {
                 }
                 let mut weapon = hold(w);
                 if h.ready(w) && settled(h.view, angles, 1.5) {
-                    weapon = press(w, Attack::Secondary, Trigger::Tap, 1.0);
+                    weapon = press(w, Attack::Secondary, Trigger::Hold, 0.0);
                     self.phase = Phase::Pressed { at: now, before: count };
                 }
                 Status::Running(Request {
@@ -64,7 +65,7 @@ impl Lob {
                     return Status::Failed("the game did not launch the grenade");
                 }
                 Status::Running(Request {
-                    weapon: Some(hold(w)),
+                    weapon: Some(press(w, Attack::Secondary, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: None,
                 })

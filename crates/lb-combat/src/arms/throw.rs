@@ -58,8 +58,9 @@ const STOP_BEFORE: f32 = 0.25;
 /// The view is held on the throw this long before letting go.
 const STEADY: f64 = 0.05;
 const DRAW_TIMEOUT: f64 = 2.5;
+/// A press is held until the game shows its effect, for this long at most.
 const CONFIRM: f64 = 0.8;
-const SATCHEL_RETRY: f64 = 1.1;
+const SATCHEL_CONFIRM: f64 = 1.5;
 /// A snark leaves this far in front of the thrower; the game wants free space there.
 const SNARK_ROOM: [f32; 2] = [20.0, 64.0];
 const SNARK_AIM_UP: f32 = 14.0;
@@ -72,8 +73,8 @@ enum Phase {
     Cook { pin: f64 },
     /// Let go at `at`; waiting for the game to throw.
     Released { at: SimTime },
-    /// Pressed the throw at `at` with `before` of the weapon's ammo.
-    Pressed { at: SimTime, before: i32, tries: u8 },
+    /// Pressing `button` since `at`, with `before` of the weapon's ammo, until the game shows the throw.
+    Pressed { at: SimTime, before: i32, button: Attack },
 }
 
 #[derive(Clone, Debug)]
@@ -225,11 +226,11 @@ impl Thrower {
                     } else {
                         h.dll.satchel_throw()
                     };
-                    weapon = press(w, button, Trigger::Tap, 1.0);
+                    weapon = press(w, button, Trigger::Hold, 0.0);
                     self.phase = Phase::Pressed {
                         at: now,
                         before: count,
-                        tries: 1,
+                        button,
                     };
                 }
                 Status::Running(Request {
@@ -238,19 +239,15 @@ impl Thrower {
                     movement: None,
                 })
             }
-            Phase::Pressed { at, before, tries } => {
+            Phase::Pressed { at, before, button } => {
                 if out && count < before {
                     return Status::Done;
                 }
-                if now.since(at) >= SATCHEL_RETRY {
-                    if tries >= 2 {
-                        return Status::Failed("the game did not throw the satchel");
-                    }
-                    self.phase = Phase::Draw;
-                    self.started = now;
+                if now.since(at) >= SATCHEL_CONFIRM {
+                    return Status::Failed("the game did not throw the satchel");
                 }
                 Status::Running(Request {
-                    weapon: Some(hold(w)),
+                    weapon: Some(press(w, button, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(self.angles())),
                     movement: None,
                 })
@@ -272,11 +269,11 @@ impl Thrower {
                 }
                 let mut weapon = hold(w);
                 if h.ready(w) && settled(h.view, angles, 5.0) && room_ahead(h, tracer) {
-                    weapon = press(w, Attack::Primary, Trigger::Tap, 1.0);
+                    weapon = press(w, Attack::Primary, Trigger::Hold, 0.0);
                     self.phase = Phase::Pressed {
                         at: now,
                         before: count,
-                        tries: 1,
+                        button: Attack::Primary,
                     };
                 }
                 Status::Running(Request {
@@ -285,7 +282,7 @@ impl Thrower {
                     movement: None,
                 })
             }
-            Phase::Pressed { at, before, .. } => {
+            Phase::Pressed { at, before, button } => {
                 if count < before {
                     return Status::Done;
                 }
@@ -293,7 +290,7 @@ impl Thrower {
                     return Status::Failed("the game did not release the snark");
                 }
                 Status::Running(Request {
-                    weapon: Some(hold(w)),
+                    weapon: Some(press(w, button, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: None,
                 })
@@ -366,6 +363,7 @@ mod tests {
             arsenal: vec![Armed::new(WeaponId::HandGrenade, None, Some(3))],
             prediction: Prediction {
                 current: Some(WeaponId::HandGrenade),
+                primary_ammo: 3,
                 ..Prediction::default()
             },
         };
@@ -417,6 +415,7 @@ mod tests {
             arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(2))],
             prediction: Prediction {
                 current: Some(WeaponId::Satchel),
+                primary_ammo: 2,
                 ..Prediction::default()
             },
         };
@@ -434,6 +433,7 @@ mod tests {
             Status::Running(_)
         ));
         scene.arsenal[0].reserve = Some(1);
+        scene.prediction.primary_ammo = 1;
         scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon {
             charge_ready: 1,
             ..PredictedWeapon::default()
