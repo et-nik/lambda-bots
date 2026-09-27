@@ -44,6 +44,11 @@ engine:
   workers: -1
   master_seed: 0          # 0 = random per start
 
+nav:
+  source: generated       # generated: made from the map (kept in nav/<map>/); yapb: the map's yapb graph
+  threads: -2             # threads making a graph; negative = all cores but that many
+  trust_imported: false   # plan through yapb links the map check failed
+
 telemetry:
   enabled: false
   dest: 127.0.0.1

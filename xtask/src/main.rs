@@ -224,6 +224,7 @@ const PACKAGE_DOCS: &[&str] = &[
     "docs/perception.md",
     "docs/behavior.md",
     "docs/navigation.md",
+    "docs/overlays.md",
     "docs/replay.md",
     "docs/images/replay.svg",
 ];

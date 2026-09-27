@@ -22,6 +22,8 @@ pub enum Cv {
     Debug,
     Dev,
     LogLevel,
+    NavSource,
+    Editor,
 }
 
 pub const ALL: &[Cv] = &[
@@ -41,6 +43,8 @@ pub const ALL: &[Cv] = &[
     Cv::Debug,
     Cv::Dev,
     Cv::LogLevel,
+    Cv::NavSource,
+    Cv::Editor,
 ];
 
 impl Cv {
@@ -62,6 +66,8 @@ impl Cv {
             Cv::Debug => "lb_debug",
             Cv::Dev => "lb_dev",
             Cv::LogLevel => "lb_log_level",
+            Cv::NavSource => "lb_nav_source",
+            Cv::Editor => "lb_editor",
         }
     }
 }
@@ -101,6 +107,19 @@ impl Cvars {
             .iter()
             .find(|(c, _, _)| *c == cv)
             .map(|(_, h, last)| (*h, last.as_str()))
+    }
+
+    pub fn handle_of(&self, cv: Cv) -> Option<CvarHandle> {
+        self.handle(cv).map(|(h, _)| h)
+    }
+
+    /// Replaces the last seen value of `cv`, unless it is empty.
+    pub fn redact(&mut self, cv: Cv, with: &str) {
+        for (c, _, last) in &mut self.handles {
+            if *c == cv && !last.is_empty() {
+                *last = with.to_string();
+            }
+        }
     }
 
     pub fn get(&self, host: &mut dyn Host, cv: Cv) -> Option<String> {

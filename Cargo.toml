@@ -55,9 +55,9 @@ parking_lot = "0.12"
 arc-swap = "1"
 rustc-hash = "2"
 indexmap = "2"
-smallvec = "1"
+smallvec = { version = "1", features = ["serde"] }
 arrayvec = "0.7"
-bitflags = "2"
+bitflags = { version = "2", features = ["serde"] }
 glam = { version = "0.33", features = ["serde"] }
 libm = "0.2"
 blake3 = "1"

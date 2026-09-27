@@ -17,7 +17,7 @@ use std::fs::File;
 use std::hash::Hasher;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 
@@ -25,13 +25,13 @@ use lb_config::MainConfig;
 use lb_core::handles::MapEpoch;
 use lb_core::rng::Pcg32;
 use lb_host::Host;
-use lb_host::record::{FrameRec, HostCall, ReplayHost};
+use lb_host::record::{FrameRec, HostCall, REDACTED, ReplayHost};
 use lb_host::strings::StringTable;
 use lb_styles::PersonaSource;
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
-use crate::cvars::Cvars;
+use crate::cvars::{Cv, Cvars};
 use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
@@ -41,6 +41,12 @@ pub const FORMAT: u32 = 1;
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
 const MAX_BYTES: u64 = 4 << 30;
+/// The largest block a reader accepts, packed or unpacked: far above `BLOCK` and a `Start` with a map's files.
+const MAX_BLOCK: usize = 256 << 20;
+/// The largest record the writer takes: after the records before it in its block, and packed (which may grow it by a
+/// tenth), it still fits `MAX_BLOCK`.
+const MAX_RECORD: usize = MAX_BLOCK / 8 * 7 - BLOCK;
+const _: () = assert!(lz4_flex::block::get_maximum_output_size(BLOCK + MAX_RECORD) + 4 <= MAX_BLOCK);
 
 /// Something the runtime took from outside the engine.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -193,10 +199,17 @@ pub enum Record {
 }
 
 impl Runtime {
+    /// What the runtime carries, the telemetry secret replaced by [`REDACTED`]: a replay opens no sockets.
     pub fn carried(&self) -> Carried {
+        let mut config = self.config.clone();
+        if !config.telemetry.secret.is_empty() {
+            config.telemetry.secret = REDACTED.into();
+        }
+        let mut cvars = self.cvars.clone();
+        cvars.redact(Cv::TelemetrySecret, REDACTED);
         Carried {
-            config: self.config.clone(),
-            cvars: self.cvars.clone(),
+            config,
+            cvars,
             strings: self.strings.clone(),
             carry_over: self.carry_over.clone(),
             requested: self.requested.clone(),
@@ -353,7 +366,16 @@ impl Writer {
     fn write(&mut self, record: &Record) -> Result<(), String> {
         let before = self.block.len();
         self.block = postcard::to_extend(record, std::mem::take(&mut self.block)).map_err(|e| e.to_string())?;
-        self.bytes += (self.block.len() - before) as u64;
+        let size = self.block.len() - before;
+        if size > MAX_RECORD {
+            self.block.truncate(before);
+            return Err(format!(
+                "a record of {} MiB, more than a replay reads ({} MiB)",
+                size >> 20,
+                MAX_RECORD >> 20
+            ));
+        }
+        self.bytes += size as u64;
         if self.block.len() >= BLOCK {
             self.flush()?;
         }
@@ -619,17 +641,35 @@ fn open(rt: &Runtime, map: &str, init_calls: &[HostCall], seconds: Option<f64>) 
 fn gather_files(init: &InitData, map: &str) -> Vec<(Root, String, Vec<u8>)> {
     let mut files = Vec::new();
     let install = &init.install_dir;
+    let config = install.join("config");
+    let main_config = config.join("lambdabots.yaml");
+    // A link to the main config elsewhere (under `profiles/`, say) is the main config too.
+    let main_real = std::fs::canonicalize(&main_config).ok();
+    let is_main = |path: &Path| {
+        path == main_config
+            || main_real
+                .as_ref()
+                .is_some_and(|m| std::fs::canonicalize(path).is_ok_and(|p| p == *m))
+    };
     let mut add = |root: Root, rel: String, path: &Path| match std::fs::read(path) {
+        Ok(bytes) if is_main(path) => match scrub_config(&bytes) {
+            Some(bytes) => files.push((root, rel, bytes)),
+            None => tracing::warn!("recording without {}: it does not parse", path.display()),
+        },
         Ok(bytes) => files.push((root, rel, bytes)),
         Err(e) => tracing::warn!("recording without {}: {e}", path.display()),
     };
-    for dir in ["config", "profiles", "names"] {
-        let mut paths = Vec::new();
+    // Only what the runtime reads from `config/`: a copy of the main config there would keep the secret.
+    let mut paths = vec![main_config.clone(), config.join("difficulty.yaml")];
+    paths.extend(lb_config::check::yaml_files(&config.join("styles")));
+    for dir in ["profiles", "names"] {
         walk(&install.join(dir), &mut paths);
-        for path in paths {
-            if let Ok(rel) = path.strip_prefix(install) {
-                add(Root::Install, rel.to_string_lossy().into_owned(), &path);
-            }
+    }
+    for path in paths {
+        if path.is_file()
+            && let Ok(rel) = path.strip_prefix(install)
+        {
+            add(Root::Install, rel.to_string_lossy().into_owned(), &path);
         }
     }
     let generated = install.join("data").join("profiles.yaml");
@@ -647,7 +687,30 @@ fn gather_files(init: &InitData, map: &str) -> Vec<(Root, String, Vec<u8>)> {
         };
         add(root, rel, graph);
     }
+    for name in nav::OVERLAYS {
+        let overlay = install.join("maps").join(map).join(name);
+        if overlay.is_file() {
+            add(Root::Install, format!("maps/{map}/{name}"), &overlay);
+        }
+    }
     files
+}
+
+/// The main config with the telemetry secret replaced by [`REDACTED`]; `None` when it does not parse, as the
+/// runtime then does not read it either.
+fn scrub_config(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut config = MainConfig::parse(std::str::from_utf8(bytes).ok()?, "").ok()?;
+    if !config.telemetry.secret.is_empty() {
+        config.telemetry.secret = REDACTED.into();
+    }
+    lb_config::yaml::to_string(&config).ok().map(String::into_bytes)
+}
+
+/// Whether a recorded path (a file's, a map's name) stays under its root: plain names only, no `..`, `.`, root or
+/// drive.
+fn stays_inside(rel: &str) -> bool {
+    let mut parts = Path::new(rel).components().peekable();
+    parts.peek().is_some() && parts.all(|c| matches!(c, Component::Normal(_)))
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -702,9 +765,17 @@ impl Reader {
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e.to_string()),
             }
-            let mut packed = vec![0u8; u32::from_le_bytes(len) as usize];
+            let len = u32::from_le_bytes(len) as usize;
+            if len > MAX_BLOCK {
+                return Err(format!("damaged recording: a block of {len} bytes"));
+            }
+            let mut packed = vec![0u8; len];
             if self.file.read_exact(&mut packed).is_err() {
                 return Ok(None);
+            }
+            let (size, _) = lz4_flex::block::uncompressed_size(&packed).map_err(|e| e.to_string())?;
+            if size > MAX_BLOCK {
+                return Err(format!("damaged recording: a block of {size} bytes unpacked"));
             }
             self.block = lz4_flex::decompress_size_prepended(&packed).map_err(|e| e.to_string())?;
             self.pos = 0;
@@ -717,7 +788,8 @@ impl Reader {
 
 #[derive(Clone, Debug, Default)]
 pub struct ReplayOptions {
-    /// Where to unpack the recorded files; a directory under the system's temporary one by default.
+    /// Where to make a new directory for the recorded files, touching nothing else there; the system's temporary
+    /// one by default.
     pub dir: Option<PathBuf>,
     /// Keep the unpacked files (and the replay's logs) afterwards.
     pub keep_dir: bool,
@@ -785,6 +857,34 @@ impl ReplayReport {
     }
 }
 
+/// A new, empty directory under `base` for one replay.
+fn fresh_dir(base: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(base).map_err(|e| format!("{}: {e}", base.display()))?;
+    let mut n = 0u32;
+    loop {
+        let dir = base.join(format!("lb-replay-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && n < 1000 => n += 1,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+}
+
+/// Removes a replay's directory when the replay returns, whichever way, unless it is to be kept.
+struct Unpacked<'a> {
+    dir: &'a Path,
+    keep: bool,
+}
+
+impl Drop for Unpacked<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(self.dir);
+        }
+    }
+}
+
 /// Replays a recording through a fresh runtime; `console` gets the core's console output.
 pub fn replay(path: &Path, opts: &ReplayOptions, console: &mut dyn FnMut(&str)) -> Result<ReplayReport, String> {
     let mut reader = Reader::open(path)?;
@@ -798,11 +898,18 @@ pub fn replay(path: &Path, opts: &ReplayOptions, console: &mut dyn FnMut(&str)) 
             lb_ffi::LB_ABI_VERSION
         ));
     }
-    let dir = opts
-        .dir
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("lb-replay-{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(&dir);
+    if let Some((_, rel, _)) = start.files.iter().find(|(_, rel, _)| !stays_inside(rel)) {
+        return Err(format!(
+            "{}: the recorded file {rel:?} is outside its directory",
+            path.display()
+        ));
+    }
+    let dir = fresh_dir(&opts.dir.clone().unwrap_or_else(std::env::temp_dir))?;
+    // Made before the runtime, so it goes after it: the runtime lets go of its files first.
+    let _unpacked = Unpacked {
+        dir: &dir,
+        keep: opts.keep_dir,
+    };
     for (root, rel, bytes) in &start.files {
         let path = dir.join(match root {
             Root::Install => "install",
@@ -855,6 +962,12 @@ pub fn replay(path: &Path, opts: &ReplayOptions, console: &mut dyn FnMut(&str)) 
             }
             Record::Step(step) => step,
         };
+        if let Entry::MapStart { map, .. } = &step.entry
+            && !stays_inside(map)
+        {
+            report.broken = Some((frame_no, format!("the recorded map {map:?} is outside its directory")));
+            break;
+        }
         report.steps += 1;
         if let Entry::FramePre(frame) = &step.entry
             && let Some(h) = frame.header()
@@ -910,10 +1023,6 @@ pub fn replay(path: &Path, opts: &ReplayOptions, console: &mut dyn FnMut(&str)) 
         }
     }
     report.commands = host.commands_checked;
-    drop(rt);
-    if !opts.keep_dir {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
     Ok(report)
 }
 
@@ -1103,12 +1212,19 @@ mod tests {
             late_load: false,
             sandbox: true,
         };
+        std::fs::create_dir_all(root.join("install/config")).unwrap();
+        std::fs::write(
+            root.join("install/config/lambdabots.yaml"),
+            "schema: lambdabots/main@1\ntelemetry:\n  secret: hunter2-secret\n",
+        )
+        .unwrap();
         let mut server = SimServer::default();
         let mut init_calls = Vec::new();
         let mut rt = Runtime::new(&mut RecordingHost::new(&mut server, Some(&mut init_calls)), init);
         let mut rec = Recorder::new(init_calls);
         let step = |rt: &mut Runtime, rec: &mut Recorder, server: &mut SimServer, entry: Entry| {
-            let mut host = RecordingHost::new(server, rec.begin(|| entry.clone()));
+            let secret = rt.cvars.handle_of(Cv::TelemetrySecret);
+            let mut host = RecordingHost::new(server, rec.begin(|| entry.clone())).hiding(secret);
             run_step(rt, &mut host, &entry);
             rec.end(rt);
         };
@@ -1137,6 +1253,10 @@ mod tests {
         step(&mut rt, &mut rec, &mut server, map);
         // Bots join 5 s into the map.
         for n in 0..1200 {
+            if n == 600 {
+                let h = rt.cvars.handle_of(Cv::TelemetrySecret).unwrap();
+                server.cvars[h.0 as usize] = "hunter2-rotated".into();
+            }
             let frame = server.frame(n);
             step(&mut rt, &mut rec, &mut server, frame);
             step(
@@ -1164,14 +1284,26 @@ mod tests {
             .unwrap()
             .unwrap()
             .path();
+        let mut reader = Reader::open(&file).unwrap();
+        while let Some(record) = reader.next_record().unwrap() {
+            let bytes = postcard::to_allocvec(&record).unwrap();
+            assert!(
+                !bytes.windows(8).any(|w| w == b"hunter2-"),
+                "a telemetry secret is in the recording: {record:?}"
+            );
+        }
 
         let opts = ReplayOptions {
             dir: Some(root.join("replay")),
             max_diffs: 5,
             ..ReplayOptions::default()
         };
+        std::fs::create_dir_all(root.join("replay")).unwrap();
+        std::fs::write(root.join("replay/mine"), "").unwrap();
         let report = replay(&file, &opts, &mut |_| {}).unwrap();
         assert!(report.matches(), "{}", report.lines().join("\n"));
+        assert!(report.dir.starts_with(root.join("replay")) && !report.dir.exists());
+        assert!(root.join("replay/mine").exists(), "the given directory keeps its files");
         assert_eq!(
             (report.steps, report.frames),
             (2402, 1200),
@@ -1199,6 +1331,153 @@ mod tests {
             report.lines().join("\n")
         );
         assert!(report.diffs[0].1.contains("seed"), "{:?}", report.diffs[0]);
+
+        let escaping = root.join("escaping.lbrec");
+        let mut reader = Reader::open(&file).unwrap();
+        let mut writer = Writer::create(&escaping).unwrap();
+        while let Some(mut record) = reader.next_record().unwrap() {
+            if let Record::Start(start) = &mut record {
+                start.files.push((Root::Install, "../../escaped".into(), Vec::new()));
+            }
+            writer.write(&record).unwrap();
+        }
+        writer.close().unwrap();
+        let err = replay(&escaping, &opts, &mut |_| {}).unwrap_err();
+        assert!(err.contains("outside"), "{err}");
+        assert!(!root.join("replay/escaped").exists());
+
+        let escaping = root.join("escaping-map.lbrec");
+        let mut reader = Reader::open(&file).unwrap();
+        let mut writer = Writer::create(&escaping).unwrap();
+        while let Some(mut record) = reader.next_record().unwrap() {
+            if let Record::Step(Step {
+                entry: Entry::MapStart { map, .. },
+                ..
+            }) = &mut record
+            {
+                *map = "x/../../../escaped".into();
+            }
+            writer.write(&record).unwrap();
+        }
+        writer.close().unwrap();
+        let report = replay(&escaping, &opts, &mut |_| {}).unwrap();
+        let broken = report.broken.as_ref().map_or("", |(_, why)| why.as_str());
+        assert!(broken.contains("outside"), "{}", report.lines().join("\n"));
+
+        // A replay that fails after unpacking takes its directory away too, unless it is kept.
+        let twice = root.join("twice.lbrec");
+        let mut reader = Reader::open(&file).unwrap();
+        let mut writer = Writer::create(&twice).unwrap();
+        let start = reader.next_record().unwrap().unwrap();
+        writer.write(&start).unwrap();
+        writer.write(&start).unwrap();
+        writer.close().unwrap();
+        let left = || -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(root.join("replay"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let err = replay(&twice, &opts, &mut |_| {}).unwrap_err();
+        assert!(err.contains("second start"), "{err}");
+        assert_eq!(left(), ["mine"]);
+        let keep = ReplayOptions {
+            keep_dir: true,
+            ..opts.clone()
+        };
+        replay(&twice, &keep, &mut |_| {}).unwrap_err();
+        assert_eq!(left().len(), 2, "{:?}", left());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_main_config_is_scrubbed_under_any_name_and_overlays_are_kept() {
+        let root = dir("record-files");
+        let install = root.join("install");
+        for d in ["config", "profiles", "maps/flatland"] {
+            std::fs::create_dir_all(install.join(d)).unwrap();
+        }
+        std::fs::write(
+            install.join("config/lambdabots.yaml"),
+            "schema: lambdabots/main@1\ntelemetry:\n  secret: hunter2-secret\n",
+        )
+        .unwrap();
+        std::fs::write(install.join("maps/flatland/overlay.yaml"), "overlay").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            install.join("config/lambdabots.yaml"),
+            install.join("profiles/alias.yaml"),
+        )
+        .unwrap();
+        let init = InitData {
+            adapter_version: "test".into(),
+            plugin_path: root.join("plugin"),
+            game_dir: root.join("game"),
+            install_dir: install,
+            platform: 0,
+            late_load: false,
+            sandbox: true,
+        };
+        let files = gather_files(&init, "flatland");
+        let rels: Vec<&str> = files.iter().map(|(_, rel, _)| rel.as_str()).collect();
+        assert!(rels.contains(&"maps/flatland/overlay.yaml"), "{rels:?}");
+        assert!(!rels.contains(&"maps/flatland/editor.yaml"), "{rels:?}");
+        #[cfg(unix)]
+        assert!(rels.contains(&"profiles/alias.yaml"), "{rels:?}");
+        for (_, rel, bytes) in &files {
+            assert!(!bytes.windows(8).any(|w| w == b"hunter2-"), "the secret is in {rel}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recorded_files_stay_inside_the_replay_directory() {
+        for rel in [
+            "config/lambdabots.yaml",
+            "maps/de..x.bsp",
+            "addons/yapb/data/graph/a.graph",
+        ] {
+            assert!(stays_inside(rel), "{rel}");
+        }
+        for rel in ["", ".", "./config/a", "/etc/passwd", "../x", "config/../../x"] {
+            assert!(!stays_inside(rel), "{rel}");
+        }
+    }
+
+    #[test]
+    fn oversized_blocks_are_refused() {
+        let root = dir("record-oversized");
+        let path = root.join("bad.lbrec");
+        let head = [MAGIC.as_slice(), &FORMAT.to_le_bytes()].concat();
+        std::fs::write(&path, [head.as_slice(), &u32::MAX.to_le_bytes()].concat()).unwrap();
+        assert!(Reader::open(&path).unwrap().next_record().is_err());
+        let packed = [u32::MAX.to_le_bytes().as_slice(), &[0x10, b'a', 0, 0]].concat();
+        std::fs::write(
+            &path,
+            [head.as_slice(), &(packed.len() as u32).to_le_bytes(), &packed].concat(),
+        )
+        .unwrap();
+        let err = Reader::open(&path).unwrap().next_record().unwrap_err();
+        assert!(err.contains("unpacked"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_recorded_config_keeps_no_secret() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/config/lambdabots.yaml");
+        let text = std::fs::read_to_string(path)
+            .unwrap()
+            .replace("secret: \"\"", "secret: hunter2");
+        let original = MainConfig::parse(&text, "t").unwrap();
+        assert_eq!(original.telemetry.secret, "hunter2");
+        let scrubbed = String::from_utf8(scrub_config(text.as_bytes()).unwrap()).unwrap();
+        assert!(!scrubbed.contains("hunter2"), "{scrubbed}");
+        let mut back = MainConfig::parse(&scrubbed, "t").unwrap();
+        assert_eq!(back.telemetry.secret, REDACTED);
+        back.telemetry.secret = original.telemetry.secret.clone();
+        assert_eq!(back, original);
+        assert!(scrub_config(b"schema: lambdabots/main@1\nquota: [").is_none());
     }
 }

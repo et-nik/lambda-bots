@@ -106,7 +106,15 @@ pub struct Trigger {
     pub wait: f32,
     pub delay: f32,
     pub spawnflags: i32,
+    /// `trigger_push`: the velocity it gives a player in it (speed along its direction).
+    pub push: Vec3,
 }
+
+/// `trigger_push` flags.
+pub const SF_PUSH_ONCE: i32 = 1;
+pub const SF_PUSH_START_OFF: i32 = 2;
+/// `trigger_multiple`/`trigger_once`: players do not set it off.
+pub const SF_TRIGGER_NOCLIENTS: i32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct Breakable {
@@ -371,6 +379,12 @@ impl Mechanisms {
                         wait: float(e, "wait").unwrap_or(if kind == TriggerKind::Multiple { 0.2 } else { 0.0 }),
                         delay: float(e, "delay").unwrap_or(0.0),
                         spawnflags,
+                        // `CTriggerPush::Spawn`: no angles push along +x, no speed is 100.
+                        push: if kind == TriggerKind::Push {
+                            movedir(e) * float(e, "speed").filter(|s| *s != 0.0).unwrap_or(100.0)
+                        } else {
+                            Vec3::ZERO
+                        },
                     });
                 }
                 "func_breakable" => m.breakables.push(Breakable {
@@ -409,6 +423,16 @@ impl Mechanisms {
         let target = trigger.target.as_deref()?;
         let e = &world.entities[self.named(target).next()?];
         Some((e.origin(), e.yaw()))
+    }
+
+    /// Push fields on when the map starts that keep pushing while a player is in them (a push-once trigger adds its
+    /// velocity a single time and is gone): `(model, velocity)`.
+    pub fn push_fields(&self) -> Vec<(usize, Vec3)> {
+        self.triggers
+            .iter()
+            .filter(|t| t.kind == TriggerKind::Push && t.spawnflags & (SF_PUSH_START_OFF | SF_PUSH_ONCE) == 0)
+            .map(|t| (t.model, t.push))
+            .collect()
     }
 
     /// Puts every mover in its rest position and makes it block.
@@ -456,7 +480,9 @@ impl Mechanisms {
                         Activation::Use { model }
                     }
                 }
-                ("trigger_multiple" | "trigger_once", Some(model)) => Activation::Touch { model },
+                ("trigger_multiple" | "trigger_once", Some(model)) if e.spawnflags() & SF_TRIGGER_NOCLIENTS == 0 => {
+                    Activation::Touch { model }
+                }
                 ("func_door" | "func_door_rotating", Some(model)) => match self.mover(model) {
                     Some(d) if d.usable => Activation::Use { model },
                     Some(d) if d.touch => Activation::Touch { model },
@@ -523,5 +549,73 @@ mod tests {
                 .any(|a| a.how == Activation::Touch { model: 65 } && (a.delay - 2.0).abs() < 1e-3),
             "{shutter:?}"
         );
+    }
+
+    #[test]
+    fn no_clients_triggers_are_not_touched() {
+        let world = BspWorld {
+            bsp: crate::Bsp {
+                planes: Vec::new(),
+                hull0: Vec::new(),
+                nodes: Vec::new(),
+                clipnodes: Vec::new(),
+                leafs: Vec::new(),
+                models: Vec::new(),
+                visdata: Vec::new(),
+                entities: String::new(),
+                textures: Vec::new(),
+                fingerprint: ([0; 32], 0),
+            },
+            entities: crate::parse_entities(
+                r#"{ "classname" "trigger_multiple" "model" "*1" "target" "a" }
+{ "classname" "trigger_once" "model" "*2" "target" "a" "spawnflags" "2" }
+{ "classname" "trigger_multiple" "model" "*3" "target" "a" "spawnflags" "3" }
+{ "classname" "trigger_once" "model" "*4" "target" "a" "spawnflags" "1" }"#,
+            ),
+            brushes: Vec::new(),
+            traces: 0,
+            pushes: Vec::new(),
+        };
+        let how: Vec<Activation> = Mechanisms::default()
+            .activators(&world, "a")
+            .into_iter()
+            .map(|a| a.how)
+            .collect();
+        let unsupported = |c: &str| Activation::Unsupported { classname: c.into() };
+        assert_eq!(
+            how,
+            vec![
+                Activation::Touch { model: 1 },
+                unsupported("trigger_once"),
+                unsupported("trigger_multiple"),
+                Activation::Touch { model: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn push_fields_are_the_continuous_ones_on_at_start() {
+        let push = |model, spawnflags| Trigger {
+            entity: model,
+            model,
+            kind: TriggerKind::Push,
+            targetname: None,
+            target: None,
+            master: None,
+            wait: 0.0,
+            delay: 0.0,
+            spawnflags,
+            push: Vec3::Z * 100.0,
+        };
+        let m = Mechanisms {
+            triggers: vec![
+                push(1, 0),
+                push(2, SF_PUSH_ONCE),
+                push(3, SF_PUSH_START_OFF),
+                push(4, SF_PUSH_ONCE | SF_PUSH_START_OFF),
+            ],
+            ..Mechanisms::default()
+        };
+        assert_eq!(m.push_fields(), vec![(1, Vec3::Z * 100.0)]);
     }
 }

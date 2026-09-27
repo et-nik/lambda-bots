@@ -4,10 +4,10 @@ use lb_config::main_config::QuotaMode;
 use lb_core::math::normalize_angle;
 use lb_host::{Host, TraceKind, TraceRequest};
 
-use crate::Runtime;
 use crate::cvars::Cv;
 use crate::manager::BotState;
 use crate::motor_test::{MotorTest, Script};
+use crate::{Runtime, editor};
 
 const HELP: &[(&str, &str)] = &[
     (
@@ -20,6 +20,15 @@ const HELP: &[(&str, &str)] = &[
     ("list", "list bots"),
     ("roster [all]", "personalities admitted by the filter (or all of them)"),
     ("nav", "navigation graph status and what every bot is walking to"),
+    ("nav regen", "forget the map's kept graphs and make the graph again"),
+    (
+        "overlay [reload]",
+        "the map's overlays (places, graph patches); reload reads and applies them again",
+    ),
+    (
+        "edit on|off|save|show|mark|link|unlink|forbid|place|info|undo",
+        "the in-game editor of the map's overlay (needs lb_editor 1; run from the game console)",
+    ),
     (
         "nav test <kind|all> [count] [name|#userid] | link <from> <to> ... | stop",
         "the obstacle course: a bot carries out special links (lift, jump, drop, ladder, door, ...)",
@@ -71,8 +80,14 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         )],
         "list" => list(rt),
         "roster" => roster(rt, rest),
+        "edit" => edit(rt, rest),
+        "overlay" => match rest.first().copied() {
+            Some("reload") => overlay_reload(rt),
+            _ => overlay(rt),
+        },
         "nav" => match rest.first().copied() {
             Some("test") => nav_test(rt, &rest[1..]),
+            Some("regen") => nav_regen(rt),
             _ => nav(rt),
         },
         "vision" => vision(rt, rest),
@@ -222,6 +237,128 @@ fn perf(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
             t.max_ns as f64 / 1000.0
         ),
     ]
+}
+
+/// `lb edit ...`: the in-game editor of the map's overlay.
+fn edit(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    if !rt.editor_allowed {
+        return vec!["the editor is off on this server (lb_editor 1 turns it on)".into()];
+    }
+    let Some(map) = rt.map.as_ref().map(|m| m.name.clone()) else {
+        return vec!["no map".into()];
+    };
+    match args {
+        ["on"] => {
+            let Some(slot) = rt.command_slot else {
+                return vec!["run it from the game console: the editor draws around the player".into()];
+            };
+            match editor::Editor::open(slot, &rt.init.install_dir, &map) {
+                Ok(ed) => {
+                    let (patches, places) = (ed.file.nav.patches.len(), ed.file.places.len());
+                    rt.editor = Some(ed);
+                    vec![format!(
+                        "editing {map} ({patches} patches, {places} places saved); `lb edit` lists the commands"
+                    )]
+                }
+                Err(e) => vec![e],
+            }
+        }
+        ["off"] => match rt.editor.take() {
+            Some(ed) if ed.unsaved() > 0 => vec![format!("editor off; {} changes not saved", ed.unsaved())],
+            Some(_) => vec!["editor off".into()],
+            None => vec!["the editor is not on".into()],
+        },
+        ["save"] => {
+            let install = rt.init.install_dir.clone();
+            let Some(ed) = rt.editor.as_mut() else {
+                return vec!["the editor is not on (lb edit on)".into()];
+            };
+            match ed.save(&install) {
+                Ok(path) => {
+                    let mut out = vec![format!("saved {}", path.display())];
+                    out.extend(overlay_reload(rt));
+                    out
+                }
+                Err(e) => vec![e],
+            }
+        }
+        _ => {
+            let origin = rt.editor.as_ref().and_then(|ed| rt.client_origin(ed.slot));
+            let graph = rt.graph.clone();
+            match (rt.editor.as_mut(), origin) {
+                (Some(ed), Some(origin)) => ed.command(args, graph.as_deref(), origin),
+                (Some(_), None) => vec!["the editing player is not in the game".into()],
+                (None, _) => vec!["the editor is not on (lb edit on)".into()],
+            }
+        }
+    }
+}
+
+/// The map's overlays: places and graph patches.
+fn overlay(rt: &Runtime) -> Vec<String> {
+    if rt.overlays.is_empty() {
+        return vec!["no overlay for this map (maps/<map>/overlay.yaml, editor.yaml)".into()];
+    }
+    let mut out = Vec::new();
+    for o in rt.overlays.iter() {
+        out.push(format!(
+            "{}: {} places, {} graph patches",
+            o.map,
+            o.places.len(),
+            o.nav.patches.len()
+        ));
+        for p in &o.places {
+            out.push(format!(
+                "  place {} at {:.0} {:.0} {:.0} r {:.0} {}",
+                p.name,
+                p.at[0],
+                p.at[1],
+                p.at[2],
+                p.radius,
+                p.tags.join(",")
+            ));
+        }
+    }
+    out.push(format!("graph: {}", rt.nav_status));
+    out
+}
+
+/// Reads the overlays again and applies them to the map's graph (from the cache when it was made before).
+fn overlay_reload(rt: &mut Runtime) -> Vec<String> {
+    let Some(map) = rt.map.as_ref().map(|m| m.name.clone()) else {
+        return vec!["no map".into()];
+    };
+    if rt.nav_loader.is_some() {
+        return vec![format!("{map}: the graph is being loaded already")];
+    }
+    rt.start_nav_load(&map);
+    vec![format!(
+        "{map}: reading the overlays again; `lb overlay` shows them once the graph is back"
+    )]
+}
+
+/// Forgets the map's kept graphs and makes the graph again.
+fn nav_regen(rt: &mut Runtime) -> Vec<String> {
+    let Some(map) = rt.map.as_ref().map(|m| m.name.clone()) else {
+        return vec!["no map".into()];
+    };
+    if rt.nav_loader.is_some() {
+        return vec![format!("{map}: the graph is being loaded already")];
+    }
+    let dir = rt.init.install_dir.join("nav").join(&map);
+    let removed = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "lbnav"))
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count();
+    rt.nav_status = format!("remaking the graph for {map}");
+    rt.start_nav_load(&map);
+    vec![format!(
+        "{map}: {removed} kept graph(s) removed, making it again ({}); bots keep the current graph until then",
+        rt.config.nav.source.name()
+    )]
 }
 
 fn nav(rt: &Runtime) -> Vec<String> {

@@ -24,6 +24,7 @@ postcard.workspace = true
 lz4_flex.workspace = true
 crc32c.workspace = true
 serde.workspace = true
+xxhash-rust.workspace = true
 
 [lints]
 workspace = true

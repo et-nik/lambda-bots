@@ -13,6 +13,7 @@ use lb_ffi::*;
 use lb_host::Host;
 use lb_host::ffi_host::FfiHost;
 use lb_host::record::{FrameRec, RecordingHost};
+use lb_runtime::cvars::Cv;
 use lb_runtime::record::{Entry, Recorder};
 use lb_runtime::{InitData, Runtime, commands, panic_message};
 use parking_lot::Mutex;
@@ -26,7 +27,8 @@ struct Plugin {
 impl Plugin {
     /// Runs `f` against the runtime as the adapter's call `entry` (built only when a recording is on).
     fn call<R>(&mut self, entry: impl FnOnce() -> Entry, f: impl FnOnce(&mut Runtime, &mut dyn Host) -> R) -> R {
-        let mut host = RecordingHost::new(&mut self.host, self.rec.begin(entry));
+        let secret = self.rt.cvars.handle_of(Cv::TelemetrySecret);
+        let mut host = RecordingHost::new(&mut self.host, self.rec.begin(entry)).hiding(secret);
         let r = f(&mut self.rt, &mut host);
         self.rec.end(&mut self.rt);
         r

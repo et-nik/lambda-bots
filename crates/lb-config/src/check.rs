@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::names::NamesFile;
+use crate::overlay::OverlayFile;
 use crate::profiles::ProfilesFile;
 use crate::skill::DifficultyFile;
 use crate::styles::StyleFile;
@@ -31,6 +32,7 @@ pub fn check_text(text: &str, path: &str) -> Result<String, ConfigError> {
         "profiles" => ProfilesFile::parse(text, path).map(|_| ()),
         "difficulty" => DifficultyFile::parse(text, path).map(|_| ()),
         "style" => StyleFile::parse(text, path).map(|_| ()),
+        "overlay" => OverlayFile::parse(text, path).map(|_| ()),
         other => Err(ConfigError::Invalid {
             path: path.to_string(),
             field: "schema".into(),

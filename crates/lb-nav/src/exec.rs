@@ -4,7 +4,8 @@
 
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3};
-use lb_kin::validate::{run_up_room, takeoff};
+use lb_kin::Physics;
+use lb_kin::validate::{DROP_OVERRUN, DROP_SLACK, LIFTING, air_steer, hover, run_up_room, swim_jump, takeoff};
 use lb_nav_api::NavStep;
 use lb_worldq::Tracer;
 
@@ -14,6 +15,15 @@ use crate::spec::{Action, Interaction, MechRef, TraversalSpec};
 
 /// Eye height of a standing player above its origin (`VEC_VIEW`).
 pub const EYE_HEIGHT: f32 = 28.0;
+/// Steepest a player on the move looks up or down: the tangent of about 12°.
+pub const TRAVEL_TILT: f32 = 0.2;
+
+/// Where a player on the move looks toward `p`: that way, tilted up or down no more than `TRAVEL_TILT`.
+pub fn travel_look(eye: Vec3, p: Vec3) -> Vec3 {
+    let d = p - eye;
+    let flat = d.truncate().length();
+    eye + d.truncate().extend(d.z.clamp(-flat * TRAVEL_TILT, flat * TRAVEL_TILT))
+}
 /// A use press is sent once the view is this close to the target, degrees.
 const USE_AIM: f32 = 8.0;
 /// A mechanism that has not moved this long after it was set off did not react.
@@ -37,11 +47,24 @@ pub struct NavInput {
     pub ground_model: u16,
     pub max_speed: f32,
     pub health: f32,
+    /// Velocity of the push field the bot is in (`basevelocity` as `trigger_push` sets it); zero outside one.
+    pub push: Vec3,
+    /// Server gravity (`sv_gravity`); 0 when not known.
+    pub gravity: f32,
 }
 
 impl NavInput {
     pub fn feet(&self) -> f32 {
         self.origin.z - if self.ducked { 18.0 } else { 36.0 }
+    }
+
+    /// Server gravity, the default when not known.
+    pub fn gravity(&self) -> f32 {
+        if self.gravity > 0.0 {
+            self.gravity
+        } else {
+            Physics::default().gravity
+        }
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -157,9 +180,15 @@ fn aim_error(input: &NavInput, p: Vec3) -> f32 {
     lb_core::dmath::acos(forward.dot(want).clamp(-1.0, 1.0)).to_degrees()
 }
 
-/// Looking at `p` and holding still: used to press buttons.
-fn aim_at(p: Vec3) -> NavStep {
+/// View pitch of looking from `eye` at `p`.
+fn pitch_to(eye: Vec3, p: Vec3) -> f32 {
+    lb_core::math::dir_to_view_angles(p - eye).x
+}
+
+/// Looking right at `p` and holding still: used to press buttons.
+fn aim_at(input: &NavInput, p: Vec3) -> NavStep {
     let mut step = NavStep::hold(p);
+    step.pitch = Some(pitch_to(input.eye(), p));
     step.mandatory = true;
     step
 }
@@ -349,7 +378,16 @@ impl DropExec {
     fn tick(&mut self, c: &mut ExecCtx<'_>, speed: f32) -> (NavStep, ExecStatus) {
         let i = c.input;
         let b = c.spec.exit.origin;
-        let mut step = toward(i, b, speed.max(150.0).min(i.max_speed));
+        // Off the ledge heading past the landing, as validated: slowing down at it stops on the ledge above it.
+        let beyond = b + (b - c.spec.entry.origin).truncate().normalize_or_zero().extend(0.0) * DROP_OVERRUN;
+        let pace = speed.max(150.0).min(i.max_speed);
+        let mut step = if self.airborne_at.is_none() && flat(b - i.origin).length() < DROP_OVERRUN {
+            let mut s = toward(i, beyond, pace);
+            s.speed = pace;
+            s
+        } else {
+            toward(i, b, pace)
+        };
         match self.airborne_at {
             None => {
                 if i.health <= c.spec.needs.health {
@@ -374,7 +412,7 @@ impl DropExec {
                         return (step, ExecStatus::Done);
                     }
                     // Landed short or long: walking the rest is the next link's business if it can be walked.
-                    if flat(b - i.origin).length() < 96.0 && (i.feet() - node_feet(c.to)).abs() < 20.0 {
+                    if flat(b - i.origin).length() < DROP_SLACK && (i.feet() - node_feet(c.to)).abs() < 20.0 {
                         return (step, ExecStatus::Running);
                     }
                     return (step, ExecStatus::Failed(FailReason::ControllerFailure));
@@ -393,6 +431,8 @@ impl DropExec {
 pub struct LadderExec {
     boarded: bool,
     left_at: Option<f64>,
+    /// Since when the climb up has not risen (against the top of a ladder the ledge is behind or beside).
+    stalled_at: Option<f64>,
 }
 
 impl LadderExec {
@@ -415,7 +455,15 @@ impl LadderExec {
             if to_ladder && !top && dz.abs() < 12.0 && across.length() < 24.0 {
                 return (step, ExecStatus::Done);
             }
-            if (!to_ladder || top) && dz < 8.0 && target.z > c.from.origin.z - 8.0 {
+            let rising = i.velocity.z > 20.0;
+            let stalled = dz > 0.0 && !rising && i.now - *self.stalled_at.get_or_insert(i.now) > 0.3;
+            if rising {
+                self.stalled_at = None;
+            }
+            // At the top, or up against it with the ledge behind or beside: step off toward the ledge, as the
+            // validator's climb does.
+            let level = !to_ladder && (-24.0..8.0).contains(&dz);
+            if (!to_ladder || top) && ((dz < 8.0 && target.z > c.from.origin.z - 8.0) || stalled || level) {
                 // At the top: step off onto the ledge.
                 let mut s = toward(i, target, i.max_speed);
                 s.mandatory = true;
@@ -514,11 +562,14 @@ impl SwimExec {
         }
         let mut step = toward(i, target, i.max_speed);
         step.speed = i.max_speed;
+        // Swimming goes where the view points, up and down too.
         step.look_at = target;
-        if i.waterlevel >= 2 && target.z > i.origin.z + 24.0 {
-            // Rise toward the surface; at the surface the jump also climbs out of the water.
-            step.jump = true;
-        }
+        step.pitch = Some(pitch_to(i.eye(), target));
+        // Rise toward the surface (where the jump also climbs out of the water), or hop over a lip into it; duck
+        // through low tunnels.
+        let to_land = !c.to.flags.contains(NodeFlags::WATER);
+        step.jump = swim_jump(i.origin, i.velocity, i.waterlevel, i.on_ground, target, to_land);
+        step.duck = c.from.flags.contains(NodeFlags::CROUCH) || c.to.flags.contains(NodeFlags::CROUCH);
         (step, ExecStatus::Running)
     }
 }
@@ -543,6 +594,8 @@ pub struct DoorExec {
     presses: u8,
     pressed_at: Option<f64>,
     pushed_at: Option<f64>,
+    /// Through the doorway's middle already.
+    via_done: bool,
 }
 
 impl DoorExec {
@@ -551,7 +604,13 @@ impl DoorExec {
         self.since = now;
     }
 
-    fn tick(&mut self, c: &mut ExecCtx<'_>, door: MechRef, open: Interaction) -> (NavStep, ExecStatus) {
+    fn tick(
+        &mut self,
+        c: &mut ExecCtx<'_>,
+        door: MechRef,
+        open: Interaction,
+        via: Option<Vec3>,
+    ) -> (NavStep, ExecStatus) {
         let i = c.input;
         let now = i.now;
         let state = c.mech.mover(door.model);
@@ -588,7 +647,7 @@ impl DoorExec {
                 }
                 DoorPhase::Activate => match open {
                     Interaction::Use { aim, .. } => {
-                        let mut step = aim_at(aim);
+                        let mut step = aim_at(i, aim);
                         if aim_error(i, aim) < USE_AIM && self.pressed_at.is_none_or(|t| now - t > 0.3) {
                             step.use_key = true;
                             self.presses += 1;
@@ -600,7 +659,7 @@ impl DoorExec {
                         return (step, ExecStatus::Running);
                     }
                     Interaction::Shoot { aim, .. } => {
-                        let mut step = aim_at(aim);
+                        let mut step = aim_at(i, aim);
                         step.fire_at = Some(aim);
                         if moving || is_open {
                             self.set(DoorPhase::WaitOpen, now);
@@ -647,7 +706,17 @@ impl DoorExec {
                     if at_node(i, c.to, c.spec.exit.radius) {
                         return (toward(i, c.to.origin, i.max_speed), ExecStatus::Done);
                     }
-                    let step = toward(i, c.to.origin, i.max_speed);
+                    let target = match via.filter(|_| !self.via_done) {
+                        Some(v) if flat(v - i.origin).length() < 16.0 => {
+                            self.via_done = true;
+                            c.to.origin
+                        }
+                        Some(v) => v,
+                        None => c.to.origin,
+                    };
+                    let mut step = toward(i, target, i.max_speed);
+                    // A low passage behind the door.
+                    step.duck = c.from.flags.contains(NodeFlags::CROUCH) || c.to.flags.contains(NodeFlags::CROUCH);
                     let slow = flat(i.velocity).length() < 20.0;
                     if slow && !is_open {
                         // Pressing into a closed door: a touch door should start opening now.
@@ -755,7 +824,7 @@ impl LiftExec {
                     }
                     match start {
                         Interaction::Use { aim, .. } => {
-                            let mut step = aim_at(aim);
+                            let mut step = aim_at(i, aim);
                             let waited = self.pressed_at.is_none_or(|t| now - t > REACTION);
                             if waited && self.presses >= PRESSES {
                                 return (step, ExecStatus::Failed(FailReason::WaitingForInteraction));
@@ -770,7 +839,7 @@ impl LiftExec {
                             return (step, ExecStatus::Waiting);
                         }
                         Interaction::Shoot { aim, .. } => {
-                            let mut step = aim_at(aim);
+                            let mut step = aim_at(i, aim);
                             step.fire_at = Some(aim);
                             if now - self.since > 4.0 {
                                 return (step, ExecStatus::Failed(FailReason::WaitingForInteraction));
@@ -897,10 +966,167 @@ impl BreakExec {
         if crowbar && dist > reach + 16.0 {
             return (toward(i, aim, i.max_speed), ExecStatus::Running);
         }
-        let mut step = aim_at(aim);
+        let mut step = aim_at(i, aim);
         step.fire_at = Some(aim);
         step.melee = crowbar;
         (step, ExecStatus::Waiting)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Push fields
+// ---------------------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushPhase {
+    /// To the entry, stopping there: the run was checked from rest.
+    Approach,
+    /// Along the run into the field.
+    Run,
+    /// Thrown or carried by the field.
+    Flight,
+    /// Down again: walk or swim the rest.
+    Landed,
+}
+
+#[derive(Clone, Debug)]
+pub struct PushExec {
+    phase: PushPhase,
+    since: f64,
+    jumped: bool,
+    runs: u8,
+    best: f32,
+    best_at: f64,
+}
+
+impl PushExec {
+    fn set(&mut self, phase: PushPhase, now: f64) {
+        self.phase = phase;
+        self.since = now;
+    }
+
+    /// Mirrors `lb_kin::validate::simulate_push`: the same run, the same jump, the same steering.
+    fn tick(
+        &mut self,
+        c: &mut ExecCtx<'_>,
+        dir: Vec2,
+        jump_at: Option<f32>,
+        hold: Option<Vec2>,
+    ) -> (NavStep, ExecStatus) {
+        let i = c.input;
+        let now = i.now;
+        let (a, b) = (c.spec.entry.origin, c.spec.exit.origin);
+        let look = b + Vec3::Z * EYE_HEIGHT;
+        let airborne = !i.on_ground && !i.on_ladder && i.waterlevel < 2;
+        let lifting = i.push.z > LIFTING;
+        // The field shows as a flight, as its push, or as more speed along the floor than running gives.
+        let carried = airborne || i.push != Vec3::ZERO || flat(i.velocity).length() > i.max_speed * 1.25;
+        for _ in 0..4 {
+            match self.phase {
+                PushPhase::Approach => {
+                    let left = flat(a - i.origin).length();
+                    if left < 12.0 && flat(i.velocity).length() < 40.0 && i.on_ground {
+                        self.jumped = false;
+                        self.set(PushPhase::Run, now);
+                        continue;
+                    }
+                    if now - self.since > 6.0 {
+                        return (NavStep::hold(look), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    let mut step = toward(i, a, i.max_speed);
+                    step.look_at = i.eye() + dir.extend(0.0) * 64.0;
+                    return (step, ExecStatus::Running);
+                }
+                PushPhase::Run => {
+                    if carried {
+                        self.set(PushPhase::Flight, now);
+                        continue;
+                    }
+                    if now - self.since > 3.0 {
+                        // The field did not take hold: switched off, or the run missed it.
+                        self.runs += 1;
+                        if self.runs >= 2 {
+                            return (NavStep::hold(look), ExecStatus::Failed(FailReason::GeometryInvalid));
+                        }
+                        self.set(PushPhase::Approach, now);
+                        continue;
+                    }
+                    let along = flat(i.origin - a).dot(dir);
+                    let mut step = NavStep::hold(i.eye() + dir.extend(0.0) * 64.0);
+                    step.move_dir = dir;
+                    step.speed = i.max_speed;
+                    step.mandatory = true;
+                    if !self.jumped && i.on_ground && jump_at.is_some_and(|j| along >= j) {
+                        step.jump = true;
+                        self.jumped = true;
+                    }
+                    return (step, ExecStatus::Running);
+                }
+                PushPhase::Flight => {
+                    if now - self.since > 12.0 {
+                        return (NavStep::hold(look), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    if i.waterlevel >= 2 {
+                        if (b - i.origin).length() < 24.0 {
+                            return (NavStep::hold(look), ExecStatus::Done);
+                        }
+                        let mut step = toward(i, b, i.max_speed);
+                        step.speed = i.max_speed;
+                        step.look_at = b;
+                        let to_land = !c.to.flags.contains(NodeFlags::WATER);
+                        step.jump = swim_jump(i.origin, i.velocity, i.waterlevel, i.on_ground, b, to_land);
+                        step.mandatory = true;
+                        return (step, ExecStatus::Running);
+                    }
+                    if let Some(spot) = hold.filter(|_| lifting) {
+                        let mut step = NavStep::hold(look);
+                        if let Some(d) = hover(i.origin, i.velocity, spot) {
+                            step.move_dir = d;
+                            step.speed = i.max_speed;
+                        }
+                        step.mandatory = true;
+                        return (step, ExecStatus::Running);
+                    }
+                    if airborne {
+                        let mut step = NavStep::hold(look);
+                        if let Some(d) = air_steer(i.origin, i.velocity, b, i.gravity()) {
+                            step.move_dir = d;
+                            step.speed = i.max_speed;
+                        }
+                        step.mandatory = true;
+                        return (step, ExecStatus::Running);
+                    }
+                    if !carried {
+                        self.best = f32::INFINITY;
+                        self.set(PushPhase::Landed, now);
+                        continue;
+                    }
+                    let mut step = toward(i, b, i.max_speed);
+                    step.look_at = look;
+                    return (step, ExecStatus::Running);
+                }
+                PushPhase::Landed => {
+                    if at_node(i, c.to, c.spec.exit.radius + 8.0) {
+                        return (NavStep::hold(look), ExecStatus::Done);
+                    }
+                    if (airborne && i.velocity.z > 300.0) || flat(i.velocity).length() > i.max_speed * 1.25 {
+                        // Thrown again: the landing was the field once more.
+                        return (NavStep::hold(look), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    let left = (b - i.origin).length();
+                    if left < self.best - 1.0 {
+                        self.best = left;
+                        self.best_at = now;
+                    } else if now - self.best_at > 1.5 {
+                        return (NavStep::hold(look), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    let mut step = toward(i, b, i.max_speed);
+                    step.look_at = look;
+                    return (step, ExecStatus::Running);
+                }
+            }
+        }
+        (NavStep::hold(look), ExecStatus::Running)
     }
 }
 
@@ -917,6 +1143,7 @@ pub enum Exec {
     Lift(LiftExec),
     Teleport(TeleportExec),
     Breakable(BreakExec),
+    Push(PushExec),
 }
 
 impl Exec {
@@ -937,6 +1164,7 @@ impl Exec {
                 presses: 0,
                 pressed_at: None,
                 pushed_at: None,
+                via_done: false,
             }),
             Action::Lift { .. } => Exec::Lift(LiftExec {
                 phase: LiftPhase::WaitRest,
@@ -946,6 +1174,14 @@ impl Exec {
             }),
             Action::Teleport { .. } => Exec::Teleport(TeleportExec::default()),
             Action::Breakable { .. } => Exec::Breakable(BreakExec),
+            Action::Push { .. } => Exec::Push(PushExec {
+                phase: PushPhase::Approach,
+                since: now,
+                jumped: false,
+                runs: 0,
+                best: f32::INFINITY,
+                best_at: now,
+            }),
         }
     }
 
@@ -955,7 +1191,7 @@ impl Exec {
             (Exec::Drop(e), Action::Drop { speed, .. }) => e.tick(c, speed),
             (Exec::Ladder(e), Action::Ladder { normal, mount, .. }) => e.tick(c, normal, mount),
             (Exec::Swim(e), Action::Swim) => e.tick(c),
-            (Exec::Door(e), Action::Door { door, open }) => e.tick(c, door, open),
+            (Exec::Door(e), Action::Door { door, open, via }) => e.tick(c, door, open, via),
             (Exec::Lift(e), Action::Lift { platform, start }) => e.tick(c, platform, start),
             (Exec::Teleport(e), Action::Teleport { touch, dest, .. }) => e.tick(c, touch, dest),
             (
@@ -964,6 +1200,7 @@ impl Exec {
                     model, aim, crowbar, ..
                 },
             ) => e.tick(c, model, aim, crowbar),
+            (Exec::Push(e), Action::Push { dir, jump_at, hold, .. }) => e.tick(c, dir, jump_at, hold),
             _ => (
                 NavStep::hold(c.to.origin),
                 ExecStatus::Failed(FailReason::ControllerFailure),
@@ -1011,6 +1248,12 @@ impl Exec {
             },
             Exec::Teleport(_) => "teleport",
             Exec::Breakable(_) => "breakable",
+            Exec::Push(e) => match e.phase {
+                PushPhase::Approach => "push:approach",
+                PushPhase::Run => "push:run",
+                PushPhase::Flight => "push:flight",
+                PushPhase::Landed => "push:landed",
+            },
         }
     }
 }

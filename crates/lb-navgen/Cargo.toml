@@ -14,8 +14,14 @@ lb-worldq.workspace = true
 lb-bsp.workspace = true
 lb-kin.workspace = true
 lb-nav.workspace = true
+lb-config.workspace = true
 rayon.workspace = true
+rustc-hash.workspace = true
 smallvec.workspace = true
+bitflags.workspace = true
+tracing.workspace = true
+xxhash-rust.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

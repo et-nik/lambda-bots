@@ -169,7 +169,7 @@ impl Mind {
     }
 }
 
-fn apply_step(intents: &mut Intents, step: &NavStep, m: &mut Mind) {
+fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &mut Mind) {
     intents.movement(
         Prio::Goal,
         MoveIntent {
@@ -185,8 +185,7 @@ fn apply_step(intents: &mut Intents, step: &NavStep, m: &mut Mind) {
         intents.stance(Prio::Traversal, stance);
         let look = match step.pitch {
             Some(pitch) => {
-                let d = step.look_at;
-                let mut angles = lb_core::math::dir_to_view_angles(d);
+                let mut angles = lb_core::math::dir_to_view_angles(step.look_at - eye);
                 angles.x = pitch;
                 LookIntent::Angles(angles)
             }
@@ -345,7 +344,7 @@ impl BotBrain {
                 if class == WeaponClass::Melee && distance > MELEE_CHARGE {
                     let (status, step) = nav.go_to(t.pos);
                     if let Some(step) = step {
-                        apply_step(&mut self.intents, &step, m);
+                        apply_step(&mut self.intents, &step, body.eye, m);
                     }
                     arrive(status, m);
                     return;
@@ -393,7 +392,7 @@ impl BotBrain {
                 };
                 let (status, step) = nav.go_to(t.pos);
                 if let Some(step) = step {
-                    apply_step(&mut self.intents, &step, m);
+                    apply_step(&mut self.intents, &step, body.eye, m);
                 }
                 arrive(status, m);
             }
@@ -412,7 +411,7 @@ impl BotBrain {
                     Some((dest, _)) => {
                         let (status, step) = nav.go_to(dest);
                         if let Some(step) = step {
-                            apply_step(&mut self.intents, &step, m);
+                            apply_step(&mut self.intents, &step, body.eye, m);
                         }
                         if status != NavStatus::Moving {
                             m.retreat_to = None;
@@ -438,13 +437,13 @@ impl BotBrain {
                 }
                 let (status, step) = nav.go_to(spot.origin);
                 if let Some(step) = step {
-                    apply_step(&mut self.intents, &step, m);
+                    apply_step(&mut self.intents, &step, body.eye, m);
                 }
                 arrive(status, m);
             }
             GoalKind::Roam => {
                 if let Some(step) = nav.roam(&mut rng.decision) {
-                    apply_step(&mut self.intents, &step, m);
+                    apply_step(&mut self.intents, &step, body.eye, m);
                 }
             }
         }

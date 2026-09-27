@@ -1,5 +1,6 @@
-//! The obstacle set: a small box world per traversal, each with a way that works and a way that fails. The bot must
-//! get through the working ones, and on the failing ones report the right cause and take another way.
+//! The obstacle set: a small box world per traversal the bot must get through. Some worlds also have a way that
+//! fails (a use door that never opens, a jump too far, a walled-up passage); there the bot must report the right
+//! cause and take another way.
 
 use lb_bsp::mech::{Mover, MoverKind, TriggerKind};
 use lb_core::Vec3;
@@ -146,6 +147,7 @@ fn door_graph(open: Option<Interaction>) -> (NavGraph, NodeId, NodeId) {
             Some(Action::Door {
                 door: door_ref(Vec3::new(0.0, 0.0, 108.0)),
                 open,
+                via: None,
             }),
         );
     }
@@ -418,7 +420,12 @@ fn an_impossible_jump_fails_and_the_bot_goes_around() {
     w.solid(Vec3::new(-600.0, -600.0, -16.0), Vec3::new(0.0, 600.0, 0.0));
     w.solid(Vec3::new(260.0, -600.0, -16.0), Vec3::new(900.0, 600.0, 0.0));
     w.solid(Vec3::new(0.0, 400.0, -16.0), Vec3::new(260.0, 600.0, 0.0));
-    w.solid(Vec3::new(-2000.0, -2000.0, -600.0), Vec3::new(2000.0, 2000.0, -584.0));
+    // The gap is a pit 128 deep with stairs up at its far end.
+    w.solid(Vec3::new(-2000.0, -2000.0, -144.0), Vec3::new(2000.0, 2000.0, -128.0));
+    for i in 1..8 {
+        let (y, top) = (400.0 - 24.0 * (8 - i) as f32, -128.0 + 16.0 * i as f32);
+        w.solid(Vec3::new(0.0, y, -128.0), Vec3::new(260.0, 400.0, top));
+    }
     let mut g = Builder::default();
     let a = g.node(-20.0, 0.0, 36.0);
     let b = g.node(300.0, 0.0, 36.0);
@@ -438,16 +445,21 @@ fn an_impossible_jump_fails_and_the_bot_goes_around() {
     g.walk(c1, c2);
     g.walk(c2, b);
     // Falling into the gap needs a way back up.
-    let pit = g.node(130.0, 0.0, -548.0);
-    g.walk(pit, c1);
+    let pit = g.node(130.0, 0.0, -92.0);
+    let stairs = g.node(130.0, 440.0, 36.0);
+    g.walk(pit, stairs);
+    g.walk(stairs, c2);
     let mut c = Course::new(w, Game::default(), g.build());
     let from = Vec3::new(-20.0, 0.0, 36.0);
     let to = Vec3::new(300.0, 0.0, 36.0);
     let mut bot = CourseBot::new(from, 100.0);
     c.place(&mut bot);
     let o = c.run(&mut bot, to, 20.0, 100.0, None);
+    assert!(o.arrived, "{}", describe(&o));
     assert!(
-        o.failures.iter().any(|f| f.reason == FailReason::ControllerFailure) || bot.nav.failures_total > 0,
+        o.failures
+            .iter()
+            .any(|f| (f.from, f.to) == (a, b) && f.reason == FailReason::ControllerFailure),
         "the missed jump is reported: {}",
         describe(&o)
     );

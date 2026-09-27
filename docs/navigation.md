@@ -5,32 +5,77 @@ and what happens when it cannot. The design behind it is in `docs/design/nav.md`
 
 ## The graph
 
-The graph is imported from the map's yapb `.graph` (`addons/lambdabots/nav/<map>.graph` or
-`addons/yapb/data/graph/<map>.graph`). Its nodes are projected onto the floor; its links are thrown away and
-classified again by simulation. `lb-kin` is a port of the engine's player movement (`PM_PlayerMove`): friction,
-acceleration, stepping, gravity, jumping, ducking, ladders and water.
+By default the graph is made from the map itself (`lb-navgen`) on a worker when the map starts, and kept in
+`addons/lambdabots/nav/<map>/` for the next time. `lb_nav_source yapb` (or `nav.source: yapb` in the main config)
+imports the map's yapb `.graph` instead (`addons/lambdabots/nav/<map>.graph` or `addons/yapb/data/graph/<map>.graph`);
+a generated graph also falls back to it when generation fails.
 
-| Kind        | Classified as                                                                           | Contract                          |
-|-------------|-----------------------------------------------------------------------------------------|-----------------------------------|
-| `walk`      | a straight hull check passes, or a simulated run slides around what is in the way       | —                                 |
-| `crouch`    | the same, crouched                                                                      | —                                 |
-| `drop`      | walking there falls more than 20 units: a simulated walk off the edge lands at the node | speed, fall damage, health needed |
-| `jump`      | a simulated running jump (see below) lands at the node                                  | speed, duck, robustness           |
-| `ladder`    | either end is on a ladder (and it is not a walk along a floor)                          | ladder normal, mount point        |
-| `swim`      | either end is under water                                                               | —                                 |
-| `door`      | a door blocks the way; the map's mechanism graph says how it opens                      | touch, use, or a remote button    |
-| `lift`      | added from the map: platforms and doors that carry a player up                          | the mover, where to call it       |
-| `teleport`  | a `trigger_teleport` stands between the nodes                                           | the trigger, the destination      |
-| `breakable` | a `func_breakable` blocks the way                                                       | the brush to shoot                |
+Either way every link is classified by simulation: `lb-kin` is a port of the engine's player movement
+(`PM_PlayerMove`): friction, acceleration, stepping, gravity, jumping, ducking, ladders, water, and push fields
+(`trigger_push`: while the player is in the field its horizontal push is added to the move and kept as momentum after,
+and its vertical push accelerates the player against gravity, at that many units/s² — one on the ground is not lifted).
 
-yapb's own link flags are only hints. A link yapb marks as a jump that a bot can simply walk (around a corner) is a
-walk. A link that fits no kind is kept but not planned through. On crossfire, 32 of 7888 links are rejected (walls,
-32-unit steps); 26 lift links are added.
+### Making the graph
+
+1. **Floor.** The floor is flooded on a 16-unit grid from the spawn points, items, ladder ends, lift platforms,
+   teleport exits, buttons and push-field landings, the way the engine walks a player (straight, or a step up and
+   over, then down onto the floor). A column of the grid holds a span per floor (a room above a room). Walking off an
+   edge is a fall; a ledge too high to step onto but at most 60 units up is a ledge (a crouch jump reaches 63). Doors
+   stand open and breakables are gone while the floor is flooded; the spots they close are marked. Spans in lava,
+   slime or a strong `trigger_hurt`, in push fields, and where a player would touch a ladder are marked too: no node
+   goes there.
+2. **Nodes.** Required spots get a node first: spawn points, items, ladder ends and rungs every 64 units, lift
+   platforms, teleports, drop edges and landings, push-field entries and landings, a spot in reach of every button, a
+   spot inside every trigger that sets a door or a lift off, and one on each side of every door. Then nodes fill the
+   rest of the floor, the middles of corridors first, twice the room around them apart (112 to 224 units). Every span
+   belongs to the node nearest to it on foot. Where two nodes whose floors meet cannot walk straight to each other
+   (round a corner, through a doorway, past a pillar), a node goes on their border where it is widest, and the floor
+   is shared out again; four rounds at most.
+3. **Walks.** Nodes whose floors touch are joined when walking in a straight line from one to the other gets there:
+   stepping up stairs is fine, but nothing on the way may push the walker off the line (a link that only slides
+   along a wall is not made), so a link is clear to walk and to look along. Longer links are added only where the
+   graph would otherwise make a bot go more than 15% out of its way (a greedy spanner, at most 12 links a node). A
+   walk never passes through a push field, nor brushes past a ladder at a ledge's edge.
+4. **Special links.**
+   - Doors and breakables in the way of touching floors: `door` (through the middle of the doorway when its leaf
+     slides across the way) and `breakable`.
+   - Drops off every stretch of ledge; ladders, bottom to top; teleports; lifts.
+   - Swims into and out of the water, onto ledges a swimmer at the surface can climb, and onto ladders rising out of
+     it; ducked through low tunnels.
+   - Jumps where walking round is more than twice as far, and onto every ledge the floor found.
+   - Push fields: each field is run into from eight sides, walking and jumping in, drifting or keeping to its middle
+     while it lifts; the flights land where nodes are put. Then flights are steered at the nodes near each field its
+     entries cannot walk to, nearest first.
+5. **Report.** The coverage report (`lb-cli nav coverage`) counts the floor and the items a bot gets to from the
+   spawn points and back, and lists the rest.
+
+On crossfire this takes 0.4 s on the stand's cores (890 nodes, 4642 links); on the largest map, boot_camp, 1.1 s.
+A kept graph loads in under a millisecond (96 ms on the stand, with the BSP and the visibility sets). The file
+(`.lbnav`: postcard, LZ4, CRC-32C) is named by the key of what the graph was made from: the BSP (BLAKE3 and size),
+the generator's version, the physics, the rules and the overlay. Only a graph with exactly the same key is used; the
+four most recently used are kept. `lb nav regen` throws a map's graphs away and makes it again.
+
+After the graph is loaded, the map's overlay patches are applied (see `docs/overlays.md`) and landmarks for the
+planner are computed.
+
+| Kind        | Classified as                                                                    | Contract                          |
+|-------------|----------------------------------------------------------------------------------|-----------------------------------|
+| `walk`      | a straight walk gets there (in an imported graph, also one sliding along a wall) | —                                 |
+| `crouch`    | the same, crouched                                                               | —                                 |
+| `drop`      | a simulated walk off the edge touches down within 96 units of the node           | speed, fall damage, health needed |
+| `jump`      | a simulated running jump (see below) lands at the node                           | speed, duck, robustness           |
+| `ladder`    | either end is on a ladder (and it is not a walk along a floor)                   | ladder normal, mount point        |
+| `swim`      | either end is in the water: a simulated swim gets there                          | —                                 |
+| `door`      | a door blocks the way; the map's mechanism graph says how it opens               | touch, use, or a remote button    |
+| `lift`      | added from the map: platforms and doors that carry a player up                   | the mover, where to call it       |
+| `teleport`  | a `trigger_teleport` stands between the nodes                                    | the trigger, the destination      |
+| `breakable` | a `func_breakable` blocks the way                                                | the brush to shoot                |
+| `push`      | a simulated run into a push field, steered in the air, lands at the node         | the run, jump, holding still      |
 
 Every special link is also checked on the live server once the map has loaded. The check fires a few traces per link
 (the floor at both ends, the way between), at most 64 per frame, and compares them with the offline world. A link
-the server disagrees with is switched off. On crossfire, all 334 special links are confirmed. `lb nav` shows the
-result.
+the server disagrees with is switched off. On crossfire, all 1120 special links of the generated graph are confirmed.
+`lb nav` shows the result.
 
 ## Contracts
 
@@ -43,7 +88,24 @@ A special link carries a `TraversalSpec`:
 - **Deadline:** the time the whole traversal may take.
 - **Cost:** the time and damage the planner charges for the link.
 
-The planner runs A* on travel time with these costs. Links the bot failed recently are left out (see below).
+The planner runs A* on travel time with these costs. Links the bot failed recently are left out (see below). Its
+heuristic is the larger of straight-line distance at running speed (off on maps with teleports) and the ALT bound:
+exact costs from and to 8–16 landmarks spread over the graph, which never overestimate. On crossfire that cuts a
+search from 197 expanded nodes to 39 on average, on boot_camp from 643 to 153. Searches run in slices: all bots
+together expand at most 2000 nodes a frame and 200 000 a second; a search that runs out goes on in the next frame
+while the bot keeps to its old path.
+
+## Following a path
+
+On plain links the follower steers the bot itself:
+- It heads for the next node and pushes against its own sideways drift. Friction alone takes the sideways speed down
+  by two thirds in a quarter of a second, so a bot turning sharply at running speed would slide about 60 units wide
+  of the new link, into the wall.
+- Before it reaches a node, it heads on to the node after only if the way there from where it stands is clear (one
+  trace per node). Otherwise it goes to the node first and does not cut the corner.
+- A path starts at the node nearest the bot. When the next node is round a corner from where the bot stands, the bot
+  goes to the nearest node first.
+- It looks along the path, a stretch ahead and nearly level (see `docs/behavior.md`).
 
 ## Carrying a link out
 
@@ -55,15 +117,16 @@ Before a special link the follower slows the bot to the speed the link takes: at
 drop, 150 for a ladder. Otherwise a bot running in at full speed passes a takeoff or runs off an edge before the
 executor can act.
 
-| Executor  | Phases                                   | How                                                                                                                                                                           |
-|-----------|------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| jump      | approach, run-up, takeoff, air           | backs up to the start of the run-up and stops there, runs at the planned speed, presses jump in the takeoff window, ducks in the air if planned                               |
-| drop      | edge, fall                               | walks off at the drop's speed; fails when the landing is not the node's floor                                                                                                 |
-| ladder    | board, climb                             | from below: walks to the mount point and into the ladder facing it; from above: steps back over the edge facing it; climbs by pitch and forward or back; steps off at the top |
-| door      | check, go-activate, activate, wait, pass | a touch door is walked into; a use door is pressed with the use key; a remote door's button is pressed; waits for it to open, then passes                                     |
-| lift      | wait, board, start, ride, exit           | waits for the platform to rest on its side, boards, starts it (standing on it or pressing its button), rides, steps off at the top                                            |
-| teleport  | —                                        | walks into the trigger; done when the bot finds itself at the destination                                                                                                     |
-| breakable | —                                        | shoots the brush (crowbar close up) until it is gone, then walks through                                                                                                      |
+| Executor  | Phases                                   | How                                                                                                                                                                                                                                                          |
+|-----------|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| jump      | approach, run-up, takeoff, air           | backs up to the start of the run-up and stops there, runs at the planned speed, presses jump in the takeoff window, ducks in the air if planned                                                                                                              |
+| drop      | edge, fall                               | walks off at the drop's speed, heading 48 units past the landing (slowing down at it stops on the ledge above it); walks the rest when it touches down within 96 units of the node on its floor, else fails                                                  |
+| ladder    | board, climb                             | from below: walks to the mount point and into the ladder facing it; from above: steps back over the edge facing it; climbs by pitch and forward or back; steps off at the top, onto a ledge behind or beside the ladder when the climb stops against its top |
+| push      | approach, run, flight, landed            | stops at the entry, runs along the checked line (jumping where checked), keeps to the field's middle while it lifts, then steers the flight at the landing; walks or swims the rest                                                                          |
+| door      | check, go-activate, activate, wait, pass | a touch door is walked into; a use door is pressed with the use key; a remote door's button is pressed; waits for it to open, then passes                                                                                                                    |
+| lift      | wait, board, start, ride, exit           | waits for the platform to rest on its side, boards, starts it (standing on it or pressing its button), rides, steps off at the top                                                                                                                           |
+| teleport  | —                                        | walks into the trigger; done when the bot finds itself at the destination                                                                                                                                                                                    |
+| breakable | —                                        | shoots the brush (crowbar close up) until it is gone, then walks through                                                                                                                                                                                     |
 
 Buttons and doors are pressed the way a player presses them: from 64 units, looking at the target within 8°, with
 a fresh press of use. A press counts only if the mechanism moves within 1.5 s; after 4 presses the link fails.
@@ -133,18 +196,23 @@ failed on the way: the planner goes around a failed link, so arriving alone prov
 | a sample at 100, 500, 1000 fps, and with a 300 ms frame | 23/23 each, no button left pressed                                      |
 | 60 random routes across the map                         | 59 arrive, 1 around a failed link; time / plan: median 1.03, worst 1.57 |
 
-`tests/obstacles.rs` builds small worlds for what crossfire lacks. Each traversal is tested for success and for
-failure:
+`tests/obstacles.rs` builds small worlds for what crossfire lacks. Carried out:
 - a touch door;
 - a use door;
 - a door opened by a remote button;
 - a platform;
 - a teleport;
 - a breakable;
-- swimming across a pool and climbing out;
-- a door that never opens, reported as `WaitingForInteraction` and walked around;
-- a jump too far, reported as `ControllerFailure`;
+- swimming across a pool and climbing out.
+
+Failures tested (the other traversals have none yet):
+- a use door that never opens, reported as `WaitingForInteraction` and walked around;
+- a jump too far, reported as `ControllerFailure` and walked around;
 - a walled-up passage, reported as `GeometryInvalid`.
+
+**Generated graphs** (`cargo test -p lb-testkit --test generated_course -- --ignored`). On every standard map, a
+sample of each kind of special link (up to 40) is carried out from its entry, and a bot walks from the nearest spawn
+point to every item the coverage report counts as reachable. Results are in `docs/m3-acceptance.md`.
 
 **Live** (`lb nav test`). A bot is taken off its behavior and runs chosen special links on the running server:
 
@@ -156,13 +224,16 @@ failure:
 | `lb nav test stop`                      | back to normal behavior                              |
 
 The bot walks to each link's entry, then carries the link out. A link whose entry it cannot reach (no path for 5 s,
-or 30 s of walking) counts as not reached, not as failed. Each result is logged as `nav test`. Results are in `docs/m2-acceptance.md`.
+or 30 s of walking) counts as not reached, not as failed. Each result is logged as `nav test`. Results are in
+`docs/m2-acceptance.md` (the imported graph) and `docs/m3-acceptance.md` (the generated one).
 
 ## Known limits
 
-- Only yapb graphs: a map without one leaves bots standing (they still see and shoot). The generator is M3.
-- One drop on crossfire (934 → 1252, off a ramp's side) passes the simulation but not the executor.
-- yapb places some nodes on the very edge of a ledge. A bot walking along it (crossfire's ladder shaft, 5 → 391)
-  can slip off.
-- Water is swum straight across; there are no swim links through tunnels yet.
-- Trains, conveyors, push triggers and `multisource` gates are not traversed (M3, with the map annotations).
+- A door opened by a remote button is carried out by walking straight to the button and back. Where the way to the
+  button is not straight (snark_pit's hatches), the link fails and bots learn to go around it.
+- Trains (`func_train`, `func_tracktrain`), conveyors and `multisource` gates are not traversed; items only they reach
+  are listed by the coverage report (see `docs/m3-acceptance.md`) for the map's overlay.
+- The graph is published whole: until it is made (0.4 s on crossfire on the stand's cores, up to a minute and a half
+  on a huge map) bots stand still. Publishing a walk-only graph first is not done yet.
+- The visibility table between nodes (for tactics) is not made yet.
+- Water is swum straight between nodes in it; a current is only crossed with it (push links).

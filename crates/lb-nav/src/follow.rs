@@ -1,16 +1,20 @@
 //! Path following: walks the plain links of a planned path itself and hands special links (jumps, drops, ladders,
-//! water, doors, lifts, teleports, breakables) to their executors. Cheap per frame: walking needs no traces, only
-//! getting stuck does.
+//! water, doors, lifts, teleports, breakables) to their executors. Cheap per frame: walking traces only when it
+//! cuts a corner toward the next node and when it gets stuck.
+//!
+//! A walking bot looks a stretch ahead along the path, nearly level, and corrects its sideways drift at every turn
+//! so it keeps to the links, which are clear in a straight line.
 //!
 //! When a walk stops making progress the follower works through a fixed ladder of responses: a sidestep, backing
 //! off, a jump (only onto a real step ahead, never on a ladder or at an edge), ducking under a low ceiling, and
 //! finally a failure with its cause, so the link is avoided for a while and the path is planned again.
 
+use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3};
 use lb_nav_api::NavStep;
 use lb_worldq::{HullKind, TraceQuery, Tracer};
 
-use crate::exec::{EYE_HEIGHT, Exec, ExecCtx, ExecStatus, HitKind, MechView, NavInput};
+use crate::exec::{EYE_HEIGHT, Exec, ExecCtx, ExecStatus, HitKind, MechView, NavInput, travel_look};
 use crate::graph::{LinkFlags, LinkKind, NavGraph, NodeFlags, NodeId};
 use crate::known::FailReason;
 
@@ -18,6 +22,14 @@ use crate::known::FailReason;
 const PROGRESS_WINDOW: f64 = 0.8;
 /// Getting closer by less than this is no progress.
 const PROGRESS_MIN: f32 = 8.0;
+/// How far along the path a walking bot looks.
+const LOOK_AHEAD: f32 = 256.0;
+/// A point to look at closer than this only spins the view round: the look keeps its heading.
+const LOOK_NEAR: f32 = 48.0;
+/// Sideways speed counts against the heading this much, so the bot turns onto a link instead of drifting wide.
+const DRIFT: f32 = 1.0;
+/// A clear way on from short of a node is checked again after this long.
+const RECHECK: f64 = 0.25;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FollowStatus {
@@ -63,6 +75,10 @@ pub struct PathFollower {
     recovery_until: f64,
     side: f32,
     airborne_from: Option<f32>,
+    /// Heading of the last look along the path, and its tilt (rise per unit across).
+    gaze: Option<(Vec2, f32)>,
+    /// Whether the way from the bot to the node after the target was clear, for which target and when.
+    way_on: Option<(usize, bool, f64)>,
 }
 
 impl PathFollower {
@@ -80,6 +96,16 @@ impl PathFollower {
             recovery_until: 0.0,
             side: 1.0,
             airborne_from: None,
+            gaze: None,
+            way_on: None,
+        }
+    }
+
+    /// Walks to the path's first node before the rest when the second one is not in a straight line from `origin`
+    /// (the first is the node nearest the bot, the second may be round a corner from where the bot stands).
+    pub fn check_start(&mut self, g: &NavGraph, s: &NavInput, tracer: &mut dyn Tracer) {
+        if self.next == 1 && !clear_way(g, s, self.path[1], tracer) {
+            self.next = 0;
         }
     }
 
@@ -135,7 +161,7 @@ impl PathFollower {
         self.tried = 0;
     }
 
-    fn reached(&self, g: &NavGraph, s: &NavInput, kind: LinkKind) -> bool {
+    fn reached(&mut self, g: &NavGraph, s: &NavInput, kind: LinkKind, tracer: &mut dyn Tracer) -> bool {
         let node = g.node(self.path[self.next]);
         let to = node.origin - s.origin;
         let flat = to.truncate().length();
@@ -154,24 +180,106 @@ impl PathFollower {
             node.radius.clamp(24.0, 48.0)
         };
         if flat < radius && dz < 40.0 {
-            return true;
+            return last || flat < 16.0 || self.way_on_clear(g, s, tracer);
         }
         // Passed the node: the plane through it, across the segment we came along.
         if !last && self.next > 0 && dz < 40.0 {
             let from = g.node(self.path[self.next - 1]).origin;
             let seg = (node.origin - from).truncate();
             if seg.length() > 1.0 && seg.dot(-to.truncate()) > 0.0 && flat < 64.0 {
-                return true;
+                return self.way_on_clear(g, s, tracer);
             }
         }
         false
+    }
+
+    /// Short of the target node: heading on to the node after it from here does not cut a corner. A link that is
+    /// not walked starts at its entry, which its executor goes to.
+    fn way_on_clear(&mut self, g: &NavGraph, s: &NavInput, tracer: &mut dyn Tracer) -> bool {
+        let Some(&after) = self.path.get(self.next + 1) else {
+            return true;
+        };
+        if g.find_link(self.path[self.next], after)
+            .is_some_and(|l| !l.kind.is_walk())
+        {
+            return true;
+        }
+        if let Some((next, clear, at)) = self.way_on
+            && next == self.next
+            && s.now - at < RECHECK
+        {
+            return clear;
+        }
+        let clear = clear_way(g, s, after, tracer);
+        self.way_on = Some((self.next, clear, s.now));
+        clear
+    }
+
+    /// Where a walking bot looks: `LOOK_AHEAD` along the path, past the small bends between nodes and round a
+    /// corner before it gets there, nearly level. The look ends where the path stops being walked (a jump, a
+    /// ladder: their executors look for themselves) and where the path turns back more than a right angle.
+    fn gaze(&mut self, g: &NavGraph, s: &NavInput) -> Vec3 {
+        let eye = s.eye();
+        let mut from = s.origin;
+        let mut left = LOOK_AHEAD;
+        let mut heading: Option<Vec2> = None;
+        let mut point = None;
+        for k in self.next..self.path.len() {
+            let at = g.node(self.path[k]).origin;
+            let seg = (at - from).truncate();
+            let len = seg.length();
+            if len > 1.0 {
+                let dir = seg / len;
+                match heading {
+                    Some(h) if h.dot(dir) < 0.0 => break,
+                    Some(_) => {}
+                    None => heading = Some(dir),
+                }
+                if len >= left {
+                    point = Some(from.lerp(at, left / len));
+                    break;
+                }
+                left -= len;
+            }
+            point = Some(at);
+            from = at;
+            let walked_on = self
+                .path
+                .get(k + 1)
+                .is_none_or(|&after| g.find_link(self.path[k], after).is_some_and(|l| l.kind.is_walk()));
+            if !walked_on {
+                break;
+            }
+        }
+        if let Some(p) = point {
+            let d = travel_look(eye, p + Vec3::Z * EYE_HEIGHT) - eye;
+            let across = d.truncate().length();
+            if across >= LOOK_NEAR {
+                self.gaze = Some((d.truncate() / across, d.z / across));
+            }
+        }
+        self.look_on(s)
+    }
+
+    /// A point along the last heading looked in, or ahead of the view when there is none.
+    fn look_on(&self, s: &NavInput) -> Vec3 {
+        let (dir, tilt) = self.gaze.unwrap_or_else(|| {
+            let (forward, _, _) = view_angle_vectors(s.view);
+            (forward.truncate().normalize_or(Vec2::X), 0.0)
+        });
+        s.eye() + dir.extend(tilt) * 128.0
+    }
+
+    /// Standing where it is, looking on.
+    fn hold(&self, s: &NavInput) -> NavStep {
+        NavStep::hold(self.look_on(s))
     }
 
     pub fn tick(&mut self, g: &NavGraph, s: &NavInput, mech: &dyn MechView, tracer: &mut dyn Tracer) -> FollowOutput {
         for _ in 0..4 {
             let Some((from, to)) = self.current_link() else {
                 return FollowOutput {
-                    step: NavStep::hold(s.origin + Vec3::Z * EYE_HEIGHT),
+                    step: self.hold(s),
                     status: FollowStatus::Arrived,
                 };
             };
@@ -203,7 +311,11 @@ impl PathFollower {
                     from: &fnode,
                     to: &tnode,
                 };
-                let (step, status) = exec.tick(&mut ctx);
+                let (mut step, status) = exec.tick(&mut ctx);
+                if step.pitch.is_none() {
+                    // Only a direction to go in: look that way, nearly level.
+                    step.look_at = travel_look(s.eye(), step.look_at);
+                }
                 return match status {
                     ExecStatus::Done => {
                         self.advance(s.now);
@@ -224,14 +336,14 @@ impl PathFollower {
                 };
             }
             let kind = link.map_or(LinkKind::Walk, |l| l.kind);
-            if self.reached(g, s, kind) {
+            if self.reached(g, s, kind, tracer) {
                 self.advance(s.now);
                 continue;
             }
             return self.walk(g, s, mech, tracer, from, to, kind, link.map(|l| l.flags));
         }
         FollowOutput {
-            step: NavStep::hold(s.origin + Vec3::Z * EYE_HEIGHT),
+            step: self.hold(s),
             status: FollowStatus::Moving,
         }
     }
@@ -239,7 +351,7 @@ impl PathFollower {
     fn fail(&mut self, s: &NavInput, from: NodeId, to: NodeId, reason: FailReason) -> FollowOutput {
         self.exec = None;
         FollowOutput {
-            step: NavStep::hold(s.origin + Vec3::Z * EYE_HEIGHT),
+            step: self.hold(s),
             status: FollowStatus::Failed { from, to, reason },
         }
     }
@@ -259,8 +371,7 @@ impl PathFollower {
         let node = g.node(to);
         let d = (node.origin - s.origin).truncate();
         let flat = d.length();
-        let mut step = NavStep::hold(node.origin + Vec3::Z * EYE_HEIGHT);
-        step.move_dir = d.normalize_or_zero();
+        let mut step = NavStep::hold(self.gaze(g, s));
         step.speed = s.max_speed;
         if self.next + 1 == self.path.len() {
             // The last node: slow down so the bot stops there instead of running past it (and off a ledge).
@@ -277,21 +388,20 @@ impl PathFollower {
             // unit of speed and second, so start braking a few dozen units out).
             step.speed = s.max_speed.min(entry.max(flat * 4.0));
         }
-        // Look further along a straight walk so turns start early.
-        if let Some(&after) = self.path.get(self.next + 1)
-            && flat < 96.0
-        {
-            step.look_at = g.node(after).origin + Vec3::Z * EYE_HEIGHT;
-        }
+        step.move_dir = steer(d.normalize_or_zero(), step.speed, s.velocity);
         step.duck = kind == LinkKind::Crouch || node.flags.contains(NodeFlags::CROUCH);
 
-        // Fell off the path: plan again from where it landed, unless the target is still within a walk.
+        // Fell off the path: plan again from where it landed, unless the target is still within a walk. Falling
+        // while working loose from being stuck on the link is the link's fault.
         if !s.on_ground && !s.on_ladder && s.waterlevel < 2 {
             self.airborne_from.get_or_insert(s.feet());
         } else if let Some(top) = self.airborne_from.take()
             && top - s.feet() > 40.0
             && (node.origin.z - 36.0 - s.feet()).abs() > 40.0
         {
+            if self.tried > 0 {
+                return self.fail(s, from, to, FailReason::GeometryInvalid);
+            }
             return FollowOutput {
                 step,
                 status: FollowStatus::Replan,
@@ -380,6 +490,40 @@ impl PathFollower {
     }
 }
 
+/// Heading `dir` at `speed` with `velocity` now: the way to push so the sideways part of the velocity dies out
+/// quicker than friction alone would kill it.
+pub fn steer(dir: Vec2, speed: f32, velocity: Vec3) -> Vec2 {
+    if dir == Vec2::ZERO {
+        return dir;
+    }
+    let v = velocity.truncate();
+    let side = v - dir * v.dot(dir);
+    (dir * speed.max(1.0) - side * DRIFT).normalize_or(dir)
+}
+
+/// Nothing in the way of walking straight from where the bot stands to node `to` (a step's height up, so stairs do
+/// not count).
+fn clear_way(g: &NavGraph, s: &NavInput, to: NodeId, tracer: &mut dyn Tracer) -> bool {
+    let node = g.node(to);
+    let crouch = s.ducked || node.flags.contains(NodeFlags::CROUCH);
+    let (hull, half) = if crouch {
+        (HullKind::Crouch, 18.0)
+    } else {
+        (HullKind::Stand, 36.0)
+    };
+    let node_feet = node.origin.z
+        - if node.flags.contains(NodeFlags::CROUCH) {
+            18.0
+        } else {
+            36.0
+        };
+    let lift = half + crate::validate::STEP_SIZE;
+    let from = s.origin.truncate().extend(s.feet() + lift);
+    let at = node.origin.truncate().extend(node_feet + lift);
+    let tr = tracer.trace(&TraceQuery::hull(from, at, hull));
+    !tr.start_solid && tr.fraction >= 1.0
+}
+
 struct Probe {
     /// A floor 18–45 units higher right ahead: a jump gets onto it.
     step_up: bool,
@@ -455,6 +599,7 @@ mod tests {
             now,
             max_speed: 270.0,
             health: 100.0,
+            gravity: 800.0,
             ..Default::default()
         }
     }

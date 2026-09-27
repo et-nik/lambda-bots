@@ -4,9 +4,10 @@
 #![forbid(unsafe_code)]
 
 use lb_core::Vec3;
+use serde::{Deserialize, Serialize};
 
 /// Collision hulls, numbered as in the engine (`TraceHull` hull numbers and BSP model hulls).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum HullKind {
     Point = 0,
@@ -71,7 +72,7 @@ pub mod contents {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TraceQuery {
     pub start: Vec3,
     pub end: Vec3,

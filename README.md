@@ -4,10 +4,11 @@ Bots for Half-Life 1 Deathmatch, packaged as a Metamod plugin. Behavior is writt
 talks to the engine. The algorithms are based on YaPB and its HLDM port (yapb-halflife), moved onto an
 architecture with fair perception, utility-based decisions and verifiable navigation transitions.
 
-Status: **M2 — traversal contracts.** Bots see, hear, decide, fight and get around crossfire with jumps, drops,
-ladders, lifts, doors, teleports and breakables; every session can be recorded and replayed. Acceptance results
-and known limitations: `docs/m0-acceptance.md`, `docs/m1-acceptance.md`, `docs/m2-acceptance.md`. The ReHLDS and
-Windows test stands are in `docs/stands/`, design notes in `docs/design/`.
+Status: **M3 — graphs made from the map.** Bots see, hear, decide, fight and get around any map: the navigation
+graph is made from the BSP (jumps, drops, ladders, lifts, doors, teleports, breakables, water, push fields), kept
+in a cache, and corrected with per-map overlays and an in-game editor; every session can be recorded and replayed.
+Acceptance results and known limitations: `docs/m0-acceptance.md` … `docs/m3-acceptance.md`. The ReHLDS and Windows
+test stands are in `docs/stands/`, design notes in `docs/design/`.
 
 ## Platforms
 
@@ -56,10 +57,12 @@ decision trace: `docs/behavior.md`.
 
 ## Navigation
 
-Bots plan on the map's yapb graph, re-checked link by link with a port of the engine's player movement. Every
-special link (jump, drop, ladder, door, lift, teleport, breakable) carries a contract that an executor carries out
-the way a player would, with fresh presses of use and jump. Failed links are avoided for a while, by reason; a bot
-stuck for good uses `kill`. Details and the obstacle courses: `docs/navigation.md`.
+Bots plan on a graph made from the map on a worker when it starts (1.5 s for crossfire) and kept in
+`addons/lambdabots/nav/<map>/`; the map's yapb graph can be used instead (`lb_nav_source yapb`). Every link is
+checked with a port of the engine's player movement, and every special link (jump, drop, ladder, swim, door, lift,
+teleport, breakable, push) carries a contract that an executor carries out the way a player would, with fresh presses
+of use and jump. Failed links are avoided for a while, by reason; a bot stuck for good uses `kill`. Details and the
+obstacle courses: `docs/navigation.md`. Places and graph patches per map, and the in-game editor: `docs/overlays.md`.
 
 ## Recording and replay
 
@@ -80,6 +83,9 @@ run them from their own console.
 | `lb list`, `lb status`                 | bot list, core state                                            |
 | `lb roster [all]`, `lb profile <name>` | personalities and their skill parameters                        |
 | `lb nav`                               | navigation graph and where bots are walking                     |
+| `lb nav regen`                         | make the map's graph again (drops the kept ones)                |
+| `lb overlay [reload]`                  | the map's overlays; reload reads and applies them again         |
+| `lb edit …`                            | in-game editor of the map's overlay (`lb_editor 1`)             |
 | `lb nav test <kind\|all> [n]`          | a bot runs special links (obstacle course)                      |
 | `lb nav test link <from> <to> …`       | a bot runs exactly these links                                  |
 | `lb record [start [s]\|stop]`          | record the next map for `lb-cli replay`                         |
@@ -90,17 +96,19 @@ run them from their own console.
 | `lb config show\|reload`               | show the config, or reload config and profiles                  |
 | `lb test motor …`                      | motor measurements (requires `lb_dev 1`)                        |
 
-| cvar            | Default | Purpose                                             |
-|-----------------|---------|-----------------------------------------------------|
-| `lb_quota`      | 8       | number of bots or players (depends on the mode)     |
-| `lb_quota_mode` | fill    | `normal`, `fill`, `match`                           |
-| `lb_difficulty` | normal  | skill filter: any, a preset, `normal-hard`, `40-70` |
-| `lb_style`      | any     | style filter: any or `rusher,sniper`                |
-| `lb_cmd_rate`   | 100     | bot commands per second (0 — every frame)           |
-| `lb_game_mode`  | -1      | forced mode: -1 auto, 0 FFA, 1 teamplay             |
-| `lb_gungame`    | auto    | GunGame detection: auto, on, off                    |
-| `lb_log_level`  | info    | level of the `logs/lambdabots.<date>.log` file      |
-| `lb_dev`        | 0       | debug commands                                      |
+| cvar            | Default   | Purpose                                             |
+|-----------------|-----------|-----------------------------------------------------|
+| `lb_quota`      | 8         | number of bots or players (depends on the mode)     |
+| `lb_quota_mode` | fill      | `normal`, `fill`, `match`                           |
+| `lb_difficulty` | normal    | skill filter: any, a preset, `normal-hard`, `40-70` |
+| `lb_style`      | any       | style filter: any or `rusher,sniper`                |
+| `lb_cmd_rate`   | 100       | bot commands per second (0 — every frame)           |
+| `lb_game_mode`  | -1        | forced mode: -1 auto, 0 FFA, 1 teamplay             |
+| `lb_nav_source` | generated | `generated` (made from the map) or `yapb`           |
+| `lb_editor`     | 0         | 1 lets admins use `lb edit`                         |
+| `lb_gungame`    | auto      | GunGame detection: auto, on, off                    |
+| `lb_log_level`  | info      | level of the `logs/lambdabots.<date>.log` file      |
+| `lb_dev`        | 0         | debug commands                                      |
 
 ## Building
 
@@ -147,13 +155,14 @@ scripts/stand/lbcmd.sh --stop
 | `crates/lb-game`       | HLDM message decoders, bot state, rules, sounds, game modes                     |
 | `crates/lb-bsp`        | BSP loading, exact hull traces, PVS and PAS, map mechanisms                     |
 | `crates/lb-kin`        | player movement (port of `PM_PlayerMove`), traversal checks                     |
-| `crates/lb-nav`        | graph, yapb import, planner, path following, link executors                     |
+| `crates/lb-nav`        | graph and `.lbnav`, yapb import, classifier, planner, path following, executors |
+| `crates/lb-navgen`     | graph generator, coverage report, graph cache, overlay patches                  |
 | `crates/lb-perception` | vision, hearing, damage compass                                                 |
 | `crates/lb-knowledge`  | beliefs: tracks of players, hypotheses from sounds and damage                   |
 | `crates/lb-brain`      | per-bot senses, beliefs and attention                                           |
 | `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging, recorder                 |
 | `crates/lb-plugin`     | exported `lb_core_*`, panic isolation                                           |
-| `crates/lb-cli`        | `config check`, `replay`, `nav tracecheck`                                      |
+| `crates/lb-cli`        | `config check`, `replay`, `nav gen/coverage/path/validate-overlay/tracecheck`   |
 | `crates/lb-testkit`    | simulated server for the obstacle courses                                       |
 | `data/`                | config, name lists; installed into `addons/lambdabots/`                         |
 | `docs/design/`         | design notes (platform, AI, navigation, yapb analysis)                          |

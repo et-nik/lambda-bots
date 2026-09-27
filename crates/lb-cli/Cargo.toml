@@ -14,6 +14,7 @@ lb-config.workspace = true
 lb-bsp.workspace = true
 lb-nav.workspace = true
 lb-navgen.workspace = true
+lb-kin.workspace = true
 lb-ffi.workspace = true
 anyhow.workspace = true
 lb-worldq.workspace = true

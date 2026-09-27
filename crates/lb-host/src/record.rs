@@ -53,6 +53,9 @@ pub fn from_pod<T: Pod>(bytes: &[u8]) -> Vec<T> {
         .collect()
 }
 
+/// What a recording keeps in place of a secret.
+pub const REDACTED: &str = "<redacted>";
+
 /// One host call and what it returned.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HostCall {
@@ -173,11 +176,22 @@ fn point_key(p: Vec3) -> u64 {
 pub struct RecordingHost<'a> {
     inner: &'a mut dyn Host,
     calls: Option<&'a mut Vec<HostCall>>,
+    secret: Option<CvarHandle>,
 }
 
 impl<'a> RecordingHost<'a> {
     pub fn new(inner: &'a mut dyn Host, calls: Option<&'a mut Vec<HostCall>>) -> RecordingHost<'a> {
-        RecordingHost { inner, calls }
+        RecordingHost {
+            inner,
+            calls,
+            secret: None,
+        }
+    }
+
+    /// Keeps [`REDACTED`] in place of this cvar's value, unless it is empty.
+    pub fn hiding(mut self, secret: Option<CvarHandle>) -> RecordingHost<'a> {
+        self.secret = secret;
+        self
     }
 
     fn keep(&mut self, call: impl FnOnce() -> HostCall) {
@@ -220,7 +234,8 @@ impl Host for RecordingHost<'_> {
 
     fn cvar_string(&mut self, handle: CvarHandle) -> String {
         let r = self.inner.cvar_string(handle);
-        self.keep(|| HostCall::CvarString(r.clone()));
+        let hidden = self.secret == Some(handle) && !r.is_empty();
+        self.keep(|| HostCall::CvarString(if hidden { REDACTED.into() } else { r.clone() }));
         r
     }
 

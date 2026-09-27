@@ -41,7 +41,7 @@ lb-cli replay addons/lambdabots/records/crossfire-20260927-170816.lbrec
 |---------------|------------------------------------------------------------------------------|
 | `--console`   | print the core's console output while replaying                              |
 | `--diffs <n>` | list up to `n` differing decisions (default 20)                              |
-| `--dir <dir>` | unpack the recorded files there (default: a directory under the system temp) |
+| `--dir <dir>` | make a new directory there for the recorded files (default: the system temp) |
 | `--keep`      | keep the unpacked files and the replay's logs                                |
 
 The exit code is:
@@ -62,13 +62,14 @@ source differs, only when the core version number does.
 **Start**, once:
 - how the core was started (paths, platform), and what the host answered while the runtime was created;
 - what the runtime carries over a map change:
-  - the config with console changes;
+  - the config with console changes, the telemetry secret left out;
   - cvar values and interned strings;
   - personalities that come back and those asked for with `lb add`;
   - the master seed and the random state;
 - the files the runtime reads:
-  - `config/`, `profiles/`, `names/`, `data/profiles.yaml`;
-  - the map's BSP and its navigation graph;
+  - `config/lambdabots.yaml`, `config/difficulty.yaml`, `config/styles/`;
+  - `profiles/`, `names/`, `data/profiles.yaml`;
+  - the map's BSP, its navigation graph and its overlays (`maps/<map>/editor.yaml`, `overlay.yaml`);
 - a hash of what the runtime made of those files. A replay warns if its own differs.
 
 **Steps**, one per call of the adapter into the core (map start, frame start and end, console command). Each step
@@ -86,6 +87,13 @@ Calls without an answer are not kept: prints, server commands, debug drawing. Th
 lines, which other threads write at their own pace.
 
 **End**: why the recording stopped, with its step and frame counts.
+
+The telemetry secret is not kept: in the carried config, in `config/lambdabots.yaml` and in the values of
+`lb_telemetry_secret` it is stored as `<redacted>`. A replay opens no sockets, so it does not need it. The recorded
+`lambdabots.yaml` is written back from what it parses to, without its comments; one that does not parse is left out,
+as the runtime does not use it either. Everything else stays as the server had it, `access.password` and the
+`setinfo` values the core read from clients included: share a recording only with people you would give the
+server's config to.
 
 The file starts with `LBREC\0\r\n` and a format version. Then come blocks: a compressed length and an lz4 block of
 postcard-encoded records. ABI structures are stored as their bytes, so a recording is tied to the ABI version,

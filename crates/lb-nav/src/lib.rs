@@ -1,7 +1,9 @@
-//! Navigation: the graph, the yapb importer, offline movement checks, planning and path following.
+//! Navigation: the graph and its `.lbnav` file, the yapb importer, offline movement checks, planning and path
+//! following.
 
 #![forbid(unsafe_code)]
 
+pub mod classify;
 pub mod exec;
 pub mod follow;
 pub mod graph;
@@ -11,6 +13,7 @@ pub mod navigator;
 pub mod plan;
 pub mod probe;
 pub mod spec;
+pub mod store;
 pub mod validate;
 pub mod yapb;
 

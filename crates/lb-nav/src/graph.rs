@@ -2,6 +2,7 @@
 //! traversal contract (`spec`).
 
 use lb_core::{Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::spec::TraversalSpec;
 
@@ -11,7 +12,7 @@ pub type NodeId = u32;
 pub const NO_SPEC: u32 = u32::MAX;
 
 bitflags::bitflags! {
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
     pub struct NodeFlags: u32 {
         /// Only reachable crouched.
         const CROUCH = 1 << 0;
@@ -32,7 +33,7 @@ bitflags::bitflags! {
 }
 
 bitflags::bitflags! {
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LinkFlags: u16 {
         /// Planning may use it.
         const VALID = 1 << 0;
@@ -51,7 +52,7 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LinkKind {
     Walk,
     Crouch,
@@ -63,10 +64,11 @@ pub enum LinkKind {
     Lift,
     Teleport,
     Breakable,
+    Push,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 10] = [
+    pub const ALL: [LinkKind; 11] = [
         LinkKind::Walk,
         LinkKind::Crouch,
         LinkKind::Jump,
@@ -77,13 +79,14 @@ impl LinkKind {
         LinkKind::Lift,
         LinkKind::Teleport,
         LinkKind::Breakable,
+        LinkKind::Push,
     ];
 
     /// Movement speed along the link relative to running.
     pub fn speed_factor(self) -> f32 {
         match self {
             LinkKind::Walk | LinkKind::Drop | LinkKind::Door | LinkKind::Lift | LinkKind::Teleport => 1.0,
-            LinkKind::Breakable => 1.0,
+            LinkKind::Breakable | LinkKind::Push => 1.0,
             LinkKind::Jump => 0.8,
             LinkKind::Crouch => 1.0 / 3.0,
             LinkKind::Ladder => 0.5,
@@ -103,6 +106,7 @@ impl LinkKind {
             LinkKind::Lift => "lift",
             LinkKind::Teleport => "teleport",
             LinkKind::Breakable => "breakable",
+            LinkKind::Push => "push",
         }
     }
 
@@ -116,7 +120,7 @@ impl LinkKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NavNode {
     /// Player origin (hull centre) standing, or crouching for `CROUCH` nodes, at this node.
     pub origin: Vec3,
@@ -129,7 +133,7 @@ pub struct NavNode {
     pub link_count: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NavLink {
     pub to: NodeId,
     pub kind: LinkKind,
@@ -147,12 +151,12 @@ impl NavLink {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphStats {
     pub nodes: usize,
     pub links: usize,
     pub invalid: usize,
-    pub by_kind: [usize; 10],
+    pub by_kind: [usize; 11],
     pub unsettled: usize,
     /// Links added from the map's mechanisms.
     pub added: usize,
@@ -172,7 +176,7 @@ impl GraphStats {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NavGraph {
     pub nodes: Vec<NavNode>,
     pub links: Vec<NavLink>,
@@ -181,6 +185,9 @@ pub struct NavGraph {
     pub probes: Vec<crate::probe::LinkProbe>,
     pub source: String,
     pub stats: GraphStats,
+    /// Landmarks for the planner's heuristic (`with_landmarks`), computed after loading.
+    #[serde(skip)]
+    pub alt: Option<std::sync::Arc<crate::plan::Alt>>,
 }
 
 impl NavGraph {
@@ -243,7 +250,7 @@ impl NavGraph {
         let mut links = Vec::with_capacity(out.iter().map(Vec::len).sum());
         stats.links = 0;
         stats.invalid = 0;
-        stats.by_kind = [0; 10];
+        stats.by_kind = [0; 11];
         for (i, list) in out.into_iter().enumerate() {
             nodes[i].first_link = links.len() as u32;
             nodes[i].link_count = list.len() as u16;
@@ -264,6 +271,14 @@ impl NavGraph {
             probes: Vec::new(),
             source: source.to_string(),
             stats,
+            alt: None,
         }
+    }
+
+    /// Landmarks spread every few hundred nodes (8 at least, 16 at most) for the planner's heuristic.
+    pub fn with_landmarks(mut self) -> NavGraph {
+        let count = (self.len() / 250).clamp(8, 16);
+        self.alt = Some(std::sync::Arc::new(crate::plan::Alt::build(&self, count)));
+        self
     }
 }

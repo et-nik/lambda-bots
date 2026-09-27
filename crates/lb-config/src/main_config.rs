@@ -20,6 +20,7 @@ pub struct MainConfig {
     pub bots: BotsConfig,
     pub roster: RosterConfig,
     pub engine: EngineConfig,
+    pub nav: NavConfig,
     pub telemetry: TelemetryConfig,
     pub access: AccessConfig,
     pub logging: LoggingConfig,
@@ -35,6 +36,7 @@ impl Default for MainConfig {
             bots: BotsConfig::default(),
             roster: RosterConfig::default(),
             engine: EngineConfig::default(),
+            nav: NavConfig::default(),
             telemetry: TelemetryConfig::default(),
             access: AccessConfig::default(),
             logging: LoggingConfig::default(),
@@ -234,6 +236,53 @@ impl Default for EngineConfig {
             max_cmd_debt_ms: 200.0,
             workers: -1,
             master_seed: 0,
+        }
+    }
+}
+
+/// Where a map's navigation graph comes from.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NavSource {
+    /// Made from the map on a worker (and kept in `nav/<map>/`); the map's yapb graph if that fails.
+    Generated,
+    /// The map's yapb graph, checked against the map.
+    Yapb,
+}
+
+impl NavSource {
+    pub fn parse(s: &str) -> Option<NavSource> {
+        match s.trim() {
+            "generated" => Some(NavSource::Generated),
+            "yapb" => Some(NavSource::Yapb),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            NavSource::Generated => "generated",
+            NavSource::Yapb => "yapb",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct NavConfig {
+    pub source: NavSource,
+    /// Threads making a graph; negative = all cores but that many.
+    pub threads: i32,
+    /// Plan through imported yapb links the map check failed.
+    pub trust_imported: bool,
+}
+
+impl Default for NavConfig {
+    fn default() -> Self {
+        NavConfig {
+            source: NavSource::Generated,
+            threads: -2,
+            trust_imported: false,
         }
     }
 }

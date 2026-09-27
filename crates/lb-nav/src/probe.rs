@@ -6,12 +6,13 @@ use lb_bsp::BspWorld;
 use lb_bsp::mech::Mechanisms;
 use lb_core::Vec3;
 use lb_worldq::{HullKind, Trace, TraceQuery, Tracer};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::graph::{LinkKind, NavNode, NodeId};
 use crate::spec::{Action, TraversalSpec};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Probe {
     Trace {
         query: TraceQuery,
@@ -45,7 +46,7 @@ impl Probe {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinkProbe {
     pub from: NodeId,
     pub to: NodeId,
@@ -65,7 +66,7 @@ fn offline(world: &mut BspWorld, mech: &Mechanisms, query: TraceQuery) -> Option
     })
 }
 
-/// Probes of a jump, drop or ladder link; `None` for other kinds (they are checked when used).
+/// Probes of a jump, drop, push or ladder link; `None` for other kinds (they are checked when used).
 pub fn probes_for(
     world: &mut BspWorld,
     mech: &Mechanisms,
@@ -78,7 +79,7 @@ pub fn probes_for(
     let (to, nb) = b;
     let mut probes = SmallVec::new();
     match (kind, spec.action) {
-        (LinkKind::Jump | LinkKind::Drop, _) => {
+        (LinkKind::Jump | LinkKind::Drop | LinkKind::Push, _) => {
             let floor = |p: Vec3| TraceQuery::hull(p + Vec3::Z * 2.0, p - Vec3::Z * 16.0, HullKind::Stand);
             let eye = |p: Vec3| p + Vec3::Z * 28.0;
             for q in [

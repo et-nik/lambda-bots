@@ -22,6 +22,9 @@ use smallvec::SmallVec;
 pub use look::{LookController, LookGoal, LookParams};
 pub use weapon::{Fire, WeaponController, WeaponIntent};
 
+/// A point to look at closer than this across is right above or below the eyes.
+const NEAR_POINT: f32 = 16.0;
+
 /// Channel priorities (design §7.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Prio {
@@ -157,10 +160,20 @@ impl Motor {
         let mut out = MotorOut::default();
         if let Some((_, look)) = intents.look {
             let goal = match look {
-                LookIntent::Point { at, engaged } => LookGoal {
-                    angles: dir_to_view_angles(at - input.eye),
-                    engaged,
-                },
+                LookIntent::Point { at, engaged } => {
+                    let d = at - input.eye;
+                    // Right above or below the eyes a point gives no heading: hold the view instead of spinning to
+                    // it (an enemy overhead is still looked at).
+                    let near = if engaged { 1.0 } else { NEAR_POINT };
+                    LookGoal {
+                        angles: if d.truncate().length() < near {
+                            self.view
+                        } else {
+                            dir_to_view_angles(d)
+                        },
+                        engaged,
+                    }
+                }
                 LookIntent::Angles(angles) => LookGoal { angles, engaged: false },
             };
             let moving = input.velocity.length() > 1.0;

@@ -20,5 +20,8 @@ lb-config.workspace = true
 lb-worldq.workspace = true
 smallvec.workspace = true
 
+[dev-dependencies]
+lb-navgen.workspace = true
+
 [lints]
 workspace = true
