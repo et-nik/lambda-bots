@@ -1,0 +1,97 @@
+schema: lambdabots/profiles@1
+
+# The bot profiles of yapb-halflife (bots.json), carried over one to one:
+#
+#   difficulty           -> skill (noob 0, easy 25, normal 50, hard 75, expert 100)
+#   personality normal   -> style balanced  (aggression 0.4..0.7, fear 0.4..0.7, as in yapb)
+#   personality rusher   -> style rusher    (aggression 0.7..1.0, fear 0.0..0.4)
+#   personality careful  -> style sniper    (aggression 0.2..0.5, fear 0.7..1.0)
+#   aggression, fear     -> traits; as in yapb they replace the style's draw, a missing one is drawn from it
+#
+# The default roster filter (lb_difficulty normal = skill 38..62) admits only the normal ones; set
+# `roster.difficulty: any` in config/lambdabots.yaml (or `lb_difficulty any`) to let all of them join.
+
+bots:
+  - name: "Lord of the Ping"
+    style: rusher
+    skill: expert
+    model: gordon
+    traits: { aggression: 0.9, fear: 0.1 }
+
+  - name: "Bilbo Laggins"
+    style: sniper
+    skill: expert
+    model: barney
+    traits: { aggression: 0.6, fear: 0.1 }
+
+  - name: "Safety Third"
+    style: sniper
+    skill: normal
+    model: barney
+    traits: { fear: 0.6 }
+
+  - name: "TODO: Fix This Later"
+    style: balanced
+    skill: easy
+    model: barney
+    traits: { aggression: 0.2, fear: 1.0 }
+
+  - name: "Undefined Behavior"
+    style: balanced
+    skill: hard
+    model: gman
+    traits: { aggression: 0.8, fear: 0.6 }
+
+  - name: "Turing Test Dropout"
+    style: sniper
+    skill: hard
+    model: gman
+    traits: { aggression: 0.4, fear: 0.8 }
+
+  - name: "Skynet Free Trial"
+    style: rusher
+    skill: normal
+    model: gina
+    traits: { aggression: 0.4, fear: 0.8 }
+
+  - name: "human.exe"
+    style: rusher
+    skill: hard
+    model: robo
+    traits: { aggression: 1.0, fear: 0.0 }
+
+  - name: "CAPTCHA Survivor"
+    style: rusher
+    skill: normal
+    model: helmet
+    traits: { aggression: 0.4, fear: 0.4 }
+
+  - name: "I See You (Wallhack)"
+    style: rusher
+    skill: normal
+    model: recon
+    traits: { aggression: 0.6, fear: 0.4 }
+
+  - name: "Uranium"
+    style: balanced
+    skill: easy
+    model: scientist
+    traits: { aggression: 0.2, fear: 1.0 }
+
+  - name: "Plutonium"
+    style: balanced
+    skill: easy
+    model: scientist
+    traits: { aggression: 0.2, fear: 1.0 }
+
+  - name: "Placebo Overdose"
+    style: sniper
+    skill: hard
+    model: scientist
+    traits: { aggression: 0.2, fear: 0.4 }
+
+  - name: "Chocolate Crowbar"
+    style: sniper
+    skill: expert
+    model: hgrunt
+    traits: { aggression: 0.2, fear: 0.4 }

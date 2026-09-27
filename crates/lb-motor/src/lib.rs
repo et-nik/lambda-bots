@@ -1,9 +1,10 @@
 //! Intents, channel arbiter, look/locomotion/stance/weapon controllers, command encoder.
 //!
-//! Behavior asks for what it wants through intents on four channels (look, movement, stance, weapon), each with a
-//! priority; the highest priority on a channel wins and the first request wins a tie. The motor then turns the
-//! winners into one user command: the look controller moves the view, movement is projected on the new yaw,
-//! stance and weapon controllers press their buttons with correct edges, and the encoder adds direction buttons.
+//! Behavior asks for what it wants through intents on five channels (look, movement, stance, weapon, use), each
+//! with a priority; the highest priority on a channel wins and the first request wins a tie. The motor then turns
+//! the winners into one user command: the look controller moves the view, movement is projected on the new yaw,
+//! stance, use and weapon controllers press their buttons with correct edges, and the encoder adds direction
+//! buttons.
 
 #![forbid(unsafe_code)]
 
@@ -14,7 +15,7 @@ use lb_core::math::{dir_to_view_angles, world_vel_to_move};
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
-use lb_game::input::{IN_DUCK, IN_JUMP, direction_buttons};
+use lb_game::input::{IN_DUCK, IN_JUMP, IN_USE, direction_buttons};
 use lb_game::weapons::WeaponId;
 use smallvec::SmallVec;
 
@@ -65,6 +66,8 @@ pub struct Intents {
     pub movement: Option<(Prio, MoveIntent)>,
     pub stance: Option<(Prio, StanceIntent)>,
     pub weapon: Option<(Prio, WeaponIntent)>,
+    /// A press of the use key (buttons, doors).
+    pub use_key: Option<(Prio, bool)>,
 }
 
 fn offer<T>(slot: &mut Option<(Prio, T)>, prio: Prio, intent: T) {
@@ -92,6 +95,10 @@ impl Intents {
 
     pub fn weapon(&mut self, prio: Prio, intent: WeaponIntent) {
         offer(&mut self.weapon, prio, intent);
+    }
+
+    pub fn use_key(&mut self, prio: Prio) {
+        offer(&mut self.use_key, prio, true);
     }
 }
 
@@ -184,6 +191,10 @@ impl Motor {
             if s.duck {
                 out.buttons |= IN_DUCK;
             }
+        }
+        // Use acts on the press: a held key is released for a command first.
+        if intents.use_key.is_some_and(|(_, u)| u) && self.last_sent & IN_USE == 0 {
+            out.buttons |= IN_USE;
         }
         let weapon = intents.weapon.as_ref().map(|(_, w)| w);
         out.buttons |= self.weapon.update(input.now, input.weapon, weapon, &mut out.commands);

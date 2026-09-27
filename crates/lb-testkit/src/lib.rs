@@ -1,1 +1,3 @@
-//! Test hosts, frame builders and scenario helpers.
+//! Test hosts, frame builders, scenario helpers and the offline obstacle course.
+
+pub mod course;

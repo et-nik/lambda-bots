@@ -165,6 +165,15 @@ impl BotBrain {
         self.beliefs.update(now, params);
     }
 
+    /// Seconds since the bot last saw or heard an enemy (long when it never did).
+    pub fn calm_for(&self, now: SimTime) -> f64 {
+        self.beliefs
+            .enemies()
+            .map(|t| now.since(t.last_seen))
+            .fold(f64::INFINITY, f64::min)
+            .min(now.since(self.mind.last_enemy_seen()))
+    }
+
     /// Where the bot's attention goes now, if anywhere but its path.
     pub fn attention(&mut self, now: SimTime, eye: Vec3) -> Option<Attention> {
         attention::pick(self, now, eye)

@@ -3,6 +3,7 @@
 //! that is all the bot gets.
 
 use lb_core::Vec3;
+use lb_core::dmath;
 use lb_core::math::{normalize_angle, view_angle_vectors};
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
@@ -69,7 +70,7 @@ pub fn stimulus(
     let bearing = if all || (x == 0.0 && y == 0.0) {
         None
     } else {
-        let local = y.atan2(x).to_degrees();
+        let local = dmath::atan2(y, x).to_degrees();
         Some(normalize_angle(view.y - local + rng.normal() * BEARING_SIGMA))
     };
     Some(DamageStimulus {

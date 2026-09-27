@@ -141,6 +141,8 @@ pub struct Mind {
     last_enemy_seen: SimTime,
     /// Where the path wants the bot to look, for vigilance.
     path_look: Option<Vec3>,
+    /// Navigation wants this point shot at (an obstacle to break), with the crowbar when set.
+    nav_fire: Option<(Vec3, bool)>,
     /// The contact already shot at: player and when it was recognized.
     answered: Option<(PlayerKey, SimTime)>,
     pub reactions: Reactions,
@@ -161,9 +163,13 @@ impl Mind {
     pub fn reloading(&self, now: SimTime) -> bool {
         now < self.reload_until
     }
+
+    pub fn last_enemy_seen(&self) -> SimTime {
+        self.last_enemy_seen
+    }
 }
 
-fn apply_step(intents: &mut Intents, step: &NavStep, path_look: &mut Option<Vec3>) {
+fn apply_step(intents: &mut Intents, step: &NavStep, m: &mut Mind) {
     intents.movement(
         Prio::Goal,
         MoveIntent {
@@ -193,7 +199,11 @@ fn apply_step(intents: &mut Intents, step: &NavStep, path_look: &mut Option<Vec3
     } else {
         intents.stance(Prio::Goal, stance);
     }
-    *path_look = Some(step.look_at);
+    if step.use_key {
+        intents.use_key(Prio::Traversal);
+    }
+    m.nav_fire = step.fire_at.map(|at| (at, step.melee));
+    m.path_look = Some(step.look_at);
 }
 
 impl BotBrain {
@@ -310,6 +320,7 @@ impl BotBrain {
 
     fn pursue(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
+        self.mind.nav_fire = None;
         let Some(goal) = self.mind.goal else { return };
         let m = &mut self.mind;
         let mut arrive = |status: NavStatus, m: &mut Mind| match status {
@@ -334,7 +345,7 @@ impl BotBrain {
                 if class == WeaponClass::Melee && distance > MELEE_CHARGE {
                     let (status, step) = nav.go_to(t.pos);
                     if let Some(step) = step {
-                        apply_step(&mut self.intents, &step, &mut m.path_look);
+                        apply_step(&mut self.intents, &step, m);
                     }
                     arrive(status, m);
                     return;
@@ -382,7 +393,7 @@ impl BotBrain {
                 };
                 let (status, step) = nav.go_to(t.pos);
                 if let Some(step) = step {
-                    apply_step(&mut self.intents, &step, &mut m.path_look);
+                    apply_step(&mut self.intents, &step, m);
                 }
                 arrive(status, m);
             }
@@ -401,7 +412,7 @@ impl BotBrain {
                     Some((dest, _)) => {
                         let (status, step) = nav.go_to(dest);
                         if let Some(step) = step {
-                            apply_step(&mut self.intents, &step, &mut m.path_look);
+                            apply_step(&mut self.intents, &step, m);
                         }
                         if status != NavStatus::Moving {
                             m.retreat_to = None;
@@ -427,13 +438,13 @@ impl BotBrain {
                 }
                 let (status, step) = nav.go_to(spot.origin);
                 if let Some(step) = step {
-                    apply_step(&mut self.intents, &step, &mut m.path_look);
+                    apply_step(&mut self.intents, &step, m);
                 }
                 arrive(status, m);
             }
             GoalKind::Roam => {
                 if let Some(step) = nav.roam(&mut rng.decision) {
-                    apply_step(&mut self.intents, &step, &mut m.path_look);
+                    apply_step(&mut self.intents, &step, m);
                 }
             }
         }
@@ -506,6 +517,28 @@ impl BotBrain {
                 if let Some(w) = weapon_choice {
                     self.intents.weapon(Prio::Threat, WeaponIntent::hold(w));
                 }
+            }
+            _ if m.nav_fire.is_some() => {
+                // Breaking an obstacle in the way: the crowbar when asked, else the weapon of choice.
+                let Some((at, melee)) = m.nav_fire else { unreachable!() };
+                let weapon = if melee || weapon_choice.is_none() {
+                    WeaponId::Crowbar
+                } else {
+                    weapon_choice.unwrap_or(WeaponId::Crowbar)
+                };
+                let (forward, _, _) = lb_core::math::view_angle_vectors(self.motor.view);
+                let on_it = forward.dot((at - body.eye).normalize_or_zero()) > 0.995;
+                let ready = body.weapon == Some(weapon);
+                self.intents.weapon(
+                    Prio::Goal,
+                    WeaponIntent {
+                        select: Some(weapon),
+                        fire: if on_it && ready { Fire::Primary } else { Fire::None },
+                        trigger: spec(weapon).trigger,
+                        interval: m.click_interval.max(0.15),
+                        reload: false,
+                    },
+                );
             }
             _ => {
                 // Calm: reload what is low, otherwise hold the best weapon.

@@ -13,9 +13,14 @@ lb-ffi.workspace = true
 lb-core.workspace = true
 lb-raw.workspace = true
 lb-worldq.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+postcard.workspace = true
 
 [lints]
 workspace = true

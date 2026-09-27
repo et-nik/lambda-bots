@@ -11,6 +11,7 @@ use lb_knowledge::SoundStimulus;
 use lb_worldq::VisSets;
 
 use crate::PerceptionParams;
+use lb_core::dmath;
 
 /// The client's `sound_nominal_clip_dist`.
 const NOMINAL_CLIP: f32 = 1000.0;
@@ -115,7 +116,7 @@ impl Hearing {
         self.stats.heard += 1;
         let loudness = (g / ev.volume.max(0.01)).clamp(0.0, 1.0);
         let d = ev.origin - l.eye;
-        let true_bearing = d.y.atan2(d.x).to_degrees();
+        let true_bearing = dmath::atan2(d.y, d.x).to_degrees();
         let sigma = params.sound_bearing_sigma
             + (WIDEST_BEARING_SIGMA - params.sound_bearing_sigma).max(0.0) * (1.0 - loudness);
         let mut bearing = true_bearing + rng.normal() * sigma;
@@ -124,11 +125,11 @@ impl Hearing {
             bearing = 2.0 * l.yaw + 180.0 - bearing;
         }
         let bearing = normalize_angle(bearing);
-        let range = distance.max(1.0) * (rng.normal() * RANGE_LOG_SIGMA).exp();
+        let range = distance.max(1.0) * dmath::exp(rng.normal() * RANGE_LOG_SIGMA);
         let elevation =
-            (d.z.atan2(d.truncate().length()).to_degrees() + rng.normal() * ELEVATION_SIGMA).clamp(-80.0, 80.0);
-        let (sb, cb) = bearing.to_radians().sin_cos();
-        let (se, ce) = elevation.to_radians().sin_cos();
+            (dmath::atan2(d.z, d.truncate().length()).to_degrees() + rng.normal() * ELEVATION_SIGMA).clamp(-80.0, 80.0);
+        let (sb, cb) = dmath::sin_cos(bearing.to_radians());
+        let (se, ce) = dmath::sin_cos(elevation.to_radians());
         Some(SoundStimulus {
             t: ev.t,
             kind: ev.class.kind,

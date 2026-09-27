@@ -5,6 +5,7 @@
 pub mod entities;
 pub mod file;
 pub mod hull;
+pub mod mech;
 pub mod vis;
 pub mod world;
 

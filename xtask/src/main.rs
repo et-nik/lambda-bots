@@ -223,6 +223,9 @@ const PACKAGE_DOCS: &[&str] = &[
     "docs/personas.md",
     "docs/perception.md",
     "docs/behavior.md",
+    "docs/navigation.md",
+    "docs/replay.md",
+    "docs/images/replay.svg",
 ];
 /// Data directories copied into `addons/lambdabots/`.
 const PACKAGE_DATA: &[&str] = &["config", "names", "profiles", "maps", "amxx"];

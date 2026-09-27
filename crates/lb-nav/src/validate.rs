@@ -138,39 +138,3 @@ pub fn walk_check(tracer: &mut dyn Tracer, from: Vec3, to: Vec3, hull: HullKind)
         WalkCheck::Ok
     }
 }
-
-/// Highest ledge a crouch jump reaches: jump apex 45 u plus the 18 u the hull shrinks by when ducking.
-pub const MAX_JUMP_RISE: f32 = 63.0;
-/// Farthest a running jump carries horizontally, with margin.
-pub const MAX_JUMP_REACH: f32 = 220.0;
-
-/// A crouch jump from `from` onto `to` (resting standing centres): rise high enough in the crouched hull, cross over
-/// at that height and land on the target's floor.
-pub fn jump_check(tracer: &mut dyn Tracer, from: Vec3, to: Vec3) -> bool {
-    let dz = to.z - from.z;
-    let flat = (to - from).truncate().length();
-    if dz > MAX_JUMP_RISE || flat > MAX_JUMP_REACH {
-        return false;
-    }
-    let crouched = |p: Vec3| p - Vec3::Z * 18.0;
-    let start = crouched(from);
-    let rise = (dz.max(0.0) + 20.0).min(MAX_JUMP_RISE + 18.0);
-    let up = tracer.trace(&TraceQuery::hull(start, start + Vec3::Z * rise, HullKind::Crouch));
-    if stuck(&up) || up.fraction < 1.0 && up.end.z < crouched(to).z + 2.0 {
-        return false;
-    }
-    let over = to.truncate().extend(up.end.z);
-    let fwd = tracer.trace(&TraceQuery::hull(up.end, over, HullKind::Crouch));
-    if stuck(&fwd) || (fwd.end - over).truncate().length() > 8.0 {
-        return false;
-    }
-    let land = tracer.trace(&TraceQuery::hull(
-        fwd.end,
-        fwd.end - Vec3::Z * (rise + 64.0),
-        HullKind::Crouch,
-    ));
-    !stuck(&land)
-        && land.fraction < 1.0
-        && land.normal.z >= MIN_FLOOR_NZ
-        && (land.end.z - crouched(to).z).abs() <= STEP_SIZE
-}

@@ -1,7 +1,8 @@
 use lb_core::Vec3;
 use lb_ffi::{LbBotCommand, LbMoveFeedback};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CvarHandle(pub u16);
 
 #[derive(Clone, Debug)]
@@ -35,12 +36,21 @@ pub struct TraceRequest {
     pub ignore: Option<lb_ffi::LbEntRef>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "lb_ffi::LbEntRef")]
+struct EntRefDef {
+    index: u16,
+    pad: u16,
+    serial: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct TraceResult {
     pub fraction: f32,
     pub end_pos: Vec3,
     pub plane_normal: Vec3,
     pub plane_dist: f32,
+    #[serde(with = "EntRefDef")]
     pub hit: lb_ffi::LbEntRef,
     pub hitgroup: i32,
     pub all_solid: bool,
@@ -69,7 +79,7 @@ pub struct CreateBotRequest {
     pub infokeys: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CreateBotOutcome {
     Created { slot: u8, userid: i32, bot_gen: u32 },
     ServerFull,
@@ -87,7 +97,7 @@ pub struct DebugPrim {
     pub channel: u8,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CompatFacts {
     pub engine_kind: u8,
     pub metamod_has_hook_tables: bool,
@@ -125,6 +135,10 @@ pub trait Host {
     fn client_info_key(&mut self, slot: u8, key: &str) -> String;
     fn player_stats(&mut self, slot: u8) -> Option<(i32, i32)>;
     fn load_file(&mut self, path: &str) -> Option<Vec<u8>>;
+    /// Weapon prediction data of our bot in `slot` (what its client would be sent); `None` when unsupported.
+    fn weapon_state(&mut self, _slot: u8) -> Option<lb_ffi::LbWeaponState> {
+        None
+    }
     fn send_debug(&mut self, slot: u8, prims: &[DebugPrim]) -> bool;
     fn compat_facts(&mut self) -> CompatFacts;
 }

@@ -2,8 +2,9 @@
 //! rcon) overrides the YAML value until `lb config reload --force`.
 
 use lb_host::{CvarHandle, CvarSpec, Host};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cv {
     Version,
     Quota,
@@ -65,7 +66,7 @@ impl Cv {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cvars {
     handles: Vec<(Cv, CvarHandle, String)>,
     game: Vec<(String, Option<CvarHandle>)>,

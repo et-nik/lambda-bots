@@ -287,6 +287,14 @@ impl Host for FfiHost {
         String::from_utf8_lossy(&buf[..n.min(buf.len())]).into_owned()
     }
 
+    fn weapon_state(&mut self, slot: u8) -> Option<lb_ffi::LbWeaponState> {
+        let mut out = lb_ffi::LbWeaponState::default();
+        let size = core::mem::size_of::<lb_ffi::LbWeaponState>() as u32;
+        let ptr = (&mut out as *mut lb_ffi::LbWeaponState).cast::<core::ffi::c_void>();
+        let status = call!(self.get_weapon_data(slot, ptr, size) else LB_ERR_UNSUPPORTED);
+        (status == LB_OK).then_some(out)
+    }
+
     fn player_stats(&mut self, slot: u8) -> Option<(i32, i32)> {
         let (mut ping, mut loss) = (0i32, 0i32);
         let status = call!(self.get_player_stats(slot, &mut ping, &mut loss) else LB_ERR_UNSUPPORTED);

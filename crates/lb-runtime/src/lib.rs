@@ -11,7 +11,9 @@ pub mod manager;
 pub mod motor_test;
 pub mod names;
 pub mod nav;
+pub mod nav_test;
 pub mod perf;
+pub mod record;
 pub mod roster;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -40,6 +42,7 @@ use lb_game::weapons::{WeaponId, weapons_in_mask};
 use lb_host::strings::StringTable;
 use lb_host::{CreateBotOutcome, CreateBotRequest, Host, TrackRule};
 use lb_knowledge::{BeliefParams, ItemSpot, PlayerKey, PublicEvent};
+use lb_nav::known::LinkHealth;
 use lb_perception::items::ItemEntity;
 use lb_perception::vision::DEFAULT_ASPECT;
 use lb_perception::{Listener, SoundEvent, StepSynth, Subject, Viewer};
@@ -47,7 +50,7 @@ use lb_raw::{ClientEventKind, RawClient, RawEvent, RawFrame};
 use lb_telemetry::{CommandChannel, TelemetrySink};
 use lb_worldq::{AllVisible, VisSets};
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::clients::Clients;
 use crate::cvars::{Cv, Cvars};
@@ -60,7 +63,7 @@ use lb_styles::{Persona, StyleId, StyleTable};
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InitData {
     pub adapter_version: String,
     pub plugin_path: PathBuf,
@@ -68,6 +71,8 @@ pub struct InitData {
     pub install_dir: PathBuf,
     pub platform: u8,
     pub late_load: bool,
+    /// No sockets (telemetry, command channel): set for a replay, which must not talk to anyone.
+    pub sandbox: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +160,12 @@ pub struct Runtime {
     compat_pending: bool,
     pub nav_loader: Option<nav::NavLoader>,
     pub graph: Option<Arc<lb_nav::NavGraph>>,
+    /// Where the map's doors, lifts and breakables are now.
+    pub mechs: nav::LiveMechs,
+    /// Links switched off for every bot after several failed them.
+    pub link_health: LinkHealth,
+    /// Special links re-checked with live engine traces after the graph loads.
+    pub live_check: lb_nav::probe::LiveCheck,
     /// What happened to the map's navigation graph, for `lb nav`.
     pub nav_status: String,
     /// PVS and PAS of the map; until they load, everything counts as potentially visible and audible.
@@ -178,6 +189,13 @@ pub struct Runtime {
     item_entities: Vec<ItemEntity>,
     item_kinds: FxHashMap<u16, Option<ItemKind>>,
     next_items_at: SimTime,
+    /// Inputs from outside the engine (the navigation loader, the command channel), kept while recording and fed
+    /// from the recording in a replay.
+    pub outside: record::OutsideMode,
+    /// `lb record start|stop`, for the recorder, which lives outside the runtime.
+    pub record_request: Option<record::RecordRequest>,
+    /// What the recorder is doing, for `lb record`.
+    pub record_status: String,
 }
 
 impl Runtime {
@@ -266,6 +284,9 @@ impl Runtime {
             compat_pending: false,
             nav_loader: None,
             graph: None,
+            mechs: nav::LiveMechs::default(),
+            link_health: LinkHealth::default(),
+            live_check: lb_nav::probe::LiveCheck::default(),
             nav_status: "no map".into(),
             vis: None,
             clients_now: Vec::new(),
@@ -279,6 +300,9 @@ impl Runtime {
             item_entities: Vec::new(),
             item_kinds: FxHashMap::default(),
             next_items_at: SimTime::ZERO,
+            outside: record::OutsideMode::Live,
+            record_request: None,
+            record_status: "not recording".into(),
         };
         rt.register_cvars(host);
         rt.open_telemetry();
@@ -398,6 +422,9 @@ impl Runtime {
     }
 
     fn open_telemetry(&mut self) {
+        if self.init.sandbox {
+            return;
+        }
         let t = &self.config.telemetry;
         self.telemetry = if t.enabled {
             match TelemetrySink::open(&t.dest, t.port, self.master_seed, t.max_kbps) {
@@ -493,7 +520,16 @@ impl Runtime {
         self.item_kinds.clear();
         self.next_items_at = SimTime::ZERO;
         self.nav_status = format!("loading the graph for {name}");
-        self.nav_loader = Some(nav::NavLoader::start(&self.init.game_dir, &self.init.install_dir, name));
+        self.mechs.set_map(None, max_clients);
+        self.link_health.clear();
+        self.live_check = lb_nav::probe::LiveCheck::default();
+        let opts = import_options(&self.game.rules);
+        self.nav_loader = Some(nav::NavLoader::start(
+            &self.init.game_dir,
+            &self.init.install_dir,
+            name,
+            opts,
+        ));
         tracing::info!(
             "map {name} (epoch {}, {} slots){}",
             epoch.0,
@@ -687,12 +723,14 @@ impl Runtime {
                 body.in_duck = s.in_duck;
                 body.has_longjump = s.has_longjump;
                 body.frags = s.frags;
+                body.groundentity = s.groundentity;
                 if !bot.view_initialized {
                     bot.view = s.v_angle;
                     bot.view_initialized = true;
                 }
             }
         }
+        self.refresh_predictions(host);
         self.others.clear();
         for c in &frame.clients {
             if c.state != lb_raw::ClientState::Free {
@@ -719,7 +757,7 @@ impl Runtime {
             bot.update_lifecycle(now, force_respawn, delay);
         }
         self.check_departures(host);
-        if let Some(result) = self.nav_loader.as_ref().and_then(|l| l.poll()) {
+        if let Some(result) = self.poll_nav_loader() {
             let map = self.nav_loader.take().map(|l| l.map).unwrap_or_default();
             match result {
                 Ok(loaded) => {
@@ -734,12 +772,25 @@ impl Runtime {
                         bot.brain.set_items(&loaded.items, self.now);
                     }
                     self.item_spots = Some(loaded.items);
+                    let max_clients = self.map.as_ref().map_or(32, |m| m.max_clients);
+                    tracing::info!(
+                        "{map}: {} movers, {} breakables",
+                        loaded.mechs.movers,
+                        loaded.mechs.breakables
+                    );
+                    self.mechs.set_map(Some(loaded.mechs), max_clients);
                     match loaded.graph {
                         Ok(graph) => {
                             let s = &graph.stats;
                             self.nav_status = format!(
-                                "{map}: {} nodes, {} links ({} rejected by the check), {} ms, from {}",
-                                s.nodes, s.links, s.invalid, loaded.millis, graph.source
+                                "{map}: {} nodes, {} links ({} rejected by the check, {} added from mechanisms: {}), {} ms, from {}",
+                                s.nodes,
+                                s.links,
+                                s.invalid,
+                                s.added,
+                                s.kinds(),
+                                loaded.millis,
+                                graph.source
                             );
                             tracing::info!("navigation graph {}", self.nav_status);
                             self.graph = Some(graph);
@@ -783,6 +834,44 @@ impl Runtime {
         if self.now >= self.next_items_at {
             self.next_items_at = self.now + 0.2;
             self.refresh_items(host);
+        }
+    }
+
+    /// Weapon prediction data of live bots, 50 times a second.
+    fn refresh_predictions(&mut self, host: &mut dyn Host) {
+        use lb_game::self_state::{PredictedWeapon, Prediction};
+        let now = self.now;
+        for bot in &mut self.bots {
+            if bot.state != BotState::Alive
+                || bot
+                    .self_state
+                    .prediction
+                    .as_ref()
+                    .is_some_and(|p| now.since(p.at) < 0.02 && now >= p.at)
+            {
+                continue;
+            }
+            let Some(ws) = host.weapon_state(bot.id.slot) else {
+                continue;
+            };
+            let mut weapons = [None; 32];
+            for (i, w) in ws.weapons.iter().enumerate() {
+                if w.id > 0 {
+                    weapons[i] = Some(PredictedWeapon {
+                        clip: w.clip,
+                        next_primary: w.next_primary,
+                        next_secondary: w.next_secondary,
+                        reloading: w.in_reload != 0 || w.in_special_reload != 0,
+                        in_attack: w.iuser2,
+                    });
+                }
+            }
+            bot.self_state.prediction = Some(Prediction {
+                at: now,
+                current: WeaponId::from_id(ws.current),
+                next_attack: ws.next_attack,
+                weapons,
+            });
         }
     }
 
@@ -1467,6 +1556,8 @@ impl Runtime {
     }
 
     fn drive_bots(&mut self, host: &mut dyn Host) {
+        self.mechs.refresh(host, &self.strings, self.now.secs());
+        self.run_live_check(host);
         let frame_ms = self.frame_time * 1000.0;
         let cmd_rate = self.config.engine.cmd_rate;
         let now = self.now;
@@ -1499,6 +1590,8 @@ impl Runtime {
         let opponents = subjects.len().saturating_sub(1);
         let registry = &self.game.weapons;
         let mut recognized = Vec::new();
+        let mechs = &self.mechs;
+        let link_health = &mut self.link_health;
         let mut tracer = nav::LiveTracer { host, count: 0 };
         for (i, bot) in self.bots.iter_mut().enumerate() {
             if matches!(bot.state, BotState::Leaving | BotState::Faulted) {
@@ -1514,8 +1607,9 @@ impl Runtime {
                     stuck_kill,
                     registry,
                     opponents,
+                    mechs,
                 };
-                drive_one(bot, &ctx, &mut tracer)
+                drive_one(bot, &ctx, &mut tracer, link_health)
             }));
             match result {
                 Ok(Some(cmd)) => self.cmds.push(cmd),
@@ -1591,28 +1685,57 @@ impl Runtime {
         }
     }
 
+    /// A slice of the live check of special links: up to 64 traces a frame (a count, not a time, so a replay runs
+    /// the same slices).
+    fn run_live_check(&mut self, host: &mut dyn Host) {
+        if self.live_check.done {
+            return;
+        }
+        let Some(graph) = self.graph.clone() else { return };
+        let mut tracer = nav::LiveTracer { host, count: 0 };
+        let wrong = self.live_check.run(&graph.probes, &mut tracer, 64, &mut || true);
+        for (a, b) in wrong {
+            self.link_health.disable(a, b);
+            tracing::warn!("link {a} -> {b} looks different on the server than in the map file; switched off");
+        }
+        if self.live_check.done {
+            tracing::info!("{}", self.live_check.progress(graph.probes.len()));
+        }
+    }
+
     fn poll_command_channel(&mut self, host: &mut dyn Host) {
+        for line in self.channel_commands() {
+            let args: Vec<&str> = line.split_whitespace().collect();
+            let out = commands::execute(self, host, &args);
+            self.telemetry.send(
+                "cmd_result",
+                self.now.secs(),
+                &serde_json::json!({ "args": line, "out": out }),
+            );
+        }
+    }
+
+    /// Commands the telemetry command channel accepted since the last frame.
+    fn read_command_channel(&mut self) -> Vec<String> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let mut results = Vec::new();
         self.commands.poll(now_ms, &mut results);
-        for r in results {
-            match r {
+        results
+            .into_iter()
+            .filter_map(|r| match r {
                 Ok(req) => {
                     tracing::info!("telemetry command from {}: lb {}", req.from, req.args);
-                    let args: Vec<&str> = req.args.split_whitespace().collect();
-                    let out = commands::execute(self, host, &args);
-                    self.telemetry.send(
-                        "cmd_result",
-                        self.now.secs(),
-                        &serde_json::json!({ "args": req.args, "out": out }),
-                    );
+                    Some(req.args)
                 }
-                Err((from, e)) => tracing::warn!("telemetry command from {from} rejected: {e}"),
-            }
-        }
+                Err((from, e)) => {
+                    tracing::warn!("telemetry command from {from} rejected: {e}");
+                    None
+                }
+            })
+            .collect()
     }
 
     fn emit_telemetry(&mut self) {
@@ -1667,6 +1790,7 @@ impl Runtime {
                         "tg": target.map_or(-1, |t| i32::from(t.who.slot)),
                         "see": target.is_some_and(|t| t.state == lb_knowledge::TrackState::Visible),
                         "fire": m.firing,
+                        "nv": b.nav.phase(),
                         "agr": b.persona.aggression,
                         "fear": b.persona.fear,
                     })
@@ -1710,7 +1834,12 @@ impl Runtime {
 }
 
 /// Produces the command for one bot this frame, or `None` if nothing is due.
-fn drive_one(bot: &mut Bot, ctx: &DriveCtx<'_>, tracer: &mut nav::LiveTracer<'_>) -> Option<LbBotCommand> {
+fn drive_one(
+    bot: &mut Bot,
+    ctx: &DriveCtx<'_>,
+    tracer: &mut nav::LiveTracer<'_>,
+    link_health: &mut LinkHealth,
+) -> Option<LbBotCommand> {
     if bot.fault_on_next_frame {
         bot.fault_on_next_frame = false;
         panic!("injected fault (lb debug panic)");
@@ -1748,14 +1877,24 @@ fn drive_one(bot: &mut Bot, ctx: &DriveCtx<'_>, tracer: &mut nav::LiveTracer<'_>
                 if out.done {
                     test.finished = true;
                 }
+            } else if bot.nav_test.as_ref().is_some_and(|t| !t.finished) {
+                let out = drive_nav_test(bot, ctx, tracer, link_health);
+                forward = out.forward;
+                side = out.side;
+                buttons |= out.buttons;
             } else {
-                let out = behave(bot, ctx, tracer);
+                let out = behave(bot, ctx, tracer, link_health);
                 forward = out.forward;
                 side = out.side;
                 buttons |= out.buttons;
             }
         }
         _ => {}
+    }
+    if matches!(bot.state, BotState::Dead | BotState::Respawning)
+        && let (Some(t), Some(g)) = (bot.nav_test.as_mut(), ctx.graph)
+    {
+        t.on_death(g, now.secs());
     }
     buttons |= direction_buttons(forward, side);
     let sent = bot.driver.tick(frame_ms, buttons)?;
@@ -1853,24 +1992,131 @@ fn ammo_need(state: &SelfState, registry: &WeaponRegistry, ammo: Ammo) -> f32 {
     }
 }
 
-/// Runs the brain for one frame: senses have run already; this decides, fights and walks.
-fn behave(bot: &mut Bot, ctx: &DriveCtx<'_>, tracer: &mut nav::LiveTracer<'_>) -> lb_motor::MotorOut {
-    let body = body_of(bot, ctx);
-    let input = lb_nav::follow::FollowInput {
+/// The bot's own state as navigation needs it.
+fn nav_input(bot: &Bot, ctx: &DriveCtx<'_>, body: &lb_brain::Body) -> lb_nav::exec::NavInput {
+    let raw = &bot.self_state.body;
+    lb_nav::exec::NavInput {
+        now: ctx.now.secs(),
         origin: body.origin,
         velocity: body.velocity,
+        view: bot.view,
         on_ground: body.on_ground,
         on_ladder: body.on_ladder,
-        now: ctx.now.secs(),
+        ducked: raw.flags & lb_game::self_state::FL_DUCKING != 0,
+        waterlevel: raw.waterlevel,
+        ground_model: if body.on_ground {
+            ctx.mechs.model_of(raw.groundentity)
+        } else {
+            0
+        },
         max_speed: body.maxspeed,
-    };
+        health: body.health,
+    }
+}
+
+/// `lb nav test`: the course drives the bot, nothing else does.
+fn drive_nav_test(
+    bot: &mut Bot,
+    ctx: &DriveCtx<'_>,
+    tracer: &mut nav::LiveTracer<'_>,
+    link_health: &mut LinkHealth,
+) -> lb_motor::MotorOut {
+    use lb_motor::{Intents, LookIntent, MoveIntent, Prio, StanceIntent};
+    let body = body_of(bot, ctx);
+    let input = nav_input(bot, ctx, &body);
+    let mut intents = Intents::default();
+    if let Some(graph) = ctx.graph
+        && let Some(test) = bot.nav_test.as_mut()
+    {
+        let mut nctx = lb_nav::navigator::NavCtx {
+            graph,
+            tracer,
+            mech: ctx.mechs,
+            health: Some(link_health),
+            bot: u32::from(bot.id.slot),
+        };
+        if let Some(step) = test.step(&mut bot.nav, &mut nctx, &input) {
+            intents.movement(
+                Prio::Goal,
+                MoveIntent {
+                    dir: step.move_dir,
+                    speed: step.speed,
+                },
+            );
+            intents.stance(
+                Prio::Goal,
+                StanceIntent {
+                    jump: step.jump,
+                    duck: step.duck,
+                },
+            );
+            if step.use_key {
+                intents.use_key(Prio::Goal);
+            }
+            let look = match step.pitch {
+                Some(pitch) => {
+                    let mut a = lb_core::math::dir_to_view_angles(step.look_at - body.eye);
+                    a.x = pitch;
+                    LookIntent::Angles(a)
+                }
+                None => LookIntent::Point {
+                    at: step.look_at,
+                    engaged: false,
+                },
+            };
+            intents.look(Prio::Goal, look);
+        }
+        if test.finished {
+            for line in test.report() {
+                tracing::info!("nav test: {line}");
+                logging::console_line(format!("[lambdabots] nav test: {line}"));
+            }
+        }
+    }
     bot.brain.motor.view = bot.view;
+    let motor_in = lb_motor::MotorInput {
+        now: ctx.now,
+        dt: body.dt,
+        eye: body.eye,
+        velocity: body.velocity,
+        maxspeed: body.maxspeed,
+        on_ladder: body.on_ladder,
+        weapon: body.weapon,
+    };
+    let look = lb_motor::LookParams {
+        model: lb_config::skill::AimModel::Spring,
+        turn_speed: 900.0,
+        skill: 100,
+    };
+    let out = bot.brain.motor.run(&intents, &motor_in, &look, &mut bot.rng.motor);
+    bot.view = out.angles;
+    out
+}
+
+/// Seconds without an enemy seen or heard before a stuck bot may give up its life.
+const CALM_BEFORE_KILL: f64 = 5.0;
+
+/// Runs the brain for one frame: senses have run already; this decides, fights and walks.
+fn behave(
+    bot: &mut Bot,
+    ctx: &DriveCtx<'_>,
+    tracer: &mut nav::LiveTracer<'_>,
+    link_health: &mut LinkHealth,
+) -> lb_motor::MotorOut {
+    let body = body_of(bot, ctx);
+    let input = nav_input(bot, ctx, &body);
+    bot.brain.motor.view = bot.view;
+    let calm = bot.brain.calm_for(ctx.now) > CALM_BEFORE_KILL;
     let mut service = nav::BotNavService {
         nav: &mut bot.nav,
         graph: ctx.graph,
         tracer,
+        mechs: ctx.mechs,
+        health: link_health,
+        bot: u32::from(bot.id.slot),
         input,
         stuck_kill: ctx.stuck_kill,
+        calm,
         kill: false,
     };
     let out = bot.brain.act(&body, &bot.character, &mut service, &mut bot.rng);
@@ -1907,6 +2153,7 @@ struct DriveCtx<'a> {
     stuck_kill: f64,
     registry: &'a WeaponRegistry,
     opponents: usize,
+    mechs: &'a nav::LiveMechs,
 }
 
 /// Players as vision gets them: the snapshot plus the weapon they show and their last shot.
@@ -2042,6 +2289,20 @@ fn load_presets(install_dir: &std::path::Path) -> (Presets, String) {
             tracing::warn!("{}: {e}; using the built-in skill table", path.display());
             (Presets::default(), "built-in".into())
         }
+    }
+}
+
+/// How the map's graph is checked: movement as this server's rules set it.
+fn import_options(rules: &PublicRules) -> lb_nav::import::ImportOptions {
+    lb_nav::import::ImportOptions {
+        trust_imported: false,
+        physics: lb_kin::Physics {
+            gravity: rules.gravity,
+            maxspeed: rules.maxspeed,
+            bunnyhop_cap: !rules.bunnyhop_uncapped,
+            progressive_fall_damage: rules.falldamage_progressive,
+            ..lb_kin::Physics::default()
+        },
     }
 }
 

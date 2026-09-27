@@ -4,6 +4,7 @@
 //! item believed present fades as time passes, faster with more opponents around to take it.
 
 use lb_core::Vec3;
+use lb_core::dmath;
 use lb_core::time::SimTime;
 use lb_game::items::ItemKind;
 
@@ -82,7 +83,7 @@ impl Items {
     pub fn availability(&self, spot: usize, now: SimTime, eta: f32, opponents: usize) -> f32 {
         let Some(b) = self.beliefs.get(spot) else { return 0.0 };
         let arrive = now + f64::from(eta);
-        let fade = |since: SimTime| (-TAKE_RATE * opponents as f32 * arrive.since(since).max(0.0) as f32).exp();
+        let fade = |since: SimTime| dmath::exp(-TAKE_RATE * opponents as f32 * arrive.since(since).max(0.0) as f32);
         match b.state {
             ItemState::Present => fade(b.present_at),
             ItemState::Absent { back: (from, to) } => {

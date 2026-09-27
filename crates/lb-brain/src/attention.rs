@@ -8,6 +8,7 @@ use lb_game::sounds::SoundKind;
 use lb_knowledge::{HypothesisKind, PlayerKey, TrackState};
 
 use crate::BotBrain;
+use lb_core::dmath;
 
 const CHEST: f32 = 8.0;
 const DAMAGE_LOOK_FOR: f64 = 1.0;
@@ -50,7 +51,7 @@ pub(crate) struct Glance {
 }
 
 fn toward(eye: Vec3, bearing: f32) -> Vec3 {
-    let (s, c) = bearing.to_radians().sin_cos();
+    let (s, c) = dmath::sin_cos(bearing.to_radians());
     eye + Vec3::new(c, s, 0.0) * 300.0
 }
 

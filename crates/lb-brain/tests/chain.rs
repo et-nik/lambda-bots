@@ -108,11 +108,7 @@ impl NavService for World {
             Some(NavStep {
                 move_dir: dir,
                 speed: 300.0,
-                look_at: dest,
-                pitch: None,
-                jump: false,
-                duck: false,
-                mandatory: false,
+                ..NavStep::hold(dest)
             }),
         )
     }
@@ -121,11 +117,7 @@ impl NavService for World {
         Some(NavStep {
             move_dir: Vec2::X,
             speed: 300.0,
-            look_at: Vec3::new(1000.0, 0.0, 28.0),
-            pitch: None,
-            jump: false,
-            duck: false,
-            mandatory: false,
+            ..NavStep::hold(Vec3::new(1000.0, 0.0, 28.0))
         })
     }
 
@@ -307,7 +299,7 @@ fn an_enemy_in_sight_is_recognized_engaged_and_shot_at() {
     assert!(reactions.recognition_to_shot / (reactions.count as f64) < 1.0);
     // The view ends up on the enemy.
     let last = r.outs.last().unwrap().angles;
-    let enemy_yaw = (-150.0f32 + 100.0 * 4.0).atan2(500.0).to_degrees();
+    let enemy_yaw = lb_core::dmath::atan2(-150.0f32 + 100.0 * 4.0, 500.0).to_degrees();
     assert!(
         lb_core::math::angle_diff(last.y, enemy_yaw).abs() < 10.0,
         "{last} vs {enemy_yaw}"

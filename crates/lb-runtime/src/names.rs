@@ -66,6 +66,10 @@ impl NamePool {
         NamePool { names, source }
     }
 
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
     pub fn len(&self) -> usize {
         self.names.len()
     }

@@ -1,0 +1,511 @@
+//! The obstacle set: a small box world per traversal, each with a way that works and a way that fails. The bot must
+//! get through the working ones, and on the failing ones report the right cause and take another way.
+
+use lb_bsp::mech::{Mover, MoverKind, TriggerKind};
+use lb_core::Vec3;
+use lb_kin::boxworld::BoxWorld;
+use lb_nav::graph::{GraphStats, LinkFlags, NO_SPEC};
+use lb_nav::known::FailReason;
+use lb_nav::spec::{Action, Anchor, Cost, Interaction, MechRef, Needs, Stance, TraversalSpec};
+use lb_nav::{LinkKind, NavGraph, NavLink, NavNode, NodeFlags, NodeId};
+use lb_testkit::course::{Course, CourseBot, Game, Outcome};
+use lb_worldq::contents;
+
+const DOOR: u16 = 10;
+const BUTTON: u16 = 11;
+const PLAT: u16 = 20;
+const TELEPORT: u16 = 30;
+const GLASS: u16 = 40;
+
+#[derive(Default)]
+struct Builder {
+    nodes: Vec<NavNode>,
+    out: Vec<Vec<NavLink>>,
+    specs: Vec<TraversalSpec>,
+}
+
+impl Builder {
+    fn node(&mut self, x: f32, y: f32, z: f32) -> NodeId {
+        self.nodes.push(NavNode {
+            origin: Vec3::new(x, y, z),
+            flags: NodeFlags::empty(),
+            radius: 24.0,
+            support: 0,
+            first_link: 0,
+            link_count: 0,
+        });
+        self.out.push(Vec::new());
+        (self.nodes.len() - 1) as NodeId
+    }
+
+    fn link(&mut self, a: NodeId, b: NodeId, kind: LinkKind, action: Option<Action>) {
+        let (na, nb) = (self.nodes[a as usize], self.nodes[b as usize]);
+        let length = na.origin.distance(nb.origin);
+        let spec = action.map(|action| {
+            self.specs.push(TraversalSpec {
+                entry: Anchor {
+                    origin: na.origin,
+                    radius: 24.0,
+                    stance: Stance::Stand,
+                },
+                exit: Anchor {
+                    origin: nb.origin,
+                    radius: 32.0,
+                    stance: Stance::Stand,
+                },
+                action,
+                needs: Needs::default(),
+                deadline: 20.0,
+                cost: Cost {
+                    time: length / 300.0,
+                    wait: 1.0,
+                    damage: 0.0,
+                },
+            });
+            (self.specs.len() - 1) as u32
+        });
+        self.out[a as usize].push(NavLink {
+            to: b,
+            kind,
+            length,
+            flags: LinkFlags::VALID,
+            cost: length / 300.0 + if spec.is_some() { 1.0 } else { 0.0 },
+            spec: spec.unwrap_or(NO_SPEC),
+        });
+    }
+
+    fn walk(&mut self, a: NodeId, b: NodeId) {
+        self.link(a, b, LinkKind::Walk, None);
+    }
+
+    fn build(self) -> NavGraph {
+        NavGraph::from_parts(self.nodes, self.out, self.specs, "obstacles", GraphStats::default())
+    }
+}
+
+fn mover(model: u16, kind: MoverKind, active: Vec3, speed: f32, wait: f32) -> Mover {
+    Mover {
+        entity: 0,
+        model: model as usize,
+        kind,
+        classname: "func_door".into(),
+        targetname: None,
+        target: None,
+        master: None,
+        spawnflags: 0,
+        movedir: active.normalize_or_zero(),
+        rest: Vec3::ZERO,
+        active,
+        speed,
+        wait,
+        dmg: 0.0,
+        health: 0.0,
+        touch: false,
+        usable: false,
+    }
+}
+
+fn door_ref(active: Vec3) -> MechRef {
+    MechRef {
+        model: DOOR,
+        rest: Vec3::ZERO,
+        active,
+        travel: active.length() / 200.0,
+        wait: 2.0,
+    }
+}
+
+/// A floor, a wall across x = 200..216 with a 96-wide doorway blocked by a door that slides up, and a way around
+/// through a far opening (for when the door fails).
+fn door_world() -> BoxWorld {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 2048.0);
+    w.solid(Vec3::new(200.0, -600.0, 0.0), Vec3::new(216.0, -48.0, 200.0));
+    w.solid(Vec3::new(200.0, 48.0, 0.0), Vec3::new(216.0, 500.0, 200.0));
+    w.entity(
+        Vec3::new(200.0, -48.0, 0.0),
+        Vec3::new(216.0, 48.0, 112.0),
+        u32::from(DOOR),
+    );
+    w.solid(Vec3::new(200.0, -48.0, 112.0), Vec3::new(216.0, 48.0, 200.0));
+    w
+}
+
+/// Nodes: 0 before the door, 1 after it, 2..4 the long way around through y = 550.
+fn door_graph(open: Option<Interaction>) -> (NavGraph, NodeId, NodeId) {
+    let mut g = Builder::default();
+    let a = g.node(100.0, 0.0, 36.0);
+    let b = g.node(320.0, 0.0, 36.0);
+    let c = g.node(100.0, 550.0, 36.0);
+    let d = g.node(320.0, 550.0, 36.0);
+    if let Some(open) = open {
+        g.link(
+            a,
+            b,
+            LinkKind::Door,
+            Some(Action::Door {
+                door: door_ref(Vec3::new(0.0, 0.0, 108.0)),
+                open,
+            }),
+        );
+    }
+    g.walk(a, c);
+    g.walk(c, d);
+    g.walk(d, b);
+    (g.build(), a, b)
+}
+
+fn run(course: &mut Course<BoxWorld>, from: Vec3, to: Vec3, seconds: f64) -> Outcome {
+    let mut bot = CourseBot::new(from, 100.0);
+    course.place(&mut bot);
+    course.run(&mut bot, to, seconds, 100.0, None)
+}
+
+fn phases(o: &Outcome) -> Vec<&'static str> {
+    o.phases.iter().map(|(_, p)| *p).collect()
+}
+
+fn describe(o: &Outcome) -> String {
+    format!(
+        "arrived {} in {:.1}s at {:?}, failures {:?}, phases {:?}, log {:?}",
+        o.arrived,
+        o.seconds,
+        o.end,
+        o.failures.iter().map(|f| (f.from, f.to, f.reason)).collect::<Vec<_>>(),
+        o.phases.iter().map(|(t, p)| format!("{t:.1}:{p}")).collect::<Vec<_>>(),
+        o.log
+    )
+}
+
+#[test]
+fn touch_door_opens_when_walked_into() {
+    let (g, a, b) = door_graph(Some(Interaction::Touch {
+        model: DOOR,
+        spot: Vec3::new(100.0, 0.0, 36.0),
+    }));
+    let mut game = Game::default();
+    game.add_mover(Mover {
+        touch: true,
+        ..mover(DOOR, MoverKind::Door, Vec3::new(0.0, 0.0, 108.0), 200.0, 2.0)
+    });
+    let mut c = Course::new(door_world(), game, g);
+    let (from, to) = (c.graph.node(a).origin, c.graph.node(b).origin);
+    let o = run(&mut c, from, to, 15.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(o.seconds < 4.0, "through the door, not around: {}", describe(&o));
+}
+
+#[test]
+fn use_door_is_opened_with_the_use_key() {
+    let aim = Vec3::new(208.0, 0.0, 56.0);
+    let (g, a, b) = door_graph(Some(Interaction::Use {
+        model: DOOR,
+        spot: Vec3::new(160.0, 0.0, 36.0),
+        aim,
+    }));
+    let mut game = Game::default();
+    game.add_mover(Mover {
+        usable: true,
+        ..mover(DOOR, MoverKind::Door, Vec3::new(0.0, 0.0, 108.0), 200.0, 2.0)
+    });
+    let mut c = Course::new(door_world(), game, g);
+    let (from, to) = (c.graph.node(a).origin, c.graph.node(b).origin);
+    let o = run(&mut c, from, to, 15.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(
+        o.log.iter().any(|l| l.contains("*10 func_door set off")),
+        "{}",
+        describe(&o)
+    );
+    assert!(o.seconds < 5.0, "{}", describe(&o));
+}
+
+#[test]
+fn remote_button_opens_the_door() {
+    // A button on the wall of the first room, 120 units from the door, fires the door by name.
+    let mut w = door_world();
+    w.entity(
+        Vec3::new(96.0, 180.0, 40.0),
+        Vec3::new(104.0, 188.0, 56.0),
+        u32::from(BUTTON),
+    );
+    let button_spot = Vec3::new(100.0, 140.0, 36.0);
+    let (g, a, b) = door_graph(Some(Interaction::Use {
+        model: BUTTON,
+        spot: button_spot,
+        aim: Vec3::new(100.0, 184.0, 48.0),
+    }));
+    let mut game = Game::default();
+    game.add_mover(Mover {
+        targetname: Some("gate".into()),
+        wait: 4.0,
+        ..mover(DOOR, MoverKind::Door, Vec3::new(0.0, 0.0, 108.0), 200.0, 4.0)
+    });
+    game.add_mover(Mover {
+        usable: true,
+        target: Some("gate".into()),
+        classname: "func_button".into(),
+        ..mover(BUTTON, MoverKind::Button, Vec3::ZERO, 40.0, 1.0)
+    });
+    let mut c = Course::new(w, game, g);
+    let (from, to) = (c.graph.node(a).origin, c.graph.node(b).origin);
+    let o = run(&mut c, from, to, 20.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    let ph = phases(&o);
+    assert!(
+        ph.contains(&"door:go-activate") && ph.contains(&"door:wait"),
+        "{}",
+        describe(&o)
+    );
+    assert!(o.seconds < 8.0, "{}", describe(&o));
+}
+
+#[test]
+fn a_door_that_never_opens_is_reported_and_walked_around() {
+    // The graph says use opens it; the game's door ignores the use key.
+    let (g, a, b) = door_graph(Some(Interaction::Use {
+        model: DOOR,
+        spot: Vec3::new(160.0, 0.0, 36.0),
+        aim: Vec3::new(208.0, 0.0, 56.0),
+    }));
+    let mut game = Game::default();
+    game.add_mover(mover(DOOR, MoverKind::Door, Vec3::new(0.0, 0.0, 108.0), 200.0, 2.0));
+    let mut c = Course::new(door_world(), game, g);
+    let (from, to) = (c.graph.node(a).origin, c.graph.node(b).origin);
+    let mut bot = CourseBot::new(from, 100.0);
+    c.place(&mut bot);
+    let o = c.run(&mut bot, to, 40.0, 100.0, None);
+    assert!(o.arrived, "{}", describe(&o));
+    assert!(
+        bot.nav
+            .known
+            .active(c.now)
+            .any(|((f, t), fail)| (f, t) == (a, b) && fail.reason == FailReason::WaitingForInteraction),
+        "the door link is blocked for a while: {}",
+        describe(&o)
+    );
+}
+
+#[test]
+fn a_plat_rides_up_when_stood_on() {
+    let mut w = BoxWorld::new();
+    // Floor around a shaft (x 0..128, y -64..64) with a platform whose top rests at floor level, and a ledge 128 up.
+    w.solid(Vec3::new(-2048.0, -2048.0, -16.0), Vec3::new(0.0, 2048.0, 0.0));
+    w.solid(Vec3::new(0.0, -2048.0, -16.0), Vec3::new(128.0, -64.0, 0.0));
+    w.solid(Vec3::new(0.0, 64.0, -16.0), Vec3::new(128.0, 2048.0, 0.0));
+    w.solid(Vec3::new(128.0, -2048.0, -16.0), Vec3::new(2048.0, 2048.0, 0.0));
+    w.solid(Vec3::new(-2048.0, -2048.0, -400.0), Vec3::new(2048.0, 2048.0, -384.0));
+    w.entity(
+        Vec3::new(0.0, -64.0, -128.0),
+        Vec3::new(128.0, 64.0, 0.0),
+        u32::from(PLAT),
+    );
+    w.solid(Vec3::new(128.0, -256.0, 0.0), Vec3::new(600.0, 256.0, 128.0));
+    let mut g = Builder::default();
+    let before = g.node(-100.0, 0.0, 36.0);
+    let on = g.node(64.0, 0.0, 36.0);
+    let top = g.node(200.0, 0.0, 164.0);
+    g.nodes[on as usize].flags |= NodeFlags::ON_MOVER;
+    g.nodes[on as usize].support = PLAT;
+    g.walk(before, on);
+    let platform = MechRef {
+        model: PLAT,
+        rest: Vec3::ZERO,
+        active: Vec3::new(0.0, 0.0, 128.0),
+        travel: 128.0 / 150.0,
+        wait: 3.0,
+    };
+    g.link(
+        on,
+        top,
+        LinkKind::Lift,
+        Some(Action::Lift {
+            platform,
+            start: Interaction::Touch {
+                model: PLAT,
+                spot: Vec3::new(64.0, 0.0, 36.0),
+            },
+        }),
+    );
+    let mut game = Game::default();
+    game.add_mover(Mover {
+        touch: true,
+        classname: "func_plat".into(),
+        ..mover(PLAT, MoverKind::Plat, Vec3::new(0.0, 0.0, 128.0), 150.0, 3.0)
+    });
+    let mut c = Course::new(w, game, g.build());
+    let o = run(&mut c, Vec3::new(-100.0, 0.0, 36.0), Vec3::new(200.0, 0.0, 164.0), 15.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(
+        o.log.iter().any(|l| l.contains("*20 func_plat set off")),
+        "{}",
+        describe(&o)
+    );
+}
+
+#[test]
+fn teleports_are_walked_into() {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    w.trigger(
+        Vec3::new(380.0, -32.0, 0.0),
+        Vec3::new(420.0, 32.0, 72.0),
+        u32::from(TELEPORT),
+    );
+    let dest = Vec3::new(2000.0, 0.0, 0.0);
+    let mut g = Builder::default();
+    let a = g.node(300.0, 0.0, 36.0);
+    let b = g.node(2000.0, 0.0, 37.0);
+    let far = g.node(2200.0, 0.0, 36.0);
+    g.link(
+        a,
+        b,
+        LinkKind::Teleport,
+        Some(Action::Teleport {
+            trigger: TELEPORT,
+            touch: Vec3::new(400.0, 0.0, 36.0),
+            dest: dest + Vec3::Z * 37.0,
+        }),
+    );
+    g.walk(b, far);
+    let mut game = Game::default();
+    game.add_trigger(TELEPORT, TriggerKind::Teleport, None, Some((dest, 0.0)));
+    let mut graph = g.build();
+    graph.stats.by_kind[LinkKind::Teleport.index()] = 1;
+    let mut c = Course::new(w, game, graph);
+    let o = run(&mut c, Vec3::new(300.0, 0.0, 36.0), Vec3::new(2200.0, 0.0, 36.0), 10.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(o.seconds < 3.0, "teleported, not walked: {}", describe(&o));
+}
+
+#[test]
+fn breakables_are_shot_out_of_the_way() {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 2048.0);
+    w.solid(Vec3::new(200.0, -600.0, 0.0), Vec3::new(216.0, -48.0, 200.0));
+    w.solid(Vec3::new(200.0, 48.0, 0.0), Vec3::new(216.0, 600.0, 200.0));
+    w.entity(
+        Vec3::new(200.0, -48.0, 0.0),
+        Vec3::new(216.0, 48.0, 200.0),
+        u32::from(GLASS),
+    );
+    let mut g = Builder::default();
+    let a = g.node(100.0, 0.0, 36.0);
+    let b = g.node(320.0, 0.0, 36.0);
+    g.link(
+        a,
+        b,
+        LinkKind::Breakable,
+        Some(Action::Breakable {
+            model: GLASS,
+            aim: Vec3::new(208.0, 0.0, 64.0),
+            health: 30.0,
+            crowbar: false,
+        }),
+    );
+    let mut game = Game::default();
+    game.add_breakable(GLASS, 30.0);
+    let mut c = Course::new(w, game, g.build());
+    let o = run(&mut c, Vec3::new(100.0, 0.0, 36.0), Vec3::new(320.0, 0.0, 36.0), 15.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(o.log.iter().any(|l| l.contains("broken")), "{}", describe(&o));
+}
+
+#[test]
+fn an_impossible_jump_fails_and_the_bot_goes_around() {
+    // A 260-unit gap no jump clears, and a bridge further along.
+    let mut w = BoxWorld::new();
+    w.solid(Vec3::new(-600.0, -600.0, -16.0), Vec3::new(0.0, 600.0, 0.0));
+    w.solid(Vec3::new(260.0, -600.0, -16.0), Vec3::new(900.0, 600.0, 0.0));
+    w.solid(Vec3::new(0.0, 400.0, -16.0), Vec3::new(260.0, 600.0, 0.0));
+    w.solid(Vec3::new(-2000.0, -2000.0, -600.0), Vec3::new(2000.0, 2000.0, -584.0));
+    let mut g = Builder::default();
+    let a = g.node(-20.0, 0.0, 36.0);
+    let b = g.node(300.0, 0.0, 36.0);
+    let c1 = g.node(-20.0, 500.0, 36.0);
+    let c2 = g.node(300.0, 500.0, 36.0);
+    g.link(
+        a,
+        b,
+        LinkKind::Jump,
+        Some(Action::Jump {
+            speed: 270.0,
+            duck: false,
+            robustness: 1.0,
+        }),
+    );
+    g.walk(a, c1);
+    g.walk(c1, c2);
+    g.walk(c2, b);
+    // Falling into the gap needs a way back up.
+    let pit = g.node(130.0, 0.0, -548.0);
+    g.walk(pit, c1);
+    let mut c = Course::new(w, Game::default(), g.build());
+    let from = Vec3::new(-20.0, 0.0, 36.0);
+    let to = Vec3::new(300.0, 0.0, 36.0);
+    let mut bot = CourseBot::new(from, 100.0);
+    c.place(&mut bot);
+    let o = c.run(&mut bot, to, 20.0, 100.0, None);
+    assert!(
+        o.failures.iter().any(|f| f.reason == FailReason::ControllerFailure) || bot.nav.failures_total > 0,
+        "the missed jump is reported: {}",
+        describe(&o)
+    );
+}
+
+#[test]
+fn a_walled_up_passage_is_reported_as_geometry() {
+    // The direct walk runs into a wall that is not in the graph; the long way around is open.
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 2048.0);
+    w.solid(Vec3::new(200.0, -300.0, 0.0), Vec3::new(216.0, 300.0, 200.0));
+    let mut g = Builder::default();
+    let a = g.node(100.0, 0.0, 36.0);
+    let b = g.node(320.0, 0.0, 36.0);
+    let c1 = g.node(100.0, 400.0, 36.0);
+    let c2 = g.node(320.0, 400.0, 36.0);
+    g.walk(a, b);
+    g.walk(a, c1);
+    g.walk(c1, c2);
+    g.walk(c2, b);
+    let mut c = Course::new(w, Game::default(), g.build());
+    let mut bot = CourseBot::new(Vec3::new(100.0, 0.0, 36.0), 100.0);
+    c.place(&mut bot);
+    let o = c.run(&mut bot, Vec3::new(320.0, 0.0, 36.0), 30.0, 100.0, None);
+    assert!(o.arrived, "{}", describe(&o));
+    assert!(
+        bot.nav
+            .known
+            .active(c.now)
+            .any(|((f, t), fail)| (f, t) == (a, b) && fail.reason == FailReason::GeometryInvalid),
+        "{}",
+        describe(&o)
+    );
+}
+
+#[test]
+fn swimming_across_a_pool_and_climbing_out() {
+    let mut w = BoxWorld::new();
+    // Pool floor at -160, water up to 0, deck at 0 on both sides.
+    w.solid(Vec3::new(-2000.0, -2000.0, -176.0), Vec3::new(2000.0, 2000.0, -160.0));
+    w.solid(Vec3::new(-600.0, -600.0, -160.0), Vec3::new(0.0, 600.0, 0.0));
+    w.solid(Vec3::new(400.0, -600.0, -160.0), Vec3::new(1000.0, 600.0, 0.0));
+    w.volume(
+        Vec3::new(0.0, -600.0, -160.0),
+        Vec3::new(400.0, 600.0, -8.0),
+        contents::WATER,
+    );
+    let mut g = Builder::default();
+    let a = g.node(-60.0, 0.0, 36.0);
+    let s1 = g.node(100.0, 0.0, -80.0);
+    let s2 = g.node(340.0, 0.0, -40.0);
+    let b = g.node(460.0, 0.0, 36.0);
+    g.nodes[s1 as usize].flags |= NodeFlags::WATER;
+    g.nodes[s2 as usize].flags |= NodeFlags::WATER;
+    g.link(a, s1, LinkKind::Swim, Some(Action::Swim));
+    g.link(s1, s2, LinkKind::Swim, Some(Action::Swim));
+    g.link(s2, b, LinkKind::Swim, Some(Action::Swim));
+    let mut c = Course::new(w, Game::default(), g.build());
+    let o = run(&mut c, Vec3::new(-60.0, 0.0, 36.0), Vec3::new(460.0, 0.0, 36.0), 20.0);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+}

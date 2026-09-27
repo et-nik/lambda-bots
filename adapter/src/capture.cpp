@@ -24,8 +24,16 @@ MsgCapture &cap() {
     return c;
 }
 
-std::unordered_map<std::string, uint16_t> &interned() {
-    static std::unordered_map<std::string, uint16_t> m;
+struct Interned {
+    std::unordered_map<std::string, uint16_t> by_text;
+    // Engine strings live in its string pool for the whole map: most lookups hit the same pointer again, and a
+    // pointer lookup does not build a std::string. The text is still compared, in case a pointer was reused.
+    std::unordered_map<const char *, uint16_t> by_ptr;
+    std::vector<const std::string *> texts{nullptr};
+};
+
+Interned &interned() {
+    static Interned m;
     return m;
 }
 
@@ -161,17 +169,28 @@ void record_precache_event(int index, const char *name) {
 uint16_t intern(const char *s) {
     if (!s || !*s) return 0;
     auto &m = interned();
-    auto it = m.find(s);
-    if (it != m.end()) return it->second;
-    if (m.size() >= 0xFFFE) return 0;
-    const uint16_t id = static_cast<uint16_t>(m.size() + 1);
-    m.emplace(s, id);
-    record_named(LB_EV_STRING, id, 0, s, true);
+    auto p = m.by_ptr.find(s);
+    if (p != m.by_ptr.end() && *m.texts[p->second] == s) return p->second;
+    auto it = m.by_text.find(s);
+    uint16_t id = 0;
+    if (it != m.by_text.end()) {
+        id = it->second;
+    } else {
+        if (m.by_text.size() >= 0xFFFE) return 0;
+        id = static_cast<uint16_t>(m.by_text.size() + 1);
+        it = m.by_text.emplace(s, id).first;
+        m.texts.push_back(&it->first);
+        record_named(LB_EV_STRING, id, 0, s, true);
+    }
+    m.by_ptr[s] = id;
     return id;
 }
 
 void reset_interned() {
-    interned().clear();
+    auto &m = interned();
+    m.by_ptr.clear();
+    m.by_text.clear();
+    m.texts.assign(1, nullptr);
 }
 
 void record_client(uint8_t what, int slot, const char *name, const char *model, const char *addr, const char *auth) {

@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn cones_follow_yapb() {
         // 10 degrees off at 500 units: only an enemy facing the bot is worth the shot.
-        let off = Vec3::new(500.0, 500.0 * 10f32.to_radians().tan(), 0.0);
+        let off = Vec3::new(500.0, 500.0 * lb_core::dmath::tan(10f32.to_radians()), 0.0);
         assert!(!on_target(&shot(off, false, WeaponId::Glock)));
         assert!(on_target(&shot(off, true, WeaponId::Glock)));
         let dead_on = Vec3::new(500.0, 2.0, 0.0);

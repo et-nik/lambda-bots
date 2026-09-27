@@ -55,12 +55,14 @@ pub struct Bot {
     pub respawn_at: Option<SimTime>,
     pub respawn_presses: u32,
     pub test: Option<MotorTest>,
+    /// `lb nav test`: the obstacle course instead of behavior.
+    pub nav_test: Option<crate::nav_test::NavTest>,
     pub fault_on_next_frame: bool,
     pub seen_reset_hud: bool,
     pub pending_client_cmds: Vec<Vec<String>>,
     pub sim_ms_since_test: f64,
     pub kick_attempts: u8,
-    pub nav: crate::nav::BotNav,
+    pub nav: lb_nav::navigator::Navigator,
     /// Senses, beliefs, decisions and motor.
     pub brain: lb_brain::BotBrain,
     /// Skill, traits and style as the brain uses them.
@@ -105,7 +107,8 @@ impl Bot {
             pending_client_cmds: Vec::new(),
             sim_ms_since_test: 0.0,
             kick_attempts: 0,
-            nav: crate::nav::BotNav::default(),
+            nav_test: None,
+            nav: lb_nav::navigator::Navigator::default(),
             brain,
             character,
             attention: None,

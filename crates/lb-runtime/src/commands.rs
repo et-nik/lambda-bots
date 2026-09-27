@@ -21,6 +21,10 @@ const HELP: &[(&str, &str)] = &[
     ("roster [all]", "personalities admitted by the filter (or all of them)"),
     ("nav", "navigation graph status and what every bot is walking to"),
     (
+        "nav test <kind|all> [count] [name|#userid] | link <from> <to> ... | stop",
+        "the obstacle course: a bot carries out special links (lift, jump, drop, ladder, door, ...)",
+    ),
+    (
         "vision [name|#userid]",
         "what bots see, hear and remember: contacts, tracks, sounds, recognition times",
     ),
@@ -46,6 +50,10 @@ const HELP: &[(&str, &str)] = &[
         "test motor <#userid|all> run|strafe|jump|duckjump|spin [arg]",
         "scripted motor measurement",
     ),
+    (
+        "record [start [seconds]|stop]",
+        "record the next map for `lb-cli replay` (starts with the map, see docs/replay.md)",
+    ),
     ("debug panic|stall|stalecmd ...", "fault injection (requires lb_dev 1)"),
     ("version", "versions"),
 ];
@@ -63,7 +71,10 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         )],
         "list" => list(rt),
         "roster" => roster(rt, rest),
-        "nav" => nav(rt),
+        "nav" => match rest.first().copied() {
+            Some("test") => nav_test(rt, &rest[1..]),
+            _ => nav(rt),
+        },
         "vision" => vision(rt, rest),
         "brain" => brain(rt, rest),
         "profile" => profile(rt, rest),
@@ -77,7 +88,32 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "config" => config(rt, host, rest),
         "test" => test(rt, host, rest),
         "debug" => debug(rt, host, rest),
+        "record" => record(rt, rest),
         other => vec![format!("lb: unknown command `{other}`, see `lb help`")],
+    }
+}
+
+fn record(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    use crate::record::RecordRequest;
+    match args {
+        [] => vec![rt.record_status.clone()],
+        ["start"] | ["start", _] => {
+            let seconds = match args.get(1).map(|s| s.parse::<f64>()) {
+                None => None,
+                Some(Ok(s)) if s > 0.0 => Some(s),
+                Some(_) => return vec!["lb record start [seconds]: seconds must be a positive number".into()],
+            };
+            rt.record_request = Some(RecordRequest::Start { seconds });
+            vec![format!(
+                "recording starts with the next map{}: `changelevel <map>` or `restart` to begin now",
+                seconds.map(|s| format!(" and runs {s} s")).unwrap_or_default()
+            )]
+        }
+        ["stop"] => {
+            rt.record_request = Some(RecordRequest::Stop);
+            vec!["recording stops".into()]
+        }
+        _ => vec!["usage: lb record [start [seconds]|stop]".into()],
     }
 }
 
@@ -191,24 +227,134 @@ fn perf(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
 fn nav(rt: &Runtime) -> Vec<String> {
     let mut out = vec![format!("graph: {}", rt.nav_status)];
     let Some(g) = rt.graph.as_deref() else { return out };
+    out.push(format!("live check: {}", rt.live_check.progress(g.probes.len())));
+    let off: Vec<String> = rt
+        .link_health
+        .disabled_links()
+        .map(|(a, b)| format!("{a}->{b}"))
+        .collect();
+    if !off.is_empty() {
+        out.push(format!("switched off for everyone: {}", off.join(" ")));
+    }
+    let now = rt.now.secs();
     for b in &rt.bots {
+        let blocked = b.nav.known.active(now).count();
+        let failure = b
+            .nav
+            .last_failure
+            .map(|f| {
+                format!(
+                    ", last failure {}->{} {} {:.0} s ago",
+                    f.from,
+                    f.to,
+                    f.reason.as_str(),
+                    now - f.at
+                )
+            })
+            .unwrap_or_default();
         let line = match b.nav.follower.as_ref() {
             Some(f) => {
                 let target = f.target().map(|t| t.to_string()).unwrap_or_else(|| "-".into());
                 let left = f.remaining().len();
                 let goal = g.node(f.goal()).origin;
                 format!(
-                    "  {:<20} goal {} ({:.0} u away), next node {target}, {left} nodes left",
+                    "  {:<20} {:<16} goal {} ({:.0} u away), next {target}, {left} nodes left, {blocked} links blocked{failure}",
                     b.persona.name,
+                    f.phase(),
                     f.goal(),
                     goal.distance(b.self_state.body.origin)
                 )
             }
-            None => format!("  {:<20} {}", b.persona.name, b.state.as_str()),
+            None => format!(
+                "  {:<20} {}, {blocked} links blocked{failure}",
+                b.persona.name,
+                b.state.as_str()
+            ),
         };
         out.push(line);
     }
     out
+}
+
+fn nav_test(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    use crate::nav_test::{NavTest, pick_links};
+    use lb_nav::LinkKind;
+    let Some(g) = rt.graph.clone() else {
+        return vec![format!("no navigation graph: {}", rt.nav_status)];
+    };
+    match args.first().copied() {
+        None => {
+            let mut out = Vec::new();
+            for b in rt.bots.iter().filter(|b| b.nav_test.is_some()) {
+                out.push(format!("{}:", b.persona.name));
+                out.extend(b.nav_test.as_ref().map(|t| t.report()).unwrap_or_default());
+            }
+            if out.is_empty() {
+                out.push("no course running; lb nav test <kind|all> [count] [name|#userid]".into());
+            }
+            out
+        }
+        Some("stop") => {
+            for b in &mut rt.bots {
+                b.nav_test = None;
+            }
+            vec!["course stopped".into()]
+        }
+        Some("link") => {
+            let nums: Vec<Option<u32>> = args[1..].iter().map(|a| a.parse().ok()).collect();
+            if nums.is_empty() || !nums.len().is_multiple_of(2) || nums.iter().any(Option::is_none) {
+                return vec!["usage: lb nav test link <from> <to> [<from> <to> ...]".into()];
+            }
+            let links: Vec<(u32, u32)> = nums.chunks(2).map(|p| (p[0].unwrap_or(0), p[1].unwrap_or(0))).collect();
+            if let Some((a, b)) = links
+                .iter()
+                .find(|(a, b)| (*a as usize) >= g.len() || g.find_link(*a, *b).is_none())
+            {
+                return vec![format!("no link {a} -> {b}")];
+            }
+            let Some(&i) = find_bots(rt, None)
+                .iter()
+                .find(|&&i| rt.bots[i].state == BotState::Alive)
+            else {
+                return vec!["no live bot to run the course".into()];
+            };
+            let n = links.len();
+            let bot = &mut rt.bots[i];
+            bot.nav_test = Some(NavTest::new(links));
+            vec![format!(
+                "{} runs {n} links; `lb nav test` shows the results",
+                bot.persona.name
+            )]
+        }
+        Some(kind) => {
+            let kind = match kind {
+                "all" => None,
+                k => match LinkKind::ALL.into_iter().find(|x| x.as_str() == k) {
+                    Some(k) => Some(k),
+                    None => return vec![format!("unknown link kind `{k}`")],
+                },
+            };
+            let count: usize = args.get(1).and_then(|c| c.parse().ok()).unwrap_or(20);
+            let who = (args.len() > 2).then(|| args[2..].join(" "));
+            let Some(&i) = find_bots(rt, who.as_deref())
+                .iter()
+                .find(|&&i| rt.bots[i].state == BotState::Alive)
+            else {
+                return vec!["no live bot to run the course".into()];
+            };
+            let links = pick_links(&g, kind, count);
+            if links.is_empty() {
+                return vec!["no such links on this map".into()];
+            }
+            let n = links.len();
+            let bot = &mut rt.bots[i];
+            bot.nav_test = Some(NavTest::new(links));
+            vec![format!(
+                "{} runs {n} links; `lb nav test` shows the results",
+                bot.persona.name
+            )]
+        }
+    }
 }
 
 fn vision(rt: &Runtime, args: &[&str]) -> Vec<String> {
@@ -383,6 +529,26 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             if m.aim.aims_at_head() { ", aims at the head" } else { "" },
             if m.firing { ", firing" } else { "" }
         ));
+        if let Some(p) = &b.self_state.prediction {
+            let w = p.current;
+            let state = w.and_then(|w| p.weapons.get(w as usize).copied().flatten());
+            out.push(format!(
+                "  client prediction: {} {}{}",
+                w.map(|w| w.classname()).unwrap_or("-"),
+                match state {
+                    Some(s) if s.reloading => format!("reloading, clip {}", s.clip),
+                    Some(s) if s.next_primary > 0.0 || p.next_attack > 0.0 => {
+                        format!("ready in {:.2} s, clip {}", s.next_primary.max(p.next_attack), s.clip)
+                    }
+                    Some(s) => format!("ready, clip {}", s.clip),
+                    None => "no data".into(),
+                },
+                state
+                    .filter(|s| s.in_attack != 0)
+                    .map(|s| format!(", attack state {}", s.in_attack))
+                    .unwrap_or_default()
+            ));
+        }
         let i = &b.brain.intents;
         let owner = |p: Option<lb_motor::Prio>| p.map(|p| format!("{p:?}")).unwrap_or_else(|| "-".into());
         out.push(format!(
@@ -660,7 +826,7 @@ fn open_yaw(host: &mut dyn Host, origin: lb_core::Vec3) -> f32 {
     let mut best = (0.0f32, -1.0f32);
     for step in 0..16 {
         let yaw = step as f32 * 22.5;
-        let (s, c) = yaw.to_radians().sin_cos();
+        let (s, c) = lb_core::dmath::sin_cos(yaw.to_radians());
         let end = origin + lb_core::Vec3::new(c, s, 0.0) * 1200.0;
         let tr = host.trace(&TraceRequest {
             start: origin,
@@ -818,7 +984,8 @@ fn trace_dump(rt: &mut Runtime, host: &mut dyn Host, n: usize) -> std::io::Resul
         let yaw = rt.rng.range_f32(0.0, std::f32::consts::TAU);
         let pitch = rt.rng.range_f32(-1.2, 1.2);
         let len = rt.rng.range_f32(16.0, 1500.0);
-        let dir = lb_core::Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin());
+        let (m, n) = (lb_core::dmath::sin_cos(yaw), lb_core::dmath::sin_cos(pitch));
+        let dir = lb_core::Vec3::new(m.1 * n.1, m.0 * n.1, n.0);
         let end = start + dir * len;
         let hull = rt.rng.range_i32(0, 3) as u8;
         let kind = if hull == 0 {

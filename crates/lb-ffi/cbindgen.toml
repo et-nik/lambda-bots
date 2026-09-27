@@ -12,7 +12,7 @@ style = "both"
 
 [export]
 item_types = ["constants", "structs", "typedefs", "opaque"]
-include = ["LbStr","LbVec3","LbEntRef","LbArgs","LbInitInfo","LbInitResult","LbMapInfo","LbFrameHeader","LbClientSnapshot","LbSelfSnapshot","LbEventBatch","LbFrameInput","LbEventHeader","LbEvClient","LbEvUserMsg","LbMsgArg","LbEvSound","LbEvPlayback","LbEvEntity","LbEvCommand","LbEvFixangle","LbEvNamed","LbEvOverflow","LbBotCommand","LbMoveFeedback","LbClientCommand","LbTraceRequest","LbTraceResult","LbTrackRule","LbEntitySnapshot","LbKeyValue","LbCreateBotRequest","LbCreateBotResult","LbDisguise","LbDebugPrim","LbCvarSpec","LbOwnedBuffer","LbCompatFacts","LbHostApi"]
+include = ["LbStr","LbVec3","LbEntRef","LbArgs","LbInitInfo","LbInitResult","LbMapInfo","LbFrameHeader","LbClientSnapshot","LbSelfSnapshot","LbEventBatch","LbFrameInput","LbEventHeader","LbEvClient","LbEvUserMsg","LbMsgArg","LbEvSound","LbEvPlayback","LbEvEntity","LbEvCommand","LbEvFixangle","LbEvNamed","LbEvOverflow","LbBotCommand","LbMoveFeedback","LbClientCommand","LbTraceRequest","LbTraceResult","LbTrackRule","LbEntitySnapshot","LbKeyValue","LbCreateBotRequest","LbCreateBotResult","LbDisguise","LbDebugPrim","LbCvarSpec","LbOwnedBuffer","LbCompatFacts","LbWeaponData","LbWeaponState","LbHostApi"]
 
 [const]
 allow_static_const = false

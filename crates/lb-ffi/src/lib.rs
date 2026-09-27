@@ -157,6 +157,7 @@ pub const LB_SZ_COMPAT_FACTS: usize = 18;
 pub const LB_SZ_HOST_API: usize = 19;
 pub const LB_SZ_MSG_ARG: usize = 20;
 pub const LB_SZ_DISGUISE: usize = 21;
+pub const LB_SZ_WEAPON_STATE: usize = 22;
 pub const LB_SZ_COUNT: usize = 24;
 
 #[repr(C)]
@@ -770,6 +771,53 @@ pub struct LbCompatFacts {
     pub gamedll_path: [u8; 256],
 }
 
+/// Weapon slots in [`LbWeaponState::weapons`] (weapon ids 0..31).
+pub const LB_MAX_WEAPONS: usize = 32;
+
+/// One weapon as the bot's own client would be told it for prediction (`weapon_data_t` from the game's
+/// `GetWeaponData`). Times are seconds from now.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LbWeaponData {
+    /// Weapon id (`WEAPON_*`); 0 = not carried.
+    pub id: i32,
+    pub clip: i32,
+    /// Until the next primary and secondary attack; zero or less: ready.
+    pub next_primary: f32,
+    pub next_secondary: f32,
+    pub idle: f32,
+    pub in_reload: i32,
+    pub in_special_reload: i32,
+    /// `m_chargeReady`, `m_fInAttack`, `m_fireState` (grenade pin, gauss charge, egon beam).
+    pub iuser1: i32,
+    pub iuser2: i32,
+    pub iuser3: i32,
+    /// `pev->fuser1`, `m_flStartThrow`, `m_flReleaseThrow`.
+    pub fuser1: f32,
+    pub fuser2: f32,
+    pub fuser3: f32,
+    pub pad: u32,
+}
+
+/// Filled by `get_weapon_data`: the bot's weapons and what `UpdateClientData` tells its client.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LbWeaponState {
+    /// Active weapon id (`clientdata.m_iId`); 0 = none.
+    pub current: i32,
+    /// Until any attack is allowed (`m_flNextAttack`: weapon switches, deploys).
+    pub next_attack: f32,
+    /// `m_flNextAmmoBurn`, `m_flAmmoStartCharge` (egon, gauss charging).
+    pub next_ammo_burn: f32,
+    pub ammo_start_charge: f32,
+    /// The active weapon's ammo types and what the player carries of them.
+    pub primary_type: i32,
+    pub primary_ammo: i32,
+    pub secondary_type: i32,
+    pub secondary_ammo: i32,
+    pub weapons: [LbWeaponData; LB_MAX_WEAPONS],
+}
+
 pub const LB_PRINT_CONSOLE: u8 = 1;
 pub const LB_PRINT_CENTER: u8 = 2;
 pub const LB_PRINT_CHAT: u8 = 3;
@@ -862,6 +910,7 @@ pub fn abi_sizes() -> [u32; LB_SZ_COUNT] {
     s[LB_SZ_HOST_API] = size_of::<LbHostApi>() as u32;
     s[LB_SZ_MSG_ARG] = size_of::<LbMsgArg>() as u32;
     s[LB_SZ_DISGUISE] = size_of::<LbDisguise>() as u32;
+    s[LB_SZ_WEAPON_STATE] = size_of::<LbWeaponState>() as u32;
     s
 }
 
@@ -894,6 +943,8 @@ mod tests {
             ("LbEvNamed", size_of::<LbEvNamed>()),
             ("LbCompatFacts", size_of::<LbCompatFacts>()),
             ("LbDisguise", size_of::<LbDisguise>()),
+            ("LbWeaponData", size_of::<LbWeaponData>()),
+            ("LbWeaponState", size_of::<LbWeaponState>()),
         ] {
             assert_eq!(size % 8, 0, "{name} size {size} is not a multiple of 8");
         }

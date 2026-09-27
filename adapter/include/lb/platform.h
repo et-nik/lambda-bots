@@ -2,7 +2,8 @@
 #pragma once
 
 #if defined(_WIN32)
-#define LB_EXPORT extern "C" __declspec(dllexport)
+// Exported by adapter/exports/lambdabots.def alone: __declspec(dllexport) would add the decorated _GiveFnptrsToDll@8.
+#define LB_EXPORT extern "C"
 #define LB_WINAPI __stdcall
 #else
 #define LB_EXPORT extern "C" __attribute__((visibility("default")))

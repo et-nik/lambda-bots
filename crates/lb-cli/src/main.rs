@@ -10,7 +10,8 @@ use lb_config::check::{check_file, yaml_files};
 
 const USAGE: &str = "usage:
   lb-cli config check <file-or-dir>...
-  lb-cli nav tracecheck <map.bsp> <tracedump.jsonl>";
+  lb-cli nav tracecheck <map.bsp> <tracedump.jsonl>
+  lb-cli replay <recording.lbrec> [--console] [--keep] [--dir <dir>] [--diffs <n>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,8 +30,47 @@ fn run(args: &[&str]) -> Result<bool> {
     match args {
         ["config", "check", paths @ ..] if !paths.is_empty() => Ok(config_check(paths)),
         ["nav", "tracecheck", bsp, dump] => trace_check(Path::new(bsp), Path::new(dump)),
+        ["replay", file, opts @ ..] => replay(Path::new(file), opts),
         _ => bail!(USAGE),
     }
+}
+
+/// Runs a recording through a fresh core and reports whether the bots decide the same.
+fn replay(file: &Path, args: &[&str]) -> Result<bool> {
+    let mut opts = lb_runtime::record::ReplayOptions {
+        max_diffs: 20,
+        ..Default::default()
+    };
+    let mut console = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--console" => console = true,
+            "--keep" => opts.keep_dir = true,
+            "--dir" => {
+                opts.dir = Some(
+                    it.next()
+                        .ok_or_else(|| anyhow::anyhow!("--dir needs a directory"))?
+                        .into(),
+                )
+            }
+            "--diffs" => opts.max_diffs = it.next().and_then(|n| n.parse().ok()).unwrap_or(opts.max_diffs),
+            other => bail!("replay: unknown option `{other}`\n{USAGE}"),
+        }
+    }
+    let report = lb_runtime::record::replay(file, &opts, &mut |line| {
+        if console {
+            println!("| {line}");
+        }
+    })
+    .map_err(anyhow::Error::msg)?;
+    for line in report.lines() {
+        println!("{line}");
+    }
+    if opts.keep_dir {
+        println!("files and logs of the replay: {}", report.dir.display());
+    }
+    Ok(report.matches())
 }
 
 fn config_check(paths: &[&str]) -> bool {

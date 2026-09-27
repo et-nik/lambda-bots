@@ -1,7 +1,7 @@
 //! Deterministic random streams. The generator is implemented here (PCG32 XSH-RR, SplitMix64
 //! seeding) so replays never change when third-party crates are upgraded.
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Pcg32 {
     state: u64,
     inc: u64,
@@ -57,7 +57,7 @@ impl Pcg32 {
     pub fn normal(&mut self) -> f32 {
         let u1 = self.next_f32().max(1e-7);
         let u2 = self.next_f32();
-        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+        (-2.0 * crate::dmath::ln(u1)).sqrt() * crate::dmath::cos(std::f32::consts::TAU * u2)
     }
 }
 
