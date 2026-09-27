@@ -433,8 +433,9 @@ impl Runtime {
             (Cv::Dev, "0".to_string()),
             (Cv::LogLevel, c.logging.level.clone()),
             (Cv::NavSource, c.nav.source.name().to_string()),
-            (Cv::Editor, "0".to_string()),
+            (Cv::Editor, (c.access.editor_enabled as u8).to_string()),
         ];
+        self.editor_allowed = c.access.editor_enabled;
         self.cvars.register(host, &defaults);
     }
 

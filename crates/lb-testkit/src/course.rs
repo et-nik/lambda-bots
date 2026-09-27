@@ -4,7 +4,7 @@
 //! breakables behave as the SDK's entities do (`doors.cpp`, `plats.cpp`, `buttons.cpp`, `triggers.cpp`).
 
 use lb_bsp::BspWorld;
-use lb_bsp::mech::{Mechanisms, Mover, MoverKind, TriggerKind};
+use lb_bsp::mech::{Mechanisms, Mover, MoverKind, SF_TRIGGER_NOCLIENTS, TriggerKind};
 use lb_config::skill::AimModel;
 use lb_core::input::IN_USE;
 use lb_core::math::view_angle_vectors;
@@ -164,6 +164,9 @@ impl Game {
             g.add_mover(m.clone());
         }
         for t in &mech.triggers {
+            if matches!(t.kind, TriggerKind::Multiple | TriggerKind::Once) && t.spawnflags & SF_TRIGGER_NOCLIENTS != 0 {
+                continue;
+            }
             let dest = if t.kind == TriggerKind::Teleport {
                 mech.teleport_destination(world, t)
             } else {

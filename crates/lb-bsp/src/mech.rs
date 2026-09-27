@@ -113,6 +113,8 @@ pub struct Trigger {
 /// `trigger_push` flags.
 pub const SF_PUSH_ONCE: i32 = 1;
 pub const SF_PUSH_START_OFF: i32 = 2;
+/// `trigger_multiple`/`trigger_once`: players do not set it off.
+pub const SF_TRIGGER_NOCLIENTS: i32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct Breakable {
@@ -477,7 +479,9 @@ impl Mechanisms {
                         Activation::Use { model }
                     }
                 }
-                ("trigger_multiple" | "trigger_once", Some(model)) => Activation::Touch { model },
+                ("trigger_multiple" | "trigger_once", Some(model)) if e.spawnflags() & SF_TRIGGER_NOCLIENTS == 0 => {
+                    Activation::Touch { model }
+                }
                 ("func_door" | "func_door_rotating", Some(model)) => match self.mover(model) {
                     Some(d) if d.usable => Activation::Use { model },
                     Some(d) if d.touch => Activation::Touch { model },
@@ -543,6 +547,48 @@ mod tests {
                 .iter()
                 .any(|a| a.how == Activation::Touch { model: 65 } && (a.delay - 2.0).abs() < 1e-3),
             "{shutter:?}"
+        );
+    }
+
+    #[test]
+    fn no_clients_triggers_are_not_touched() {
+        let world = BspWorld {
+            bsp: crate::Bsp {
+                planes: Vec::new(),
+                hull0: Vec::new(),
+                nodes: Vec::new(),
+                clipnodes: Vec::new(),
+                leafs: Vec::new(),
+                models: Vec::new(),
+                visdata: Vec::new(),
+                entities: String::new(),
+                textures: Vec::new(),
+                fingerprint: ([0; 32], 0),
+            },
+            entities: crate::parse_entities(
+                r#"{ "classname" "trigger_multiple" "model" "*1" "target" "a" }
+{ "classname" "trigger_once" "model" "*2" "target" "a" "spawnflags" "2" }
+{ "classname" "trigger_multiple" "model" "*3" "target" "a" "spawnflags" "3" }
+{ "classname" "trigger_once" "model" "*4" "target" "a" "spawnflags" "1" }"#,
+            ),
+            brushes: Vec::new(),
+            traces: 0,
+            pushes: Vec::new(),
+        };
+        let how: Vec<Activation> = Mechanisms::default()
+            .activators(&world, "a")
+            .into_iter()
+            .map(|a| a.how)
+            .collect();
+        let unsupported = |c: &str| Activation::Unsupported { classname: c.into() };
+        assert_eq!(
+            how,
+            vec![
+                Activation::Touch { model: 1 },
+                unsupported("trigger_once"),
+                unsupported("trigger_multiple"),
+                Activation::Touch { model: 4 },
+            ]
         );
     }
 }

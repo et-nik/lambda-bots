@@ -143,4 +143,49 @@ mod tests {
         };
         assert!(matches!(start, Interaction::Use { .. }), "{start:?}");
     }
+
+    /// A yapb link from a lift's platform straight to the top fails the check with the lift at rest: the lift link
+    /// takes its place, so the follower rides the lift the planner chose.
+    #[test]
+    fn crossfire_lift_replaces_imported_link() {
+        let Some(maps) = lb_bsp::test_maps_dir() else { return };
+        let (Ok(bsp), Ok(graph)) = (
+            std::fs::read(maps.join("crossfire.bsp")),
+            std::fs::read(maps.join("../addons/yapb/data/graph/crossfire.graph")),
+        ) else {
+            return;
+        };
+        let import = |yapb: &YapbGraph, trust_imported: bool| {
+            let mut world = lb_bsp::BspWorld::load(&bsp).unwrap();
+            let mech = Mechanisms::from_world(&world);
+            let opts = ImportOptions {
+                trust_imported,
+                ..Default::default()
+            };
+            import_yapb(yapb, &mut world, &mech, &opts, "crossfire.graph")
+        };
+        let mut yapb = crate::yapb::parse(&graph).unwrap();
+        let g = import(&yapb, false);
+        let lifts: Vec<(NodeId, NodeId)> = (0..g.len() as NodeId)
+            .flat_map(|a| {
+                g.links(a)
+                    .iter()
+                    .filter(|l| l.kind == LinkKind::Lift)
+                    .map(move |l| (a, l.to))
+            })
+            .collect();
+        assert!(!lifts.is_empty());
+        for &(a, b) in &lifts {
+            let mut l = yapb.nodes[a as usize].links[0];
+            (l.index, l.flags) = (b as i16, 0);
+            yapb.nodes[a as usize].links.push(l);
+        }
+        for trust in [false, true] {
+            let g = import(&yapb, trust);
+            for &(a, b) in &lifts {
+                assert_eq!(g.links(a).iter().filter(|l| l.to == b).count(), 1, "{a} -> {b}");
+                assert_eq!(g.find_link(a, b).map(|l| l.kind), Some(LinkKind::Lift), "{a} -> {b}");
+            }
+        }
+    }
 }

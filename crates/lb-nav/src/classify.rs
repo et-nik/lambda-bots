@@ -883,6 +883,14 @@ impl Classifier<'_> {
                     ..a
                 };
                 for &(_, to) in &exits {
+                    // One link per pair, as the follower takes the first: a checked one stays, a failed or merely
+                    // trusted one gives way to the lift.
+                    if out[from as usize]
+                        .iter()
+                        .any(|l| l.to == to && l.valid() && !l.flags.contains(LinkFlags::TRUSTED))
+                    {
+                        continue;
+                    }
                     let b = self.nodes[to as usize];
                     if self.walk(&raised, &b).is_none() {
                         continue;
@@ -901,6 +909,7 @@ impl Classifier<'_> {
                     };
                     self.specs.push(spec);
                     let cost = spec.cost.time + spec.cost.wait;
+                    out[from as usize].retain(|l| l.to != to);
                     out[from as usize].push(NavLink {
                         to,
                         kind: LinkKind::Lift,

@@ -5,11 +5,11 @@ with its yapb graph, 1000 fps. The ReHLDS server has not run M2 yet (package `la
 
 ## Results against the plan's criteria
 
-| Criterion                                                               | Status | How it was checked                                                    |
-|-------------------------------------------------------------------------|--------|-----------------------------------------------------------------------|
-| Obstacle set: every traversal has a tested success and a tested failure | yes    | offline courses on crossfire and synthetic worlds; live `lb nav test` |
-| A long frame leaves no button pressed                                   | yes    | offline course with a 300 ms frame at 100 and 1000 fps                |
-| Replay reproduces decisions                                             | yes    | stand recordings replayed by `lb-cli replay`: 0 differing commands    |
+| Criterion                                                               | Status  | How it was checked                                                    |
+|-------------------------------------------------------------------------|---------|-----------------------------------------------------------------------|
+| Obstacle set: every traversal has a tested success and a tested failure | partial | offline courses on crossfire and synthetic worlds; live `lb nav test` |
+| A long frame leaves no button pressed                                   | yes     | offline course with a 300 ms frame at 100 and 1000 fps                |
+| Replay reproduces decisions                                             | yes     | stand recordings replayed by `lb-cli replay`: 0 differing commands    |
 
 ## Traversals
 
@@ -29,13 +29,13 @@ failed on the way):
 | sample at 100, 500, 1000 fps and with a 300 ms frame | 23/23 each; no button left pressed                                      |
 | 60 random routes                                     | 59 arrive (1 around a failed link); time / plan median 1.03, worst 1.57 |
 
-Synthetic worlds (`crates/lb-testkit/tests/obstacles.rs`), each with its success and its failure:
+Synthetic worlds (`crates/lb-testkit/tests/obstacles.rs`); a dash means no failure test:
 
 | Traversal                 | Success                      | Failure tested                                     |
 |---------------------------|------------------------------|----------------------------------------------------|
-| touch door                | opens when walked into       | a door that never opens: `WaitingForInteraction`   |
-| use door                  | opened with the use key      | the same                                           |
-| door with a remote button | the button is pressed first  | the same                                           |
+| touch door                | opens when walked into       | —                                                  |
+| use door                  | opened with the use key      | a door that never opens: `WaitingForInteraction`   |
+| door with a remote button | the button is pressed first  | —                                                  |
 | platform                  | rides up when stood on       | —                                                  |
 | teleport                  | walked into, arrival checked | —                                                  |
 | breakable                 | shot out of the way          | —                                                  |
@@ -43,6 +43,8 @@ Synthetic worlds (`crates/lb-testkit/tests/obstacles.rs`), each with its success
 | jump                      | (crossfire)                  | a jump too far: `ControllerFailure`, walked around |
 | walk                      | (crossfire)                  | a walled-up passage: `GeometryInvalid`             |
 | drop                      | (crossfire)                  | not enough health: `MissingCapability` (live)      |
+
+Lifts and ladders are tested for success only (crossfire).
 
 **Live** (`lb nav test all 60`, one bot, 60 special links spread over the map):
 

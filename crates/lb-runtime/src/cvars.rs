@@ -109,6 +109,19 @@ impl Cvars {
             .map(|(_, h, last)| (*h, last.as_str()))
     }
 
+    pub fn handle_of(&self, cv: Cv) -> Option<CvarHandle> {
+        self.handle(cv).map(|(h, _)| h)
+    }
+
+    /// Replaces the last seen value of `cv`, unless it is empty.
+    pub fn redact(&mut self, cv: Cv, with: &str) {
+        for (c, _, last) in &mut self.handles {
+            if *c == cv && !last.is_empty() {
+                *last = with.to_string();
+            }
+        }
+    }
+
     pub fn get(&self, host: &mut dyn Host, cv: Cv) -> Option<String> {
         self.handle(cv).map(|(h, _)| host.cvar_string(h))
     }

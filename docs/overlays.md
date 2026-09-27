@@ -63,8 +63,11 @@ patch applied. `lb-cli config check` checks the schema of any overlay file witho
 ## The editor
 
 The editor lets an admin walk the map with the graph drawn around them and record changes into `editor.yaml`. It is
-off unless `lb_editor 1` is set, and it only takes commands from a player with `lb` access (see `access` in the main
-config). Run the commands from the game console:
+off unless the server allows it: `lb_editor 1` in the server console (or `rcon lb_editor 1` from the game, or
+`access.editor_enabled: true` in the main config). It only takes commands from a player with `lb` access: a SteamID
+in `access.admins`, or `access.password` set on the server and the same value given with `setinfo _lbpw <password>`
+in the game console (on a listen server the host always has access). Run the `lb edit` commands from the game console
+(`cmd lb edit on` if the client does not pass the command on by itself):
 
 | Command                                   | Does                                                                            |
 |-------------------------------------------|---------------------------------------------------------------------------------|

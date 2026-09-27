@@ -178,17 +178,18 @@ failed on the way: the planner goes around a failed link, so arriving alone prov
 | a sample at 100, 500, 1000 fps, and with a 300 ms frame | 23/23 each, no button left pressed                                      |
 | 60 random routes across the map                         | 59 arrive, 1 around a failed link; time / plan: median 1.03, worst 1.57 |
 
-`tests/obstacles.rs` builds small worlds for what crossfire lacks. Each traversal is tested for success and for
-failure:
+`tests/obstacles.rs` builds small worlds for what crossfire lacks. Carried out:
 - a touch door;
 - a use door;
 - a door opened by a remote button;
 - a platform;
 - a teleport;
 - a breakable;
-- swimming across a pool and climbing out;
-- a door that never opens, reported as `WaitingForInteraction` and walked around;
-- a jump too far, reported as `ControllerFailure`;
+- swimming across a pool and climbing out.
+
+Failures tested (the other traversals have none yet):
+- a use door that never opens, reported as `WaitingForInteraction` and walked around;
+- a jump too far, reported as `ControllerFailure` and walked around;
 - a walled-up passage, reported as `GeometryInvalid`.
 
 **Generated graphs** (`cargo test -p lb-testkit --test generated_course -- --ignored`). On every standard map, a
