@@ -18,6 +18,8 @@ pub struct CompatibilityProfile {
     pub gamedll: String,
     pub gamedll_path: String,
     pub bugfixedhl: bool,
+    /// The weapon rules the bots use (`lb_game::dll`) and whether they were detected.
+    pub weapon_rules: String,
     pub channels: Vec<(&'static str, bool)>,
     pub resolved_messages: Vec<(String, i32)>,
     pub missing_messages: Vec<String>,
@@ -47,6 +49,7 @@ impl CompatibilityProfile {
         let _ = writeln!(s, "gamedll: \"{}\"", self.gamedll);
         let _ = writeln!(s, "gamedll_path: \"{}\"", self.gamedll_path);
         let _ = writeln!(s, "bugfixedhl: {}", self.bugfixedhl);
+        let _ = writeln!(s, "weapon_rules: {}", self.weapon_rules);
         let _ = writeln!(s, "map: {}", self.map);
         let _ = writeln!(s, "late_load: {}", self.late_load);
         let _ = writeln!(s, "install_dir: {}", quote(&self.install_dir));

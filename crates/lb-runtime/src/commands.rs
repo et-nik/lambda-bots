@@ -47,6 +47,11 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("status", "runtime status and counters"),
     (
+        "weapons [all|melee|<weapon>...] [give]",
+        "weapons bots may use; with give every bot gets them on spawn (needs sv_cheats 1)",
+    ),
+    ("stats [reset]", "weapon statistics: rounds, hit rate by distance, kills, suicides"),
+    (
         "perf [reset|bots]",
         "core time per frame (p50/p95/p99/max) or command timing per bot",
     ),
@@ -94,6 +99,14 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "brain" => brain(rt, rest),
         "profile" => profile(rt, rest),
         "status" => status(rt),
+        "weapons" => weapons(rt, rest),
+        "stats" => match rest.first().copied() {
+            Some("reset") => {
+                rt.arms_stats.reset(rt.now.secs());
+                vec!["weapon statistics reset".into()]
+            }
+            _ => rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages),
+        },
         "perf" => perf(rt, rest),
         "compat" => rt.compat.to_yaml().lines().map(String::from).collect(),
         "add" => add(rt, host, rest),
@@ -686,6 +699,29 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
                     .unwrap_or_default()
             ));
         }
+        let arms = &m.arms;
+        let st = &arms.stats;
+        out.push(format!(
+            "  arms: {}; thrown {} grenades, {} satchels, {} snarks; {} m203, {} mines laid, {} detonations, {} mines \
+             shot, gauss {} fired {} dumped, {} dodges, {} failed{}; explosives known: {} own satchels, {} mines, {} \
+             in flight",
+            arms.describe(now),
+            st.grenades,
+            st.satchels,
+            st.snarks,
+            st.lobs,
+            st.mines,
+            st.detonations,
+            st.mine_shots,
+            arms.gauss.fired,
+            arms.gauss.dumped,
+            st.dodges,
+            st.failed,
+            arms.last_failure.map(|f| format!(" (last: {f})")).unwrap_or_default(),
+            b.brain.explosives.charges.len(),
+            b.brain.explosives.mines.len(),
+            b.brain.explosives.flying.len(),
+        ));
         let i = &b.brain.intents;
         let owner = |p: Option<lb_motor::Prio>| p.map(|p| format!("{p:?}")).unwrap_or_else(|| "-".into());
         out.push(format!(
@@ -1148,4 +1184,65 @@ fn trace_dump(rt: &mut Runtime, host: &mut dyn Host, n: usize) -> std::io::Resul
     }
     out.flush()?;
     Ok((path, n))
+}
+
+/// Weapon names for `lb weapons`: classnames without `weapon_` and the usual aliases.
+fn weapon_by_name(name: &str) -> Option<lb_game::weapons::WeaponId> {
+    use lb_game::weapons::WeaponId;
+    match name.to_ascii_lowercase().as_str() {
+        "357" | "python" => Some(WeaponId::Python),
+        "mp5" | "9mmar" => Some(WeaponId::Mp5),
+        "glock" | "9mmhandgun" => Some(WeaponId::Glock),
+        "hornet" | "hornetgun" => Some(WeaponId::Hornetgun),
+        "grenade" | "handgrenade" => Some(WeaponId::HandGrenade),
+        other => WeaponId::from_classname(other),
+    }
+}
+
+fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    use lb_game::weapons::WeaponId;
+    let describe = |rt: &Runtime| {
+        let allowed: Vec<&str> = WeaponId::ALL
+            .into_iter()
+            .filter(|w| rt.weapons_allowed & w.bit() != 0)
+            .map(|w| &w.classname()["weapon_".len()..])
+            .collect();
+        let given: Vec<&str> = rt.weapons_give.iter().map(|w| &w.classname()["weapon_".len()..]).collect();
+        let allowed = if rt.weapons_allowed == u32::MAX {
+            "all".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        format!(
+            "bots may use: {allowed}; given on spawn: {}",
+            if given.is_empty() { "nothing".into() } else { given.join(", ") }
+        )
+    };
+    let Some(first) = args.first().copied() else {
+        return vec![describe(rt)];
+    };
+    let give = args.last().is_some_and(|a| a.eq_ignore_ascii_case("give"));
+    let names: Vec<&str> = args.iter().copied().filter(|a| !a.eq_ignore_ascii_case("give")).collect();
+    match first {
+        "all" | "standard" => {
+            rt.weapons_allowed = u32::MAX;
+            rt.weapons_give.clear();
+        }
+        "melee" => {
+            rt.weapons_allowed = WeaponId::Crowbar.bit();
+            rt.weapons_give.clear();
+        }
+        _ => {
+            let mut list = Vec::new();
+            for n in &names {
+                match weapon_by_name(n) {
+                    Some(w) => list.push(w),
+                    None => return vec![format!("unknown weapon `{n}`")],
+                }
+            }
+            rt.weapons_allowed = list.iter().fold(WeaponId::Crowbar.bit(), |m, w| m | w.bit());
+            rt.weapons_give = if give { list } else { Vec::new() };
+        }
+    }
+    vec![describe(rt)]
 }

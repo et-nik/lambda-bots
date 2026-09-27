@@ -49,3 +49,55 @@ pub const TRACK_RULES: &[(&str, bool, u8)] = &[
 pub fn kind_mask(kinds: &[u8]) -> u32 {
     kinds.iter().fold(0, |m, k| m | (1 << k))
 }
+
+/// Projectiles and placed explosives a player can see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProjectileKind {
+    /// A hand grenade or an MP5 grenade (the same entity class).
+    Grenade,
+    Rocket,
+    Bolt,
+    Hornet,
+    Snark,
+    Satchel,
+    Tripmine,
+}
+
+impl ProjectileKind {
+    pub fn from_classname(name: &str) -> Option<ProjectileKind> {
+        Some(match name {
+            "grenade" => ProjectileKind::Grenade,
+            "rpg_rocket" => ProjectileKind::Rocket,
+            "bolt" => ProjectileKind::Bolt,
+            "hornet" => ProjectileKind::Hornet,
+            "monster_snark" => ProjectileKind::Snark,
+            "monster_satchel" => ProjectileKind::Satchel,
+            "monster_tripmine" => ProjectileKind::Tripmine,
+            _ => return None,
+        })
+    }
+
+    /// Farthest a player notices one: a rocket's glow and trail carry far, a satchel on the floor does not.
+    pub fn view_range(self) -> f32 {
+        match self {
+            ProjectileKind::Grenade => 1200.0,
+            ProjectileKind::Rocket => 3000.0,
+            ProjectileKind::Bolt => 1500.0,
+            ProjectileKind::Hornet | ProjectileKind::Satchel => 800.0,
+            ProjectileKind::Snark => 900.0,
+            ProjectileKind::Tripmine => 1000.0,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectileKind::Grenade => "grenade",
+            ProjectileKind::Rocket => "rocket",
+            ProjectileKind::Bolt => "bolt",
+            ProjectileKind::Hornet => "hornet",
+            ProjectileKind::Snark => "snark",
+            ProjectileKind::Satchel => "satchel",
+            ProjectileKind::Tripmine => "tripmine",
+        }
+    }
+}

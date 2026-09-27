@@ -1,8 +1,15 @@
-//! Weapon policy: which weapon to fight with at a distance. Expected damage per second from the mechanics (spread
-//! and the shooter's own aim error), outside a weapon's band only a third counts, the current weapon gets a
-//! margin against flip-flopping, and yapb's order breaks ties.
+//! Weapon policy: which gun to fight with at a distance.
+//!
+//! Every gun is scored by the damage per second it is expected to deal to a standing player there: the server's
+//! damage, the weapon's spread and the shooter's own aim error; for projectiles also the flight time a moving target
+//! has to step aside, and the blast that makes up for part of it. Outside a weapon's band only a third counts. A
+//! weapon whose blast would reach the shooter scores nothing (a rocket under 350 units, a bolt under 160, the egon's
+//! beam end under 128). The current weapon gets a margin against flip-flopping, and yapb's order breaks ties.
+//! Throwables are not guns: the weapon protocols throw them.
 
-use lb_game::mechanics::{WeaponClass, spec};
+use lb_game::mechanics::{
+    BODY, BOLT_BLAST_RADIUS, BOLT_HIT, BOLT_SPEED, Damages, ROCKET_SPEED, WeaponClass, WeaponSpec, blast_radius, spec,
+};
 use lb_game::weapons::WeaponId;
 
 /// A weapon the bot owns, with what it knows about its ammo.
@@ -13,9 +20,20 @@ pub struct Armed {
     pub clip: Option<i32>,
     /// Rounds in reserve; `None` when not known yet.
     pub reserve: Option<i32>,
+    /// Reserve of the second ammo type (the MP5's grenades); `None` when not known or none.
+    pub reserve2: Option<i32>,
 }
 
 impl Armed {
+    pub fn new(id: WeaponId, clip: Option<i32>, reserve: Option<i32>) -> Armed {
+        Armed {
+            id,
+            clip,
+            reserve,
+            reserve2: None,
+        }
+    }
+
     /// Can fire right now: a loaded clip, or reserve ammo for clip-less weapons (the crowbar always).
     pub fn loaded(&self) -> bool {
         let s = spec(self.id);
@@ -23,7 +41,8 @@ impl Armed {
             return true;
         }
         if s.clip < 0 {
-            return self.reserve.is_none_or(|r| r > 0);
+            let need = if self.id == WeaponId::Gauss { 2 } else { 1 };
+            return self.reserve.is_none_or(|r| r >= need);
         }
         self.clip.is_none_or(|c| c > 0)
     }
@@ -31,6 +50,16 @@ impl Armed {
     pub fn can_reload(&self) -> bool {
         let s = spec(self.id);
         s.clip > 0 && self.clip.is_some_and(|c| c < s.clip) && self.reserve.is_some_and(|r| r > 0)
+    }
+
+    /// Rounds left to fire: clip and reserve; `None` when not known.
+    pub fn rounds(&self) -> Option<i32> {
+        match (spec(self.id).clip, self.clip, self.reserve) {
+            (c, _, r) if c < 0 => r,
+            (_, Some(c), Some(r)) => Some(c + r),
+            (_, Some(c), None) => Some(c),
+            (_, None, r) => r,
+        }
     }
 }
 
@@ -49,19 +78,84 @@ impl Choice {
     }
 }
 
+/// What a weapon is weighed against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Target {
+    pub distance: f32,
+    /// How fast the target moves, units per second (projectiles must lead it).
+    pub speed: f32,
+    pub aim_sigma: f32,
+}
+
 const OUT_OF_BAND: f32 = 0.35;
 const KEEP_MARGIN: f32 = 1.2;
+/// A zoomed crossbow is worth it from here on; closer it fires bolts.
+pub const XBOW_ZOOM_FROM: f32 = 600.0;
+/// Rockets are never fired closer than this: the blast would reach the shooter.
+pub const ROCKET_MIN: f32 = 350.0;
+/// Unzoomed bolts and the egon's beam end blow up this close to the shooter.
+const BOLT_MIN: f32 = 160.0;
+const EGON_MIN: f32 = 128.0;
+/// Seconds between rockets: the shot and the reload of the one-rocket clip.
+const ROCKET_CYCLE: f32 = 3.5;
+/// A homing hornet finds its target this often within `HORNET_SEEK`.
+const HORNET_HIT: f32 = 0.8;
+const HORNET_SEEK: f32 = 1024.0;
 
-/// Best weapon against a target at `distance`; `aim_sigma` is the bot's aim error there, in units.
-pub fn choose(weapons: &[Armed], current: Option<WeaponId>, distance: f32, underwater: bool, aim_sigma: f32) -> Choice {
+/// Chance a projectile of `speed` lands on a target at `distance` moving at `target_speed`, from `spread` and aim
+/// error `aim_sigma`; a blast of `blast` radius makes up for part of the miss.
+fn projectile_hit(s: &WeaponSpec, t: &Target, speed: f32, blast: f32) -> f32 {
+    let flight = t.distance / speed.max(1.0);
+    let sigma = t.aim_sigma + 0.5 * t.speed * flight;
+    let reach = 0.4 * blast;
+    s.hit_chance_with(s.spread, t.distance, [BODY[0] + reach, BODY[1] + reach], sigma)
+}
+
+/// Expected damage per second of `a` against `t`; zero when it cannot or must not fire.
+pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
+    let s = spec(a.id);
+    let d = t.distance;
+    let dmg = damages.primary(a.id);
+    match a.id {
+        _ if s.class == WeaponClass::Throwable => 0.0,
+        WeaponId::Crossbow if d >= XBOW_ZOOM_FROM => s.dps(dmg, d, t.aim_sigma),
+        WeaponId::Crossbow if d < BOLT_MIN => 0.0,
+        WeaponId::Crossbow => {
+            let bolt = BOLT_HIT + damages.xbow_bolt;
+            bolt * projectile_hit(s, t, BOLT_SPEED, BOLT_BLAST_RADIUS) / s.cycle
+        }
+        WeaponId::Rpg if d < ROCKET_MIN => 0.0,
+        WeaponId::Rpg => dmg * projectile_hit(s, t, ROCKET_SPEED, blast_radius(dmg)) / ROCKET_CYCLE,
+        WeaponId::Egon if d < EGON_MIN => 0.0,
+        WeaponId::Hornetgun => {
+            let seek = if d <= HORNET_SEEK {
+                HORNET_HIT
+            } else {
+                HORNET_HIT * HORNET_SEEK / d
+            };
+            dmg * seek / s.cycle
+        }
+        _ => s.dps(dmg, d, t.aim_sigma),
+    }
+}
+
+/// Best gun against `t`, among the weapons `allowed` admits; `underwater` rules out those that do not fire there.
+pub fn choose(
+    weapons: &[Armed],
+    current: Option<WeaponId>,
+    t: &Target,
+    underwater: bool,
+    damages: &Damages,
+    allowed: &dyn Fn(WeaponId) -> bool,
+) -> Choice {
     let usable = |a: &&Armed| {
         let s = spec(a.id);
-        s.class != WeaponClass::Throwable && (s.underwater || !underwater)
+        s.class != WeaponClass::Throwable && (s.underwater || !underwater) && allowed(a.id)
     };
-    let score = |a: &Armed| {
+    let rank = |a: &Armed| {
         let s = spec(a.id);
-        let mut v = s.dps(distance, aim_sigma);
-        if !s.in_band(distance) {
+        let mut v = score(a, t, damages);
+        if !s.in_band(t.distance) {
             v *= OUT_OF_BAND;
         }
         if Some(a.id) == current {
@@ -73,8 +167,9 @@ pub fn choose(weapons: &[Armed], current: Option<WeaponId>, distance: f32, under
         .iter()
         .filter(usable)
         .filter(|a| a.loaded())
-        .filter(|a| spec(a.id).class != WeaponClass::Melee || distance <= spec(a.id).reach)
-        .max_by(|a, b| score(a).total_cmp(&score(b)));
+        .filter(|a| spec(a.id).class != WeaponClass::Melee || t.distance <= spec(a.id).reach)
+        .filter(|a| spec(a.id).class == WeaponClass::Melee || score(a, t, damages) > 0.0)
+        .max_by(|a, b| rank(a).total_cmp(&rank(b)));
     if let Some(a) = best {
         return Choice::Use(a.id);
     }
@@ -82,11 +177,34 @@ pub fn choose(weapons: &[Armed], current: Option<WeaponId>, distance: f32, under
         .iter()
         .filter(usable)
         .filter(|a| a.can_reload())
-        .max_by(|a, b| score(a).total_cmp(&score(b)))
+        .max_by(|a, b| rank(a).total_cmp(&rank(b)))
     {
         return Choice::Reload(a.id);
     }
     Choice::Use(WeaponId::Crowbar)
+}
+
+/// The gun the bot would like in hand at `distance` if everything were loaded: the one worth reloading when calm.
+pub fn preferred(
+    weapons: &[Armed],
+    t: &Target,
+    damages: &Damages,
+    allowed: &dyn Fn(WeaponId) -> bool,
+) -> Option<WeaponId> {
+    weapons
+        .iter()
+        .filter(|a| spec(a.id).class != WeaponClass::Throwable && spec(a.id).class != WeaponClass::Melee)
+        .filter(|a| allowed(a.id) && (a.loaded() || a.can_reload()))
+        .map(|a| {
+            let full = Armed {
+                clip: Some(spec(a.id).clip.max(1)),
+                ..*a
+            };
+            (a.id, score(&full, t, damages) + f32::from(spec(a.id).rank) * 1e-3)
+        })
+        .filter(|(_, v)| *v > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(w, _)| w)
 }
 
 #[cfg(test)]
@@ -94,11 +212,21 @@ mod tests {
     use super::*;
 
     fn armed(id: WeaponId, clip: i32, reserve: i32) -> Armed {
-        Armed {
-            id,
-            clip: Some(clip),
-            reserve: Some(reserve),
+        Armed::new(id, Some(clip), Some(reserve))
+    }
+
+    fn at(distance: f32, aim_sigma: f32) -> Target {
+        Target {
+            distance,
+            speed: 250.0,
+            aim_sigma,
         }
+    }
+
+    const ANY: &dyn Fn(WeaponId) -> bool = &|_| true;
+
+    fn pick(kit: &[Armed], current: Option<WeaponId>, t: Target, underwater: bool) -> Choice {
+        choose(kit, current, &t, underwater, &Damages::default(), ANY)
     }
 
     #[test]
@@ -108,22 +236,85 @@ mod tests {
             armed(WeaponId::Glock, 17, 68),
             armed(WeaponId::Shotgun, 8, 12),
         ];
-        assert_eq!(choose(&kit, None, 200.0, false, 10.0), Choice::Use(WeaponId::Shotgun));
-        assert_eq!(choose(&kit, None, 1400.0, false, 20.0), Choice::Use(WeaponId::Glock));
+        assert_eq!(pick(&kit, None, at(200.0, 10.0), false), Choice::Use(WeaponId::Shotgun));
+        assert_eq!(pick(&kit, None, at(1400.0, 20.0), false), Choice::Use(WeaponId::Glock));
         let dry = [armed(WeaponId::Crowbar, -1, 0), armed(WeaponId::Glock, 0, 34)];
         assert_eq!(
-            choose(&dry, Some(WeaponId::Glock), 500.0, false, 10.0),
+            pick(&dry, Some(WeaponId::Glock), at(500.0, 10.0), false),
             Choice::Reload(WeaponId::Glock)
         );
-        assert_eq!(choose(&dry, None, 40.0, false, 10.0), Choice::Use(WeaponId::Crowbar));
+        assert_eq!(pick(&dry, None, at(40.0, 10.0), false), Choice::Use(WeaponId::Crowbar));
         let empty = [armed(WeaponId::Crowbar, -1, 0), armed(WeaponId::Glock, 0, 0)];
-        assert_eq!(choose(&empty, None, 500.0, false, 10.0), Choice::Use(WeaponId::Crowbar));
+        assert_eq!(
+            pick(&empty, None, at(500.0, 10.0), false),
+            Choice::Use(WeaponId::Crowbar)
+        );
     }
 
     #[test]
     fn water_rules_out_the_mp5() {
         let kit = [armed(WeaponId::Glock, 17, 68), armed(WeaponId::Mp5, 50, 100)];
-        assert_eq!(choose(&kit, None, 300.0, false, 10.0), Choice::Use(WeaponId::Mp5));
-        assert_eq!(choose(&kit, None, 300.0, true, 10.0), Choice::Use(WeaponId::Glock));
+        assert_eq!(pick(&kit, None, at(300.0, 10.0), false), Choice::Use(WeaponId::Mp5));
+        assert_eq!(pick(&kit, None, at(300.0, 10.0), true), Choice::Use(WeaponId::Glock));
+    }
+
+    #[test]
+    fn heavy_weapons_lead_and_blasts_are_kept_off_the_shooter() {
+        let kit = [
+            armed(WeaponId::Glock, 17, 68),
+            armed(WeaponId::Mp5, 50, 100),
+            armed(WeaponId::Rpg, 1, 4),
+            armed(WeaponId::Gauss, -1, 60),
+            armed(WeaponId::Egon, -1, 60),
+            armed(WeaponId::Crossbow, 5, 10),
+        ];
+        assert_eq!(pick(&kit, None, at(400.0, 12.0), false), Choice::Use(WeaponId::Egon));
+        let no_egon: Vec<Armed> = kit.iter().filter(|a| a.id != WeaponId::Egon).copied().collect();
+        assert_eq!(
+            pick(&no_egon, None, at(400.0, 12.0), false),
+            Choice::Use(WeaponId::Gauss)
+        );
+        let rockets = [armed(WeaponId::Mp5, 50, 100), armed(WeaponId::Rpg, 1, 4)];
+        assert_eq!(
+            pick(&rockets, None, at(1200.0, 20.0), false),
+            Choice::Use(WeaponId::Rpg)
+        );
+        assert_eq!(
+            pick(&rockets, Some(WeaponId::Rpg), at(250.0, 10.0), false),
+            Choice::Use(WeaponId::Mp5),
+            "no rockets at point blank"
+        );
+        let xbow = [armed(WeaponId::Glock, 17, 68), armed(WeaponId::Crossbow, 5, 10)];
+        assert_eq!(
+            pick(&xbow, None, at(1500.0, 20.0), false),
+            Choice::Use(WeaponId::Crossbow)
+        );
+        assert_eq!(
+            pick(&xbow, None, at(100.0, 10.0), false),
+            Choice::Use(WeaponId::Glock),
+            "a bolt blast would reach the shooter"
+        );
+        let dry_gauss = [armed(WeaponId::Glock, 17, 68), armed(WeaponId::Gauss, -1, 1)];
+        assert_eq!(
+            pick(&dry_gauss, None, at(400.0, 10.0), false),
+            Choice::Use(WeaponId::Glock)
+        );
+    }
+
+    #[test]
+    fn restrictions_and_the_gun_worth_reloading() {
+        let kit = [
+            armed(WeaponId::Crowbar, -1, 0),
+            armed(WeaponId::Glock, 17, 68),
+            armed(WeaponId::Mp5, 0, 100),
+        ];
+        let d = Damages::default();
+        let t = at(300.0, 10.0);
+        assert_eq!(
+            choose(&kit, None, &t, false, &d, &|w| w != WeaponId::Glock),
+            Choice::Reload(WeaponId::Mp5)
+        );
+        assert_eq!(choose(&kit, None, &t, false, &d, ANY), Choice::Use(WeaponId::Glock));
+        assert_eq!(preferred(&kit, &t, &d, ANY), Some(WeaponId::Mp5));
     }
 }

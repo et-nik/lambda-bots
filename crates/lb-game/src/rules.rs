@@ -1,5 +1,7 @@
 //! Public server rules read from cvars (what any player can query).
 
+use crate::mechanics::{DAMAGE_CVARS, Damages};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublicRules {
     pub teamplay: bool,
@@ -14,6 +16,10 @@ pub struct PublicRules {
     pub gravity: f32,
     pub timelimit_min: f32,
     pub fraglimit: f32,
+    /// Weapon damage (BugfixedHL's `mp_dmg_*`).
+    pub damages: Damages,
+    /// BugfixedHL's `mp_selfgauss`: 0 = only a reflected beam hurts its shooter, 1 = as in vanilla HLDM, 2 = never.
+    pub selfgauss: u8,
 }
 
 impl Default for PublicRules {
@@ -30,11 +36,13 @@ impl Default for PublicRules {
             gravity: 800.0,
             timelimit_min: 0.0,
             fraglimit: 0.0,
+            damages: Damages::default(),
+            selfgauss: 1,
         }
     }
 }
 
-/// Cvars polled by the runtime (missing ones keep defaults).
+/// Cvars polled by the runtime (missing ones keep defaults); the damage cvars ([`DAMAGE_CVARS`]) come on top.
 pub const RULE_CVARS: &[&str] = &[
     "mp_teamplay",
     "mp_teamlist",
@@ -47,7 +55,13 @@ pub const RULE_CVARS: &[&str] = &[
     "sv_gravity",
     "mp_timelimit",
     "mp_fraglimit",
+    "mp_selfgauss",
 ];
+
+/// Every cvar the rules are read from.
+pub fn rule_cvars() -> impl Iterator<Item = &'static str> {
+    RULE_CVARS.iter().chain(DAMAGE_CVARS.iter()).copied()
+}
 
 impl PublicRules {
     /// Applies a cvar value; `bhl` tells whether the BugfixedHL rules apply to `mp_bunnyhop`.
@@ -72,7 +86,10 @@ impl PublicRules {
             "sv_gravity" if f > 0.0 => self.gravity = f,
             "mp_timelimit" => self.timelimit_min = f,
             "mp_fraglimit" => self.fraglimit = f,
-            _ => {}
+            "mp_selfgauss" => self.selfgauss = f.clamp(0.0, 2.0) as u8,
+            _ => {
+                self.damages.apply_cvar(name, f);
+            }
         }
     }
 }

@@ -57,6 +57,8 @@ pub struct LoadedMap {
     pub vis: Arc<lb_bsp::MapVis>,
     /// Items the map places (static knowledge every bot has).
     pub items: Arc<Vec<ItemSpot>>,
+    /// Where players spawn.
+    pub spawns: Arc<Vec<Vec3>>,
     pub mechs: Arc<MapMechs>,
     pub graph: Result<Arc<NavGraph>, String>,
     /// Where the graph came from: "cache", "generated" or "yapb".
@@ -193,6 +195,12 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
             })
         })
         .collect();
+    let spawns: Vec<Vec3> = world
+        .entities
+        .iter()
+        .filter(|e| matches!(e.classname(), "info_player_deathmatch" | "info_player_start"))
+        .map(|e| e.origin())
+        .collect();
     let mech = Mechanisms::from_world(&world);
     let mechs = Arc::new(MapMechs::from(&world, &mech));
     let overlays = read_overlays(install, map, world.bsp.fingerprint.1);
@@ -223,6 +231,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     Ok(LoadedMap {
         vis,
         items: Arc::new(items),
+        spawns: Arc::new(spawns),
         mechs,
         graph,
         origin,

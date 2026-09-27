@@ -177,7 +177,7 @@ impl Fight {
 }
 
 /// Moving along `velocity` for a fifth of a second would step off a ledge higher than a safe drop.
-fn drops(tracer: &mut dyn Tracer, origin: Vec3, velocity: Vec2) -> bool {
+pub fn drops(tracer: &mut dyn Tracer, origin: Vec3, velocity: Vec2) -> bool {
     let spot = origin + (velocity * 0.2).extend(0.0);
     let tr = tracer.trace(&TraceQuery::line(spot, spot - Vec3::Z * (SAFE_DROP + 36.0)));
     !tr.start_solid && tr.fraction >= 1.0

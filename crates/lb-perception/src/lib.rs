@@ -9,6 +9,7 @@
 pub mod damage;
 pub mod hearing;
 pub mod items;
+pub mod projectiles;
 pub mod steps;
 pub mod vision;
 

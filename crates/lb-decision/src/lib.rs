@@ -394,11 +394,13 @@ mod tests {
             id: WeaponId::Crowbar,
             clip: None,
             reserve: None,
+            reserve2: None,
         },
         Armed {
             id: WeaponId::Glock,
             clip: Some(17),
             reserve: Some(68),
+            reserve2: None,
         },
     ];
 

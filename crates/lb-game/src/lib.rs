@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compat;
+pub mod dll;
 pub mod entities;
 pub mod input;
 pub mod items;

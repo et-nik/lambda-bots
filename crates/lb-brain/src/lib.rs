@@ -2,15 +2,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod arms;
 pub mod attention;
 pub mod mind;
 
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
-use lb_knowledge::{BeliefParams, Beliefs, DamageStimulus, ItemSpot, Items, PublicEvent};
+use lb_knowledge::{BeliefParams, Beliefs, DamageStimulus, Explosives, ItemSpot, Items, PublicEvent};
 use lb_motor::{Intents, Motor};
 use lb_perception::items::ItemEntity;
+use lb_perception::projectiles::ProjectileEntity;
 use lb_perception::vision::{PERIOD, VisionOutput};
 use lb_perception::{Listener, Perception, PerceptionParams, SoundEvent, Subject, Viewer};
 use lb_worldq::{Tracer, VisSets};
@@ -28,6 +30,10 @@ pub struct BotBrain {
     pub beliefs: Beliefs,
     /// The map's items and what the bot believes about them; `None` until the map's spots are known.
     pub items: Option<Items>,
+    /// Its own satchels and mines, mines it has seen, projectiles it sees coming.
+    pub explosives: Explosives,
+    /// Where players spawn on this map (static map knowledge): no mines there.
+    pub spawns: Vec<Vec3>,
     pub params: PerceptionParams,
     /// Output of the latest vision tick.
     pub last_vision: VisionOutput,
@@ -50,6 +56,8 @@ impl BotBrain {
             perception: Perception::default(),
             beliefs: Beliefs::default(),
             items: None,
+            explosives: Explosives::default(),
+            spawns: Vec::new(),
             params,
             last_vision: VisionOutput::default(),
             mind: Mind::default(),
@@ -75,6 +83,7 @@ impl BotBrain {
     pub fn on_death(&mut self) {
         self.perception.reset();
         self.beliefs.on_own_death();
+        self.explosives.on_own_death();
         self.last_vision.clear();
         self.mind.reset();
     }
@@ -159,6 +168,27 @@ impl BotBrain {
         if let Some(items) = self.items.as_mut() {
             lb_perception::items::look(now, viewer, items, entities, range, vis, tracer, &mut self.item_cursor);
         }
+    }
+
+    /// Looks at projectiles and mines on the vision tick; call right after [`BotBrain::see`] returned true.
+    pub fn see_projectiles(
+        &mut self,
+        now: SimTime,
+        viewer: &Viewer,
+        entities: &[ProjectileEntity],
+        vis: &dyn VisSets,
+        tracer: &mut dyn Tracer,
+    ) {
+        let mut seen = Vec::new();
+        lb_perception::projectiles::look(now, viewer, entities, &self.explosives, vis, tracer, &mut seen);
+        for s in &seen {
+            self.explosives.on_sighting(s);
+        }
+    }
+
+    /// An explosion was seen or heard at `pos`.
+    pub fn on_explosion(&mut self, pos: Vec3) {
+        self.explosives.on_explosion(pos);
     }
 
     pub fn update(&mut self, now: SimTime, params: &BeliefParams) {

@@ -72,6 +72,11 @@ logging:
   file: true
   max_files: 7
 
+# The game DLL, where its weapon rules differ (satchel buttons, hand grenade speed): auto = BugfixedHL when its
+# cvars are there, else the classic SDK; or name it: bugfixed | hl25 | classic. `lb selftest` checks it live.
+game:
+  dll: auto
+
 gungame:
   mode: auto              # auto | on | off
   detect_cvar: gg_enabled

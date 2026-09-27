@@ -69,6 +69,8 @@ pub struct Bot {
     pub character: lb_brain::Character,
     /// What the bot looked at on its last frame, when not along its path.
     pub attention: Option<lb_brain::Attention>,
+    /// Rounds left per weapon id on the last frame (-1: not known), for `lb stats`.
+    pub rounds: [i32; 16],
 }
 
 impl Bot {
@@ -112,6 +114,7 @@ impl Bot {
             brain,
             character,
             attention: None,
+            rounds: [-1; 16],
         }
     }
 
