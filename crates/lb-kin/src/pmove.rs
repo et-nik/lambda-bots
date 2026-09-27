@@ -844,6 +844,7 @@ impl Pm<'_> {
             wishspeed = self.maxspeed;
         }
         wishspeed *= 0.8;
+        self.p.velocity += self.p.basevelocity;
         let speed = self.p.velocity.length();
         let newspeed = if speed > 0.0 {
             let n = (speed - self.frametime * speed * self.phys.friction).max(0.0);
@@ -861,7 +862,6 @@ impl Pm<'_> {
             let amount = (self.phys.accelerate * wishspeed * self.frametime).min(add);
             self.p.velocity += dir * amount;
         }
-        self.p.velocity += self.p.basevelocity;
         // Assume a stair or slope: press down from a step above the destination.
         let dest = self.p.origin + self.p.velocity * self.frametime;
         let start = dest + Vec3::Z * (self.phys.stepsize + 1.0);

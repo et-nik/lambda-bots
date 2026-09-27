@@ -1019,8 +1019,8 @@ impl PushExec {
         let look = b + Vec3::Z * EYE_HEIGHT;
         let airborne = !i.on_ground && !i.on_ladder && i.waterlevel < 2;
         let lifting = i.push.z > LIFTING;
-        // The field shows as a flight, or as more speed along the floor than running gives.
-        let carried = airborne || flat(i.velocity).length() > i.max_speed * 1.25;
+        // The field shows as a flight, as its push, or as more speed along the floor than running gives.
+        let carried = airborne || i.push != Vec3::ZERO || flat(i.velocity).length() > i.max_speed * 1.25;
         for _ in 0..4 {
             match self.phase {
                 PushPhase::Approach => {
