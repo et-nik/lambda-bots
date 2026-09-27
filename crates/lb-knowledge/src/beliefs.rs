@@ -8,6 +8,7 @@ use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
 
 use crate::obs::*;
+use lb_core::dmath;
 
 /// A track counts as in sight while its last sighting is this recent (vision runs at 20 Hz).
 const VISIBLE_AGE: f64 = 0.12;
@@ -273,7 +274,7 @@ impl Beliefs {
     }
 
     pub fn on_cue(&mut self, c: &AnonymousCue) {
-        let bearing = c.dir.y.atan2(c.dir.x).to_degrees();
+        let bearing = dmath::atan2(c.dir.y, c.dir.x).to_degrees();
         self.push_hypothesis(Hypothesis {
             kind: HypothesisKind::Cue,
             t: c.t,
@@ -287,7 +288,7 @@ impl Beliefs {
     }
 
     pub fn on_sound(&mut self, s: &SoundStimulus) {
-        let lateral = s.range * s.bearing_sigma.to_radians().tan();
+        let lateral = s.range * dmath::tan(s.bearing_sigma.to_radians());
         let sigma = (lateral * lateral + (RANGE_ERROR * s.range).powi(2)).sqrt();
         let memory = self.memory;
         let fits = |t: &EnemyTrack| {

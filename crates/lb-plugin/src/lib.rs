@@ -12,12 +12,25 @@ use lb_core::handles::MapEpoch;
 use lb_ffi::*;
 use lb_host::Host;
 use lb_host::ffi_host::FfiHost;
+use lb_host::record::{FrameRec, RecordingHost};
+use lb_runtime::record::{Entry, Recorder};
 use lb_runtime::{InitData, Runtime, commands, panic_message};
 use parking_lot::Mutex;
 
 struct Plugin {
     host: FfiHost,
     rt: Runtime,
+    rec: Recorder,
+}
+
+impl Plugin {
+    /// Runs `f` against the runtime as the adapter's call `entry` (built only when a recording is on).
+    fn call<R>(&mut self, entry: impl FnOnce() -> Entry, f: impl FnOnce(&mut Runtime, &mut dyn Host) -> R) -> R {
+        let mut host = RecordingHost::new(&mut self.host, self.rec.begin(entry));
+        let r = f(&mut self.rt, &mut host);
+        self.rec.end(&mut self.rt);
+        r
+    }
 }
 
 static PLUGIN: Mutex<Option<Plugin>> = Mutex::new(None);
@@ -32,6 +45,7 @@ fn guard<R>(default: R, f: impl FnOnce(&mut Plugin) -> R) -> R {
         Ok(r) => r,
         Err(payload) => {
             let msg = panic_message(&payload);
+            plugin.rec.crashed(&mut plugin.rt, &msg);
             plugin.rt.safe_mode = Some(format!("core panic: {msg}"));
             plugin
                 .host
@@ -125,10 +139,16 @@ pub unsafe extern "C" fn lb_core_init(
                 install_dir: PathBuf::from(string(info.install_dir)),
                 platform: info.platform,
                 late_load: info.late_load != 0,
+                sandbox: false,
             }
         };
-        let rt = Runtime::new(&mut ffi_host, init);
-        *PLUGIN.lock() = Some(Plugin { host: ffi_host, rt });
+        let mut init_calls = Vec::new();
+        let rt = Runtime::new(&mut RecordingHost::new(&mut ffi_host, Some(&mut init_calls)), init);
+        *PLUGIN.lock() = Some(Plugin {
+            host: ffi_host,
+            rt,
+            rec: Recorder::new(init_calls),
+        });
         LB_OK
     }))
     .unwrap_or(LB_ERR_INVALID);
@@ -152,6 +172,7 @@ pub extern "C" fn lb_core_shutdown(reason: u32) {
         if let Some(mut lock) = PLUGIN.try_lock()
             && let Some(mut p) = lock.take()
         {
+            p.rec.finish(&mut p.rt, "shutdown");
             tracing::info!("shutdown (reason {reason})");
             let (lines, _) = lb_runtime::logging::drain_console(64);
             for line in lines {
@@ -169,20 +190,27 @@ pub unsafe extern "C" fn lb_core_map_start(info: *const LbMapInfo) {
     let Some(info) = (unsafe { info.as_ref() }) else { return };
     // SAFETY: strings are valid during the call.
     let name = unsafe { string(info.map_name) };
+    let late_load = info.late_load != 0;
     guard((), |p| {
-        p.rt.map_start(
-            &mut p.host,
-            &name,
-            info.max_clients,
-            MapEpoch(info.map_epoch),
-            info.late_load != 0,
-        )
+        p.rec.map_starting(&mut p.rt, &name);
+        let entry = || Entry::MapStart {
+            map: name.clone(),
+            max_clients: info.max_clients,
+            epoch: info.map_epoch,
+            late_load,
+        };
+        p.call(entry, |rt, host| {
+            rt.map_start(host, &name, info.max_clients, MapEpoch(info.map_epoch), late_load)
+        });
     });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lb_core_map_end(_epoch: u32) {
-    guard((), |p| p.rt.map_end(&mut p.host));
+    guard((), |p| {
+        p.call(|| Entry::MapEnd, |rt, host| rt.map_end(host));
+        p.rec.finish(&mut p.rt, "the map ended");
+    });
 }
 
 /// # Safety
@@ -196,8 +224,12 @@ pub unsafe extern "C" fn lb_core_frame_pre(input: *const LbFrameInput) {
     guard((), |p| {
         let start = Instant::now();
         // SAFETY: arrays and the arena are valid during the call.
-        let (frame, malformed) = unsafe { lb_host::arena::decode_frame(input, &mut p.rt.strings) };
-        p.rt.frame_pre(&mut p.host, frame, malformed);
+        let entry = || Entry::FramePre(unsafe { FrameRec::capture(input) });
+        p.call(entry, |rt, host| {
+            // SAFETY: as above.
+            let (frame, malformed) = unsafe { lb_host::arena::decode_frame(input, &mut rt.strings) };
+            rt.frame_pre(host, frame, malformed);
+        });
         p.rt.core_times.set_pre(start.elapsed().as_nanos() as u64);
     });
 }
@@ -210,7 +242,7 @@ pub unsafe extern "C" fn lb_core_frame_post(input: *const LbFrameInput) {
     let mono_ns = unsafe { input.as_ref() }.map(|i| i.header.mono_ns).unwrap_or(0);
     guard((), |p| {
         let start = Instant::now();
-        p.rt.frame_post(&mut p.host, mono_ns);
+        p.call(|| Entry::FramePost { mono_ns }, |rt, host| rt.frame_post(host, mono_ns));
         p.rt.core_times.finish_frame(start.elapsed().as_nanos() as u64);
     });
 }
@@ -231,11 +263,15 @@ pub unsafe extern "C" fn lb_core_server_command(args: *const LbArgs) {
             .collect()
     };
     guard((), |p| {
-        let refs: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
-        let out = commands::execute(&mut p.rt, &mut p.host, &refs);
-        for line in out {
-            p.host.server_print(&format!("{line}\n"));
-        }
+        p.call(
+            || Entry::Command(argv.clone()),
+            |rt, host| {
+                let refs: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
+                for line in commands::execute(rt, host, &refs) {
+                    host.server_print(&format!("{line}\n"));
+                }
+            },
+        );
     });
 }
 

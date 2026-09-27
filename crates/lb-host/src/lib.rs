@@ -4,6 +4,7 @@ pub mod arena;
 pub mod driver;
 pub mod ffi_host;
 pub mod host;
+pub mod record;
 pub mod strings;
 
 pub use host::{

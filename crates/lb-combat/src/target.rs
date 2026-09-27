@@ -2,6 +2,7 @@
 //! the current target keeps a bonus so the bot does not flick between two equal ones.
 
 use lb_core::Vec3;
+use lb_core::dmath;
 use lb_core::math::angle_diff;
 use lb_core::time::SimTime;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
@@ -14,7 +15,7 @@ const CURRENT_BONUS: f32 = 1.3;
 /// The track's observed facing points at `me`.
 pub fn faces(track: &EnemyTrack, me: Vec3) -> bool {
     let d = me - track.pos;
-    let toward_me = d.y.atan2(d.x).to_degrees();
+    let toward_me = dmath::atan2(d.y, d.x).to_degrees();
     angle_diff(track.traits.facing, toward_me).abs() <= FACING_ME_DEGREES
 }
 

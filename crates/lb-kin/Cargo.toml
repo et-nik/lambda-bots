@@ -1,6 +1,6 @@
 [package]
 name = "lb-kin"
-description = "Simplified GoldSrc kinematics and traversal validator"
+description = "GoldSrc kinematics: player movement and traversal checks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 lb-core.workspace = true
 lb-worldq.workspace = true
+lb-bsp.workspace = true
 smallvec.workspace = true
 
 [lints]

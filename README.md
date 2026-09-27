@@ -4,9 +4,10 @@ Bots for Half-Life 1 Deathmatch, packaged as a Metamod plugin. Behavior is writt
 talks to the engine. The algorithms are based on YaPB and its HLDM port (yapb-halflife), moved onto an
 architecture with fair perception, utility-based decisions and verifiable navigation transitions.
 
-Status: **M0 — skeleton and integration.** Bots join the server, respawn and run motor tests; there is no
-behavior (combat, navigation) yet. Acceptance results and known limitations are in `docs/m0-acceptance.md`,
-the ReHLDS and Windows test stands in `docs/stands/`, design notes in `docs/design/`.
+Status: **M2 — traversal contracts.** Bots see, hear, decide, fight and get around crossfire with jumps, drops,
+ladders, lifts, doors, teleports and breakables; every session can be recorded and replayed. Acceptance results
+and known limitations: `docs/m0-acceptance.md`, `docs/m1-acceptance.md`, `docs/m2-acceptance.md`. The ReHLDS and
+Windows test stands are in `docs/stands/`, design notes in `docs/design/`.
 
 ## Platforms
 
@@ -53,26 +54,41 @@ Bots pick a goal (fight, chase, back off, collect an item, roam) by weighted uti
 yapb's movement and aim model, and choose weapons by expected damage at the distance. Details and the `lb brain`
 decision trace: `docs/behavior.md`.
 
+## Navigation
+
+Bots plan on the map's yapb graph, re-checked link by link with a port of the engine's player movement. Every
+special link (jump, drop, ladder, door, lift, teleport, breakable) carries a contract that an executor carries out
+the way a player would, with fresh presses of use and jump. Failed links are avoided for a while, by reason; a bot
+stuck for good uses `kill`. Details and the obstacle courses: `docs/navigation.md`.
+
+## Recording and replay
+
+`lb record start [seconds]` records the next map; `lb-cli replay <file>` runs the recording through a fresh core and
+checks that every bot command comes out the same. Details: `docs/replay.md`.
+
 ## Commands and cvars
 
 All commands are `lb <subcommand>` in the server console or via rcon. Players listed in `access.admins` can
 run them from their own console.
 
-| Command                                | Action                                         |
-|----------------------------------------|------------------------------------------------|
-| `lb add [n\|name]`                     | add bots or one personality (raises the quota) |
-| `lb kick [#userid\|name\|all]`         | kick bots (lowers the quota)                   |
-| `lb kill [#userid\|all]`               | kill bots with the `kill` command              |
-| `lb quota <n> [normal\|fill\|match]`   | set the quota                                  |
-| `lb list`, `lb status`                 | bot list, core state                           |
-| `lb roster [all]`, `lb profile <name>` | personalities and their skill parameters       |
-| `lb nav`                               | navigation graph and where bots are walking    |
-| `lb vision [name]`                     | what bots see, hear and remember               |
-| `lb brain [name]`                      | goals, candidates, target, weapon, reactions   |
-| `lb perf [reset\|bots]`                | core time per frame, bot command timing        |
-| `lb compat`                            | server compatibility profile                   |
-| `lb config show\|reload`               | show the config, or reload config and profiles |
-| `lb test motor …`                      | motor measurements (requires `lb_dev 1`)       |
+| Command                                | Action                                                          |
+|----------------------------------------|-----------------------------------------------------------------|
+| `lb add [n\|name]`                     | add bots or one personality (raises the quota)                  |
+| `lb kick [#userid\|name\|all]`         | kick bots (lowers the quota)                                    |
+| `lb kill [#userid\|all]`               | kill bots with the `kill` command                               |
+| `lb quota <n> [normal\|fill\|match]`   | set the quota                                                   |
+| `lb list`, `lb status`                 | bot list, core state                                            |
+| `lb roster [all]`, `lb profile <name>` | personalities and their skill parameters                        |
+| `lb nav`                               | navigation graph and where bots are walking                     |
+| `lb nav test <kind\|all> [n]`          | a bot runs special links (obstacle course)                      |
+| `lb nav test link <from> <to> …`       | a bot runs exactly these links                                  |
+| `lb record [start [s]\|stop]`          | record the next map for `lb-cli replay`                         |
+| `lb vision [name]`                     | what bots see, hear and remember                                |
+| `lb brain [name]`                      | goals, candidates, target, weapon, reactions, weapon prediction |
+| `lb perf [reset\|bots]`                | core time per frame, bot command timing                         |
+| `lb compat`                            | server compatibility profile                                    |
+| `lb config show\|reload`               | show the config, or reload config and profiles                  |
+| `lb test motor …`                      | motor measurements (requires `lb_dev 1`)                        |
 
 | cvar            | Default | Purpose                                             |
 |-----------------|---------|-----------------------------------------------------|
@@ -106,7 +122,8 @@ scripts/check-binary.sh build/release-linux-i386/lambdabots_mm_i386.so
 
 Rust checks: `cargo test --workspace`, `cargo clippy --workspace --all-targets`,
 `cargo xtask layering` (crate layering rules), `cargo xtask abi --check` (C headers are up to date),
-`cargo run -p lb-cli -- config check data/`.
+`cargo run -p lb-cli -- config check data/`. The obstacle courses on crossfire run with the maps:
+`LB_MAPS_DIR=<valve>/maps cargo test --release -p lb-testkit`.
 
 ## macOS test stand
 
@@ -122,22 +139,25 @@ scripts/stand/lbcmd.sh --stop
 
 ## Layout
 
-| Path                   | Contents                                                      |
-|------------------------|---------------------------------------------------------------|
-| `adapter/`             | C++ Metamod adapter: hooks, event arena, fake clients, ReHLDS |
-| `crates/lb-ffi`        | C ABI between the adapter and the core (source of `lb_abi.h`) |
-| `crates/lb-host`       | event arena parsing, command driver (msec, buttons)           |
-| `crates/lb-game`       | HLDM message decoders, bot state, rules, sounds, game modes   |
-| `crates/lb-bsp`        | BSP loading, exact hull traces, PVS and PAS                   |
-| `crates/lb-nav`        | navigation graph, yapb import, planner, path following        |
-| `crates/lb-perception` | vision, hearing, damage compass                               |
-| `crates/lb-knowledge`  | beliefs: tracks of players, hypotheses from sounds and damage |
-| `crates/lb-brain`      | per-bot senses, beliefs and attention                         |
-| `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging         |
-| `crates/lb-plugin`     | exported `lb_core_*`, panic isolation                         |
-| `data/`                | config, name lists; installed into `addons/lambdabots/`       |
-| `docs/design/`         | design notes (platform, AI, navigation, yapb analysis)        |
-| `scripts/`             | builds, binary checks, test stands                            |
+| Path                   | Contents                                                                        |
+|------------------------|---------------------------------------------------------------------------------|
+| `adapter/`             | C++ Metamod adapter: hooks, event arena, fake clients, ReHLDS                   |
+| `crates/lb-ffi`        | C ABI between the adapter and the core (source of `lb_abi.h`)                   |
+| `crates/lb-host`       | event arena parsing, command driver (msec, buttons), recording and replay hosts |
+| `crates/lb-game`       | HLDM message decoders, bot state, rules, sounds, game modes                     |
+| `crates/lb-bsp`        | BSP loading, exact hull traces, PVS and PAS, map mechanisms                     |
+| `crates/lb-kin`        | player movement (port of `PM_PlayerMove`), traversal checks                     |
+| `crates/lb-nav`        | graph, yapb import, planner, path following, link executors                     |
+| `crates/lb-perception` | vision, hearing, damage compass                                                 |
+| `crates/lb-knowledge`  | beliefs: tracks of players, hypotheses from sounds and damage                   |
+| `crates/lb-brain`      | per-bot senses, beliefs and attention                                           |
+| `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging, recorder                 |
+| `crates/lb-plugin`     | exported `lb_core_*`, panic isolation                                           |
+| `crates/lb-cli`        | `config check`, `replay`, `nav tracecheck`                                      |
+| `crates/lb-testkit`    | simulated server for the obstacle courses                                       |
+| `data/`                | config, name lists; installed into `addons/lambdabots/`                         |
+| `docs/design/`         | design notes (platform, AI, navigation, yapb analysis)                          |
+| `scripts/`             | builds, binary checks, test stands                                              |
 
 ## License
 

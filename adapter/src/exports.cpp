@@ -121,6 +121,7 @@ void core_init(bool late) {
     info.sizes[LB_SZ_HOST_API] = sizeof(LbHostApi);
     info.sizes[LB_SZ_MSG_ARG] = sizeof(LbMsgArg);
     info.sizes[LB_SZ_DISGUISE] = sizeof(LbDisguise);
+    info.sizes[LB_SZ_WEAPON_STATE] = sizeof(LbWeaponState);
     info.adapter_version = str(kAdapterVersion);
     info.plugin_path = str(state().plugin_path);
     info.game_dir = str(state().game_dir);

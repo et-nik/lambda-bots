@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "capture.h"
+#include "entity_state.h"
 #include "fake_client.h"
 #include "registry.h"
 #include "rehlds_bridge.h"
@@ -241,8 +242,50 @@ uint32_t h_get_client_info_key(void *, uint8_t slot, LbStr key, uint8_t *buf, ui
     return info ? copy_out(g_engfuncs.pfnInfoKeyValue(info, k.c_str()), buf, cap) : 0;
 }
 
-int32_t h_get_weapon_data(void *, uint8_t, void *, uint32_t) {
-    return LB_ERR_UNSUPPORTED;
+// What the bot's own client would be sent for weapon prediction. Called on the game's original functions (not the
+// hooked table), which only read the player's state.
+int32_t h_get_weapon_data(void *, uint8_t slot, void *out_raw, uint32_t cap) {
+    if (cap < sizeof(LbWeaponState) || !out_raw) return LB_ERR_INVALID;
+    if (slot < 1 || slot > state().max_clients) return LB_ERR_INVALID;
+    edict_t *ed = edict_of(slot);
+    if (!is_our_bot(ed) || ed->free || !ed->pvPrivateData) return LB_ERR_NOT_FOUND;
+    DLL_FUNCTIONS *dll = state().gamedll ? state().gamedll->dllapi_table : nullptr;
+    if (!dll || !dll->pfnGetWeaponData || !dll->pfnUpdateClientData) return LB_ERR_UNSUPPORTED;
+    static weapon_data_t weapons[64];
+    std::memset(weapons, 0, sizeof(weapons));
+    dll->pfnGetWeaponData(ed, weapons);
+    clientdata_t cd;
+    std::memset(&cd, 0, sizeof(cd));
+    dll->pfnUpdateClientData(ed, 1, &cd);
+    auto *out = static_cast<LbWeaponState *>(out_raw);
+    std::memset(out, 0, sizeof(*out));
+    out->current = cd.m_iId;
+    out->next_attack = cd.m_flNextAttack;
+    out->next_ammo_burn = cd.fuser2;
+    out->ammo_start_charge = cd.fuser3;
+    out->primary_type = static_cast<int32_t>(cd.vuser4[0]);
+    out->primary_ammo = static_cast<int32_t>(cd.vuser4[1]);
+    out->secondary_type = static_cast<int32_t>(cd.vuser3[2]);
+    out->secondary_ammo = static_cast<int32_t>(cd.vuser4[2]);
+    for (int i = 0; i < LB_MAX_WEAPONS; i++) {
+        const weapon_data_t &w = weapons[i];
+        if (w.m_iId <= 0) continue;
+        LbWeaponData &d = out->weapons[i];
+        d.id = w.m_iId;
+        d.clip = w.m_iClip;
+        d.next_primary = w.m_flNextPrimaryAttack;
+        d.next_secondary = w.m_flNextSecondaryAttack;
+        d.idle = w.m_flTimeWeaponIdle;
+        d.in_reload = w.m_fInReload;
+        d.in_special_reload = w.m_fInSpecialReload;
+        d.iuser1 = w.iuser1;
+        d.iuser2 = w.iuser2;
+        d.iuser3 = w.iuser3;
+        d.fuser1 = w.fuser1;
+        d.fuser2 = w.fuser2;
+        d.fuser3 = w.fuser3;
+    }
+    return LB_OK;
 }
 
 int32_t h_set_bot_disguise(void *, const LbDisguise *) {

@@ -125,6 +125,8 @@
 
 #define LB_SZ_DISGUISE 21
 
+#define LB_SZ_WEAPON_STATE 22
+
 #define LB_SZ_COUNT 24
 
 #define LB_EV_CLIENT 1
@@ -256,6 +258,9 @@
 #define LB_CVAR_SERVER 2
 
 #define LB_CVAR_READONLY 4
+
+// Weapon slots in [`LbWeaponState::weapons`] (weapon ids 0..31).
+#define LB_MAX_WEAPONS 32
 
 #define LB_PRINT_CONSOLE 1
 
@@ -736,6 +741,46 @@ typedef struct LbCompatFacts {
   uint8_t gamedll_desc[64];
   uint8_t gamedll_path[256];
 } LbCompatFacts;
+
+// One weapon as the bot's own client would be told it for prediction (`weapon_data_t` from the game's
+// `GetWeaponData`). Times are seconds from now.
+typedef struct LbWeaponData {
+  // Weapon id (`WEAPON_*`); 0 = not carried.
+  int32_t id;
+  int32_t clip;
+  // Until the next primary and secondary attack; zero or less: ready.
+  float next_primary;
+  float next_secondary;
+  float idle;
+  int32_t in_reload;
+  int32_t in_special_reload;
+  // `m_chargeReady`, `m_fInAttack`, `m_fireState` (grenade pin, gauss charge, egon beam).
+  int32_t iuser1;
+  int32_t iuser2;
+  int32_t iuser3;
+  // `pev->fuser1`, `m_flStartThrow`, `m_flReleaseThrow`.
+  float fuser1;
+  float fuser2;
+  float fuser3;
+  uint32_t pad;
+} LbWeaponData;
+
+// Filled by `get_weapon_data`: the bot's weapons and what `UpdateClientData` tells its client.
+typedef struct LbWeaponState {
+  // Active weapon id (`clientdata.m_iId`); 0 = none.
+  int32_t current;
+  // Until any attack is allowed (`m_flNextAttack`: weapon switches, deploys).
+  float next_attack;
+  // `m_flNextAmmoBurn`, `m_flAmmoStartCharge` (egon, gauss charging).
+  float next_ammo_burn;
+  float ammo_start_charge;
+  // The active weapon's ammo types and what the player carries of them.
+  int32_t primary_type;
+  int32_t primary_ammo;
+  int32_t secondary_type;
+  int32_t secondary_ammo;
+  struct LbWeaponData weapons[LB_MAX_WEAPONS];
+} LbWeaponState;
 
 typedef struct LbHostApi {
   uint32_t struct_size;

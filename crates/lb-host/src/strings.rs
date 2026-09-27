@@ -1,6 +1,6 @@
 //! Interned strings announced by the adapter (`LB_EV_STRING`), user message and event names.
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StringTable {
     strings: Vec<Option<Vec<u8>>>,
     msg_names: Vec<(i32, Vec<u8>)>,

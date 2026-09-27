@@ -29,6 +29,8 @@ pub struct Body {
     pub in_duck: bool,
     pub has_longjump: bool,
     pub frags: f32,
+    /// Edict index of what the feet stand on (`groundentity`), 0 for the world.
+    pub groundentity: u16,
 }
 
 pub const FL_ONGROUND: u32 = 1 << 9;
@@ -46,6 +48,29 @@ pub struct DamageTaken {
     pub source: Vec3,
 }
 
+/// One weapon as the bot's own client would be told it for prediction.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PredictedWeapon {
+    pub clip: i32,
+    /// Seconds until the next primary and secondary attack; zero or less: ready.
+    pub next_primary: f32,
+    pub next_secondary: f32,
+    pub reloading: bool,
+    /// Weapon-specific attack state (`m_fInAttack`: gauss charge stage, grenade pin).
+    pub in_attack: i32,
+}
+
+/// What the bot's own client would be sent for weapon prediction (`GetWeaponData`, `UpdateClientData`): the
+/// honest source of weapon readiness a human's client has too.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prediction {
+    pub at: SimTime,
+    pub current: Option<WeaponId>,
+    /// Seconds until any attack is allowed (weapon switch and deploy).
+    pub next_attack: f32,
+    pub weapons: [Option<PredictedWeapon>; 32],
+}
+
 #[derive(Clone, Debug)]
 pub struct SelfState {
     pub body: Body,
@@ -60,6 +85,7 @@ pub struct SelfState {
     pub last_damage: Option<DamageTaken>,
     pub spawned_at: Option<SimTime>,
     pub deaths: i32,
+    pub prediction: Option<Prediction>,
 }
 
 impl Default for SelfState {
@@ -76,6 +102,7 @@ impl Default for SelfState {
             last_damage: None,
             spawned_at: None,
             deaths: 0,
+            prediction: None,
         }
     }
 }
@@ -97,6 +124,13 @@ impl SelfState {
         self.body.weapons_mask & w.bit() != 0
     }
 
+    /// Weapon `w` can fire now, as the prediction data says; `None` without that data.
+    pub fn ready(&self, w: WeaponId) -> Option<bool> {
+        let p = self.prediction.as_ref()?;
+        let weapon = p.weapons.get(w as usize).copied().flatten()?;
+        Some(p.next_attack <= 0.0 && weapon.next_primary <= 0.0 && !weapon.reloading)
+    }
+
     /// Resets per-life state on spawn (weapons, clips and ammo come fresh from the game).
     pub fn on_spawn(&mut self, now: SimTime) {
         self.current_weapon = Known::Unknown;
@@ -105,6 +139,7 @@ impl SelfState {
         self.ammo = [Known::Unknown; MAX_AMMO_TYPES];
         self.last_damage = None;
         self.spawned_at = Some(now);
+        self.prediction = None;
     }
 
     /// Applies a message addressed to this bot.

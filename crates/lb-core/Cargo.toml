@@ -10,8 +10,10 @@ publish.workspace = true
 
 [dependencies]
 glam.workspace = true
+libm.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [lints]

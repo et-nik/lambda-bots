@@ -1,25 +1,59 @@
-//! Navigation in the runtime: loading the map (visibility sets and navigation graph) off the main thread, live
-//! engine traces, and the per-bot roaming state (goal, path follower, penalties for links that got the bot stuck).
+//! Navigation in the runtime: loading the map (visibility sets, mechanisms, navigation graph) off the main thread,
+//! live engine traces, the live state of the map's mechanisms, and each bot's navigation service.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
+use lb_bsp::mech::{Mechanisms, MoverKind};
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_game::items::ItemKind;
-use lb_host::{Host, TraceKind, TraceRequest};
+use lb_host::strings::StringTable;
+use lb_host::{EntitySnapshot, Host, TraceKind, TraceRequest};
 use lb_knowledge::ItemSpot;
-use lb_nav::follow::{EYE_HEIGHT, FollowInput, FollowOutput, FollowStatus, PathFollower};
-use lb_nav::{NavGraph, NodeFlags, NodeId};
+use lb_nav::NavGraph;
+use lb_nav::exec::{HitKind, MechView, MoverState, NavInput};
+use lb_nav::import::ImportOptions;
+use lb_nav::known::LinkHealth;
+use lb_nav::navigator::{NavCtx, Navigator};
 use lb_nav_api::{NavService, NavStatus, NavStep};
 use lb_worldq::{HullKind, Trace, TraceQuery, Tracer};
+use rustc_hash::FxHashMap;
+
+/// What the runtime keeps of a map's mechanisms: where each moving brush was compiled and what it is.
+#[derive(Clone, Debug, Default)]
+pub struct MapMechs {
+    /// Brush model → (spawn origin of its entity, is a mover, is a breakable).
+    pub models: FxHashMap<u16, (Vec3, bool, bool)>,
+    pub movers: usize,
+    pub breakables: usize,
+}
+
+impl MapMechs {
+    fn from(world: &lb_bsp::BspWorld, mech: &Mechanisms) -> MapMechs {
+        let mut m = MapMechs::default();
+        for mv in &mech.movers {
+            let origin = world.entities.get(mv.entity).map_or(Vec3::ZERO, |e| e.origin());
+            let moving = mv.kind != MoverKind::Other || mv.speed > 0.0;
+            m.models.insert(mv.model as u16, (origin, moving, false));
+            m.movers += 1;
+        }
+        for b in &mech.breakables {
+            let origin = world.entities.get(b.entity).map_or(Vec3::ZERO, |e| e.origin());
+            m.models.insert(b.model as u16, (origin, false, true));
+            m.breakables += 1;
+        }
+        m
+    }
+}
 
 pub struct LoadedMap {
     /// PVS and PAS of the map, for perception.
     pub vis: Arc<lb_bsp::MapVis>,
     /// Items the map places (static knowledge every bot has).
     pub items: Arc<Vec<ItemSpot>>,
+    pub mechs: Arc<MapMechs>,
     pub graph: Result<Arc<NavGraph>, String>,
     pub millis: u128,
 }
@@ -31,11 +65,11 @@ pub struct NavLoader {
 }
 
 impl NavLoader {
-    pub fn start(game_dir: &Path, install_dir: &Path, map: &str) -> NavLoader {
+    pub fn start(game_dir: &Path, install_dir: &Path, map: &str, opts: ImportOptions) -> NavLoader {
         let (tx, rx) = channel();
         let (game, install, name) = (game_dir.to_path_buf(), install_dir.to_path_buf(), map.to_string());
         let spawned = std::thread::Builder::new().name("lb-nav-load".into()).spawn(move || {
-            let _ = tx.send(load(&game, &install, &name));
+            let _ = tx.send(load(&game, &install, &name, &opts));
         });
         if let Err(e) = spawned {
             tracing::error!("cannot start the navigation loader: {e}");
@@ -54,14 +88,49 @@ impl NavLoader {
             Err(TryRecvError::Disconnected) => Some(Err("navigation loader stopped".into())),
         }
     }
+
+    /// Blocks until the worker is done (a replay applies the result at the frame it was applied when recorded).
+    pub fn wait(&self) -> Result<LoadedMap, String> {
+        self.rx
+            .recv()
+            .unwrap_or_else(|_| Err("navigation loader stopped".into()))
+    }
 }
 
-fn first_existing(paths: &[PathBuf]) -> Option<&PathBuf> {
-    paths.iter().find(|p| p.is_file())
+/// What a load came to, without timings or paths: a replay checks that it loaded the same.
+pub fn summary(result: &Result<LoadedMap, String>) -> String {
+    match result {
+        Ok(m) => format!(
+            "{} leaves, {} items, {} movers, {} breakables, {}",
+            m.vis.visleafs(),
+            m.items.len(),
+            m.mechs.movers,
+            m.mechs.breakables,
+            match &m.graph {
+                Ok(g) => format!(
+                    "{} nodes, {} links ({} invalid, {} added, {})",
+                    g.stats.nodes,
+                    g.stats.links,
+                    g.stats.invalid,
+                    g.stats.added,
+                    g.stats.kinds()
+                ),
+                Err(_) => "no graph".into(),
+            }
+        ),
+        Err(_) => "not loaded".into(),
+    }
 }
 
-fn load(game: &Path, install: &Path, map: &str) -> Result<LoadedMap, String> {
-    let started = std::time::Instant::now();
+/// The files a map's navigation is loaded from.
+pub struct MapFiles {
+    pub bsp: Option<PathBuf>,
+    pub graph: Option<PathBuf>,
+    /// Where the files were looked for, for the message when they are missing.
+    pub graph_paths: [PathBuf; 2],
+}
+
+pub fn map_files(game: &Path, install: &Path, map: &str) -> MapFiles {
     let bsp_paths = [
         game.join("maps").join(format!("{map}.bsp")),
         game.with_file_name(format!(
@@ -69,7 +138,28 @@ fn load(game: &Path, install: &Path, map: &str) -> Result<LoadedMap, String> {
             game.file_name().and_then(|n| n.to_str()).unwrap_or("valve")
         )),
     ];
-    let bsp_path = first_existing(&bsp_paths).ok_or_else(|| format!("{map}.bsp not found in {}", game.display()))?;
+    let graph_paths = [
+        install.join("nav").join(format!("{map}.graph")),
+        game.join("addons/yapb/data/graph").join(format!("{map}.graph")),
+    ];
+    MapFiles {
+        bsp: first_existing(&bsp_paths).cloned(),
+        graph: first_existing(&graph_paths).cloned(),
+        graph_paths,
+    }
+}
+
+fn first_existing(paths: &[PathBuf]) -> Option<&PathBuf> {
+    paths.iter().find(|p| p.is_file())
+}
+
+fn load(game: &Path, install: &Path, map: &str, opts: &ImportOptions) -> Result<LoadedMap, String> {
+    let started = std::time::Instant::now();
+    let files = map_files(game, install, map);
+    let bsp_path = files
+        .bsp
+        .as_ref()
+        .ok_or_else(|| format!("{map}.bsp not found in {}", game.display()))?;
     let bytes = std::fs::read(bsp_path).map_err(|e| format!("{}: {e}", bsp_path.display()))?;
     let mut world = lb_bsp::BspWorld::load(&bytes).map_err(|e| format!("{}: {e}", bsp_path.display()))?;
     let vis = Arc::new(lb_bsp::MapVis::build(&world.bsp));
@@ -83,25 +173,30 @@ fn load(game: &Path, install: &Path, map: &str) -> Result<LoadedMap, String> {
             })
         })
         .collect();
-    let graph = load_graph(install, game, map, &mut world);
+    let mech = Mechanisms::from_world(&world);
+    let mechs = Arc::new(MapMechs::from(&world, &mech));
+    let graph = load_graph(&files, map, &mut world, &mech, opts);
     Ok(LoadedMap {
         vis,
         items: Arc::new(items),
+        mechs,
         graph,
         millis: started.elapsed().as_millis(),
     })
 }
 
-fn load_graph(install: &Path, game: &Path, map: &str, world: &mut lb_bsp::BspWorld) -> Result<Arc<NavGraph>, String> {
-    let graph_paths = [
-        install.join("nav").join(format!("{map}.graph")),
-        game.join("addons/yapb/data/graph").join(format!("{map}.graph")),
-    ];
-    let graph_path = first_existing(&graph_paths).ok_or_else(|| {
+fn load_graph(
+    files: &MapFiles,
+    map: &str,
+    world: &mut lb_bsp::BspWorld,
+    mech: &Mechanisms,
+    opts: &ImportOptions,
+) -> Result<Arc<NavGraph>, String> {
+    let graph_path = files.graph.as_ref().ok_or_else(|| {
         format!(
             "no graph for {map}: looked for {} and {}",
-            graph_paths[0].display(),
-            graph_paths[1].display()
+            files.graph_paths[0].display(),
+            files.graph_paths[1].display()
         )
     })?;
     let yapb_bytes = std::fs::read(graph_path).map_err(|e| format!("{}: {e}", graph_path.display()))?;
@@ -115,7 +210,7 @@ fn load_graph(install: &Path, game: &Path, map: &str, world: &mut lb_bsp::BspWor
             world.bsp.fingerprint.1
         );
     }
-    let graph = lb_nav::import::import_yapb(&yapb, world, false, &graph_path.display().to_string());
+    let graph = lb_nav::import::import_yapb(&yapb, world, mech, opts, &graph_path.display().to_string());
     Ok(Arc::new(graph))
 }
 
@@ -145,6 +240,7 @@ impl Tracer for LiveTracer<'_> {
                 serial: 0,
             }),
         });
+        let touched = tr.fraction < 1.0 || tr.start_solid;
         Trace {
             all_solid: tr.all_solid,
             start_solid: tr.start_solid,
@@ -154,7 +250,7 @@ impl Tracer for LiveTracer<'_> {
             end: tr.end_pos,
             normal: tr.plane_normal,
             dist: tr.plane_dist,
-            hit: (tr.hit.index != 0).then_some(u32::from(tr.hit.index)),
+            hit: touched.then_some(u32::from(tr.hit.index)),
         }
     }
 
@@ -163,303 +259,144 @@ impl Tracer for LiveTracer<'_> {
     }
 }
 
-/// A link a bot got stuck on, avoided when planning until `until`.
-#[derive(Clone, Copy, Debug)]
-struct Avoid {
-    from: NodeId,
-    to: NodeId,
-    until: f64,
-}
-
-/// Navigation calls this far apart mean the bot did something else meanwhile (fought): the stuck clock restarts.
-const NAV_GAP: f64 = 0.5;
-const REPLAN_EVERY: f64 = 0.5;
-const GIVE_UP_AFTER: u32 = 3;
-const DIRECT_WALK: f32 = 200.0;
-const DIRECT_RECHECK: f64 = 0.1;
-
+/// The live state of the map's mechanisms, refreshed every frame from entity snapshots. Executors read it to
+/// operate doors and lifts; planning never does.
 #[derive(Default)]
-pub struct BotNav {
-    pub follower: Option<PathFollower>,
-    pub goal: Option<NodeId>,
-    next_goal_at: f64,
-    next_plan_at: f64,
-    avoid: Vec<Avoid>,
-    failures: u32,
-    /// Where the bot was when it last moved noticeably, for the irrecoverably-stuck check.
-    anchor: Vec3,
-    anchor_at: f64,
-    last_used: f64,
-    /// A destination walked to straight, whether the way was clear, and when that was checked.
-    direct: Option<(Vec3, bool, f64)>,
-    /// The graph node nearest to the last destination.
-    dest_node: Option<(Vec3, NodeId)>,
+pub struct LiveMechs {
+    map: Option<Arc<MapMechs>>,
+    /// Brush model → (state, still exists).
+    models: FxHashMap<u16, MoverState>,
+    /// Entity index → brush model, for what traces hit.
+    by_index: FxHashMap<u16, u16>,
+    /// Interned model name → brush model number.
+    model_ids: FxHashMap<u16, Option<u16>>,
+    pub max_clients: u32,
+    snapshots: Vec<EntitySnapshot>,
+    /// Sim time of the last refresh.
+    refreshed_at: Option<f64>,
 }
 
-pub struct NavContext<'a> {
-    pub graph: &'a NavGraph,
-    pub tracer: &'a mut dyn Tracer,
-}
+/// Seconds between refreshes: a lift at 200 units/s moves 2 units in that time.
+const MECHS_PERIOD: f64 = 0.01;
 
-impl BotNav {
-    pub fn reset(&mut self) {
-        *self = BotNav::default();
+impl LiveMechs {
+    pub fn set_map(&mut self, map: Option<Arc<MapMechs>>, max_clients: u32) {
+        self.map = map;
+        self.max_clients = max_clients;
+        self.models.clear();
+        self.by_index.clear();
+        self.model_ids.clear();
+        self.refreshed_at = None;
     }
 
-    /// Seconds of navigating without moving 48 u away from where the bot last was.
-    pub fn stuck_for(&mut self, origin: Vec3, now: f64) -> f64 {
-        if self.anchor_at == 0.0 || origin.distance(self.anchor) > 48.0 || now - self.last_used > NAV_GAP {
-            self.anchor = origin;
-            self.anchor_at = now;
+    pub fn is_loaded(&self) -> bool {
+        self.map.is_some()
+    }
+
+    /// Reads where every mover and breakable is now, a hundred times a second.
+    pub fn refresh(&mut self, host: &mut dyn Host, strings: &StringTable, now: f64) {
+        let Some(map) = self.map.clone() else { return };
+        if self.refreshed_at.is_some_and(|t| now >= t && now - t < MECHS_PERIOD) {
+            return;
         }
-        self.last_used = now;
-        now - self.anchor_at
-    }
-
-    /// Nearest node the bot can reach in a straight line.
-    fn start_node(ctx: &mut NavContext<'_>, origin: Vec3) -> Option<NodeId> {
-        for (id, _) in ctx.graph.nearest(origin, 512.0, 6) {
-            let node = ctx.graph.node(id);
-            let tr = ctx
-                .tracer
-                .trace(&TraceQuery::hull(origin, node.origin, HullKind::Crouch));
-            if !tr.start_solid && tr.fraction > 0.97 {
-                return Some(id);
-            }
-        }
-        ctx.graph.nearest(origin, 256.0, 1).first().map(|(id, _)| *id)
-    }
-
-    fn pick_goal(ctx: &mut NavContext<'_>, origin: Vec3, rng: &mut Pcg32) -> Option<NodeId> {
-        let g = ctx.graph;
-        let goals: Vec<NodeId> = (0..g.len() as NodeId)
-            .filter(|&id| {
-                g.node(id)
-                    .flags
-                    .intersects(NodeFlags::GOAL | NodeFlags::CAMP | NodeFlags::SNIPER)
-            })
-            .collect();
-        for _ in 0..8 {
-            let id = if !goals.is_empty() && rng.chance(60.0) {
-                goals[rng.range_i32(0, goals.len() as i32 - 1) as usize]
-            } else {
-                rng.range_i32(0, g.len() as i32 - 1) as NodeId
+        self.refreshed_at = Some(now);
+        use lb_game::entities::{KIND_BREAKABLE, KIND_BUTTON, KIND_MOVER, kind_mask};
+        self.snapshots.clear();
+        host.snapshot_entities(
+            kind_mask(&[KIND_MOVER, KIND_BUTTON, KIND_BREAKABLE]),
+            &mut self.snapshots,
+        );
+        self.models.clear();
+        self.by_index.clear();
+        const EF_NODRAW: u32 = 128;
+        for s in &self.snapshots {
+            // Model names arrive through the string table a frame after first use: only known names are cached.
+            let model = match self.model_ids.get(&s.model_id) {
+                Some(m) => *m,
+                None => match strings.string(s.model_id) {
+                    Some(name) => {
+                        let m = std::str::from_utf8(name)
+                            .ok()
+                            .and_then(|n| n.strip_prefix('*'))
+                            .and_then(|n| n.parse().ok());
+                        self.model_ids.insert(s.model_id, m);
+                        m
+                    }
+                    None => None,
+                },
             };
-            let node = g.node(id);
-            if node.origin.distance(origin) > 400.0 && !node.flags.intersects(NodeFlags::LADDER | NodeFlags::AIRBORNE) {
-                return Some(id);
-            }
-        }
-        None
-    }
-
-    fn plan(&mut self, ctx: &mut NavContext<'_>, origin: Vec3, goal: NodeId, now: f64) -> bool {
-        let Some(start) = Self::start_node(ctx, origin) else {
-            return false;
-        };
-        self.avoid.retain(|a| a.until > now);
-        let avoid = &self.avoid;
-        let penalty = |a: NodeId, b: NodeId| {
-            if avoid.iter().any(|x| x.from == a && x.to == b) {
-                f32::INFINITY
-            } else {
-                0.0
-            }
-        };
-        match lb_nav::plan::plan(ctx.graph, start, goal, &penalty) {
-            Some(path) => {
-                self.follower = Some(PathFollower::new(path, now));
-                self.goal = Some(goal);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Walks toward `dest`: a path to the graph node nearest to it, the last stretch straight when it is clear.
-    pub fn go_to(
-        &mut self,
-        ctx: &mut NavContext<'_>,
-        input: &FollowInput,
-        dest: Vec3,
-    ) -> (NavStatus, Option<FollowOutput>) {
-        let now = input.now;
-        let to = dest - input.origin;
-        let flat = to.truncate().length();
-        if flat < 32.0 && to.z.abs() < 48.0 {
-            self.follower = None;
-            return (NavStatus::Arrived, None);
-        }
-        if flat < DIRECT_WALK && to.z.abs() < 32.0 {
-            let fresh = self
-                .direct
-                .filter(|(d, _, at)| d.distance(dest) < 16.0 && now - at < DIRECT_RECHECK);
-            let clear = match fresh {
-                Some((_, clear, _)) => clear,
-                None => {
-                    let level = Vec3::new(dest.x, dest.y, input.origin.z);
-                    let tr = ctx
-                        .tracer
-                        .trace(&TraceQuery::hull(input.origin, level, HullKind::Stand));
-                    let clear = !tr.start_solid && tr.fraction >= 1.0;
-                    self.direct = Some((dest, clear, now));
-                    clear
-                }
+            let Some(model) = model else { continue };
+            self.by_index.insert(s.ent.index, model);
+            let Some(&(origin, _, breakable)) = map.models.get(&model) else {
+                continue;
             };
-            if clear {
-                self.follower = None;
-                return (NavStatus::Moving, Some(straight(input, dest)));
+            if breakable && (s.solid == 0 || s.effects & EF_NODRAW != 0) {
+                continue;
             }
-        }
-        let cached = self.dest_node.filter(|(d, _)| d.distance(dest) < 32.0).map(|(_, n)| n);
-        let Some(goal) = cached.or_else(|| ctx.graph.nearest(dest, 400.0, 1).first().map(|(n, _)| *n)) else {
-            return (NavStatus::NoPath, None);
-        };
-        if cached.is_none() {
-            self.dest_node = Some((dest, goal));
-        }
-        if (self.follower.is_none() || self.goal != Some(goal)) && now >= self.next_plan_at {
-            self.next_plan_at = now + REPLAN_EVERY;
-            if !self.plan(ctx, input.origin, goal, now) {
-                self.failures += 1;
-                let status = if self.failures >= GIVE_UP_AFTER {
-                    self.failures = 0;
-                    NavStatus::NoPath
-                } else {
-                    NavStatus::Moving
-                };
-                return (status, None);
-            }
-        }
-        let Some(follower) = self.follower.as_mut() else {
-            return (NavStatus::Moving, None);
-        };
-        let out = follower.tick(ctx.graph, input);
-        match out.status {
-            FollowStatus::Moving => (NavStatus::Moving, Some(out)),
-            FollowStatus::Arrived => {
-                // At the node closest to the destination: as close as the graph gets.
-                self.follower = None;
-                self.failures = 0;
-                (NavStatus::Arrived, Some(out))
-            }
-            FollowStatus::Stuck { from, to } => {
-                self.avoid.push(Avoid {
-                    from,
-                    to,
-                    until: now + 10.0,
-                });
-                self.follower = None;
-                self.failures += 1;
-                if self.failures >= GIVE_UP_AFTER {
-                    self.failures = 0;
-                    return (NavStatus::NoPath, Some(out));
-                }
-                (NavStatus::Moving, Some(out))
-            }
+            let at = Vec3::new(s.origin.x, s.origin.y, s.origin.z);
+            let vel = Vec3::new(s.velocity.x, s.velocity.y, s.velocity.z);
+            self.models.insert(
+                model,
+                MoverState {
+                    offset: at - origin,
+                    velocity: vel,
+                },
+            );
         }
     }
 
-    /// A node to fall back to: well away from `threat`, not too far from the bot.
-    pub fn away_from(ctx: &NavContext<'_>, origin: Vec3, threat: Vec3) -> Option<Vec3> {
-        let here = origin.distance(threat);
-        ctx.graph
-            .nearest(origin, 1200.0, 64)
-            .into_iter()
-            .map(|(id, _)| ctx.graph.node(id))
-            .filter(|n| !n.flags.intersects(NodeFlags::LADDER | NodeFlags::AIRBORNE))
-            .map(|n| n.origin)
-            .filter(|p| p.distance(threat) > here + 200.0)
-            .max_by(|a, b| {
-                let score = |p: &Vec3| p.distance(threat) - 0.5 * p.distance(origin);
-                score(a).total_cmp(&score(b))
-            })
-    }
-
-    /// Roaming: walk to a goal, pause, pick the next one. Returns what to do this frame.
-    pub fn tick(&mut self, ctx: &mut NavContext<'_>, input: &FollowInput, rng: &mut Pcg32) -> Option<FollowOutput> {
-        let now = input.now;
-        if self.follower.is_none() {
-            if now < self.next_goal_at {
-                return None;
-            }
-            self.next_goal_at = now + 1.0;
-            let goal = Self::pick_goal(ctx, input.origin, rng)?;
-            if !self.plan(ctx, input.origin, goal, now) {
-                return None;
-            }
-        }
-        let follower = self.follower.as_mut()?;
-        let out = follower.tick(ctx.graph, input);
-        match out.status {
-            FollowStatus::Moving => {}
-            FollowStatus::Arrived => {
-                self.follower = None;
-                self.failures = 0;
-                self.next_goal_at = now + f64::from(rng.range_f32(0.2, 1.5));
-            }
-            FollowStatus::Stuck { from, to } => {
-                self.avoid.push(Avoid {
-                    from,
-                    to,
-                    until: now + 10.0,
-                });
-                self.failures += 1;
-                self.follower = None;
-                let goal = self.goal.filter(|_| self.failures < 3);
-                if let Some(goal) = goal {
-                    self.plan(ctx, input.origin, goal, now);
-                } else {
-                    self.failures = 0;
-                    self.next_goal_at = now + 0.5;
-                }
-            }
-        }
-        Some(out)
+    /// Brush model of the entity at `index` (for `groundentity`), 0 for the world or anything else.
+    pub fn model_of(&self, index: u16) -> u16 {
+        self.by_index.get(&index).copied().unwrap_or(0)
     }
 }
 
-/// A step straight at `dest`.
-fn straight(input: &FollowInput, dest: Vec3) -> FollowOutput {
-    FollowOutput {
-        move_dir: (dest - input.origin).truncate().normalize_or_zero(),
-        speed: input.max_speed,
-        look_at: Vec3::new(dest.x, dest.y, input.origin.z + EYE_HEIGHT),
-        pitch: None,
-        jump: false,
-        duck: false,
-        mandatory: false,
-        status: FollowStatus::Moving,
+impl MechView for LiveMechs {
+    fn mover(&self, model: u16) -> Option<MoverState> {
+        self.models.get(&model).copied()
+    }
+
+    fn exists(&self, model: u16) -> bool {
+        self.models.contains_key(&model)
+    }
+
+    fn hit_kind(&self, hit: u32) -> HitKind {
+        if hit == 0 {
+            return HitKind::World;
+        }
+        if hit <= self.max_clients {
+            return HitKind::Player;
+        }
+        let model = self.model_of(hit as u16);
+        match self.map.as_ref().and_then(|m| m.models.get(&model)) {
+            Some((_, true, _)) => HitKind::Mover(model),
+            _ => HitKind::Other,
+        }
     }
 }
 
-fn step(o: &FollowOutput) -> NavStep {
-    NavStep {
-        move_dir: o.move_dir,
-        speed: o.speed,
-        look_at: o.look_at,
-        pitch: o.pitch,
-        jump: o.jump,
-        duck: o.duck,
-        mandatory: o.mandatory,
-    }
-}
-
-/// Navigation as one bot's behavior sees it for one frame: its path state, the graph, live traces.
+/// Navigation as one bot's behavior sees it for one frame: its navigator, the graph, live traces and mechanisms.
 pub struct BotNavService<'a, 'h> {
-    pub nav: &'a mut BotNav,
+    pub nav: &'a mut Navigator,
     pub graph: Option<&'a NavGraph>,
     pub tracer: &'a mut LiveTracer<'h>,
-    pub input: FollowInput,
+    pub mechs: &'a LiveMechs,
+    pub health: &'a mut LinkHealth,
+    pub bot: u32,
+    pub input: NavInput,
     pub stuck_kill: f64,
+    /// No enemy in sight or heard for a while: a stuck bot may give up its life.
+    pub calm: bool,
     /// Stuck beyond recovery: the bot should `kill` itself.
     pub kill: bool,
 }
 
 impl BotNavService<'_, '_> {
-    /// No progress for `stuck_kill` seconds of navigating: give up on this life.
+    /// No progress for `stuck_kill` seconds of navigating (waiting for a lift or a door does not count), with
+    /// no enemy around: give up on this life.
     fn stuck(&mut self) -> bool {
-        if self.nav.stuck_for(self.input.origin, self.input.now) > self.stuck_kill {
+        let stuck = self.nav.stuck_for(self.input.origin, self.input.now);
+        if stuck > self.stuck_kill && self.calm && self.nav.failures_total > 0 {
             self.kill = true;
             self.nav.reset();
             return true;
@@ -486,12 +423,14 @@ impl NavService for BotNavService<'_, '_> {
         if self.stuck() {
             return (NavStatus::NoPath, None);
         }
-        let mut ctx = NavContext {
+        let mut ctx = NavCtx {
             graph,
             tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: Some(&mut *self.health),
+            bot: self.bot,
         };
-        let (status, out) = self.nav.go_to(&mut ctx, &self.input, dest);
-        (status, out.as_ref().map(step))
+        self.nav.go_to(&mut ctx, &self.input, dest)
     }
 
     fn roam(&mut self, rng: &mut Pcg32) -> Option<NavStep> {
@@ -499,20 +438,26 @@ impl NavService for BotNavService<'_, '_> {
         if self.stuck() {
             return None;
         }
-        let mut ctx = NavContext {
+        let mut ctx = NavCtx {
             graph,
             tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: Some(&mut *self.health),
+            bot: self.bot,
         };
-        self.nav.tick(&mut ctx, &self.input, rng).as_ref().map(step)
+        self.nav.roam(&mut ctx, &self.input, rng)
     }
 
     fn away_from(&mut self, threat: Vec3) -> Option<Vec3> {
         let graph = self.graph?;
-        let ctx = NavContext {
+        let ctx = NavCtx {
             graph,
             tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: None,
+            bot: self.bot,
         };
-        BotNav::away_from(&ctx, self.input.origin, threat)
+        Navigator::away_from(&ctx, self.input.origin, threat)
     }
 
     fn available(&self) -> bool {

@@ -18,6 +18,7 @@ use lb_worldq::{TraceQuery, Tracer, VisSets};
 use smallvec::SmallVec;
 
 use crate::PerceptionParams;
+use lb_core::dmath;
 
 pub const PERIOD: f64 = 0.05;
 pub const VIEW_RANGE: f32 = 4096.0;
@@ -151,7 +152,7 @@ impl Frustum {
     /// `fov` is the engine's 4:3 field of view; the horizontal angle widens with `aspect` (Hor+).
     pub fn new(eye: Vec3, angles: Vec3, fov: f32, aspect: f32) -> Frustum {
         let fov = if fov <= 0.0 { DEFAULT_FOV } else { fov.min(170.0) };
-        let tan43 = (fov.to_radians() * 0.5).tan();
+        let tan43 = dmath::tan(fov.to_radians() * 0.5);
         let tan_h = tan43 * aspect / (4.0 / 3.0);
         let (forward, right, up) = view_angle_vectors(angles);
         Frustum {
@@ -161,7 +162,7 @@ impl Frustum {
             up,
             tan_h,
             tan_v: tan43 * 0.75,
-            half_h: tan_h.atan(),
+            half_h: dmath::atan(tan_h),
         }
     }
 
@@ -194,7 +195,7 @@ impl Frustum {
     /// Angle from the view axis to `p` as a share of the horizontal half field of view.
     pub fn eccentricity(&self, p: Vec3) -> f32 {
         let d = (p - self.eye).normalize_or_zero();
-        d.dot(self.forward).clamp(-1.0, 1.0).acos() / self.half_h
+        dmath::acos(d.dot(self.forward).clamp(-1.0, 1.0)) / self.half_h
     }
 }
 
@@ -555,7 +556,7 @@ impl Vision {
 /// World yaw from `from` toward `to`, degrees.
 pub fn bearing(from: Vec3, to: Vec3) -> f32 {
     let d = to - from;
-    d.y.atan2(d.x).to_degrees()
+    dmath::atan2(d.y, d.x).to_degrees()
 }
 
 /// Center of the view counts fully, the middle band 0.7, the edge the bot's peripheral gain.

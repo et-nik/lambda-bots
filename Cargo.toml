@@ -58,7 +58,8 @@ indexmap = "2"
 smallvec = "1"
 arrayvec = "0.7"
 bitflags = "2"
-glam = "0.33"
+glam = { version = "0.33", features = ["serde"] }
+libm = "0.2"
 blake3 = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }

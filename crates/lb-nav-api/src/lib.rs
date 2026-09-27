@@ -22,8 +22,33 @@ pub struct NavStep {
     pub pitch: Option<f32>,
     pub jump: bool,
     pub duck: bool,
-    /// A traversal that must not be disturbed (a jump in flight, a ladder): its look and stance win over combat.
+    /// Press the use key (buttons, use-only doors); the motor makes it a fresh press.
+    pub use_key: bool,
+    /// Shoot at this point to break an obstacle in the way.
+    pub fire_at: Option<Vec3>,
+    /// Break it with the crowbar.
+    pub melee: bool,
+    /// A traversal that must not be disturbed (a jump in flight, a ladder, aiming at a button): its look and
+    /// stance win over combat.
     pub mandatory: bool,
+}
+
+impl NavStep {
+    /// Standing still, looking at `look_at`.
+    pub fn hold(look_at: Vec3) -> NavStep {
+        NavStep {
+            move_dir: Vec2::ZERO,
+            speed: 0.0,
+            look_at,
+            pitch: None,
+            jump: false,
+            duck: false,
+            use_key: false,
+            fire_at: None,
+            melee: false,
+            mandatory: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

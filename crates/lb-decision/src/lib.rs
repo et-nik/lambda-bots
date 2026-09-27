@@ -8,6 +8,7 @@
 
 use lb_combat::Armed;
 use lb_core::Vec3;
+use lb_core::dmath;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_game::items::{Ammo, ItemKind};
@@ -206,7 +207,7 @@ pub fn candidates(s: &Situation<'_>, out: &mut Vec<Goal>) {
             let d = spot.origin.distance(s.origin);
             let eta = s.eta(spot.origin);
             let available = items.availability(i, s.now, eta, s.opponents);
-            let mut w = (benefit * s.affinity.collect).min(1.0) * available * (-eta / 10.0).exp();
+            let mut w = (benefit * s.affinity.collect).min(1.0) * available * dmath::exp(-eta / 10.0);
             let b = &items.beliefs[i];
             let seen_there =
                 b.checked_at.is_some_and(|t| s.now.since(t) <= 1.0) && b.present_at == b.checked_at.unwrap();

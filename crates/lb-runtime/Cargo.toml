@@ -30,6 +30,7 @@ lb-ext.workspace = true
 lb-styles.workspace = true
 lb-nav.workspace = true
 lb-bsp.workspace = true
+lb-kin.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -39,6 +40,8 @@ parking_lot.workspace = true
 crossbeam-channel.workspace = true
 arc-swap.workspace = true
 rustc-hash.workspace = true
+postcard.workspace = true
+lz4_flex.workspace = true
 
 [lints]
 workspace = true

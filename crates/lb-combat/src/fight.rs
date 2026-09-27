@@ -10,6 +10,7 @@
 //! - **Extras:** crouch taps and dodge jumps by skill.
 //! - **Ledges:** a move that would drop more than 160 units is reversed.
 
+use lb_core::dmath;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
@@ -108,7 +109,7 @@ impl Fight {
         let (mut ahead, mut sideways) = (0.0f32, 0.0f32);
         if self.style == Style::Strafe {
             if i.now >= self.side_until {
-                let (sin, cos) = i.enemy_facing.to_radians().sin_cos();
+                let (sin, cos) = dmath::sin_cos(i.enemy_facing.to_radians());
                 let enemy_right = Vec2::new(sin, -cos);
                 self.side = if (i.origin - i.enemy).truncate().dot(enemy_right) < 0.0 {
                     1.0

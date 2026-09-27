@@ -1,6 +1,7 @@
 //! GoldSrc angle conventions: angles are `(pitch, yaw, roll)` in degrees, pitch positive = down
 //! for view angles (`v_angle`), yaw counter-clockwise from +X.
 
+use crate::dmath;
 use glam::Vec3;
 
 pub fn normalize_angle(mut a: f32) -> f32 {
@@ -23,16 +24,16 @@ pub fn dir_to_view_angles(dir: Vec3) -> Vec3 {
         let pitch = if dir.z > 0.0 { -90.0 } else { 90.0 };
         return Vec3::new(pitch, 0.0, 0.0);
     }
-    let yaw = dir.y.atan2(dir.x).to_degrees();
-    let pitch = -(dir.z.atan2(dir.truncate().length())).to_degrees();
+    let yaw = dmath::atan2(dir.y, dir.x).to_degrees();
+    let pitch = -dmath::atan2(dir.z, dir.truncate().length()).to_degrees();
     Vec3::new(pitch, normalize_angle(yaw), 0.0)
 }
 
 /// Forward, right and up vectors of view angles (as `AngleVectors` with view pitch convention).
 pub fn view_angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
-    let (sp, cp) = angles.x.to_radians().sin_cos();
-    let (sy, cy) = angles.y.to_radians().sin_cos();
-    let (sr, cr) = angles.z.to_radians().sin_cos();
+    let (sp, cp) = dmath::sin_cos(angles.x.to_radians());
+    let (sy, cy) = dmath::sin_cos(angles.y.to_radians());
+    let (sr, cr) = dmath::sin_cos(angles.z.to_radians());
     let forward = Vec3::new(cp * cy, cp * sy, -sp);
     let right = Vec3::new(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
     let up = Vec3::new(cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp);
@@ -41,7 +42,7 @@ pub fn view_angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
 
 /// Projects a desired world-space horizontal velocity onto forward/side move values for a yaw.
 pub fn world_vel_to_move(vel: Vec3, yaw_deg: f32) -> (f32, f32) {
-    let (sy, cy) = yaw_deg.to_radians().sin_cos();
+    let (sy, cy) = dmath::sin_cos(yaw_deg.to_radians());
     let forward = vel.x * cy + vel.y * sy;
     let side = vel.x * sy - vel.y * cy;
     (forward, side)

@@ -454,6 +454,9 @@ name = "glam"
 version = "0.33.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "granit-parser"
@@ -592,6 +595,7 @@ dependencies = [
  "lb-ffi",
  "lb-nav",
  "lb-navgen",
+ "lb-runtime",
  "lb-worldq",
  "serde_json",
 ]
@@ -626,7 +630,9 @@ name = "lb-core"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "libm",
  "rustc-hash",
+ "serde",
  "smallvec",
  "thiserror",
 ]
@@ -685,6 +691,9 @@ dependencies = [
  "lb-ffi",
  "lb-raw",
  "lb-worldq",
+ "postcard",
+ "rustc-hash",
+ "serde",
  "smallvec",
  "thiserror",
  "tracing",
@@ -694,6 +703,7 @@ dependencies = [
 name = "lb-kin"
 version = "0.1.0"
 dependencies = [
+ "lb-bsp",
  "lb-core",
  "lb-worldq",
  "smallvec",
@@ -757,9 +767,11 @@ dependencies = [
  "lb-worldq",
  "lz4_flex",
  "postcard",
+ "rustc-hash",
  "serde",
  "smallvec",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -834,6 +846,7 @@ dependencies = [
  "lb-ffi",
  "lb-game",
  "lb-host",
+ "lb-kin",
  "lb-knowledge",
  "lb-motor",
  "lb-nav",
@@ -843,7 +856,9 @@ dependencies = [
  "lb-styles",
  "lb-telemetry",
  "lb-worldq",
+ "lz4_flex",
  "parking_lot",
+ "postcard",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -881,11 +896,15 @@ dependencies = [
 name = "lb-testkit"
 version = "0.1.0"
 dependencies = [
+ "lb-bsp",
+ "lb-config",
  "lb-core",
- "lb-ffi",
  "lb-host",
- "lb-raw",
- "lb-runtime",
+ "lb-kin",
+ "lb-motor",
+ "lb-nav",
+ "lb-nav-api",
+ "lb-worldq",
  "smallvec",
 ]
 
@@ -903,6 +922,12 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linux-raw-sys"

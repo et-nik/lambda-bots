@@ -2,3 +2,17 @@ disallowed-types = [
     { path = "std::collections::HashMap", reason = "use rustc_hash::FxHashMap or indexmap::IndexMap: iteration order must be deterministic" },
     { path = "std::collections::HashSet", reason = "use rustc_hash::FxHashSet or indexmap::IndexSet: iteration order must be deterministic" },
 ]
+disallowed-methods = [
+    { path = "f32::sin", reason = "use lb_core::dmath: libm results differ between builds and platforms, replays must not" },
+    { path = "f32::cos", reason = "use lb_core::dmath" },
+    { path = "f32::sin_cos", reason = "use lb_core::dmath" },
+    { path = "f32::tan", reason = "use lb_core::dmath" },
+    { path = "f32::atan", reason = "use lb_core::dmath" },
+    { path = "f32::atan2", reason = "use lb_core::dmath" },
+    { path = "f32::acos", reason = "use lb_core::dmath" },
+    { path = "f32::asin", reason = "use lb_core::dmath" },
+    { path = "f32::exp", reason = "use lb_core::dmath" },
+    { path = "f32::ln", reason = "use lb_core::dmath" },
+    { path = "f32::powf", reason = "use lb_core::dmath" },
+    { path = "f32::hypot", reason = "use lb_core::dmath" },
+]
