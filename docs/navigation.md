@@ -12,7 +12,8 @@ a generated graph also falls back to it when generation fails.
 
 Either way every link is classified by simulation: `lb-kin` is a port of the engine's player movement
 (`PM_PlayerMove`): friction, acceleration, stepping, gravity, jumping, ducking, ladders, water, and push fields
-(`trigger_push`: the push is added while the player is in the field and kept as momentum after).
+(`trigger_push`: while the player is in the field its horizontal push is added to the move and kept as momentum after,
+and its vertical push accelerates the player against gravity, at that many units/s² — one on the ground is not lifted).
 
 ### Making the graph
 

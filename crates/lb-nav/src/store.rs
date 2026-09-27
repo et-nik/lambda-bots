@@ -94,6 +94,23 @@ pub fn read_key(bytes: &[u8]) -> Result<GraphKey, StoreError> {
     postcard::from_bytes(c.take(len)?).map_err(|e| StoreError::Decode(e.to_string()))
 }
 
+/// A key is a few dozen bytes: a longer one is damage, not something to read.
+const MAX_KEY: usize = 1024;
+
+/// Reads only the key from the start of a `.lbnav` file, leaving the graph after it unread.
+pub fn read_key_from(r: &mut impl std::io::Read) -> Result<GraphKey, StoreError> {
+    let mut bytes = vec![0; MAGIC.len() + 8];
+    r.read_exact(&mut bytes).map_err(|_| StoreError::Truncated)?;
+    let len = header(&bytes)?.u32()? as usize;
+    if len > MAX_KEY {
+        return Err(StoreError::Decode(format!("a key of {len} bytes")));
+    }
+    let head = bytes.len();
+    bytes.resize(head + len, 0);
+    r.read_exact(&mut bytes[head..]).map_err(|_| StoreError::Truncated)?;
+    read_key(&bytes)
+}
+
 fn header(bytes: &[u8]) -> Result<Cursor<'_>, StoreError> {
     let mut c = Cursor { bytes, at: 0 };
     if c.take(MAGIC.len()).map_err(|_| StoreError::NotLbnav)? != MAGIC {
@@ -154,6 +171,8 @@ mod tests {
         assert_eq!(k, key());
         assert_eq!(back, g);
         assert_eq!(read_key(&bytes).unwrap(), key());
+        let mut head = &bytes[..MAGIC.len() + 8 + postcard::to_allocvec(&key()).unwrap().len()];
+        assert_eq!(read_key_from(&mut head).unwrap(), key());
     }
 
     #[test]
@@ -169,6 +188,11 @@ mod tests {
         let mut future = whole.clone();
         future[8] = 99;
         assert_eq!(read(&future).unwrap_err(), StoreError::Format(99));
+        assert_eq!(read_key_from(&mut &future[..]).unwrap_err(), StoreError::Format(99));
+        assert_eq!(read_key_from(&mut &whole[..20]).unwrap_err(), StoreError::Truncated);
+        let mut huge = whole.clone();
+        huge[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(read_key_from(&mut &huge[..]), Err(StoreError::Decode(_))));
     }
 
     #[test]

@@ -633,6 +633,8 @@ impl<W: SimWorld> Course<W> {
             ground_model: p.ground.map_or(0, |g| g as u16),
             max_speed: self.phys.maxspeed,
             health: bot.health,
+            push: p.field,
+            gravity: self.phys.gravity,
         };
         let mut ctx = NavCtx {
             graph: &self.graph,

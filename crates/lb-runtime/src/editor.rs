@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lb_config::overlay::{OverlayFile, Patch, Place};
+use lb_config::overlay::{LINK_KINDS, OverlayFile, Patch, Place};
 use lb_core::Vec3;
 use lb_host::DebugPrim;
 use lb_nav::{LinkKind, NavGraph, NodeFlags, NodeId};
@@ -50,6 +50,14 @@ pub fn editor_path(install: &Path, map: &str) -> PathBuf {
 
 fn at(p: Vec3) -> [f32; 3] {
     [p.x.round(), p.y.round(), p.z.round()]
+}
+
+/// A radius argument: `default` when left out, `None` unless a finite number above 0.
+fn radius_arg(arg: Option<&&str>, default: f32) -> Option<f32> {
+    match arg {
+        None => Some(default),
+        Some(r) => r.parse::<f32>().ok().filter(|r| r.is_finite() && *r > 0.0),
+    }
 }
 
 fn kind_color(kind: LinkKind, valid: bool) -> [u8; 3] {
@@ -155,10 +163,14 @@ impl Editor {
                 let (from, to) = (at(g.node(a).origin), at(g.node(b).origin));
                 let both = opts.contains(&"both");
                 if args[0] == "link" {
-                    let kind = opts
-                        .iter()
-                        .find(|o| **o != "both" && **o != "trust")
-                        .map(|k| k.to_string());
+                    let kinds: Vec<&str> = opts.iter().copied().filter(|o| *o != "both" && *o != "trust").collect();
+                    if kinds.len() > 1 || kinds.iter().any(|k| !LINK_KINDS.contains(k)) {
+                        return vec![format!(
+                            "lb edit link [kind] [both] [trust]: kind is one of {}",
+                            LINK_KINDS.join(", ")
+                        )];
+                    }
+                    let kind = kinds.first().map(|k| k.to_string());
                     self.patch(Patch::AddLink {
                         from,
                         to,
@@ -184,8 +196,10 @@ impl Editor {
                     )]
                 }
             }
-            ["forbid", radius @ ..] => {
-                let radius = radius.first().and_then(|r| r.parse().ok()).unwrap_or(48.0);
+            ["forbid", rest @ ..] => {
+                let Some(radius) = radius_arg(rest.first(), 48.0) else {
+                    return vec!["lb edit forbid [radius]: the radius is a number of units above 0".into()];
+                };
                 self.patch(Patch::Forbid {
                     at: at(origin),
                     radius,
@@ -194,7 +208,11 @@ impl Editor {
                 vec![format!("bots will not plan through here ({radius:.0} u) after saving")]
             }
             ["place", name, rest @ ..] => {
-                let radius = rest.first().and_then(|r| r.parse().ok()).unwrap_or(128.0);
+                let Some(radius) = radius_arg(rest.first(), 128.0) else {
+                    return vec![
+                        "lb edit place <name> [radius] [tags...]: the radius is a number of units above 0".into(),
+                    ];
+                };
                 self.file.places.retain(|p| p.name != *name);
                 self.file.places.push(Place {
                     name: name.to_string(),
@@ -355,5 +373,29 @@ mod tests {
         assert!(!drawn.is_empty() && drawn.len() <= BEAMS);
         assert!(ed.draw(1.1, &g, Vec3::ZERO).is_none(), "not due yet");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_radii_and_kinds_are_not_recorded() {
+        let dir = std::env::temp_dir().join(format!("lb-editor-bad-{}", std::process::id()));
+        let g = line();
+        let mut ed = Editor::open(1, &dir, "crossfire").unwrap();
+        let here = Vec3::new(100.0, 0.0, 36.0);
+        for r in ["0", "-5", "nan", "inf", "wide"] {
+            assert!(ed.command(&["forbid", r], Some(&g), here)[0].contains("above 0"), "{r}");
+            assert!(
+                ed.command(&["place", "bridge", r], Some(&g), here)[0].contains("above 0"),
+                "{r}"
+            );
+        }
+        ed.command(&["mark"], Some(&g), Vec3::new(0.0, 0.0, 36.0));
+        let far = Vec3::new(200.0, 0.0, 36.0);
+        assert!(ed.command(&["link", "jmup"], Some(&g), far)[0].contains("kind is one of"));
+        assert!(ed.command(&["link", "jump", "drop"], Some(&g), far)[0].contains("kind is one of"));
+        assert_eq!(ed.unsaved(), 0);
+        assert!(ed.file.nav.patches.is_empty() && ed.file.places.is_empty());
+        ed.command(&["link", "both", "drop"], Some(&g), far);
+        ed.command(&["forbid"], Some(&g), here);
+        assert_eq!(ed.unsaved(), 2);
     }
 }

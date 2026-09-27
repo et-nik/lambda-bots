@@ -393,9 +393,14 @@ impl Runtime {
             (Cv::Style, c.roster.styles.clone()),
             (Cv::CmdRate, c.engine.cmd_rate.to_string()),
             (Cv::ForceRespawn, (c.bots.force_respawn as u8).to_string()),
+            (Cv::Editor, (c.access.editor_enabled as u8).to_string()),
         ];
         for (cv, value) in values {
             self.cvars.set(host, cv, &value);
+        }
+        self.editor_allowed = self.config.access.editor_enabled;
+        if !self.editor_allowed {
+            self.editor = None;
         }
         for bot in &mut self.bots {
             if let Some(p) = self.roster.get(&bot.persona.name) {
@@ -770,6 +775,7 @@ impl Runtime {
                 body.has_longjump = s.has_longjump;
                 body.frags = s.frags;
                 body.groundentity = s.groundentity;
+                body.basevelocity = s.basevelocity;
                 if !bot.view_initialized {
                     bot.view = s.v_angle;
                     bot.view_initialized = true;
@@ -851,6 +857,9 @@ impl Runtime {
                                 }
                                 self.link_health.clear();
                                 self.live_check = lb_nav::probe::LiveCheck::default();
+                                if let Some(ed) = self.editor.as_mut() {
+                                    ed.mark = None;
+                                }
                             }
                             self.graph = Some(graph);
                         }
@@ -1665,6 +1674,7 @@ impl Runtime {
         };
         let opponents = subjects.len().saturating_sub(1);
         let registry = &self.game.weapons;
+        let gravity = self.game.rules.gravity;
         let mut recognized = Vec::new();
         let mechs = &self.mechs;
         let link_health = &mut self.link_health;
@@ -1688,6 +1698,7 @@ impl Runtime {
                     registry,
                     opponents,
                     mechs,
+                    gravity,
                 };
                 drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
             }));
@@ -2093,6 +2104,12 @@ fn nav_input(bot: &Bot, ctx: &DriveCtx<'_>, body: &lb_brain::Body) -> lb_nav::ex
         },
         max_speed: body.maxspeed,
         health: body.health,
+        push: if raw.flags & lb_game::self_state::FL_BASEVELOCITY != 0 {
+            raw.basevelocity
+        } else {
+            Vec3::ZERO
+        },
+        gravity: ctx.gravity,
     }
 }
 
@@ -2242,6 +2259,8 @@ struct DriveCtx<'a> {
     registry: &'a WeaponRegistry,
     opponents: usize,
     mechs: &'a nav::LiveMechs,
+    /// `sv_gravity`.
+    gravity: f32,
 }
 
 /// Players as vision gets them: the snapshot plus the weapon they show and their last shot.

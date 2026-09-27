@@ -471,7 +471,7 @@ fn push_run(world: &mut dyn MoveWorld, phys: &Physics, run: &PushRun, reach: boo
         in_water: p.waterlevel > 0,
     };
     for i in 0..(PUSH_TIME / tick) as usize {
-        let in_field = p.basevelocity != Vec3::ZERO;
+        let in_field = p.field != Vec3::ZERO;
         if in_field && landed {
             // Back in the field after coming down: round and round.
             return verdict(&p, false, flight, impact);
@@ -492,7 +492,7 @@ fn push_run(world: &mut dyn MoveWorld, phys: &Physics, run: &PushRun, reach: boo
             jumped |= jump;
             cmd.forward = 400.0;
             cmd.buttons = IN_FORWARD | if jump { IN_JUMP } else { 0 };
-        } else if let Some(spot) = run.hold.filter(|_| p.basevelocity.z > LIFTING) {
+        } else if let Some(spot) = run.hold.filter(|_| p.field.z > LIFTING) {
             if let Some(d) = hover(p.origin, p.velocity, spot) {
                 cmd.angles = dir_to_view_angles(d.extend(0.0));
                 cmd.forward = 400.0;
@@ -522,7 +522,7 @@ fn push_run(world: &mut dyn MoveWorld, phys: &Physics, run: &PushRun, reach: boo
         if pushed && let Some(v) = ev.landed {
             impact = impact.max(v);
         }
-        let out = p.basevelocity == Vec3::ZERO;
+        let out = p.field == Vec3::ZERO;
         if pushed && out && (p.on_ground() || p.waterlevel >= 2) {
             landed = true;
         }

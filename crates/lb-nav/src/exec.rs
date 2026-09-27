@@ -38,11 +38,24 @@ pub struct NavInput {
     pub ground_model: u16,
     pub max_speed: f32,
     pub health: f32,
+    /// Velocity of the push field the bot is in (`basevelocity` as `trigger_push` sets it); zero outside one.
+    pub push: Vec3,
+    /// Server gravity (`sv_gravity`); 0 when not known.
+    pub gravity: f32,
 }
 
 impl NavInput {
     pub fn feet(&self) -> f32 {
         self.origin.z - if self.ducked { 18.0 } else { 36.0 }
+    }
+
+    /// Server gravity, the default when not known.
+    pub fn gravity(&self) -> f32 {
+        if self.gravity > 0.0 {
+            self.gravity
+        } else {
+            Physics::default().gravity
+        }
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -967,8 +980,6 @@ pub struct PushExec {
     runs: u8,
     best: f32,
     best_at: f64,
-    /// Time and origin of the last frame.
-    last: Option<(f64, Vec3)>,
 }
 
 impl PushExec {
@@ -990,11 +1001,7 @@ impl PushExec {
         let (a, b) = (c.spec.entry.origin, c.spec.exit.origin);
         let look = b + Vec3::Z * EYE_HEIGHT;
         let airborne = !i.on_ground && !i.on_ladder && i.waterlevel < 2;
-        // A field shows as motion the bot's own velocity does not explain.
-        let lifting = match self.last.replace((now, i.origin)) {
-            Some((t, o)) if now - t > 1e-4 => ((i.origin - o) / (now - t) as f32 - i.velocity).z > LIFTING,
-            _ => false,
-        };
+        let lifting = i.push.z > LIFTING;
         // The field shows as a flight, or as more speed along the floor than running gives.
         let carried = airborne || flat(i.velocity).length() > i.max_speed * 1.25;
         for _ in 0..4 {
@@ -1065,7 +1072,7 @@ impl PushExec {
                     }
                     if airborne {
                         let mut step = NavStep::hold(look);
-                        if let Some(d) = air_steer(i.origin, i.velocity, b, Physics::default().gravity) {
+                        if let Some(d) = air_steer(i.origin, i.velocity, b, i.gravity()) {
                             step.move_dir = d;
                             step.speed = i.max_speed;
                         }
@@ -1157,7 +1164,6 @@ impl Exec {
                 runs: 0,
                 best: f32::INFINITY,
                 best_at: now,
-                last: None,
             }),
         }
     }

@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 
 use lb_bsp::BspWorld;
 use lb_nav::NavGraph;
-use lb_nav::store::{GraphKey, read, read_key, write};
+use lb_nav::store::{GraphKey, read, read_key_from, write};
 
 use crate::GenOptions;
 
 /// Version of the generator. Bump it whenever the same map and settings would give another graph.
-pub const GENERATOR: u32 = 2;
+pub const GENERATOR: u32 = 3;
 /// Graphs kept per map.
 pub const KEEP: usize = 4;
 
@@ -78,26 +78,41 @@ impl GraphCache {
 
     /// Keys of the graphs kept, most recently used first.
     pub fn kept(&self) -> Vec<(PathBuf, GraphKey)> {
-        let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&self.dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "lbnav"))
-            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-            .collect();
-        files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        files
-            .into_iter()
-            .filter_map(|(_, p)| {
-                let key = read_key(&std::fs::read(&p).ok()?).ok()?;
-                Some((p, key))
-            })
-            .collect()
+        self.scan().0
     }
 
+    /// The graph files: those whose key reads (only the header is read), most recently used first, and the others.
+    fn scan(&self) -> (Vec<(PathBuf, GraphKey)>, Vec<PathBuf>) {
+        let mut readable = Vec::new();
+        let mut unreadable = Vec::new();
+        let paths = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path());
+        for path in paths.filter(|p| p.extension().is_some_and(|x| x == "lbnav") && p.is_file()) {
+            let key = std::fs::File::open(&path)
+                .ok()
+                .and_then(|mut f| read_key_from(&mut f).ok());
+            match key {
+                Some(key) => {
+                    let used = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    readable.push((used, path, key));
+                }
+                None => unreadable.push(path),
+            }
+        }
+        readable.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        (readable.into_iter().map(|(_, p, k)| (p, k)).collect(), unreadable)
+    }
+
+    /// Removes the graph files whose key does not read and the least recently used beyond `KEEP`.
     fn evict(&self) {
-        for (path, _) in self.kept().into_iter().skip(KEEP) {
-            if let Err(e) = std::fs::remove_file(&path) {
+        let (readable, unreadable) = self.scan();
+        for path in unreadable.iter().chain(readable.iter().skip(KEEP).map(|(p, _)| p)) {
+            if let Err(e) = std::fs::remove_file(path) {
                 tracing::warn!("{}: {e}", path.display());
             }
         }
@@ -169,6 +184,24 @@ mod tests {
         assert_eq!(kept[0], key(9));
         assert!(kept.contains(&key(1)));
         assert!(!kept.contains(&key(2)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_without_a_readable_key_go_on_the_next_store() {
+        let root = scratch("unreadable");
+        let cache = GraphCache::new(&root, "crossfire");
+        let first = cache.store(&key(1), &tiny(3)).unwrap();
+        let junk = cache.dir().join("0000000000000000.lbnav");
+        std::fs::write(&junk, b"not a graph").unwrap();
+        // A graph cut short after its key still names what it was made from: only the header is read.
+        let bytes = std::fs::read(&first).unwrap();
+        let cut = cache.dir().join("1111111111111111.lbnav");
+        std::fs::write(&cut, &bytes[..bytes.len() - 5]).unwrap();
+        assert_eq!(cache.kept().len(), 2);
+        cache.store(&key(2), &tiny(2)).unwrap();
+        assert!(!junk.exists());
+        assert!(cut.exists() && first.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

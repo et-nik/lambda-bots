@@ -31,10 +31,13 @@ pub struct Body {
     pub frags: f32,
     /// Edict index of what the feet stand on (`groundentity`), 0 for the world.
     pub groundentity: u16,
+    pub basevelocity: Vec3,
 }
 
 pub const FL_ONGROUND: u32 = 1 << 9;
 pub const FL_DUCKING: u32 = 1 << 14;
+/// `basevelocity` is what a push field set this frame, not momentum left from one.
+pub const FL_BASEVELOCITY: u32 = 1 << 22;
 pub const MOVETYPE_FLY: u8 = 5;
 pub const DEAD_NO: u8 = 0;
 pub const DEAD_RESPAWNABLE: u8 = 3;

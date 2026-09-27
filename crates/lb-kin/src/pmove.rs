@@ -79,8 +79,12 @@ pub struct Player {
     /// The player's own speed cap (`pev->maxspeed`); 0 = only `sv_maxspeed`.
     pub client_maxspeed: f32,
     pub dead: bool,
-    /// Velocity of the push field the player is in (`basevelocity`); added to the player's own while moving, and
-    /// kept as momentum when it leaves the field.
+    /// Velocity of the push field the player box was in for the last command (what `trigger_push` sets with
+    /// `FL_BASEVELOCITY`); zero outside one.
+    pub field: Vec3,
+    /// The push the player carries (`basevelocity`): its horizontal part is added to the player's own velocity while
+    /// moving and kept as momentum when the player leaves the field; gravity takes the vertical part into the
+    /// velocity every command.
     pub basevelocity: Vec3,
 }
 
@@ -105,6 +109,7 @@ impl Player {
             longjump: false,
             client_maxspeed: 0.0,
             dead: false,
+            field: Vec3::ZERO,
             basevelocity: Vec3::ZERO,
         }
     }
@@ -255,9 +260,10 @@ impl Pm<'_> {
         self.forward = forward;
         self.right = right;
 
-        // A push field sets the base velocity while the player is in it; leaving it, the push stays as momentum
-        // (`SV_CheckMovingGround`, before the move).
+        // A push field sets the base velocity while the player is in it; leaving it, what gravity has not taken of
+        // the push stays as momentum (`SV_CheckMovingGround`, before the move).
         let push = self.world.push(self.p.origin, self.p.hull());
+        self.p.field = push;
         if push != Vec3::ZERO {
             self.p.basevelocity = push;
         } else if self.p.basevelocity != Vec3::ZERO {
@@ -382,6 +388,8 @@ impl Pm<'_> {
             return;
         }
         self.p.velocity.z -= self.phys.gravity * 0.5 * self.frametime;
+        self.p.velocity.z += self.p.basevelocity.z * self.frametime;
+        self.p.basevelocity.z = 0.0;
         self.check_velocity();
     }
 

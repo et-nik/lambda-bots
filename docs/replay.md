@@ -69,7 +69,7 @@ source differs, only when the core version number does.
 - the files the runtime reads:
   - `config/lambdabots.yaml`, `config/difficulty.yaml`, `config/styles/`;
   - `profiles/`, `names/`, `data/profiles.yaml`;
-  - the map's BSP and its navigation graph;
+  - the map's BSP, its navigation graph and its overlays (`maps/<map>/editor.yaml`, `overlay.yaml`);
 - a hash of what the runtime made of those files. A replay warns if its own differs.
 
 **Steps**, one per call of the adapter into the core (map start, frame start and end, console command). Each step

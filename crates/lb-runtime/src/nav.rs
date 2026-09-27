@@ -232,11 +232,13 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     })
 }
 
-/// The map's overlays in the order they apply: `maps/<map>/editor.yaml` (the in-game editor's), then
-/// `maps/<map>/overlay.yaml` (hand-written). A file that does not read is left out with a warning.
+/// A map's overlay files under `maps/<map>/`, in the order they apply: the in-game editor's, then the hand-written one.
+pub const OVERLAYS: [&str; 2] = ["editor.yaml", "overlay.yaml"];
+
+/// The map's overlays (`OVERLAYS`) in the order they apply. A file that does not read is left out with a warning.
 pub fn read_overlays(install: &Path, map: &str, bsp_size: u64) -> Vec<OverlayFile> {
     let dir = install.join("maps").join(map);
-    ["editor.yaml", "overlay.yaml"]
+    OVERLAYS
         .iter()
         .filter_map(|name| {
             let path = dir.join(name);

@@ -425,11 +425,12 @@ impl Mechanisms {
         Some((e.origin(), e.yaw()))
     }
 
-    /// Push fields on when the map starts: `(model, velocity)`.
+    /// Push fields on when the map starts that keep pushing while a player is in them (a push-once trigger adds its
+    /// velocity a single time and is gone): `(model, velocity)`.
     pub fn push_fields(&self) -> Vec<(usize, Vec3)> {
         self.triggers
             .iter()
-            .filter(|t| t.kind == TriggerKind::Push && t.spawnflags & SF_PUSH_START_OFF == 0)
+            .filter(|t| t.kind == TriggerKind::Push && t.spawnflags & (SF_PUSH_START_OFF | SF_PUSH_ONCE) == 0)
             .map(|t| (t.model, t.push))
             .collect()
     }
@@ -590,5 +591,31 @@ mod tests {
                 Activation::Touch { model: 4 },
             ]
         );
+    }
+
+    #[test]
+    fn push_fields_are_the_continuous_ones_on_at_start() {
+        let push = |model, spawnflags| Trigger {
+            entity: model,
+            model,
+            kind: TriggerKind::Push,
+            targetname: None,
+            target: None,
+            master: None,
+            wait: 0.0,
+            delay: 0.0,
+            spawnflags,
+            push: Vec3::Z * 100.0,
+        };
+        let m = Mechanisms {
+            triggers: vec![
+                push(1, 0),
+                push(2, SF_PUSH_ONCE),
+                push(3, SF_PUSH_START_OFF),
+                push(4, SF_PUSH_ONCE | SF_PUSH_START_OFF),
+            ],
+            ..Mechanisms::default()
+        };
+        assert_eq!(m.push_fields(), vec![(1, Vec3::Z * 100.0)]);
     }
 }

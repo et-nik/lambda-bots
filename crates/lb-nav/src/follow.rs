@@ -459,6 +459,7 @@ mod tests {
             now,
             max_speed: 270.0,
             health: 100.0,
+            gravity: 800.0,
             ..Default::default()
         }
     }
