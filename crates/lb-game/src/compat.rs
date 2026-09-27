@@ -2,6 +2,8 @@
 
 use std::fmt::Write;
 
+use lb_config::yaml::quote;
+
 #[derive(Clone, Debug, Default)]
 pub struct CompatibilityProfile {
     pub core_version: String,
@@ -47,9 +49,9 @@ impl CompatibilityProfile {
         let _ = writeln!(s, "bugfixedhl: {}", self.bugfixedhl);
         let _ = writeln!(s, "map: {}", self.map);
         let _ = writeln!(s, "late_load: {}", self.late_load);
-        let _ = writeln!(s, "install_dir: \"{}\"", self.install_dir);
-        let _ = writeln!(s, "config: \"{}\"", self.config);
-        let _ = writeln!(s, "names: \"{}\"", self.names);
+        let _ = writeln!(s, "install_dir: {}", quote(&self.install_dir));
+        let _ = writeln!(s, "config: {}", quote(&self.config));
+        let _ = writeln!(s, "names: {}", quote(&self.names));
         let _ = writeln!(s, "sys_ticrate: {}", self.sys_ticrate);
         let _ = writeln!(s, "channels:");
         for (name, on) in &self.channels {

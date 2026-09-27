@@ -142,19 +142,7 @@ impl PersonaSpec {
     /// The entry as YAML lines for appending under `bots:` (two-space list indent). Strings are written as JSON
     /// strings, which are valid YAML double-quoted scalars.
     pub fn to_yaml_entry(&self) -> String {
-        let q = |s: &str| {
-            let mut out = String::from("\"");
-            for c in s.chars() {
-                match c {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-                    c => out.push(c),
-                }
-            }
-            out.push('"');
-            out
-        };
+        let q = yaml::quote;
         let mut s = format!("  - name: {}\n", q(&self.name));
         if let Some(style) = &self.style {
             s += &format!("    style: {style}\n");

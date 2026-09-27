@@ -487,8 +487,10 @@ impl Runtime {
         self.public_now.clear();
         self.steps.reset();
         self.last_shot = vec![None; max_clients as usize + 1];
+        self.weapon_models.clear();
         self.item_spots = None;
         self.item_entities.clear();
+        self.item_kinds.clear();
         self.next_items_at = SimTime::ZERO;
         self.nav_status = format!("loading the graph for {name}");
         self.nav_loader = Some(nav::NavLoader::start(&self.init.game_dir, &self.init.install_dir, name));

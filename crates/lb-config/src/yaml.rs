@@ -19,6 +19,21 @@ pub fn to_string<T: Serialize>(value: &T) -> Result<String, ConfigError> {
     })
 }
 
+/// `s` as a double-quoted scalar. The escapes are JSON's, which YAML accepts too.
+pub fn quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Checks the mandatory `schema: lambdabots/<kind>@<major>` header.
 pub fn check_schema(found: &str, kind: &str, major: u32, path: &str) -> Result<(), ConfigError> {
     let expected = format!("lambdabots/{kind}@{major}");

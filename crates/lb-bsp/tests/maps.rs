@@ -90,8 +90,12 @@ fn crossfire_traces() {
     assert_eq!(world.point_contents(s), contents::EMPTY);
     assert_eq!(world.point_contents(down.end - Vec3::Z * 8.0), contents::SOLID);
     // A crouching hull fits wherever a standing one does.
+    let stand = world.trace(&TraceQuery::hull(s, s - Vec3::Z * 4096.0, HullKind::Stand));
     let crouch = world.trace(&TraceQuery::hull(s, s - Vec3::Z * 4096.0, HullKind::Crouch));
-    assert!(crouch.fraction >= down.fraction * 0.0 && !crouch.start_solid);
+    assert!(
+        !crouch.start_solid && crouch.fraction >= stand.fraction,
+        "{crouch:?} {stand:?}"
+    );
 }
 
 /// The PVS gate must never hide a player a clear line reaches, and the PAS always covers the PVS.

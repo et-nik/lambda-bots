@@ -285,6 +285,21 @@ mod tests {
         vec!["gordon".into(), "barney".into()]
     }
 
+    #[test]
+    fn shipped_profiles_load_cleanly() {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let r = Roster::load(&data, &models(), &StyleTable::default());
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        let p = r.get("human.exe").unwrap();
+        assert_eq!((p.style, p.skill, p.model.as_str()), (StyleId::Rusher, 75, "robo"));
+        assert_eq!((p.aggression, p.fear), (1.0, 0.0));
+        // Only the fear is given: the aggression comes from the sniper style's range.
+        let p = r.get("safety third").unwrap();
+        assert_eq!((p.style, p.skill, p.fear), (StyleId::Sniper, 50, 0.6));
+        assert!((0.2..=0.5).contains(&p.aggression));
+        assert_eq!(r.get("TODO: Fix This Later").unwrap().skill, 25);
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lb-roster-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -11,6 +11,7 @@ use crate::file::{Bsp, BspError};
 /// Brush entities that stay where the map put them and block movement.
 const STATIC_SOLIDS: &[&str] = &[
     "func_wall",
+    "func_wall_toggle",
     "func_healthcharger",
     "func_recharge",
     "func_breakable",

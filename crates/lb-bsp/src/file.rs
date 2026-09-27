@@ -132,6 +132,9 @@ impl Bsp {
                 }
             })
             .collect();
+        if planes.iter().any(|p| !(0..=5).contains(&p.kind)) {
+            return Err(BspError::Invalid("plane type out of range".into()));
+        }
 
         let (ofs, len) = lump(LUMP_LEAFS, 28)?;
         let leafs: Vec<Leaf> = (0..len / 28)
@@ -215,6 +218,15 @@ impl Bsp {
             .collect();
         if models.is_empty() {
             return Err(BspError::Invalid("no models".into()));
+        }
+        let head = models[0].headnode[0];
+        if head < 0 || head as usize >= nodes.len() {
+            return Err(BspError::Invalid(format!("world head node {head} out of range")));
+        }
+        // Leaves 1..=visleafs carry PVS rows; leaf 0 is the shared solid leaf.
+        let visleafs = models[0].visleafs;
+        if visleafs < 0 || visleafs as usize >= leafs.len() {
+            return Err(BspError::Invalid(format!("world visleafs {visleafs} out of range")));
         }
 
         let (ofs, len) = lump(LUMP_VISIBILITY, 0)?;
