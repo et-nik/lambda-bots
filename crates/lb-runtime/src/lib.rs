@@ -6,6 +6,7 @@ pub mod capture;
 pub mod clients;
 pub mod commands;
 pub mod cvars;
+pub mod editor;
 pub mod logging;
 pub mod manager;
 pub mod motor_test;
@@ -168,6 +169,15 @@ pub struct Runtime {
     pub live_check: lb_nav::probe::LiveCheck,
     /// What happened to the map's navigation graph, for `lb nav`.
     pub nav_status: String,
+    /// Path search expansions saved up (`PLAN_RATE`, at most `PLAN_BURST`).
+    plan_tokens: f64,
+    /// The in-game editor, when a player has it on (`lb edit on`, needs `lb_editor 1`).
+    pub editor: Option<editor::Editor>,
+    pub editor_allowed: bool,
+    /// The player whose `lb` command runs now; `None` for the server console.
+    pub command_slot: Option<u8>,
+    /// The map's overlays (places, graph patches), as last loaded.
+    pub overlays: std::sync::Arc<Vec<lb_config::overlay::OverlayFile>>,
     /// PVS and PAS of the map; until they load, everything counts as potentially visible and audible.
     pub vis: Option<Arc<lb_bsp::MapVis>>,
     /// Player snapshots of this frame, kept from `frame_pre` for the senses in `frame_post`.
@@ -288,6 +298,11 @@ impl Runtime {
             link_health: LinkHealth::default(),
             live_check: lb_nav::probe::LiveCheck::default(),
             nav_status: "no map".into(),
+            plan_tokens: 0.0,
+            editor: None,
+            editor_allowed: false,
+            command_slot: None,
+            overlays: Default::default(),
             vis: None,
             clients_now: Vec::new(),
             sounds_now: Vec::new(),
@@ -417,6 +432,8 @@ impl Runtime {
             (Cv::Debug, "0".to_string()),
             (Cv::Dev, "0".to_string()),
             (Cv::LogLevel, c.logging.level.clone()),
+            (Cv::NavSource, c.nav.source.name().to_string()),
+            (Cv::Editor, "0".to_string()),
         ];
         self.cvars.register(host, &defaults);
     }
@@ -520,16 +537,11 @@ impl Runtime {
         self.item_kinds.clear();
         self.next_items_at = SimTime::ZERO;
         self.nav_status = format!("loading the graph for {name}");
+        self.editor = None;
         self.mechs.set_map(None, max_clients);
         self.link_health.clear();
         self.live_check = lb_nav::probe::LiveCheck::default();
-        let opts = import_options(&self.game.rules);
-        self.nav_loader = Some(nav::NavLoader::start(
-            &self.init.game_dir,
-            &self.init.install_dir,
-            name,
-            opts,
-        ));
+        self.start_nav_load(name);
         tracing::info!(
             "map {name} (epoch {}, {} slots){}",
             epoch.0,
@@ -548,6 +560,39 @@ impl Runtime {
                 "engine": self.compat.engine,
             }),
         );
+    }
+
+    /// The graph around the editing player, a few times a second.
+    fn draw_editor(&mut self, host: &mut dyn Host) {
+        let (Some(ed), Some(graph)) = (self.editor.as_mut(), self.graph.as_deref()) else {
+            return;
+        };
+        let Some(player) = self.clients_now.iter().find(|c| c.slot == ed.slot) else {
+            return;
+        };
+        if let Some(prims) = ed.draw(self.now.secs(), graph, player.origin + player.view_ofs) {
+            host.send_debug(ed.slot, &prims);
+        }
+    }
+
+    /// Where the player in `slot` stands, from this frame's snapshot.
+    pub fn client_origin(&self, slot: u8) -> Option<Vec3> {
+        self.clients_now.iter().find(|c| c.slot == slot).map(|c| c.origin)
+    }
+
+    /// Loads the map's navigation on the worker: visibility, mechanisms and the graph.
+    pub(crate) fn start_nav_load(&mut self, name: &str) {
+        let opts = nav::LoadOptions {
+            source: self.config.nav.source,
+            import: import_options(&self.game.rules, self.config.nav.trust_imported),
+            threads: self.config.nav.threads,
+        };
+        self.nav_loader = Some(nav::NavLoader::start(
+            &self.init.game_dir,
+            &self.init.install_dir,
+            name,
+            opts,
+        ));
     }
 
     pub fn map_end(&mut self, _host: &mut dyn Host) {
@@ -779,20 +824,33 @@ impl Runtime {
                         loaded.mechs.breakables
                     );
                     self.mechs.set_map(Some(loaded.mechs), max_clients);
+                    self.overlays = loaded.overlays;
                     match loaded.graph {
                         Ok(graph) => {
                             let s = &graph.stats;
                             self.nav_status = format!(
-                                "{map}: {} nodes, {} links ({} rejected by the check, {} added from mechanisms: {}), {} ms, from {}",
+                                "{map}: {} nodes, {} links ({} rejected by the check, {} added from mechanisms: {}), {} ms, {} ({})",
                                 s.nodes,
                                 s.links,
                                 s.invalid,
                                 s.added,
                                 s.kinds(),
                                 loaded.millis,
+                                loaded.origin,
                                 graph.source
                             );
+                            if !loaded.patches.is_empty() {
+                                self.nav_status = format!("{}; {}", self.nav_status, loaded.patches);
+                            }
                             tracing::info!("navigation graph {}", self.nav_status);
+                            // Node numbers belong to one graph: paths and what was learned about links go with it.
+                            if self.graph.is_some() {
+                                for bot in &mut self.bots {
+                                    bot.nav.clear();
+                                }
+                                self.link_health.clear();
+                                self.live_check = lb_nav::probe::LiveCheck::default();
+                            }
                             self.graph = Some(graph);
                         }
                         Err(e) => {
@@ -899,6 +957,7 @@ impl Runtime {
         if self.safe_mode.is_none() {
             self.drive_bots(host);
         }
+        self.draw_editor(host);
         self.sounds_now.clear();
         self.public_now.clear();
         self.poll_command_channel(host);
@@ -1155,7 +1214,10 @@ impl Runtime {
         let args: Vec<String> = argv.iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         tracing::info!("client {} ({}) ran: lb {}", client.name, client.auth_id, args.join(" "));
-        for line in commands::execute(self, host, &refs) {
+        self.command_slot = Some(slot);
+        let lines = commands::execute(self, host, &refs);
+        self.command_slot = None;
+        for line in lines {
             host.client_print(slot, lb_host::PrintKind::Console, &format!("{line}\n"));
         }
     }
@@ -1201,6 +1263,19 @@ impl Runtime {
                     }
                 }
                 Cv::ForceRespawn => self.config.bots.force_respawn = value.trim() != "0",
+                Cv::Editor => {
+                    self.editor_allowed = value.trim() != "0";
+                    if !self.editor_allowed {
+                        self.editor = None;
+                    }
+                }
+                Cv::NavSource => match lb_config::main_config::NavSource::parse(&value) {
+                    Some(source) => {
+                        self.config.nav.source = source;
+                        tracing::info!("navigation graphs: {} from the next map on", source.name());
+                    }
+                    None => tracing::warn!("lb_nav_source `{value}`: expected generated or yapb"),
+                },
                 Cv::GameMode => self.game_mode_forced = value.trim().parse().unwrap_or(-1),
                 Cv::GunGame => self.config.gungame.mode = value.trim().to_string(),
                 Cv::Freeze => self.freeze = value.trim() != "0",
@@ -1593,6 +1668,10 @@ impl Runtime {
         let mechs = &self.mechs;
         let link_health = &mut self.link_health;
         let mut tracer = nav::LiveTracer { host, count: 0 };
+        // Path search expansions this frame, shared by the bots: a steady rate with a cap per frame.
+        self.plan_tokens = (self.plan_tokens + PLAN_RATE * frame_ms / 1000.0).min(PLAN_BURST);
+        let mut plan_budget = self.plan_tokens as u32;
+        let budget_start = plan_budget;
         for (i, bot) in self.bots.iter_mut().enumerate() {
             if matches!(bot.state, BotState::Leaving | BotState::Faulted) {
                 continue;
@@ -1609,7 +1688,7 @@ impl Runtime {
                     opponents,
                     mechs,
                 };
-                drive_one(bot, &ctx, &mut tracer, link_health)
+                drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
             }));
             match result {
                 Ok(Some(cmd)) => self.cmds.push(cmd),
@@ -1621,6 +1700,7 @@ impl Runtime {
                 }
             }
         }
+        self.plan_tokens -= f64::from(budget_start - plan_budget);
         let host = tracer.host;
         for (bot, r) in recognized {
             let name = self.clients.get(r.who.slot).map(|c| c.name.clone()).unwrap_or_default();
@@ -1839,6 +1919,7 @@ fn drive_one(
     ctx: &DriveCtx<'_>,
     tracer: &mut nav::LiveTracer<'_>,
     link_health: &mut LinkHealth,
+    plan_budget: &mut u32,
 ) -> Option<LbBotCommand> {
     if bot.fault_on_next_frame {
         bot.fault_on_next_frame = false;
@@ -1883,7 +1964,7 @@ fn drive_one(
                 side = out.side;
                 buttons |= out.buttons;
             } else {
-                let out = behave(bot, ctx, tracer, link_health);
+                let out = behave(bot, ctx, tracer, link_health, plan_budget);
                 forward = out.forward;
                 side = out.side;
                 buttons |= out.buttons;
@@ -2034,6 +2115,7 @@ fn drive_nav_test(
             mech: ctx.mechs,
             health: Some(link_health),
             bot: u32::from(bot.id.slot),
+            budget: None,
         };
         if let Some(step) = test.step(&mut bot.nav, &mut nctx, &input) {
             intents.movement(
@@ -2095,6 +2177,9 @@ fn drive_nav_test(
 
 /// Seconds without an enemy seen or heard before a stuck bot may give up its life.
 const CALM_BEFORE_KILL: f64 = 5.0;
+/// Path search node expansions per second shared by all bots, and the most one frame may spend.
+const PLAN_RATE: f64 = 200_000.0;
+const PLAN_BURST: f64 = 2000.0;
 
 /// Runs the brain for one frame: senses have run already; this decides, fights and walks.
 fn behave(
@@ -2102,6 +2187,7 @@ fn behave(
     ctx: &DriveCtx<'_>,
     tracer: &mut nav::LiveTracer<'_>,
     link_health: &mut LinkHealth,
+    plan_budget: &mut u32,
 ) -> lb_motor::MotorOut {
     let body = body_of(bot, ctx);
     let input = nav_input(bot, ctx, &body);
@@ -2118,6 +2204,7 @@ fn behave(
         stuck_kill: ctx.stuck_kill,
         calm,
         kill: false,
+        plan_budget,
     };
     let out = bot.brain.act(&body, &bot.character, &mut service, &mut bot.rng);
     if service.kill {
@@ -2293,9 +2380,9 @@ fn load_presets(install_dir: &std::path::Path) -> (Presets, String) {
 }
 
 /// How the map's graph is checked: movement as this server's rules set it.
-fn import_options(rules: &PublicRules) -> lb_nav::import::ImportOptions {
+fn import_options(rules: &PublicRules, trust_imported: bool) -> lb_nav::import::ImportOptions {
     lb_nav::import::ImportOptions {
-        trust_imported: false,
+        trust_imported,
         physics: lb_kin::Physics {
             gravity: rules.gravity,
             maxspeed: rules.maxspeed,

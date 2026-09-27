@@ -106,7 +106,13 @@ pub struct Trigger {
     pub wait: f32,
     pub delay: f32,
     pub spawnflags: i32,
+    /// `trigger_push`: the velocity it gives a player in it (speed along its direction).
+    pub push: Vec3,
 }
+
+/// `trigger_push` flags.
+pub const SF_PUSH_ONCE: i32 = 1;
+pub const SF_PUSH_START_OFF: i32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct Breakable {
@@ -371,6 +377,12 @@ impl Mechanisms {
                         wait: float(e, "wait").unwrap_or(if kind == TriggerKind::Multiple { 0.2 } else { 0.0 }),
                         delay: float(e, "delay").unwrap_or(0.0),
                         spawnflags,
+                        // `CTriggerPush::Spawn`: no angles push along +x, no speed is 100.
+                        push: if kind == TriggerKind::Push {
+                            movedir(e) * float(e, "speed").filter(|s| *s != 0.0).unwrap_or(100.0)
+                        } else {
+                            Vec3::ZERO
+                        },
                     });
                 }
                 "func_breakable" => m.breakables.push(Breakable {
@@ -409,6 +421,15 @@ impl Mechanisms {
         let target = trigger.target.as_deref()?;
         let e = &world.entities[self.named(target).next()?];
         Some((e.origin(), e.yaw()))
+    }
+
+    /// Push fields on when the map starts: `(model, velocity)`.
+    pub fn push_fields(&self) -> Vec<(usize, Vec3)> {
+        self.triggers
+            .iter()
+            .filter(|t| t.kind == TriggerKind::Push && t.spawnflags & SF_PUSH_START_OFF == 0)
+            .map(|t| (t.model, t.push))
+            .collect()
     }
 
     /// Puts every mover in its rest position and makes it block.

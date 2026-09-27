@@ -285,13 +285,17 @@ impl PathFollower {
         }
         step.duck = kind == LinkKind::Crouch || node.flags.contains(NodeFlags::CROUCH);
 
-        // Fell off the path: plan again from where it landed, unless the target is still within a walk.
+        // Fell off the path: plan again from where it landed, unless the target is still within a walk. Falling
+        // while working loose from being stuck on the link is the link's fault.
         if !s.on_ground && !s.on_ladder && s.waterlevel < 2 {
             self.airborne_from.get_or_insert(s.feet());
         } else if let Some(top) = self.airborne_from.take()
             && top - s.feet() > 40.0
             && (node.origin.z - 36.0 - s.feet()).abs() > 40.0
         {
+            if self.tried > 0 {
+                return self.fail(s, from, to, FailReason::GeometryInvalid);
+            }
             return FollowOutput {
                 step,
                 status: FollowStatus::Replan,

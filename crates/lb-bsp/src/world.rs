@@ -86,6 +86,9 @@ pub struct BspWorld {
     pub entities: Vec<Entity>,
     pub brushes: Vec<Brush>,
     pub traces: u64,
+    /// `trigger_push` fields a simulated player is pushed by: (model, velocity). Empty unless whoever simulates
+    /// fills it (`Mechanisms::push_fields`).
+    pub pushes: Vec<(usize, Vec3)>,
 }
 
 fn classify(e: &Entity) -> Option<BrushKind> {
@@ -152,7 +155,18 @@ impl BspWorld {
             entities,
             brushes,
             traces: 0,
+            pushes: Vec::new(),
         })
+    }
+
+    /// The push a player box (`hull` at `origin`) gets from the push fields it is in (`CTriggerPush::Touch`: the
+    /// pushes of fields touched in one frame add up).
+    pub fn push_at(&self, origin: Vec3, hull: HullKind) -> Vec3 {
+        self.pushes
+            .iter()
+            .filter(|(m, _)| self.hull_overlaps(*m, Vec3::ZERO, origin, hull))
+            .map(|(_, v)| *v)
+            .sum()
     }
 
     /// The brush entity of model `*model`.
@@ -203,6 +217,40 @@ impl BspWorld {
 impl Tracer for BspWorld {
     fn trace(&mut self, q: &TraceQuery) -> Trace {
         self.traces += 1;
+        self.trace_shared(q)
+    }
+
+    fn point_contents(&mut self, p: Vec3) -> i32 {
+        self.point_contents_shared(p)
+    }
+}
+
+/// A world shared by several threads: each traces through its own view, which counts its traces.
+pub struct WorldView<'a> {
+    pub world: &'a BspWorld,
+    pub traces: u64,
+}
+
+impl<'a> WorldView<'a> {
+    pub fn new(world: &'a BspWorld) -> WorldView<'a> {
+        WorldView { world, traces: 0 }
+    }
+}
+
+impl Tracer for WorldView<'_> {
+    fn trace(&mut self, q: &TraceQuery) -> Trace {
+        self.traces += 1;
+        self.world.trace_shared(q)
+    }
+
+    fn point_contents(&mut self, p: Vec3) -> i32 {
+        self.world.point_contents_shared(p)
+    }
+}
+
+impl BspWorld {
+    /// A trace that does not count itself, for threads sharing the world (`WorldView`).
+    pub fn trace_shared(&self, q: &TraceQuery) -> Trace {
         let mut best = self
             .trace_model(0, Vec3::ZERO, q)
             .unwrap_or_else(|| Trace::clear(q.end));
@@ -233,7 +281,7 @@ impl Tracer for BspWorld {
     }
 
     /// World contents, then the contents of a non-solid brush entity around the point (`SV_PointContents`).
-    fn point_contents(&mut self, p: Vec3) -> i32 {
+    pub fn point_contents_shared(&self, p: Vec3) -> i32 {
         let Some(hull) = self.bsp.hull(0, HullKind::Point) else {
             return contents::EMPTY;
         };

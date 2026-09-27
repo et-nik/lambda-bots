@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use lb_bsp::mech::{Mechanisms, MoverKind};
+use lb_config::main_config::NavSource;
+use lb_config::overlay::{OverlayFile, Patch};
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_game::items::ItemKind;
@@ -18,6 +20,8 @@ use lb_nav::import::ImportOptions;
 use lb_nav::known::LinkHealth;
 use lb_nav::navigator::{NavCtx, Navigator};
 use lb_nav_api::{NavService, NavStatus, NavStep};
+use lb_navgen::GenOptions;
+use lb_navgen::cache::GraphCache;
 use lb_worldq::{HullKind, Trace, TraceQuery, Tracer};
 use rustc_hash::FxHashMap;
 
@@ -55,17 +59,33 @@ pub struct LoadedMap {
     pub items: Arc<Vec<ItemSpot>>,
     pub mechs: Arc<MapMechs>,
     pub graph: Result<Arc<NavGraph>, String>,
+    /// Where the graph came from: "cache", "generated" or "yapb".
+    pub origin: &'static str,
+    /// The map's overlays (editor's, then the hand-written one) and what applying their patches came to.
+    pub overlays: Arc<Vec<OverlayFile>>,
+    pub patches: String,
     pub millis: u128,
 }
 
-/// Loads `maps/<map>.bsp` and a yapb graph for it on a worker thread.
+/// How a map's graph is had.
+#[derive(Clone, Debug)]
+pub struct LoadOptions {
+    pub source: NavSource,
+    /// Checking an imported graph (and the physics a generated one is made with).
+    pub import: ImportOptions,
+    /// Threads making a graph; negative = all cores but that many.
+    pub threads: i32,
+}
+
+/// Loads `maps/<map>.bsp` and its graph on a worker thread: a generated graph (from the cache when it was made
+/// before), or the map's yapb graph.
 pub struct NavLoader {
     rx: Receiver<Result<LoadedMap, String>>,
     pub map: String,
 }
 
 impl NavLoader {
-    pub fn start(game_dir: &Path, install_dir: &Path, map: &str, opts: ImportOptions) -> NavLoader {
+    pub fn start(game_dir: &Path, install_dir: &Path, map: &str, opts: LoadOptions) -> NavLoader {
         let (tx, rx) = channel();
         let (game, install, name) = (game_dir.to_path_buf(), install_dir.to_path_buf(), map.to_string());
         let spawned = std::thread::Builder::new().name("lb-nav-load".into()).spawn(move || {
@@ -153,7 +173,7 @@ fn first_existing(paths: &[PathBuf]) -> Option<&PathBuf> {
     paths.iter().find(|p| p.is_file())
 }
 
-fn load(game: &Path, install: &Path, map: &str, opts: &ImportOptions) -> Result<LoadedMap, String> {
+fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<LoadedMap, String> {
     let started = std::time::Instant::now();
     let files = map_files(game, install, map);
     let bsp_path = files
@@ -175,14 +195,126 @@ fn load(game: &Path, install: &Path, map: &str, opts: &ImportOptions) -> Result<
         .collect();
     let mech = Mechanisms::from_world(&world);
     let mechs = Arc::new(MapMechs::from(&world, &mech));
-    let graph = load_graph(&files, map, &mut world, &mech, opts);
+    let overlays = read_overlays(install, map, world.bsp.fingerprint.1);
+    let (graph, origin) = match opts.source {
+        NavSource::Yapb => (load_graph(&files, map, &mut world, &mech, &opts.import), "yapb"),
+        NavSource::Generated => match generated_graph(install, map, &mut world, &mech, opts) {
+            Ok((graph, origin)) => (Ok(graph), origin),
+            Err(e) => {
+                tracing::warn!("{map}: {e}; trying the yapb graph");
+                (load_graph(&files, map, &mut world, &mech, &opts.import), "yapb")
+            }
+        },
+    };
+    let patches: Vec<Patch> = overlays.iter().flat_map(|o| o.nav.patches.iter().cloned()).collect();
+    let (graph, patches) = match graph {
+        Ok(g) if !patches.is_empty() => {
+            let base = Arc::try_unwrap(g).unwrap_or_else(|g| (*g).clone());
+            let (patched, report) = lb_navgen::patch::apply(base, &patches, &mut world, &mech, opts.import.physics);
+            for p in &report.problems {
+                tracing::warn!("{map} overlay: {p}");
+            }
+            let summary = format!("{} of {} overlay patches applied", report.applied, patches.len());
+            (Ok(Arc::new(patched)), summary)
+        }
+        other => (other, String::new()),
+    };
+    let graph = graph.map(|g| Arc::new(Arc::try_unwrap(g).unwrap_or_else(|g| (*g).clone()).with_landmarks()));
     Ok(LoadedMap {
         vis,
         items: Arc::new(items),
         mechs,
         graph,
+        origin,
+        overlays: Arc::new(overlays),
+        patches,
         millis: started.elapsed().as_millis(),
     })
+}
+
+/// The map's overlays in the order they apply: `maps/<map>/editor.yaml` (the in-game editor's), then
+/// `maps/<map>/overlay.yaml` (hand-written). A file that does not read is left out with a warning.
+pub fn read_overlays(install: &Path, map: &str, bsp_size: u64) -> Vec<OverlayFile> {
+    let dir = install.join("maps").join(map);
+    ["editor.yaml", "overlay.yaml"]
+        .iter()
+        .filter_map(|name| {
+            let path = dir.join(name);
+            let text = std::fs::read_to_string(&path).ok()?;
+            match OverlayFile::parse(&text, &path.display().to_string()) {
+                Ok(o) if o.bsp_size.is_some_and(|s| s != bsp_size) => {
+                    tracing::warn!(
+                        "{}: made for a {}-byte {map}.bsp, this one has {bsp_size} bytes; not applied",
+                        path.display(),
+                        o.bsp_size.unwrap_or(0)
+                    );
+                    None
+                }
+                Ok(o) => Some(o),
+                Err(e) => {
+                    tracing::warn!("{e}; not applied");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generator settings for the server's physics.
+pub fn gen_options(opts: &LoadOptions) -> GenOptions {
+    GenOptions {
+        physics: opts.import.physics,
+        ..GenOptions::default()
+    }
+}
+
+/// The map's graph from the cache in `nav/<map>/`, or made now on a pool of its own and kept there.
+fn generated_graph(
+    install: &Path,
+    map: &str,
+    world: &mut lb_bsp::BspWorld,
+    mech: &Mechanisms,
+    opts: &LoadOptions,
+) -> Result<(Arc<NavGraph>, &'static str), String> {
+    let gen_opts = gen_options(opts);
+    let cache = GraphCache::new(&install.join("nav"), map);
+    let key = lb_navgen::cache::key(world, &gen_opts, 0, 0);
+    if let Some(graph) = cache.load(&key) {
+        return Ok((Arc::new(graph), "cache"));
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as i32;
+    let threads = if opts.threads > 0 {
+        opts.threads
+    } else {
+        cores + opts.threads
+    }
+    .max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads as usize)
+        .thread_name(|i| format!("lb-navgen-{i}"))
+        .build()
+        .map_err(|e| format!("cannot start the generator's threads: {e}"))?;
+    let generated = pool.install(|| lb_navgen::generate(world, mech, &gen_opts, "generated"));
+    if generated.graph.is_empty() {
+        return Err("the generator found no floor".into());
+    }
+    let report = lb_navgen::report::coverage(&generated);
+    tracing::info!(
+        "{map}: graph made in {} ms on {threads} threads: {} nodes, {} links ({}); {:.1}% of the floor covered, \
+         {}/{} items",
+        generated.graph.stats.millis,
+        generated.graph.stats.nodes,
+        generated.graph.stats.links,
+        generated.graph.stats.kinds(),
+        report.ratio() * 100.0,
+        report.items_ok,
+        report.items
+    );
+    match cache.store(&key, &generated.graph) {
+        Ok(path) => tracing::debug!("{map}: graph kept in {}", path.display()),
+        Err(e) => tracing::warn!("{map}: the graph is not kept: {e}"),
+    }
+    Ok((Arc::new(generated.graph), "generated"))
 }
 
 fn load_graph(
@@ -389,6 +521,8 @@ pub struct BotNavService<'a, 'h> {
     pub calm: bool,
     /// Stuck beyond recovery: the bot should `kill` itself.
     pub kill: bool,
+    /// Path search expansions left this frame for all bots.
+    pub plan_budget: &'a mut u32,
 }
 
 impl BotNavService<'_, '_> {
@@ -429,6 +563,7 @@ impl NavService for BotNavService<'_, '_> {
             mech: self.mechs,
             health: Some(&mut *self.health),
             bot: self.bot,
+            budget: Some(&mut *self.plan_budget),
         };
         self.nav.go_to(&mut ctx, &self.input, dest)
     }
@@ -444,6 +579,7 @@ impl NavService for BotNavService<'_, '_> {
             mech: self.mechs,
             health: Some(&mut *self.health),
             bot: self.bot,
+            budget: Some(&mut *self.plan_budget),
         };
         self.nav.roam(&mut ctx, &self.input, rng)
     }
@@ -456,6 +592,7 @@ impl NavService for BotNavService<'_, '_> {
             mech: self.mechs,
             health: None,
             bot: self.bot,
+            budget: None,
         };
         Navigator::away_from(&ctx, self.input.origin, threat)
     }

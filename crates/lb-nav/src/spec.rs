@@ -3,8 +3,9 @@
 //! out; the importer fills them from checks against the map.
 
 use lb_core::{Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stance {
     Stand,
     Crouch,
@@ -13,7 +14,7 @@ pub enum Stance {
 }
 
 /// A place a traversal starts or ends at.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Anchor {
     /// Player origin (hull centre) there.
     pub origin: Vec3,
@@ -23,7 +24,7 @@ pub struct Anchor {
 }
 
 /// A brush entity the traversal depends on, with its positions (offsets from where its model was compiled).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MechRef {
     /// Brush model `*model`.
     pub model: u16,
@@ -36,7 +37,7 @@ pub struct MechRef {
 }
 
 /// How a mechanism is set off.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Interaction {
     /// Walking into it (touch doors) or standing in its field (platforms, touch plates).
     Touch { model: u16, spot: Vec3 },
@@ -62,7 +63,7 @@ impl Interaction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Action {
     /// Run at the landing and jump from the entry; the least run-up speed, ducking in the air for high ledges.
     Jump {
@@ -82,10 +83,12 @@ pub enum Action {
         mount: Vec3,
     },
     Swim,
-    /// Pass a door that `open` sets off (the door itself for touch and use doors).
+    /// Pass a door that `open` sets off (the door itself for touch and use doors), through `via` when the way is
+    /// not straight (the middle of a doorway the leaf slides across).
     Door {
         door: MechRef,
         open: Interaction,
+        via: Option<Vec3>,
     },
     /// Ride a platform from the entry (on the platform at rest) to the exit (at the platform's other end).
     Lift {
@@ -105,6 +108,14 @@ pub enum Action {
         health: f32,
         crowbar: bool,
     },
+    /// From rest at the entry run along `dir` into the push field `trigger` (jumping `jump_at` units along the run),
+    /// keep over `hold` while it lifts, then steer the flight onto the exit (`lb_kin::validate::simulate_push`).
+    Push {
+        trigger: u16,
+        dir: Vec2,
+        jump_at: Option<f32>,
+        hold: Option<Vec2>,
+    },
 }
 
 impl Action {
@@ -118,6 +129,7 @@ impl Action {
             Action::Lift { .. } => "lift",
             Action::Teleport { .. } => "teleport",
             Action::Breakable { .. } => "breakable",
+            Action::Push { .. } => "push",
         }
     }
 
@@ -128,13 +140,14 @@ impl Action {
             Action::Lift { platform, .. } => Some(platform.model),
             Action::Teleport { trigger, .. } => Some(trigger),
             Action::Breakable { model, .. } => Some(model),
+            Action::Push { trigger, .. } => Some(trigger),
             _ => None,
         }
     }
 }
 
 /// What must hold before committing to the traversal.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Needs {
     /// Health above this (falls).
     pub health: f32,
@@ -142,7 +155,7 @@ pub struct Needs {
 }
 
 /// Expected cost, seconds and points.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cost {
     /// Moving through it.
     pub time: f32,
@@ -152,7 +165,7 @@ pub struct Cost {
     pub damage: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TraversalSpec {
     pub entry: Anchor,
     pub exit: Anchor,
@@ -176,6 +189,8 @@ impl TraversalSpec {
             Action::Jump { speed, .. } => Some(speed.max(120.0)),
             Action::Drop { speed, .. } => Some(speed),
             Action::Ladder { .. } => Some(150.0),
+            // The run into the field starts from rest.
+            Action::Push { .. } => Some(100.0),
             _ => None,
         }
     }

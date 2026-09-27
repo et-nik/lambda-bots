@@ -5,6 +5,7 @@
 pub mod check;
 pub mod main_config;
 pub mod names;
+pub mod overlay;
 pub mod profiles;
 pub mod skill;
 pub mod styles;

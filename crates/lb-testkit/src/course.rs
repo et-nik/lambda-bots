@@ -637,6 +637,7 @@ impl<W: SimWorld> Course<W> {
             mech: &self.game,
             health: Some(&mut self.health),
             bot: 1,
+            budget: None,
         };
         let (status, step) = bot.nav.go_to(&mut ctx, &input, dest);
         bot.stuck = bot.nav.stuck_for(p.origin, now);

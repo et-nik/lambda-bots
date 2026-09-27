@@ -146,6 +146,7 @@ fn door_graph(open: Option<Interaction>) -> (NavGraph, NodeId, NodeId) {
             Some(Action::Door {
                 door: door_ref(Vec3::new(0.0, 0.0, 108.0)),
                 open,
+                via: None,
             }),
         );
     }

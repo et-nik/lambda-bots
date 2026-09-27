@@ -10,6 +10,7 @@ use crate::exec::{EYE_HEIGHT, MechView, NavInput};
 use crate::follow::{FollowStatus, PathFollower};
 use crate::graph::{NavGraph, NodeFlags, NodeId};
 use crate::known::{FailReason, KnownChanges, LinkHealth};
+use crate::plan::{Search, SearchStep};
 
 /// Navigation calls this far apart mean the bot did something else meanwhile (fought): the stuck clock restarts.
 const NAV_GAP: f64 = 0.5;
@@ -27,6 +28,8 @@ pub struct NavCtx<'a> {
     pub health: Option<&'a mut LinkHealth>,
     /// Who reports failures to `health`.
     pub bot: u32,
+    /// Node expansions path searches may still spend this frame (shared by the bots); `None` = no limit.
+    pub budget: Option<&'a mut u32>,
 }
 
 /// The last link that failed, for diagnostics.
@@ -59,6 +62,8 @@ pub struct Navigator {
     direct: Option<(Vec3, bool, f64)>,
     /// The graph node nearest to the last destination.
     dest_node: Option<(Vec3, NodeId)>,
+    /// A path search that ran out of this frame's budget.
+    search: Option<Search>,
 }
 
 impl Navigator {
@@ -134,10 +139,15 @@ impl Navigator {
         None
     }
 
-    fn plan(&mut self, ctx: &mut NavCtx<'_>, origin: Vec3, goal: NodeId, now: f64) -> bool {
-        let Some(start) = Self::start_node(ctx, origin) else {
-            return false;
-        };
+    /// Searches a path to `goal` within this frame's budget: `Some(true)` once the bot follows one, `Some(false)`
+    /// when there is none, `None` while the search goes on (it resumes on the next call).
+    fn plan(&mut self, ctx: &mut NavCtx<'_>, origin: Vec3, goal: NodeId, now: f64) -> Option<bool> {
+        if self.search.as_ref().is_none_or(|s| s.goal() != goal) {
+            let Some(start) = Self::start_node(ctx, origin) else {
+                return Some(false);
+            };
+            self.search = Some(Search::new(ctx.graph, ctx.graph.alt.as_deref(), start, goal));
+        }
         self.known.expire(now);
         let known = &self.known;
         let health = ctx.health.as_deref();
@@ -147,13 +157,24 @@ impl Navigator {
             }
             known.penalty(a, b, now)
         };
-        match crate::plan::plan(ctx.graph, start, goal, &penalty) {
-            Some(path) => {
+        let mut unlimited = u32::MAX;
+        let budget = match ctx.budget.as_deref_mut() {
+            Some(b) => b,
+            None => &mut unlimited,
+        };
+        let search = self.search.as_mut()?;
+        match search.run(ctx.graph, ctx.graph.alt.as_deref(), &penalty, budget) {
+            SearchStep::Pending => None,
+            SearchStep::Found(path) => {
+                self.search = None;
                 self.follower = Some(PathFollower::new(path, now));
                 self.goal = Some(goal);
-                true
+                Some(true)
             }
-            None => false,
+            SearchStep::NoPath => {
+                self.search = None;
+                Some(false)
+            }
         }
     }
 
@@ -214,17 +235,25 @@ impl Navigator {
         if cached.is_none() {
             self.dest_node = Some((dest, goal));
         }
-        if (self.follower.is_none() || self.goal != Some(goal)) && now >= self.next_plan_at {
-            self.next_plan_at = now + REPLAN_EVERY;
-            if !self.plan(ctx, input.origin, goal, now) {
-                self.failures += 1;
-                let status = if self.failures >= GIVE_UP_AFTER {
-                    self.failures = 0;
-                    NavStatus::NoPath
-                } else {
-                    NavStatus::Moving
-                };
-                return (status, None);
+        // A search that ran out of budget goes on every frame; a new one at most every `REPLAN_EVERY`.
+        let want = self.follower.is_none() || self.goal != Some(goal);
+        if want && (self.search.is_some() || now >= self.next_plan_at) {
+            if self.search.is_none() {
+                self.next_plan_at = now + REPLAN_EVERY;
+            }
+            match self.plan(ctx, input.origin, goal, now) {
+                None if self.follower.is_none() => return (NavStatus::Moving, None),
+                None | Some(true) => {}
+                Some(false) => {
+                    self.failures += 1;
+                    let status = if self.failures >= GIVE_UP_AFTER {
+                        self.failures = 0;
+                        NavStatus::NoPath
+                    } else {
+                        NavStatus::Moving
+                    };
+                    return (status, None);
+                }
             }
         }
         let Some(follower) = self.follower.as_mut() else {
@@ -283,12 +312,17 @@ impl Navigator {
         let now = input.now;
         self.waiting = false;
         if self.follower.is_none() {
-            if now < self.next_goal_at {
-                return None;
-            }
-            self.next_goal_at = now + 1.0;
-            let goal = Self::pick_goal(ctx, input.origin, rng)?;
-            if !self.plan(ctx, input.origin, goal, now) {
+            let goal = match self.search.as_ref() {
+                Some(s) => s.goal(),
+                None => {
+                    if now < self.next_goal_at {
+                        return None;
+                    }
+                    self.next_goal_at = now + 1.0;
+                    Self::pick_goal(ctx, input.origin, rng)?
+                }
+            };
+            if self.plan(ctx, input.origin, goal, now) != Some(true) {
                 return None;
             }
         }

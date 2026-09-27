@@ -36,6 +36,11 @@ pub const MAX_CMD_MSEC: u8 = 50;
 pub trait MoveWorld: Tracer {
     /// The ladder the player box (`hull` at `origin`) is in, with the normal of its face pointing out.
     fn ladder(&mut self, origin: Vec3, hull: HullKind) -> Option<Ladder>;
+
+    /// The velocity a push field the player box is in gives it (`trigger_push`).
+    fn push(&mut self, _origin: Vec3, _hull: HullKind) -> Vec3 {
+        Vec3::ZERO
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +79,9 @@ pub struct Player {
     /// The player's own speed cap (`pev->maxspeed`); 0 = only `sv_maxspeed`.
     pub client_maxspeed: f32,
     pub dead: bool,
+    /// Velocity of the push field the player is in (`basevelocity`); added to the player's own while moving, and
+    /// kept as momentum when it leaves the field.
+    pub basevelocity: Vec3,
 }
 
 impl Player {
@@ -97,6 +105,7 @@ impl Player {
             longjump: false,
             client_maxspeed: 0.0,
             dead: false,
+            basevelocity: Vec3::ZERO,
         }
     }
 
@@ -246,6 +255,15 @@ impl Pm<'_> {
         self.forward = forward;
         self.right = right;
 
+        // A push field sets the base velocity while the player is in it; leaving it, the push stays as momentum
+        // (`SV_CheckMovingGround`, before the move).
+        let push = self.world.push(self.p.origin, self.p.hull());
+        if push != Vec3::ZERO {
+            self.p.basevelocity = push;
+        } else if self.p.basevelocity != Vec3::ZERO {
+            self.p.velocity += self.p.basevelocity * (1.0 + self.frametime * 0.5);
+            self.p.basevelocity = Vec3::ZERO;
+        }
         self.categorize();
         if !self.p.on_ground() {
             self.p.fall_velocity = -self.p.velocity.z;
@@ -293,6 +311,7 @@ impl Pm<'_> {
                 self.p.oldbuttons &= !IN_JUMP;
             }
             self.water_move();
+            self.p.velocity -= self.p.basevelocity;
             self.categorize();
             return;
         }
@@ -314,6 +333,7 @@ impl Pm<'_> {
             self.air_move();
         }
         self.categorize();
+        self.p.velocity -= self.p.basevelocity;
         self.check_velocity();
         if self.p.waterlevel <= 1 {
             self.fixup_gravity();
@@ -730,6 +750,7 @@ impl Pm<'_> {
         self.p.velocity.z = 0.0;
         self.accelerate(wishdir, wishspeed, self.phys.accelerate);
         self.p.velocity.z = 0.0;
+        self.p.velocity += self.p.basevelocity;
         if self.p.velocity.length() < 1.0 {
             self.p.velocity = Vec3::ZERO;
             return;
@@ -785,6 +806,7 @@ impl Pm<'_> {
     fn air_move(&mut self) {
         let (wishdir, wishspeed) = self.wish();
         self.air_accelerate(wishdir, wishspeed, self.phys.airaccelerate);
+        self.p.velocity += self.p.basevelocity;
         self.fly_move();
     }
 
@@ -818,6 +840,7 @@ impl Pm<'_> {
             let amount = (self.phys.accelerate * wishspeed * self.frametime).min(add);
             self.p.velocity += dir * amount;
         }
+        self.p.velocity += self.p.basevelocity;
         // Assume a stair or slope: press down from a step above the destination.
         let dest = self.p.origin + self.p.velocity * self.frametime;
         let start = dest + Vec3::Z * (self.phys.stepsize + 1.0);
