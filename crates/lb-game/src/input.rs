@@ -1,4 +1,4 @@
-//! Engine button bits (`IN_*`).
+//! Client input: button bits (`IN_*`) of a user command.
 
 pub const IN_ATTACK: u16 = 1 << 0;
 pub const IN_JUMP: u16 = 1 << 1;

@@ -52,6 +52,13 @@ impl Pcg32 {
     pub fn chance(&mut self, percent: f32) -> bool {
         self.next_f32() * 100.0 < percent
     }
+
+    /// Standard normal deviate (Box–Muller; one of the pair is dropped so every call uses exactly two draws).
+    pub fn normal(&mut self) -> f32 {
+        let u1 = self.next_f32().max(1e-7);
+        let u2 = self.next_f32();
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    }
 }
 
 pub fn splitmix64(mut x: u64) -> u64 {
@@ -94,18 +101,21 @@ pub struct BotRng {
 }
 
 impl BotRng {
-    pub fn new(master_seed: u64, bot_uid: u64) -> BotRng {
+    /// `persona_seed` belongs to the bot's personality. The profile stream depends on it alone, so traits
+    /// drawn from it are the same in every session; the other streams also mix in the session's master seed.
+    pub fn new(master_seed: u64, persona_seed: u64) -> BotRng {
         let stream = |d: RngDomain| {
-            let seed = splitmix64(master_seed ^ splitmix64(bot_uid.wrapping_mul(31).wrapping_add(d as u64)));
+            let seed = splitmix64(master_seed ^ splitmix64(persona_seed.wrapping_mul(31).wrapping_add(d as u64)));
             Pcg32::new(seed, d as u64)
         };
+        let profile = splitmix64(persona_seed ^ RngDomain::Profile as u64);
         BotRng {
             perception: stream(RngDomain::Perception),
             decision: stream(RngDomain::Decision),
             combat: stream(RngDomain::Combat),
             motor: stream(RngDomain::Motor),
             cosmetic: stream(RngDomain::Cosmetic),
-            profile: stream(RngDomain::Profile),
+            profile: Pcg32::new(profile, RngDomain::Profile as u64),
         }
     }
 }
@@ -134,6 +144,15 @@ mod tests {
             let f = rng.range_f32(0.5, 1.5);
             assert!((0.5..=1.5).contains(&f));
         }
+    }
+
+    #[test]
+    fn normal_deviates_have_unit_spread() {
+        let mut rng = Pcg32::new(3, 3);
+        let v: Vec<f32> = (0..20_000).map(|_| rng.normal()).collect();
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / v.len() as f32;
+        assert!(mean.abs() < 0.03 && (var - 1.0).abs() < 0.05, "{mean} {var}");
     }
 
     #[test]

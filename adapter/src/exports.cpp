@@ -14,6 +14,9 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <unistd.h>
 #endif
 
 namespace lb {
@@ -44,6 +47,22 @@ std::string base_name(const std::string &path) {
     return pos == std::string::npos ? path : path.substr(pos + 1);
 }
 
+// Metamod and the engine hand out paths relative to the server's working directory ("valve/addons/..."): make
+// them absolute so logs and diagnostics show where files are really looked up.
+std::string absolute(const std::string &path) {
+    if (path.empty()) return path;
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    const DWORD n = GetFullPathNameA(path.c_str(), sizeof(buf), buf, nullptr);
+    return (n > 0 && n < sizeof(buf)) ? std::string(buf) : path;
+#else
+    char buf[PATH_MAX];
+    if (realpath(path.c_str(), buf)) return buf;
+    if (path[0] == '/') return path;
+    return getcwd(buf, sizeof(buf)) ? std::string(buf) + "/" + path : path;
+#endif
+}
+
 // The plugin path as the OS loader sees it (absolute), falling back to Metamod's (relative).
 std::string plugin_path() {
 #if defined(_WIN32)
@@ -67,14 +86,14 @@ std::string plugin_path() {
 void core_init(bool late) {
     char gamedir[512] = {};
     g_engfuncs.pfnGetGameDir(gamedir);
-    state().game_dir = gamedir;
-    state().plugin_path = plugin_path();
+    state().game_dir = absolute(gamedir);
+    state().plugin_path = absolute(plugin_path());
     const std::string bin = parent_dir(state().plugin_path);
     const std::string root = parent_dir(bin);
     if (base_name(bin) == "bin" && !root.empty()) {
         state().install_dir = root;
     } else {
-        state().install_dir = std::string(gamedir) + "/addons/lambdabots";
+        state().install_dir = state().game_dir + "/addons/lambdabots";
     }
 
     LbInitInfo info{};

@@ -8,11 +8,15 @@
 
 pub mod compat;
 pub mod entities;
+pub mod input;
+pub mod items;
+pub mod mechanics;
 pub mod messages;
 pub mod mode;
 pub mod rules;
 pub mod scoreboard;
 pub mod self_state;
+pub mod sounds;
 pub mod weapons;
 
 /// A value that may not have been observed yet; never silently assumed to be zero.

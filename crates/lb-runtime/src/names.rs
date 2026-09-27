@@ -1,4 +1,4 @@
-//! Bot name pool: names from `names/<lang>.yaml`, unused by any connected player.
+//! Nicknames for new personalities: `names/<lang>.yaml`, with a small built-in fallback.
 
 use lb_config::names::{NamesFile, sanitize_name};
 use lb_core::rng::Pcg32;
@@ -28,11 +28,14 @@ const BUILTIN: &[&str] = &[
 
 pub struct NamePool {
     names: Vec<String>,
+    /// File the names came from, or `None` for the built-in fallback.
+    pub source: Option<std::path::PathBuf>,
 }
 
 impl NamePool {
     pub fn load(install_dir: &std::path::Path, language: &str) -> NamePool {
         let mut names = Vec::new();
+        let mut source = None;
         for lang in [language, "en"] {
             let path = install_dir.join("names").join(format!("{lang}.yaml"));
             if let Ok(text) = std::fs::read_to_string(&path) {
@@ -44,6 +47,7 @@ impl NamePool {
                             .map(|n| sanitize_name(n))
                             .filter(|n| !n.is_empty())
                             .collect();
+                        source = Some(path);
                         break;
                     }
                     Err(e) => tracing::warn!("{e}"),
@@ -51,9 +55,15 @@ impl NamePool {
             }
         }
         if names.is_empty() {
+            tracing::warn!(
+                "no bot names in {}; using {} built-in names",
+                install_dir.join("names").display(),
+                BUILTIN.len()
+            );
             names = BUILTIN.iter().map(|s| s.to_string()).collect();
+            source = None;
         }
-        NamePool { names }
+        NamePool { names, source }
     }
 
     pub fn len(&self) -> usize {
@@ -64,21 +74,10 @@ impl NamePool {
         self.names.is_empty()
     }
 
-    /// Picks a name not used by any connected player; falls back to a numbered name.
-    pub fn pick(&self, rng: &mut Pcg32, prefix: &str, taken: &dyn Fn(&str) -> bool) -> String {
-        for _ in 0..self.names.len() * 2 {
-            let base = &self.names[rng.range_i32(0, self.names.len() as i32 - 1) as usize];
-            let name = sanitize_name(&format!("{prefix}{base}"));
-            if !name.is_empty() && !taken(&name) {
-                return name;
-            }
-        }
-        for i in 1.. {
-            let name = sanitize_name(&format!("{prefix}lambda_{i}"));
-            if !taken(&name) {
-                return name;
-            }
-        }
-        unreachable!()
+    /// A random nickname for a new personality among those `used` rejects (already a personality, or taken by a
+    /// player); `None` when the list is exhausted.
+    pub fn pick_unused(&self, rng: &mut Pcg32, used: &dyn Fn(&str) -> bool) -> Option<String> {
+        let free: Vec<&String> = self.names.iter().filter(|n| !used(n)).collect();
+        (!free.is_empty()).then(|| free[rng.range_i32(0, free.len() as i32 - 1) as usize].clone())
     }
 }

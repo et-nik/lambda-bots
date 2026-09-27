@@ -16,6 +16,8 @@ lb-nav.workspace = true
 lb-navgen.workspace = true
 lb-ffi.workspace = true
 anyhow.workspace = true
+lb-worldq.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

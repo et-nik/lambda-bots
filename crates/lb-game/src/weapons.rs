@@ -63,16 +63,40 @@ impl WeaponId {
         }
     }
 
+    /// From a classname in any case, aliases included (`weapon_glock`, `weapon_python`, `weapon_mp5`).
     pub fn from_classname(name: &str) -> Option<WeaponId> {
-        let name = name.strip_prefix("weapon_").unwrap_or(name);
+        let name = name.to_ascii_lowercase();
+        let name = name.strip_prefix("weapon_").unwrap_or(&name);
         match name {
             "glock" => Some(WeaponId::Glock),
             "python" => Some(WeaponId::Python),
             "mp5" => Some(WeaponId::Mp5),
             _ => WeaponId::ALL
                 .into_iter()
-                .find(|w| &w.classname()["weapon_".len()..] == name),
+                .find(|w| w.classname()["weapon_".len()..].eq_ignore_ascii_case(name)),
         }
+    }
+
+    /// Weapon a player holds, from the third-person model it shows (`pev->weaponmodel`).
+    pub fn from_player_model(model: &str) -> Option<WeaponId> {
+        let name = model.rsplit('/').next()?.strip_suffix(".mdl")?.strip_prefix("p_")?;
+        Some(match name.to_ascii_lowercase().as_str() {
+            "crowbar" => WeaponId::Crowbar,
+            "9mmhandgun" => WeaponId::Glock,
+            "357" => WeaponId::Python,
+            "9mmar" => WeaponId::Mp5,
+            "crossbow" => WeaponId::Crossbow,
+            "shotgun" => WeaponId::Shotgun,
+            "rpg" => WeaponId::Rpg,
+            "gauss" => WeaponId::Gauss,
+            "egon" => WeaponId::Egon,
+            "hgun" => WeaponId::Hornetgun,
+            "grenade" => WeaponId::HandGrenade,
+            "tripmine" => WeaponId::Tripmine,
+            "satchel" | "satchel_radio" => WeaponId::Satchel,
+            "squeak" => WeaponId::Snark,
+            _ => return None,
+        })
     }
 
     pub fn is_melee(self) -> bool {
@@ -118,6 +142,12 @@ mod tests {
         }
         assert_eq!(WeaponId::from_classname("weapon_glock"), Some(WeaponId::Glock));
         assert_eq!(WeaponId::from_classname("weapon_mp5"), Some(WeaponId::Mp5));
+        assert_eq!(WeaponId::from_player_model("models/p_9mmAR.mdl"), Some(WeaponId::Mp5));
+        assert_eq!(
+            WeaponId::from_player_model("models/p_satchel_radio.mdl"),
+            Some(WeaponId::Satchel)
+        );
+        assert_eq!(WeaponId::from_player_model("models/v_crowbar.mdl"), None);
         let mask = WeaponId::Crowbar.bit() | WeaponId::Glock.bit() | (1 << WEAPON_SUIT_BIT);
         assert_eq!(
             weapons_in_mask(mask).collect::<Vec<_>>(),

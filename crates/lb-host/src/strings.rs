@@ -58,6 +58,10 @@ impl StringTable {
             .map(|(_, n)| n.as_slice())
     }
 
+    pub fn event_count(&self) -> usize {
+        self.event_names.len()
+    }
+
     pub fn clear_map_scoped(&mut self) {
         self.event_names.clear();
     }

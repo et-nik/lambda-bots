@@ -5,6 +5,9 @@
 pub mod check;
 pub mod main_config;
 pub mod names;
+pub mod profiles;
+pub mod skill;
+pub mod styles;
 pub mod yaml;
 
 pub use main_config::MainConfig;

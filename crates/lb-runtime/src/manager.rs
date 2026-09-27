@@ -1,9 +1,12 @@
 //! Bot lifecycle and quota management.
 
+use std::sync::Arc;
+
 use lb_config::main_config::{QuotaConfig, QuotaMode};
+use lb_config::skill::SkillParams;
 use lb_core::Vec3;
 use lb_core::handles::BotId;
-use lb_core::rng::{BotRng, Pcg32, fnv1a64};
+use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
 use lb_game::self_state::{DEAD_NO, DEAD_RESPAWNABLE, SelfState};
 use lb_host::driver::CommandDriver;
@@ -35,21 +38,13 @@ impl BotState {
     }
 }
 
-/// Who the bot is; carried over across map changes when names are saved.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Identity {
-    pub name: String,
-    pub model: String,
-    pub difficulty: u8,
-    pub style: String,
-    pub topcolor: u8,
-    pub bottomcolor: u8,
-}
-
 pub struct Bot {
     pub id: BotId,
     pub userid: i32,
-    pub identity: Identity,
+    /// Who the bot is: nickname, style, skill, look.
+    pub persona: Arc<lb_styles::Persona>,
+    /// The persona's skill resolved against `config/difficulty.yaml`.
+    pub skill: SkillParams,
     pub state: BotState,
     pub state_since: SimTime,
     pub self_state: SelfState,
@@ -65,28 +60,41 @@ pub struct Bot {
     pub pending_client_cmds: Vec<Vec<String>>,
     pub sim_ms_since_test: f64,
     pub kick_attempts: u8,
+    pub nav: crate::nav::BotNav,
+    /// Senses, beliefs, decisions and motor.
+    pub brain: lb_brain::BotBrain,
+    /// Skill, traits and style as the brain uses them.
+    pub character: lb_brain::Character,
+    /// What the bot looked at on its last frame, when not along its path.
+    pub attention: Option<lb_brain::Attention>,
 }
 
 impl Bot {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: BotId,
         userid: i32,
-        identity: Identity,
+        persona: Arc<lb_styles::Persona>,
+        skill: SkillParams,
+        affinity: lb_styles::GoalAffinity,
         now: SimTime,
         master_seed: u64,
         cmd_rate: f64,
         max_debt_ms: f64,
     ) -> Bot {
-        let uid = fnv1a64(identity.name.as_bytes()) ^ ((id.slot as u64) << 32) ^ id.generation as u64;
+        let rng = BotRng::new(master_seed, persona.seed);
+        let brain = lb_brain::BotBrain::new(id.slot, lb_perception::PerceptionParams::from_skill(&skill));
+        let character = character(&persona, &skill, affinity);
         Bot {
             id,
             userid,
-            identity,
+            persona,
+            skill,
             state: BotState::Connecting,
             state_since: now,
             self_state: SelfState::default(),
             driver: CommandDriver::new(cmd_rate, max_debt_ms),
-            rng: BotRng::new(master_seed, uid),
+            rng,
             view: Vec3::ZERO,
             view_initialized: false,
             respawn_at: None,
@@ -97,7 +105,24 @@ impl Bot {
             pending_client_cmds: Vec::new(),
             sim_ms_since_test: 0.0,
             kick_attempts: 0,
+            nav: crate::nav::BotNav::default(),
+            brain,
+            character,
+            attention: None,
         }
+    }
+
+    /// The personality, its skill or its style changed (config reload).
+    pub fn set_persona(
+        &mut self,
+        persona: Arc<lb_styles::Persona>,
+        skill: SkillParams,
+        affinity: lb_styles::GoalAffinity,
+    ) {
+        self.brain.params = lb_perception::PerceptionParams::from_skill(&skill);
+        self.character = character(&persona, &skill, affinity);
+        self.skill = skill;
+        self.persona = persona;
     }
 
     /// Still owns its slot: not kicked and not faulted.
@@ -109,7 +134,7 @@ impl Bot {
         if self.state != state {
             tracing::debug!(
                 "bot {} (#{}): {} -> {}",
-                self.identity.name,
+                self.persona.name,
                 self.userid,
                 self.state.as_str(),
                 state.as_str()
@@ -138,11 +163,15 @@ impl Bot {
                     self.respawn_at = None;
                     self.respawn_presses = 0;
                     self.test = None;
+                    self.nav.reset();
+                    self.brain.on_death();
                 }
             }
             BotState::Dead | BotState::Respawning => {
                 if alive {
                     self.self_state.on_spawn(now);
+                    self.nav.reset();
+                    self.brain.on_spawn();
                     self.set_state(BotState::Alive, now);
                 } else if force_respawn && body.deadflag == DEAD_RESPAWNABLE {
                     if self.respawn_at.is_none() {
@@ -156,6 +185,20 @@ impl Bot {
             }
             BotState::Leaving | BotState::Faulted => {}
         }
+    }
+}
+
+fn character(
+    persona: &lb_styles::Persona,
+    skill: &SkillParams,
+    affinity: lb_styles::GoalAffinity,
+) -> lb_brain::Character {
+    lb_brain::Character {
+        skill: skill.clone(),
+        level: persona.skill,
+        aggression: persona.aggression,
+        fear: persona.fear,
+        affinity,
     }
 }
 
@@ -200,10 +243,6 @@ pub fn pick_bot_to_kick(bots: &[Bot]) -> Option<usize> {
             (dead(a), a.self_state.body.frags as i32).cmp(&(dead(b), b.self_state.body.frags as i32))
         })
         .map(|(i, _)| i)
-}
-
-pub fn random_color(rng: &mut Pcg32) -> u8 {
-    rng.range_i32(0, 255) as u8
 }
 
 #[cfg(test)]

@@ -1,0 +1,21 @@
+schema: lambdabots/style@1
+
+# Keeps its distance: seldom chases, backs off early.
+#
+#   traits   ranges new personalities of this style draw aggression and fear from (0..1)
+#   goals    multipliers of goal weights, 1 = the balanced style:
+#            engage (fight an enemy in sight), hunt (chase one lost moments ago), retreat (back off when hurt),
+#            collect (go for weapons, ammo, health, armor), roam (wander)
+#
+# Anything left out keeps its built-in value.
+
+id: sniper
+traits:
+  aggression: [0.20, 0.50]
+  fear: [0.70, 1.00]
+goals:
+  engage: 1.0
+  hunt: 0.3
+  retreat: 1.4
+  collect: 1.0
+  roam: 1.0

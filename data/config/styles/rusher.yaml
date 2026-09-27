@@ -1,0 +1,21 @@
+schema: lambdabots/style@1
+
+# Charges in: fights and chases hard, backs off late.
+#
+#   traits   ranges new personalities of this style draw aggression and fear from (0..1)
+#   goals    multipliers of goal weights, 1 = the balanced style:
+#            engage (fight an enemy in sight), hunt (chase one lost moments ago), retreat (back off when hurt),
+#            collect (go for weapons, ammo, health, armor), roam (wander)
+#
+# Anything left out keeps its built-in value.
+
+id: rusher
+traits:
+  aggression: [0.70, 1.00]
+  fear: [0.00, 0.40]
+goals:
+  engage: 1.2
+  hunt: 1.4
+  retreat: 0.6
+  collect: 1.0
+  roam: 1.0

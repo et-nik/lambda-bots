@@ -10,12 +10,16 @@ publish.workspace = true
 
 [dependencies]
 lb-core.workspace = true
+lb-config.workspace = true
 lb-raw.workspace = true
 lb-worldq.workspace = true
 lb-game.workspace = true
 lb-knowledge.workspace = true
 lb-nav-api.workspace = true
 smallvec.workspace = true
+
+[dev-dependencies]
+lb-raw.workspace = true
 
 [lints]
 workspace = true

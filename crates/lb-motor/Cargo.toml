@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 lb-core.workspace = true
+lb-config.workspace = true
 lb-game.workspace = true
 lb-styles.workspace = true
 smallvec.workspace = true

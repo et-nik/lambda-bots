@@ -14,12 +14,9 @@ quota:
   join_interval: [0.5, 3.0]
 
 bots:
-  difficulty: normal      # noob | easy | normal | hard | expert
-  style: random
-  name_prefix: ""
+  name_prefix: ""         # shown before every bot name, e.g. "[BOT] "
   save_names: true        # the same bots come back after a map change
-  language: en            # names/<language>.yaml
-  use_profiles: true
+  language: en            # names/<language>.yaml: nicknames for new personalities
   models: [barney, gina, gman, gordon, helmet, hgrunt, recon, robo, scientist, zombie]
   rotate:
     enabled: false
@@ -28,6 +25,18 @@ bots:
   force_respawn: true
   respawn_delay: [0.3, 1.2]
   stuck_kill_time: 20.0
+
+# Personalities: a nickname always plays with the same style, skill (0..100) and look. They come from
+# profiles/*.yaml (written by you) and data/profiles.yaml (created by the server for new nicknames).
+roster:
+  # Who may join, by skill: any | noob | easy | normal | hard | expert (a band around the preset: hard = 63..87)
+  # | a number (60 = 48..72) | a range (normal-hard, 40-70). A personality's own skill never changes.
+  difficulty: normal
+  styles: any             # any | comma list of balanced, rusher, sniper, controller, trapper
+  generate:
+    enabled: true         # create personalities for new nicknames when the filtered roster is too small
+    pool: 16              # keep at least this many personalities passing the filters
+    styles: { balanced: 4, rusher: 2, sniper: 1, controller: 2, trapper: 1 }   # style mix of new ones
 
 engine:
   cmd_rate: 100           # commands per second per bot sent to the engine; 0 = every frame

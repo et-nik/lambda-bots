@@ -17,8 +17,7 @@ constexpr const char *kInterfaceVersion = "VREHLDS_HLDS_API_VERSION001";
 constexpr int kMajor = 3;
 constexpr int kMinMinor = 7;                // GetHostFrameTime
 constexpr int kEmitPingsMinor = 11;         // SV_EmitPings hook
-constexpr int kMessageManagerMinor = 14;    // GetMessageManager; 3.14 builds older than 830 lack it
-constexpr int kMessageManagerBuild = 830;
+constexpr int kMessageManagerMinor = 14;    // GetMessageManager (every released 3.14 has it)
 
 enum HookChainPriority {
     HC_PRIORITY_UNINTERRUPTABLE = 255,
