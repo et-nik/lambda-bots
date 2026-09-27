@@ -555,7 +555,27 @@ pub struct CourseBot {
     pub stuck: f64,
     pub worst_stuck: f64,
     pub phases: Vec<(f64, &'static str)>,
+    pub gait: Gait,
     last_fire: f64,
+}
+
+/// How a bot walked: time on plain walks, time of it spent against a wall, time looking steeply up or down, and
+/// how far its view turned, degrees.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Gait {
+    pub walking: f64,
+    pub walled: f64,
+    pub steep: f64,
+    pub turned: f64,
+}
+
+impl Gait {
+    pub fn add(&mut self, o: &Gait) {
+        self.walking += o.walking;
+        self.walled += o.walled;
+        self.steep += o.steep;
+        self.turned += o.turned;
+    }
 }
 
 impl CourseBot {
@@ -570,6 +590,7 @@ impl CourseBot {
             stuck: 0.0,
             worst_stuck: 0.0,
             phases: Vec::new(),
+            gait: Gait::default(),
             last_fire: 0.0,
         }
     }
@@ -588,6 +609,7 @@ pub struct Outcome {
     pub phases: Vec<(f64, &'static str)>,
     pub log: Vec<String>,
     pub end: Vec3,
+    pub gait: Gait,
 }
 
 pub struct Course<W: SimWorld> {
@@ -659,6 +681,7 @@ impl<W: SimWorld> Course<W> {
             }
         }
         let eye = p.eye();
+        let view_before = bot.motor.view;
         let out = bot.motor.run(
             &intents,
             &MotorInput {
@@ -687,6 +710,9 @@ impl<W: SimWorld> Course<W> {
             if let Some(v) = ev.landed {
                 bot.health -= self.phys.fall_damage(v);
             }
+            if phase == "walk" && ev.walled {
+                bot.gait.walled += f64::from(sent.msec) / 1000.0;
+            }
             let used = sent.pressed(IN_USE);
             if self
                 .game
@@ -694,6 +720,14 @@ impl<W: SimWorld> Course<W> {
             {
                 bot.motor.set_view(bot.motor.view);
             }
+        }
+        if phase == "walk" {
+            let dt = frame_ms / 1000.0;
+            bot.gait.walking += dt;
+            if bot.motor.view.x.abs() > 20.0 {
+                bot.gait.steep += dt;
+            }
+            bot.gait.turned += f64::from(lb_core::math::angle_diff(bot.motor.view.y, view_before.y).abs());
         }
         self.game.tick(
             &mut self.world,
@@ -802,6 +836,7 @@ impl<W: SimWorld> Course<W> {
         out.phases = std::mem::take(&mut bot.phases);
         out.log = self.game.log[log_start..].to_vec();
         out.end = bot.player.origin;
+        out.gait = std::mem::take(&mut bot.gait);
         out
     }
 }

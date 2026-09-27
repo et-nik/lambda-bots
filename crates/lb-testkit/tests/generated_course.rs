@@ -9,7 +9,7 @@ use lb_nav::follow::PathFollower;
 use lb_nav::{LinkKind, NavGraph, NodeFlags, NodeId};
 use lb_navgen::report::coverage;
 use lb_navgen::{GenOptions, generate};
-use lb_testkit::course::{Course, CourseBot, Game, Outcome};
+use lb_testkit::course::{Course, CourseBot, Gait, Game, Outcome};
 
 const MAPS: [&str; 12] = [
     "boot_camp",
@@ -71,6 +71,8 @@ struct MapResult {
     /// (kind, clean, tried).
     kinds: Vec<(LinkKind, usize, usize)>,
     routes: (usize, usize),
+    /// Over the routes.
+    gait: Gait,
 }
 
 fn check_map(map: &str) -> Option<MapResult> {
@@ -112,6 +114,7 @@ fn check_map(map: &str) -> Option<MapResult> {
     // Every item the report counts as reachable, from the nearest spawn point.
     let reach = |n: NodeId| cov.roundtrip_nodes.get(n as usize).copied().unwrap_or(false);
     let mut routes = (0, 0);
+    let mut gait = Gait::default();
     for &item in items.iter().filter(|&&i| reach(i)) {
         let Some(&spawn) = spawns.iter().min_by(|&&x, &&y| {
             let at = c.graph.node(item).origin;
@@ -124,6 +127,7 @@ fn check_map(map: &str) -> Option<MapResult> {
             continue;
         };
         let o = run_route(&mut c, spawn, item);
+        gait.add(&o.gait);
         routes.1 += 1;
         if o.arrived {
             routes.0 += 1;
@@ -144,7 +148,12 @@ fn check_map(map: &str) -> Option<MapResult> {
             ));
         }
     }
-    Some(MapResult { lines, kinds, routes })
+    Some(MapResult {
+        lines,
+        kinds,
+        routes,
+        gait,
+    })
 }
 
 #[test]
@@ -156,6 +165,16 @@ fn generated_graphs_are_walked() {
     });
     let (mut routes_ok, mut routes_all) = (0, 0);
     let mut by_kind: Vec<(LinkKind, usize, usize)> = Vec::new();
+    let mut gait = Gait::default();
+    let walked = |g: &Gait| {
+        format!(
+            "walking {:.0} s: against a wall {:.1}%, looking steeply {:.1}%, view turning {:.0} deg/s",
+            g.walking,
+            g.walled * 100.0 / g.walking.max(1e-9),
+            g.steep * 100.0 / g.walking.max(1e-9),
+            g.turned / g.walking.max(1e-9)
+        )
+    };
     for (map, r) in &results {
         let Some(r) = r else { continue };
         let kinds: Vec<String> = r
@@ -164,6 +183,8 @@ fn generated_graphs_are_walked() {
             .map(|(k, ok, n)| format!("{} {ok}/{n}", k.as_str()))
             .collect();
         eprintln!("{map}: routes {}/{}; {}", r.routes.0, r.routes.1, kinds.join(", "));
+        eprintln!("  {}", walked(&r.gait));
+        gait.add(&r.gait);
         for l in &r.lines {
             eprintln!("{l}");
         }
@@ -187,6 +208,7 @@ fn generated_graphs_are_walked() {
         .map(|(k, ok, n)| format!("{} {ok}/{n}", k.as_str()))
         .collect();
     eprintln!("all maps: routes {routes_ok}/{routes_all}; {}", kinds.join(", "));
+    eprintln!("all maps: {}", walked(&gait));
     // 0.93 on 27.09.2026 (docs/m3-acceptance.md): doors opened from a remote button are not carried out yet.
     let rate = routes_ok as f64 / routes_all as f64;
     assert!(rate >= 0.9, "routes {rate:.3}");

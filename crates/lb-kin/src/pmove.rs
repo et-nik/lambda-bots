@@ -153,6 +153,8 @@ pub struct MoveEvents {
     pub landed: Option<f32>,
     /// Entities the move ran into or stood on (`Trace::hit`, world excluded).
     pub touched: SmallVec<[u32; 4]>,
+    /// Walking, the player ran into a wall (a step it went up does not count).
+    pub walled: bool,
 }
 
 impl MoveEvents {
@@ -160,6 +162,7 @@ impl MoveEvents {
         self.jumped |= other.jumped;
         self.longjumped |= other.longjumped;
         self.landed = self.landed.or(other.landed);
+        self.walled |= other.walled;
         for t in other.touched {
             if !self.touched.contains(&t) {
                 self.touched.push(t);
@@ -189,6 +192,7 @@ pub fn player_move(world: &mut dyn MoveWorld, phys: &Physics, p: &mut Player, cm
         forward: Vec3::ZERO,
         right: Vec3::ZERO,
         events: MoveEvents::default(),
+        walls: 0,
     };
     pm.run();
     pm.p.oldbuttons = cmd.buttons;
@@ -226,6 +230,8 @@ struct Pm<'a> {
     forward: Vec3,
     right: Vec3,
     events: MoveEvents,
+    /// Planes steeper than floor that `fly_move` clipped against.
+    walls: u32,
 }
 
 impl Pm<'_> {
@@ -779,9 +785,12 @@ impl Pm<'_> {
         }
         let original = self.p.origin;
         let original_vel = self.p.velocity;
+        let walls = self.walls;
         self.fly_move();
         let down = self.p.origin;
         let down_vel = self.p.velocity;
+        let down_walled = self.walls > walls;
+        let walls = self.walls;
 
         // Again from one step up, then back down onto the step.
         self.p.origin = original;
@@ -792,10 +801,12 @@ impl Pm<'_> {
         }
         self.fly_move();
         let here = self.p.origin;
+        let up_walled = self.walls > walls;
         let tr = self.trace(here, here - Vec3::Z * self.phys.stepsize);
         if tr.normal.z < 0.7 {
             self.p.origin = down;
             self.p.velocity = down_vel;
+            self.events.walled |= down_walled;
             return;
         }
         if !tr.start_solid && !tr.all_solid {
@@ -806,8 +817,10 @@ impl Pm<'_> {
         if flat(down) > flat(up) {
             self.p.origin = down;
             self.p.velocity = down_vel;
+            self.events.walled |= down_walled;
         } else {
             self.p.velocity.z = down_vel.z;
+            self.events.walled |= up_walled;
         }
     }
 
@@ -895,6 +908,9 @@ impl Pm<'_> {
             }
             planes[numplanes] = tr.normal;
             numplanes += 1;
+            if tr.normal.z < 0.7 {
+                self.walls += 1;
+            }
             if numplanes == 1 && !self.p.on_ladder && !self.p.on_ground() {
                 // Player friction is always 1, so walls and floors both reflect with an overbounce of 1.
                 let v = clip_velocity(original_vel, planes[0], 1.0);
