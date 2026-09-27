@@ -3,7 +3,7 @@
 //! flooded, and which spots hurt, lie in water or are closed off by a door at rest.
 
 use lb_bsp::BspWorld;
-use lb_bsp::mech::{Mechanisms, MoverKind, SF_DOOR_START_OPEN, TriggerKind};
+use lb_bsp::mech::{Activation, Mechanisms, MoverKind, SF_DOOR_START_OPEN, TriggerKind};
 use lb_bsp::world::{BrushKind, WorldView};
 use lb_core::{Vec2, Vec3};
 use lb_worldq::{HullKind, TraceQuery, Tracer, contents};
@@ -29,6 +29,8 @@ pub enum SeedKind {
     LadderEnd,
     /// Where a button is in reach of the use key.
     UseSpot,
+    /// Inside a trigger (or touch button) that sets a door or a lift off when walked into.
+    TouchSpot,
 }
 
 /// A standing hull centre the floor is flooded from; some also get a node of their own.
@@ -209,6 +211,27 @@ pub fn sites(world: &BspWorld, mech: &Mechanisms) -> MapSites {
             });
         }
     }
+    let mut touched: Vec<usize> = mech
+        .movers
+        .iter()
+        .filter(|m| m.kind != MoverKind::Button)
+        .filter_map(|m| m.targetname.as_deref())
+        .flat_map(|name| mech.activators(world, name))
+        .filter_map(|a| match a.how {
+            Activation::Touch { model } => Some(model),
+            _ => None,
+        })
+        .collect();
+    touched.sort_unstable();
+    touched.dedup();
+    for model in touched {
+        if let Some(origin) = touch_spot(world, &mut v, model) {
+            out.push(Seed {
+                origin,
+                kind: SeedKind::TouchSpot,
+            });
+        }
+    }
     let ladders = ladder_sites(world, &mut v);
     for l in &ladders {
         for end in ladder_ends(&mut v, l) {
@@ -225,8 +248,24 @@ pub fn sites(world: &BspWorld, mech: &Mechanisms) -> MapSites {
     }
 }
 
+/// A standing hull centre on the floor in the middle of trigger (or touch button) `model`, touching it.
+fn touch_spot(world: &BspWorld, v: &mut WorldView<'_>, model: usize) -> Option<Vec3> {
+    let (mins, maxs, offset) = match world.brush(model) {
+        Some(b) => (b.abs_mins(), b.abs_maxs(), b.offset),
+        None => {
+            let m = world.bsp.models.get(model)?;
+            (m.mins, m.maxs, Vec3::ZERO)
+        }
+    };
+    let center = (mins + maxs) * 0.5;
+    let inside = Vec3::new(center.x, center.y, (mins.z + 36.0).min(maxs.z));
+    settle(v, inside)
+        .map(|(feet, _, _)| Vec3::new(center.x, center.y, feet + 36.0))
+        .filter(|&spot| world.hull_overlaps(model, offset, spot, HullKind::Stand))
+}
+
 /// Reach of the use key from a player's origin to a button's box, less a margin (`PLAYER_SEARCH_RADIUS` is 64).
-const USE_REACH: f32 = 52.0;
+pub const USE_REACH: f32 = 52.0;
 
 /// A standing hull centre on the floor in front of the button with box `mins..maxs`, close enough to press it and
 /// seeing it.
@@ -242,9 +281,16 @@ fn use_spot(v: &mut WorldView<'_>, model: usize, mins: Vec3, maxs: Vec3) -> Opti
             .filter(|&a| dir[a].abs() > 1e-3)
             .map(|a| half[a] / dir[a].abs())
             .fold(f32::INFINITY, f32::min);
-        let at = (center.truncate() + dir * (edge + 24.0)).extend(center.z);
-        let tr = v.trace(&TraceQuery::hull(at, at - Vec3::Z * 128.0, HullKind::Stand));
-        if tr.start_solid || tr.fraction >= 1.0 || tr.normal.z < 0.7 {
+        let at = center.truncate() + dir * (edge + 24.0);
+        // From the button's height, or higher where a low button puts the hull in the floor.
+        let Some(tr) = [0.0, 24.0, 48.0].into_iter().find_map(|up| {
+            let start = at.extend(center.z + up);
+            let tr = v.trace(&TraceQuery::hull(start, start - Vec3::Z * 128.0, HullKind::Stand));
+            (!tr.start_solid).then_some(tr)
+        }) else {
+            continue;
+        };
+        if tr.fraction >= 1.0 || tr.normal.z < 0.7 {
             continue;
         }
         let origin = tr.end;

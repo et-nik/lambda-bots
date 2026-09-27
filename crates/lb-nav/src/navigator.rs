@@ -7,7 +7,7 @@ use lb_nav_api::{NavStatus, NavStep};
 use lb_worldq::{HullKind, TraceQuery, Tracer};
 
 use crate::exec::{EYE_HEIGHT, MechView, NavInput};
-use crate::follow::{FollowStatus, PathFollower};
+use crate::follow::{FollowStatus, PathFollower, steer};
 use crate::graph::{NavGraph, NodeFlags, NodeId};
 use crate::known::{FailReason, KnownChanges, LinkHealth};
 use crate::plan::{Search, SearchStep};
@@ -141,7 +141,8 @@ impl Navigator {
 
     /// Searches a path to `goal` within this frame's budget: `Some(true)` once the bot follows one, `Some(false)`
     /// when there is none, `None` while the search goes on (it resumes on the next call).
-    fn plan(&mut self, ctx: &mut NavCtx<'_>, origin: Vec3, goal: NodeId, now: f64) -> Option<bool> {
+    fn plan(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput, goal: NodeId) -> Option<bool> {
+        let (origin, now) = (input.origin, input.now);
         if self.search.as_ref().is_none_or(|s| s.goal() != goal) {
             let Some(start) = Self::start_node(ctx, origin) else {
                 return Some(false);
@@ -167,7 +168,9 @@ impl Navigator {
             SearchStep::Pending => None,
             SearchStep::Found(path) => {
                 self.search = None;
-                self.follower = Some(PathFollower::new(path, now));
+                let mut follower = PathFollower::new(path, now);
+                follower.check_start(ctx.graph, input, &mut *ctx.tracer);
+                self.follower = Some(follower);
                 self.goal = Some(goal);
                 Some(true)
             }
@@ -241,7 +244,7 @@ impl Navigator {
             if self.search.is_none() {
                 self.next_plan_at = now + REPLAN_EVERY;
             }
-            match self.plan(ctx, input.origin, goal, now) {
+            match self.plan(ctx, input, goal) {
                 None if self.follower.is_none() => return (NavStatus::Moving, None),
                 None | Some(true) => {}
                 Some(false) => {
@@ -322,7 +325,7 @@ impl Navigator {
                     Self::pick_goal(ctx, input.origin, rng)?
                 }
             };
-            if self.plan(ctx, input.origin, goal, now) != Some(true) {
+            if self.plan(ctx, input, goal) != Some(true) {
                 return None;
             }
         }
@@ -339,14 +342,14 @@ impl Navigator {
             FollowStatus::Replan => {
                 self.follower = None;
                 if let Some(goal) = self.goal {
-                    self.plan(ctx, input.origin, goal, now);
+                    self.plan(ctx, input, goal);
                 }
             }
             FollowStatus::Failed { from, to, reason } => {
                 self.failed(ctx, from, to, reason, now);
                 let goal = self.goal.filter(|_| self.failures < GIVE_UP_AFTER);
                 if let Some(goal) = goal {
-                    self.plan(ctx, input.origin, goal, now);
+                    self.plan(ctx, input, goal);
                 } else {
                     self.failures = 0;
                     self.next_goal_at = now + 0.5;
@@ -375,7 +378,11 @@ fn straight_clear(tracer: &mut dyn Tracer, input: &NavInput, dest: Vec3) -> bool
 /// A step straight at `dest`.
 fn straight(input: &NavInput, dest: Vec3) -> NavStep {
     let mut step = NavStep::hold(Vec3::new(dest.x, dest.y, input.origin.z + EYE_HEIGHT));
-    step.move_dir = (dest - input.origin).truncate().normalize_or_zero();
     step.speed = input.max_speed;
+    step.move_dir = steer(
+        (dest - input.origin).truncate().normalize_or_zero(),
+        step.speed,
+        input.velocity,
+    );
     step
 }

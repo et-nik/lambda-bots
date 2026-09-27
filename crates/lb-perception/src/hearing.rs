@@ -22,7 +22,8 @@ const RUNNING_MASK: f32 = 1.2;
 const RUNNING_SPEED: f32 = 150.0;
 const WIDEST_BEARING_SIGMA: f32 = 35.0;
 const RANGE_LOG_SIGMA: f32 = 0.3;
-const ELEVATION_SIGMA: f32 = 30.0;
+/// Up or down is told apart worse than left and right.
+const ELEVATION_SIGMA: f32 = 10.0;
 
 /// A sound or weapon event of this frame, as the engine sent it.
 #[derive(Clone, Copy, Debug, PartialEq)]

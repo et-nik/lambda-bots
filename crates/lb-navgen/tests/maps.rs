@@ -9,16 +9,16 @@ use lb_navgen::{GenOptions, generate, report};
 /// Map, and items the graph gets to and back from.
 #[rustfmt::skip]
 const MAPS: &[(&str, usize)] = &[
-    ("boot_camp", 148),
-    ("bounce", 64),
-    ("crossfire", 121),
+    ("boot_camp", 150),
+    ("bounce", 58),
+    ("crossfire", 109),
     ("datacore", 57),
     ("frenzy", 40),
     ("gasworks", 73),
     ("lambda_bunker", 44),
     ("rapidcore", 58),
     ("snark_pit", 45),
-    ("stalkyard", 68),
+    ("stalkyard", 70),
     ("subtransit", 64),
     ("undertow", 41),
 ];

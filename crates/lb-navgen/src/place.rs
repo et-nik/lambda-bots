@@ -1,6 +1,8 @@
 //! Node placement over the floor field: spots that must have a node first (spawns, items, ladder ends, lift
-//! platforms, teleports, drop edges and landings), then corridor centres outward, keeping nodes apart by a radius
-//! that grows with the room around them. Every span then belongs to the node nearest to it on foot.
+//! platforms, teleports, drop edges and landings), then corridor centres outward, keeping nodes apart by a gap
+//! that grows with the room around them. Every span then belongs to the node nearest to it on foot; where two
+//! nodes whose floor areas meet cannot walk straight to each other, the generator adds a node on their border
+//! ([`borders`]).
 
 use std::collections::VecDeque;
 
@@ -130,30 +132,82 @@ pub fn spot_at(field: &FloorField, s: u32, extra: NodeFlags) -> Spot {
     }
 }
 
+/// How far apart the nodes that fill the floor are: twice the room around them, within these bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spacing {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl Default for Spacing {
+    fn default() -> Spacing {
+        Spacing { min: 112.0, max: 224.0 }
+    }
+}
+
 /// Places nodes: `required` first, then the rest of the field.
-pub fn place(field: &FloorField, required: &[Spot]) -> Placement {
+pub fn place(field: &FloorField, required: &[Spot], spacing: Spacing) -> Placement {
     let mut p = Placement::new();
     for &spot in required {
         let id = p.add(spot);
         p.required.push(id);
     }
     let mut order: Vec<u32> = (0..field.len() as u32)
-        .filter(|&i| {
-            !field.spans[i as usize]
-                .flags
-                .intersects(SpanFlags::HAZARD | SpanFlags::GATE | SpanFlags::PUSH | SpanFlags::LADDER)
-        })
+        .filter(|&i| !field.spans[i as usize].flags.intersects(NO_NODE))
         .collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(field.spans[i as usize].edge), i));
     for s in order {
         let origin = field.spans[s as usize].player_origin();
-        let r = (room(field, s) * 1.2).clamp(48.0, 128.0);
+        let r = (room(field, s) * 2.0).clamp(spacing.min, spacing.max);
         if p.near(origin, r).next().is_none() {
             p.add(spot_at(field, s, NodeFlags::empty()));
         }
     }
-    p.owner = owners(field, &p.spots);
+    p.reassign(field);
     p
+}
+
+impl Placement {
+    /// Gives every span to the node nearest to it on foot again (after nodes were added).
+    pub fn reassign(&mut self, field: &FloorField) {
+        self.owner = owners(field, &self.spots);
+    }
+}
+
+/// Spans no node goes on: inside a door, a hazard, a push field or a ladder.
+const NO_NODE: SpanFlags = SpanFlags::HAZARD
+    .union(SpanFlags::GATE)
+    .union(SpanFlags::PUSH)
+    .union(SpanFlags::LADDER);
+
+/// Every pair of nodes whose floor areas meet on foot (`a < b`), with the span on their border with the most room
+/// around it: where a node between the two would go.
+pub fn borders(field: &FloorField, owner: &[u32]) -> Vec<((u32, u32), u32)> {
+    let mut best: FxHashMap<(u32, u32), (u16, u32)> = FxHashMap::default();
+    for (s, span) in field.spans.iter().enumerate() {
+        let a = owner[s];
+        if a == NONE || span.flags.intersects(NO_NODE) {
+            continue;
+        }
+        for (_, t) in span.walk_dirs() {
+            let b = owner[t as usize];
+            if b == NONE || b == a || field.spans[t as usize].flags.intersects(NO_NODE) {
+                continue;
+            }
+            let key = (a.min(b), a.max(b));
+            let cand = (span.edge, s as u32);
+            best.entry(key)
+                .and_modify(|e| {
+                    if (cand.0, std::cmp::Reverse(cand.1)) > (e.0, std::cmp::Reverse(e.1)) {
+                        *e = cand;
+                    }
+                })
+                .or_insert(cand);
+        }
+    }
+    let mut out: Vec<((u32, u32), u32)> = best.into_iter().map(|(k, (_, s))| (k, s)).collect();
+    out.sort_unstable();
+    out
 }
 
 /// The node each span belongs to: the nearest on foot, found by one walk outward from every node at once.

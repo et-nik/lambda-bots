@@ -18,7 +18,8 @@ pub struct NavStep {
     pub speed: f32,
     /// Where to look to follow the path.
     pub look_at: Vec3,
-    /// View pitch to hold on ladders.
+    /// View pitch to hold exactly (ladders, swimming, aiming at a button); without it `look_at` is only the way the
+    /// bot is going, and looking elsewhere for a moment does no harm.
     pub pitch: Option<f32>,
     pub jump: bool,
     pub duck: bool,

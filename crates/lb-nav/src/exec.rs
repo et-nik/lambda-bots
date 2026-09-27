@@ -15,6 +15,15 @@ use crate::spec::{Action, Interaction, MechRef, TraversalSpec};
 
 /// Eye height of a standing player above its origin (`VEC_VIEW`).
 pub const EYE_HEIGHT: f32 = 28.0;
+/// Steepest a player on the move looks up or down: the tangent of about 12°.
+pub const TRAVEL_TILT: f32 = 0.2;
+
+/// Where a player on the move looks toward `p`: that way, tilted up or down no more than `TRAVEL_TILT`.
+pub fn travel_look(eye: Vec3, p: Vec3) -> Vec3 {
+    let d = p - eye;
+    let flat = d.truncate().length();
+    eye + d.truncate().extend(d.z.clamp(-flat * TRAVEL_TILT, flat * TRAVEL_TILT))
+}
 /// A use press is sent once the view is this close to the target, degrees.
 const USE_AIM: f32 = 8.0;
 /// A mechanism that has not moved this long after it was set off did not react.
@@ -171,9 +180,15 @@ fn aim_error(input: &NavInput, p: Vec3) -> f32 {
     lb_core::dmath::acos(forward.dot(want).clamp(-1.0, 1.0)).to_degrees()
 }
 
-/// Looking at `p` and holding still: used to press buttons.
-fn aim_at(p: Vec3) -> NavStep {
+/// View pitch of looking from `eye` at `p`.
+fn pitch_to(eye: Vec3, p: Vec3) -> f32 {
+    lb_core::math::dir_to_view_angles(p - eye).x
+}
+
+/// Looking right at `p` and holding still: used to press buttons.
+fn aim_at(input: &NavInput, p: Vec3) -> NavStep {
     let mut step = NavStep::hold(p);
+    step.pitch = Some(pitch_to(input.eye(), p));
     step.mandatory = true;
     step
 }
@@ -547,7 +562,9 @@ impl SwimExec {
         }
         let mut step = toward(i, target, i.max_speed);
         step.speed = i.max_speed;
+        // Swimming goes where the view points, up and down too.
         step.look_at = target;
+        step.pitch = Some(pitch_to(i.eye(), target));
         // Rise toward the surface (where the jump also climbs out of the water), or hop over a lip into it; duck
         // through low tunnels.
         let to_land = !c.to.flags.contains(NodeFlags::WATER);
@@ -630,7 +647,7 @@ impl DoorExec {
                 }
                 DoorPhase::Activate => match open {
                     Interaction::Use { aim, .. } => {
-                        let mut step = aim_at(aim);
+                        let mut step = aim_at(i, aim);
                         if aim_error(i, aim) < USE_AIM && self.pressed_at.is_none_or(|t| now - t > 0.3) {
                             step.use_key = true;
                             self.presses += 1;
@@ -642,7 +659,7 @@ impl DoorExec {
                         return (step, ExecStatus::Running);
                     }
                     Interaction::Shoot { aim, .. } => {
-                        let mut step = aim_at(aim);
+                        let mut step = aim_at(i, aim);
                         step.fire_at = Some(aim);
                         if moving || is_open {
                             self.set(DoorPhase::WaitOpen, now);
@@ -807,7 +824,7 @@ impl LiftExec {
                     }
                     match start {
                         Interaction::Use { aim, .. } => {
-                            let mut step = aim_at(aim);
+                            let mut step = aim_at(i, aim);
                             let waited = self.pressed_at.is_none_or(|t| now - t > REACTION);
                             if waited && self.presses >= PRESSES {
                                 return (step, ExecStatus::Failed(FailReason::WaitingForInteraction));
@@ -822,7 +839,7 @@ impl LiftExec {
                             return (step, ExecStatus::Waiting);
                         }
                         Interaction::Shoot { aim, .. } => {
-                            let mut step = aim_at(aim);
+                            let mut step = aim_at(i, aim);
                             step.fire_at = Some(aim);
                             if now - self.since > 4.0 {
                                 return (step, ExecStatus::Failed(FailReason::WaitingForInteraction));
@@ -949,7 +966,7 @@ impl BreakExec {
         if crowbar && dist > reach + 16.0 {
             return (toward(i, aim, i.max_speed), ExecStatus::Running);
         }
-        let mut step = aim_at(aim);
+        let mut step = aim_at(i, aim);
         step.fire_at = Some(aim);
         step.melee = crowbar;
         (step, ExecStatus::Waiting)

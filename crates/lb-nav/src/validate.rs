@@ -61,8 +61,17 @@ fn advance(tracer: &mut dyn Tracer, cur: Vec3, delta: Vec2, hull: HullKind) -> (
     }
 }
 
-/// Walks from `from` to `to` (both resting hull centres) with `hull`.
+/// Walks from `from` to `to` (both resting hull centres) with `hull`, sliding along what is in the way.
 pub fn walk_check(tracer: &mut dyn Tracer, from: Vec3, to: Vec3, hull: HullKind) -> WalkCheck {
+    walk(tracer, from, to, hull, true)
+}
+
+/// Walks from `from` to `to` in a straight line: blocked by anything that would push the walker off it.
+pub fn walk_straight(tracer: &mut dyn Tracer, from: Vec3, to: Vec3, hull: HullKind) -> WalkCheck {
+    walk(tracer, from, to, hull, false)
+}
+
+fn walk(tracer: &mut dyn Tracer, from: Vec3, to: Vec3, hull: HullKind, slide: bool) -> WalkCheck {
     let target = to.truncate();
     let total = (target - from.truncate()).length();
     if total < 1.0 {
@@ -85,6 +94,9 @@ pub fn walk_check(tracer: &mut dyn Tracer, from: Vec3, to: Vec3, hull: HullKind)
         }
         let delta = remaining.clamp_length_max(MOVE);
         let (mut next, wall) = advance(tracer, cur, delta, hull);
+        if !slide && (next - cur).truncate().length() < delta.length() - 0.5 {
+            return WalkCheck::Blocked;
+        }
         if (next - cur).truncate().length() < 1.0
             && let Some(n) = wall
         {

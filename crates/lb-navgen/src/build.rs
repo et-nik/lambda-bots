@@ -10,24 +10,24 @@ use std::collections::BinaryHeap;
 use std::time::Instant;
 
 use lb_bsp::BspWorld;
-use lb_bsp::mech::Mechanisms;
+use lb_bsp::mech::{Mechanisms, MoverKind};
 use lb_bsp::world::WorldView;
-use lb_core::Vec3;
+use lb_core::{Vec2, Vec3};
 use lb_kin::Physics;
 use lb_kin::validate::{
-    JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_push, simulate_swim, simulate_walk,
+    JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_push, simulate_swim,
 };
 use lb_nav::classify::{Classified, Classifier, DROP_SPEED, crouch_origin, is_water, stand_origin};
 use lb_nav::graph::{GraphStats, LinkFlags, LinkKind, NavGraph, NavLink, NavNode, NodeFlags, NodeId};
 use lb_nav::plan::RUN_SPEED;
-use lb_nav::validate::{WalkCheck, walk_check};
+use lb_nav::validate::{WalkCheck, walk_straight};
 use lb_worldq::{HullKind, TraceQuery, Tracer};
 use rayon::prelude::*;
 
 use crate::field::{FloorField, NONE, STEP, SpanFlags, settle};
-use crate::place::{Spot, place, room, spot_at};
+use crate::place::{Spacing, Spot, borders, place, room, spot_at};
 use crate::push::{PushEntry, field_center, push_sites};
-use crate::site::{LadderSite, SeedKind, Site, TOP_BELOW, flood_poses, ladder_ends, rest_poses, sites};
+use crate::site::{LadderSite, SeedKind, Site, TOP_BELOW, USE_REACH, flood_poses, ladder_ends, rest_poses, sites};
 
 #[derive(Clone, Copy, Debug)]
 pub struct GenOptions {
@@ -39,6 +39,7 @@ pub struct GenOptions {
     pub max_out: usize,
     /// Plan jumps across gaps and onto ledges.
     pub jumps: bool,
+    pub spacing: Spacing,
 }
 
 impl Default for GenOptions {
@@ -49,6 +50,7 @@ impl Default for GenOptions {
             stretch: 1.15,
             max_out: 12,
             jumps: true,
+            spacing: Spacing::default(),
         }
     }
 }
@@ -66,6 +68,9 @@ pub struct Generated {
     pub spawns: Vec<u32>,
     pub items: Vec<u32>,
 }
+
+/// Rounds of putting a node between two whose floor areas meet but that cannot walk straight to each other.
+const PORTAL_ROUNDS: usize = 4;
 
 /// Drop edges are this far apart at least along a ledge.
 const DROP_SPACING: f32 = 96.0;
@@ -171,6 +176,130 @@ fn ladder_chain(v: &mut WorldView<'_>, field: &FloorField, l: &LadderSite, req: 
     LadderChain { foot, chain, top }
 }
 
+/// Cells a door side node steps out from the door: clear of its leaf, still in reach of the use key.
+const DOOR_STEP_OUT: usize = 1;
+
+/// A node on each side of every door where it rests, a step away from it: the link between the two goes straight
+/// through the doorway.
+fn door_sides(field: &FloorField, req: &mut Required) {
+    let spans = &field.spans;
+    let gate = |s: u32| spans[s as usize].flags.contains(SpanFlags::GATE);
+    let open = |s: u32| {
+        !spans[s as usize]
+            .flags
+            .intersects(SpanFlags::HAZARD | SpanFlags::GATE | SpanFlags::PUSH | SpanFlags::LADDER)
+    };
+    let mut seen = vec![false; spans.len()];
+    let mut in_rim = vec![false; spans.len()];
+    for start in 0..spans.len() as u32 {
+        if !gate(start) || seen[start as usize] {
+            continue;
+        }
+        seen[start as usize] = true;
+        let mut door = vec![start];
+        let mut k = 0;
+        while k < door.len() {
+            let s = door[k];
+            k += 1;
+            for (_, t) in spans[s as usize].walk_dirs() {
+                if gate(t) && !seen[t as usize] {
+                    seen[t as usize] = true;
+                    door.push(t);
+                }
+            }
+        }
+        let centre = door.iter().map(|&s| spans[s as usize].at).sum::<Vec2>() / door.len() as f32;
+        let mut rim: Vec<u32> = door
+            .iter()
+            .flat_map(|&s| spans[s as usize].walk_dirs().map(|(_, t)| t))
+            .filter(|&t| open(t))
+            .collect();
+        rim.sort_unstable();
+        rim.dedup();
+        for &r in &rim {
+            in_rim[r as usize] = true;
+        }
+        // The rim falls apart into the door's sides.
+        for &first in &rim {
+            if !in_rim[first as usize] {
+                continue;
+            }
+            in_rim[first as usize] = false;
+            let mut side = vec![first];
+            let mut k = 0;
+            while k < side.len() {
+                let s = side[k];
+                k += 1;
+                for (_, t) in spans[s as usize].walk_dirs() {
+                    if in_rim[t as usize] {
+                        in_rim[t as usize] = false;
+                        side.push(t);
+                    }
+                }
+            }
+            let mean = side.iter().map(|&s| spans[s as usize].at).sum::<Vec2>() / side.len() as f32;
+            let Some(mut at) = side.iter().copied().min_by(|&a, &b| {
+                let d = |s: u32| (spans[s as usize].at - mean).length();
+                d(a).total_cmp(&d(b)).then(a.cmp(&b))
+            }) else {
+                continue;
+            };
+            let out = (spans[at as usize].at - centre).normalize_or_zero();
+            for _ in 0..DOOR_STEP_OUT {
+                let step = spans[at as usize]
+                    .walk_dirs()
+                    .filter(|&(_, t)| open(t))
+                    .map(|(d, t)| {
+                        let (dx, dy) = crate::field::DIRS[d];
+                        (Vec2::new(dx as f32, dy as f32).normalize().dot(out), t)
+                    })
+                    .filter(|&(dot, _)| dot > 0.7)
+                    .max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1)));
+                match step {
+                    Some((_, t)) => at = t,
+                    None => break,
+                }
+            }
+            req.push(spot_at(field, at, NodeFlags::empty()));
+        }
+    }
+}
+
+/// A node on the floor in reach of every button, seeing it: the floor the flood found has room for a player where
+/// probing from the button may find none (a button low in a recess).
+fn use_spots(world: &BspWorld, mech: &Mechanisms, field: &FloorField, req: &mut Required) {
+    let mut v = WorldView::new(world);
+    for m in mech.movers.iter().filter(|m| m.kind == MoverKind::Button && m.health <= 0.0) {
+        let Some(b) = world.brush(m.model) else { continue };
+        let (mins, maxs) = (b.abs_mins(), b.abs_maxs());
+        let center = (mins + maxs) * 0.5;
+        let mut near: Vec<(f32, u32)> = field
+            .spans
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                !s.flags
+                    .intersects(SpanFlags::HAZARD | SpanFlags::GATE | SpanFlags::PUSH | SpanFlags::LADDER)
+            })
+            .map(|(i, s)| {
+                let o = s.player_origin();
+                ((o.clamp(mins, maxs) - o).length(), i as u32)
+            })
+            .filter(|&(reach, _)| reach < USE_REACH)
+            .collect();
+        near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        let seen = near.into_iter().find(|&(_, s)| {
+            let span = &field.spans[s as usize];
+            let eye = span.player_origin() + Vec3::Z * if span.flags.contains(SpanFlags::CROUCH) { 12.0 } else { 28.0 };
+            let sight = v.trace(&TraceQuery::line(eye, center));
+            sight.fraction >= 0.99 || sight.hit == Some(m.model as u32)
+        });
+        if let Some((_, s)) = seen {
+            req.push(spot_at(field, s, NodeFlags::MECHANISM));
+        }
+    }
+}
+
 /// Edges to walk off and where the fall lands, one per stretch of ledge and floor below.
 fn drop_pairs(field: &FloorField, req: &mut Required) -> Vec<(usize, usize)> {
     let mut chosen: Vec<(Vec3, f32)> = Vec::new();
@@ -240,9 +369,34 @@ fn walkable(v: &mut WorldView<'_>, a: &NavNode, b: &NavNode, ladders: &[(usize, 
         (false, false) => {}
     }
     if a.flags.contains(NodeFlags::CROUCH) || b.flags.contains(NodeFlags::CROUCH) {
-        walk_check(v, crouch_origin(a), crouch_origin(b), HullKind::Crouch)
+        walk_straight(v, crouch_origin(a), crouch_origin(b), HullKind::Crouch)
     } else {
-        walk_check(v, a.origin, b.origin, HullKind::Stand)
+        walk_straight(v, a.origin, b.origin, HullKind::Stand)
+    }
+}
+
+/// Nodes whose floor areas meet but that cannot walk straight to each other, where a node on their border would
+/// join them (not a ladder or the edge of the water between them).
+fn apart(v: &mut WorldView<'_>, a: &NavNode, b: &NavNode, ladders: &[(usize, f32)]) -> bool {
+    let off_floor = NodeFlags::LADDER | NodeFlags::AIRBORNE;
+    if a.flags.intersects(off_floor)
+        || b.flags.intersects(off_floor)
+        || a.flags.contains(NodeFlags::WATER) != b.flags.contains(NodeFlags::WATER)
+    {
+        return false;
+    }
+    let walks = |r: WalkCheck| matches!(r, WalkCheck::Ok) || matches!(r, WalkCheck::Drop(h) if h <= 20.0);
+    !walks(walkable(v, a, b, ladders)) && !walks(walkable(v, b, a, ladders))
+}
+
+fn node_of(s: &Spot) -> NavNode {
+    NavNode {
+        origin: s.origin,
+        flags: s.flags,
+        radius: s.radius,
+        support: s.support,
+        first_link: 0,
+        link_count: 0,
     }
 }
 
@@ -365,7 +519,9 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         if let Some(s) = field.at(seed.origin) {
             let flags = match seed.kind {
                 SeedKind::Item => NodeFlags::GOAL,
-                SeedKind::LiftBoard | SeedKind::TeleportEntry | SeedKind::UseSpot => NodeFlags::MECHANISM,
+                SeedKind::LiftBoard | SeedKind::TeleportEntry | SeedKind::UseSpot | SeedKind::TouchSpot => {
+                    NodeFlags::MECHANISM
+                }
                 _ => NodeFlags::empty(),
             };
             let k = req.push(spot_at(&field, s, flags));
@@ -421,28 +577,45 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         chains
     };
     let drops = drop_pairs(&field, &mut req);
-    let placement = place(&field, &req.spots);
-    let id = |k: usize| placement.required[k];
-    let nodes: Vec<NavNode> = placement
-        .spots
-        .iter()
-        .map(|s| NavNode {
-            origin: s.origin,
-            flags: s.flags,
-            radius: s.radius,
-            support: s.support,
-            first_link: 0,
-            link_count: 0,
-        })
-        .collect();
-    lap("place", &mut t);
-
+    door_sides(&field, &mut req);
+    use_spots(world, mech, &field, &mut req);
     let ladder_models: Vec<(usize, f32)> = world
         .brushes
         .iter()
         .filter(|b| b.kind == lb_bsp::world::BrushKind::Volume(lb_worldq::contents::LADDER))
         .map(|b| (b.model, b.abs_mins().z))
         .collect();
+    let mut placement = place(&field, &req.spots, opts.spacing);
+    // Neighbours that cannot see each other get a node on their border (round a corner, through a doorway).
+    for _ in 0..PORTAL_ROUNDS {
+        let shared: &BspWorld = world;
+        let spots = &placement.spots;
+        let found: Vec<(u32, u64)> = borders(&field, &placement.owner)
+            .par_iter()
+            .filter_map(|&((a, b), span)| {
+                let mut v = WorldView::new(shared);
+                let apart = apart(
+                    &mut v,
+                    &node_of(&spots[a as usize]),
+                    &node_of(&spots[b as usize]),
+                    &ladder_models,
+                );
+                apart.then_some((span, v.traces))
+            })
+            .collect();
+        extra_traces += found.iter().map(|(_, n)| n).sum::<u64>();
+        let before = placement.spots.len();
+        for &(span, _) in &found {
+            placement.add(spot_at(&field, span, NodeFlags::empty()));
+        }
+        if placement.spots.len() == before {
+            break;
+        }
+        placement.reassign(&field);
+    }
+    let id = |k: usize| placement.required[k];
+    let nodes: Vec<NavNode> = placement.spots.iter().map(node_of).collect();
+    lap("place", &mut t);
 
     // Walk candidates: nodes whose floor areas touch, then longer ones within reach.
     let owner = &placement.owner;
@@ -553,7 +726,7 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
     extra_traces += view.traces;
     lap("spanner", &mut t);
 
-    // Touching areas the straight check could not join: doors and breakables in the way, corners to slide round.
+    // Touching areas the straight check could not join because a door or a breakable is in the way.
     let mut cls = Classifier {
         world,
         mech,
@@ -561,7 +734,6 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         nodes,
         specs: Vec::new(),
     };
-    let mut slide: Vec<(u32, u32)> = Vec::new();
     for &(a, b) in &blocked {
         if links.has(a, b) {
             continue;
@@ -572,37 +744,12 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
                 .filter(|c| c.valid)
                 .or_else(|| cls.breakable_link(&na, &nb, m))
         });
-        match special {
-            Some(c) => {
-                let link = cls.link(a as usize, b as usize, c, LinkFlags::empty());
-                links.out[a as usize].push(link);
-            }
-            None => slide.push((a, b)),
+        if let Some(c) = special {
+            let link = cls.link(a as usize, b as usize, c, LinkFlags::empty());
+            links.out[a as usize].push(link);
         }
     }
-    let slides: Vec<bool> = {
-        let (w, nodes, phys) = (&*cls.world, &cls.nodes, opts.physics);
-        slide
-            .par_iter()
-            .map(|&(a, b)| {
-                let (na, nb) = (&nodes[a as usize], &nodes[b as usize]);
-                if na.flags.intersects(NodeFlags::CROUCH | NodeFlags::WATER)
-                    || nb.flags.intersects(NodeFlags::CROUCH | NodeFlags::WATER)
-                {
-                    return false;
-                }
-                let mut v = WorldView::new(w);
-                let r = simulate_walk(&mut v, &phys, stand_origin(na), stand_origin(nb), false);
-                r.ok && r.flight < 0.1
-            })
-            .collect()
-    };
-    for (&(a, b), ok) in slide.iter().zip(slides) {
-        if ok && !links.has(a, b) {
-            links.out[a as usize].push(walk_link(&cls.nodes, a, b, LinkKind::Walk));
-        }
-    }
-    lap("doors and corners", &mut t);
+    lap("doors", &mut t);
 
     // Into and out of the water: swum there the way a bot swims, up to the surface and over the edge.
     {
@@ -910,6 +1057,7 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         }
     }
     lap("pushes", &mut t);
+
 
     let probes = cls.probes(&links.out);
     let traces = cls.world.traces - traces_before + extra_traces;
