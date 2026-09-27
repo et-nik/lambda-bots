@@ -5,7 +5,7 @@
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3};
 use lb_kin::Physics;
-use lb_kin::validate::{DROP_OVERRUN, LIFTING, air_steer, hover, run_up_room, swim_jump, takeoff};
+use lb_kin::validate::{DROP_OVERRUN, DROP_SLACK, LIFTING, air_steer, hover, run_up_room, swim_jump, takeoff};
 use lb_nav_api::NavStep;
 use lb_worldq::Tracer;
 
@@ -412,7 +412,7 @@ impl DropExec {
                         return (step, ExecStatus::Done);
                     }
                     // Landed short or long: walking the rest is the next link's business if it can be walked.
-                    if flat(b - i.origin).length() < 96.0 && (i.feet() - node_feet(c.to)).abs() < 20.0 {
+                    if flat(b - i.origin).length() < DROP_SLACK && (i.feet() - node_feet(c.to)).abs() < 20.0 {
                         return (step, ExecStatus::Running);
                     }
                     return (step, ExecStatus::Failed(FailReason::ControllerFailure));

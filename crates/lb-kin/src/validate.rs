@@ -559,13 +559,17 @@ fn push_run(world: &mut dyn MoveWorld, phys: &Physics, run: &PushRun, reach: boo
 
 /// A bot walking off a ledge aims this far past the landing, so it does not stop on the ledge right above it.
 pub const DROP_OVERRUN: f32 = 48.0;
+/// A drop that touches down within this of its landing walks the rest; farther off it has failed.
+pub const DROP_SLACK: f32 = 96.0;
 
 /// Walks off a ledge from `from` (starting at rest) toward `to`, no faster than `speed`, and reports the landing:
-/// on the ledge heading past the landing (`DROP_OVERRUN`), in the air at it.
+/// on the ledge heading past the landing (`DROP_OVERRUN`), in the air at it. Touching down more than `DROP_SLACK`
+/// from it is a miss, as for the bot.
 pub fn simulate_drop(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3, speed: f32) -> MoveVerdict {
     let mut p = settled(world, phys, from);
     p.client_maxspeed = speed;
     let mut airborne = false;
+    let mut touchdown: Option<Vec3> = None;
     let mut flight = 0.0;
     let mut impact = 0.0f32;
     let beyond = to + flat_dir(from, to).extend(0.0) * DROP_OVERRUN;
@@ -580,12 +584,16 @@ pub fn simulate_drop(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: 
         if let Some(v) = ev.landed {
             impact = impact.max(v);
         }
+        if airborne && (p.on_ground() || p.waterlevel >= 2) {
+            touchdown.get_or_insert(p.origin);
+        }
         if airborne && p.on_ground() && (p.origin - to).truncate().length() < ARRIVE_RADIUS {
             break;
         }
     }
+    let near = touchdown.is_some_and(|t| (t - to).truncate().length() < DROP_SLACK);
     MoveVerdict {
-        ok: airborne && arrived(&p, to, ARRIVE_RADIUS),
+        ok: airborne && near && arrived(&p, to, ARRIVE_RADIUS),
         landing: p.origin,
         flight,
         impact,

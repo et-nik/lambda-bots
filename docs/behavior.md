@@ -85,6 +85,23 @@ wins:
 - **Goal (50):** the goal's movement.
 - **Optional (20):** looking along the path and glancing at sounds.
 
+### Where a bot looks
+
+- **On the move** it looks along its path: at a point 256 units ahead, past the small bends of the graph and round
+  a corner before it gets there, tilted no more than 12° up or down. Nearer than 48 units such a point says little
+  (the path's end, the top of a ladder), and the view keeps its heading. The pitch is exact only where it steers the
+  move or aims: on ladders, in water, at a button to press.
+- **Sounds** draw a glance only when they matter and are not in front of the bot already:
+  - a shot within 1500 units, pain within 1000, steps, jumps and pickups within 700, weapon noises within 500;
+  - more than 40° off the view;
+  - 2.5–5 s after the last glance.
+
+  A glance lasts 0.8 s and stays within 15° of level: how high a sound was is a guess.
+- **A glimpse** of someone not recognized yet is looked at directly, and so are a lost enemy's last known position and
+  the direction damage came from.
+- A point right above or below the eyes (closer than 16 units across) gives no direction: the view holds still
+  instead of spinning to it, unless it is an enemy.
+
 ## Inspecting
 
 `lb brain [name|#userid]` prints for each bot:

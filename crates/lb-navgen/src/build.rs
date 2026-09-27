@@ -14,9 +14,7 @@ use lb_bsp::mech::{Mechanisms, MoverKind};
 use lb_bsp::world::WorldView;
 use lb_core::{Vec2, Vec3};
 use lb_kin::Physics;
-use lb_kin::validate::{
-    JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_push, simulate_swim,
-};
+use lb_kin::validate::{JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_push, simulate_swim};
 use lb_nav::classify::{Classified, Classifier, DROP_SPEED, crouch_origin, is_water, stand_origin};
 use lb_nav::graph::{GraphStats, LinkFlags, LinkKind, NavGraph, NavLink, NavNode, NodeFlags, NodeId};
 use lb_nav::plan::RUN_SPEED;
@@ -269,7 +267,11 @@ fn door_sides(field: &FloorField, req: &mut Required) {
 /// probing from the button may find none (a button low in a recess).
 fn use_spots(world: &BspWorld, mech: &Mechanisms, field: &FloorField, req: &mut Required) {
     let mut v = WorldView::new(world);
-    for m in mech.movers.iter().filter(|m| m.kind == MoverKind::Button && m.health <= 0.0) {
+    for m in mech
+        .movers
+        .iter()
+        .filter(|m| m.kind == MoverKind::Button && m.health <= 0.0)
+    {
         let Some(b) = world.brush(m.model) else { continue };
         let (mins, maxs) = (b.abs_mins(), b.abs_maxs());
         let center = (mins + maxs) * 0.5;
@@ -290,7 +292,13 @@ fn use_spots(world: &BspWorld, mech: &Mechanisms, field: &FloorField, req: &mut 
         near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
         let seen = near.into_iter().find(|&(_, s)| {
             let span = &field.spans[s as usize];
-            let eye = span.player_origin() + Vec3::Z * if span.flags.contains(SpanFlags::CROUCH) { 12.0 } else { 28.0 };
+            let eye = span.player_origin()
+                + Vec3::Z
+                    * if span.flags.contains(SpanFlags::CROUCH) {
+                        12.0
+                    } else {
+                        28.0
+                    };
             let sight = v.trace(&TraceQuery::line(eye, center));
             sight.fraction >= 0.99 || sight.hit == Some(m.model as u32)
         });
@@ -1057,7 +1065,6 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         }
     }
     lap("pushes", &mut t);
-
 
     let probes = cls.probes(&links.out);
     let traces = cls.world.traces - traces_before + extra_traces;

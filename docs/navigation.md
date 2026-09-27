@@ -25,12 +25,17 @@ and its vertical push accelerates the player against gravity, at that many units
    slime or a strong `trigger_hurt`, in push fields, and where a player would touch a ladder are marked too: no node
    goes there.
 2. **Nodes.** Required spots get a node first: spawn points, items, ladder ends and rungs every 64 units, lift
-   platforms, teleports, drop edges and landings, push-field entries and landings, a spot in reach of every button.
-   Then nodes fill the rest of the floor, farther apart where the floor is open. Every span belongs to the node
-   nearest to it on foot.
-3. **Walks.** Nodes whose floors touch are joined when a straight hull check passes; longer links are added only
-   where the graph would otherwise make a bot go more than 15% out of its way (a greedy spanner, at most 12 links a
-   node). A walk never passes through a push field, nor brushes past a ladder at a ledge's edge.
+   platforms, teleports, drop edges and landings, push-field entries and landings, a spot in reach of every button, a
+   spot inside every trigger that sets a door or a lift off, and one on each side of every door. Then nodes fill the
+   rest of the floor, the middles of corridors first, twice the room around them apart (112 to 224 units). Every span
+   belongs to the node nearest to it on foot. Where two nodes whose floors meet cannot walk straight to each other
+   (round a corner, through a doorway, past a pillar), a node goes on their border where it is widest, and the floor
+   is shared out again; four rounds at most.
+3. **Walks.** Nodes whose floors touch are joined when walking in a straight line from one to the other gets there:
+   stepping up stairs is fine, but nothing on the way may push the walker off the line (a link that only slides
+   along a wall is not made), so a link is clear to walk and to look along. Longer links are added only where the
+   graph would otherwise make a bot go more than 15% out of its way (a greedy spanner, at most 12 links a node). A
+   walk never passes through a push field, nor brushes past a ladder at a ledge's edge.
 4. **Special links.**
    - Doors and breakables in the way of touching floors: `door` (through the middle of the doorway when its leaf
      slides across the way) and `breakable`.
@@ -44,7 +49,7 @@ and its vertical push accelerates the player against gravity, at that many units
 5. **Report.** The coverage report (`lb-cli nav coverage`) counts the floor and the items a bot gets to from the
    spawn points and back, and lists the rest.
 
-On crossfire this takes 1.5 s on the stand's cores (2096 nodes, 13012 links); on the largest map, boot_camp, 5.4 s.
+On crossfire this takes 0.4 s on the stand's cores (890 nodes, 4642 links); on the largest map, boot_camp, 1.1 s.
 A kept graph loads in under a millisecond (96 ms on the stand, with the BSP and the visibility sets). The file
 (`.lbnav`: postcard, LZ4, CRC-32C) is named by the key of what the graph was made from: the BSP (BLAKE3 and size),
 the generator's version, the physics, the rules and the overlay. Only a graph with exactly the same key is used; the
@@ -53,23 +58,23 @@ four most recently used are kept. `lb nav regen` throws a map's graphs away and 
 After the graph is loaded, the map's overlay patches are applied (see `docs/overlays.md`) and landmarks for the
 planner are computed.
 
-| Kind        | Classified as                                                                     | Contract                          |
-|-------------|-----------------------------------------------------------------------------------|-----------------------------------|
-| `walk`      | a straight hull check passes, or a simulated run slides around what is in the way | —                                 |
-| `crouch`    | the same, crouched                                                                | —                                 |
-| `drop`      | a simulated walk off the edge lands at the node                                   | speed, fall damage, health needed |
-| `jump`      | a simulated running jump (see below) lands at the node                            | speed, duck, robustness           |
-| `ladder`    | either end is on a ladder (and it is not a walk along a floor)                    | ladder normal, mount point        |
-| `swim`      | either end is in the water: a simulated swim gets there                           | —                                 |
-| `door`      | a door blocks the way; the map's mechanism graph says how it opens                | touch, use, or a remote button    |
-| `lift`      | added from the map: platforms and doors that carry a player up                    | the mover, where to call it       |
-| `teleport`  | a `trigger_teleport` stands between the nodes                                     | the trigger, the destination      |
-| `breakable` | a `func_breakable` blocks the way                                                 | the brush to shoot                |
-| `push`      | a simulated run into a push field, steered in the air, lands at the node          | the run, jump, holding still      |
+| Kind        | Classified as                                                                    | Contract                          |
+|-------------|----------------------------------------------------------------------------------|-----------------------------------|
+| `walk`      | a straight walk gets there (in an imported graph, also one sliding along a wall) | —                                 |
+| `crouch`    | the same, crouched                                                               | —                                 |
+| `drop`      | a simulated walk off the edge touches down within 96 units of the node           | speed, fall damage, health needed |
+| `jump`      | a simulated running jump (see below) lands at the node                           | speed, duck, robustness           |
+| `ladder`    | either end is on a ladder (and it is not a walk along a floor)                   | ladder normal, mount point        |
+| `swim`      | either end is in the water: a simulated swim gets there                          | —                                 |
+| `door`      | a door blocks the way; the map's mechanism graph says how it opens               | touch, use, or a remote button    |
+| `lift`      | added from the map: platforms and doors that carry a player up                   | the mover, where to call it       |
+| `teleport`  | a `trigger_teleport` stands between the nodes                                    | the trigger, the destination      |
+| `breakable` | a `func_breakable` blocks the way                                                | the brush to shoot                |
+| `push`      | a simulated run into a push field, steered in the air, lands at the node         | the run, jump, holding still      |
 
 Every special link is also checked on the live server once the map has loaded. The check fires a few traces per link
 (the floor at both ends, the way between), at most 64 per frame, and compares them with the offline world. A link
-the server disagrees with is switched off. On crossfire, all 1507 special links of the generated graph are confirmed.
+the server disagrees with is switched off. On crossfire, all 1120 special links of the generated graph are confirmed.
 `lb nav` shows the result.
 
 ## Contracts
@@ -86,9 +91,21 @@ A special link carries a `TraversalSpec`:
 The planner runs A* on travel time with these costs. Links the bot failed recently are left out (see below). Its
 heuristic is the larger of straight-line distance at running speed (off on maps with teleports) and the ALT bound:
 exact costs from and to 8–16 landmarks spread over the graph, which never overestimate. On crossfire that cuts a
-search from 473 expanded nodes to 88 on average, on boot_camp from 1196 to 204. Searches run in slices: all bots
+search from 197 expanded nodes to 39 on average, on boot_camp from 643 to 153. Searches run in slices: all bots
 together expand at most 2000 nodes a frame and 200 000 a second; a search that runs out goes on in the next frame
 while the bot keeps to its old path.
+
+## Following a path
+
+On plain links the follower steers the bot itself:
+- It heads for the next node and pushes against its own sideways drift. Friction alone takes the sideways speed down
+  by two thirds in a quarter of a second, so a bot turning sharply at running speed would slide about 60 units wide
+  of the new link, into the wall.
+- Before it reaches a node, it heads on to the node after only if the way there from where it stands is clear (one
+  trace per node). Otherwise it goes to the node first and does not cut the corner.
+- A path starts at the node nearest the bot. When the next node is round a corner from where the bot stands, the bot
+  goes to the nearest node first.
+- It looks along the path, a stretch ahead and nearly level (see `docs/behavior.md`).
 
 ## Carrying a link out
 
@@ -103,7 +120,7 @@ executor can act.
 | Executor  | Phases                                   | How                                                                                                                                                                                                                                                          |
 |-----------|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | jump      | approach, run-up, takeoff, air           | backs up to the start of the run-up and stops there, runs at the planned speed, presses jump in the takeoff window, ducks in the air if planned                                                                                                              |
-| drop      | edge, fall                               | walks off at the drop's speed, heading 48 units past the landing (slowing down at it stops on the ledge above it); fails when the landing is not the node's floor                                                                                            |
+| drop      | edge, fall                               | walks off at the drop's speed, heading 48 units past the landing (slowing down at it stops on the ledge above it); walks the rest when it touches down within 96 units of the node on its floor, else fails                                                  |
 | ladder    | board, climb                             | from below: walks to the mount point and into the ladder facing it; from above: steps back over the edge facing it; climbs by pitch and forward or back; steps off at the top, onto a ledge behind or beside the ladder when the climb stops against its top |
 | push      | approach, run, flight, landed            | stops at the entry, runs along the checked line (jumping where checked), keeps to the field's middle while it lifts, then steers the flight at the landing; walks or swims the rest                                                                          |
 | door      | check, go-activate, activate, wait, pass | a touch door is walked into; a use door is pressed with the use key; a remote door's button is pressed; waits for it to open, then passes                                                                                                                    |
@@ -216,7 +233,7 @@ or 30 s of walking) counts as not reached, not as failed. Each result is logged 
   button is not straight (snark_pit's hatches), the link fails and bots learn to go around it.
 - Trains (`func_train`, `func_tracktrain`), conveyors and `multisource` gates are not traversed; items only they reach
   are listed by the coverage report (see `docs/m3-acceptance.md`) for the map's overlay.
-- The graph is published whole: until it is made (1.5 s on crossfire on the stand's cores, up to a minute and a half
+- The graph is published whole: until it is made (0.4 s on crossfire on the stand's cores, up to a minute and a half
   on a huge map) bots stand still. Publishing a walk-only graph first is not done yet.
 - The visibility table between nodes (for tactics) is not made yet.
 - Water is swum straight between nodes in it; a current is only crossed with it (push links).

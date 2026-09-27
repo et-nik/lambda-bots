@@ -47,7 +47,8 @@ fifth.
 
 What is heard is anonymous: a kind (step, jump, pain, shot, reload, pickup, item respawn, explosion), sometimes a
 weapon, and a guessed position. The bearing error grows from `sound_bearing_sigma` for loud sounds up to 35° for
-faint ones, and faint sounds are sometimes placed behind instead of in front. The range is off by about 30%.
+faint ones, and faint sounds are sometimes placed behind instead of in front. The range is off by about 30%, the
+height by about 10°.
 
 Footsteps follow the multiplayer rule of `pm_shared`: steps are audible only with `mp_footsteps 1`, and only on a
 ladder or above 220 units per second. Walking is silent. With ReHLDS the steps come from the engine's

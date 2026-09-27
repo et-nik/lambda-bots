@@ -199,7 +199,9 @@ impl PathFollower {
         let Some(&after) = self.path.get(self.next + 1) else {
             return true;
         };
-        if g.find_link(self.path[self.next], after).is_some_and(|l| !l.kind.is_walk()) {
+        if g.find_link(self.path[self.next], after)
+            .is_some_and(|l| !l.kind.is_walk())
+        {
             return true;
         }
         if let Some((next, clear, at)) = self.way_on
