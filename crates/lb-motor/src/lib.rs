@@ -162,17 +162,14 @@ impl Motor {
             let goal = match look {
                 LookIntent::Point { at, engaged } => {
                     let d = at - input.eye;
-                    // Right above or below the eyes a point gives no heading: hold the view instead of spinning to
-                    // it (an enemy overhead is still looked at).
+                    // Right above or below the eyes a point gives no heading: keep the yaw instead of spinning to
+                    // it and only pitch (an enemy overhead is still looked at).
                     let near = if engaged { 1.0 } else { NEAR_POINT };
-                    LookGoal {
-                        angles: if d.truncate().length() < near {
-                            self.view
-                        } else {
-                            dir_to_view_angles(d)
-                        },
-                        engaged,
+                    let mut angles = dir_to_view_angles(d);
+                    if d.truncate().length() < near {
+                        angles.y = self.view.y;
                     }
+                    LookGoal { angles, engaged }
                 }
                 LookIntent::Angles(angles) => LookGoal { angles, engaged: false },
             };
