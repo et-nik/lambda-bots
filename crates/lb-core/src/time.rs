@@ -14,6 +14,10 @@ impl SimTime {
     pub fn since(self, earlier: SimTime) -> f64 {
         self.0 - earlier.0
     }
+
+    pub fn max(self, other: SimTime) -> SimTime {
+        if other.0 > self.0 { other } else { self }
+    }
 }
 
 impl Add<f64> for SimTime {

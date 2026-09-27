@@ -1,6 +1,5 @@
 //! `lb` console commands (server console, rcon, authorized clients, telemetry channel).
 
-use lb_config::MainConfig;
 use lb_config::main_config::QuotaMode;
 use lb_core::math::normalize_angle;
 use lb_host::{Host, TraceKind, TraceRequest};
@@ -11,18 +10,38 @@ use crate::manager::BotState;
 use crate::motor_test::{MotorTest, Script};
 
 const HELP: &[(&str, &str)] = &[
-    ("add [count]", "add bots (raises the quota)"),
+    (
+        "add [count|name]",
+        "add bots or one personality by name (raises the quota)",
+    ),
     ("kick [#userid|name|all]", "kick bots (lowers the quota)"),
     ("kill [#userid|all]", "kill bots with the `kill` client command"),
     ("quota <n> [normal|fill|match]", "set the bot quota"),
     ("list", "list bots"),
+    ("roster [all]", "personalities admitted by the filter (or all of them)"),
+    ("nav", "navigation graph status and what every bot is walking to"),
+    (
+        "vision [name|#userid]",
+        "what bots see, hear and remember: contacts, tracks, sounds, recognition times",
+    ),
+    (
+        "brain [name|#userid]",
+        "decisions: goal and candidates, target, weapon, channel owners, reaction times",
+    ),
+    (
+        "profile <name>",
+        "one personality: style, skill, look and resolved skill parameters",
+    ),
     ("status", "runtime status and counters"),
     (
         "perf [reset|bots]",
         "core time per frame (p50/p95/p99/max) or command timing per bot",
     ),
     ("compat", "compatibility profile of this server"),
-    ("config show|reload", "show or reload config/lambdabots.yaml"),
+    (
+        "config show|reload",
+        "show the config, or reload config, skill table and profiles",
+    ),
     (
         "test motor <#userid|all> run|strafe|jump|duckjump|spin [arg]",
         "scripted motor measurement",
@@ -43,6 +62,11 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             lb_ffi::LB_ABI_VERSION
         )],
         "list" => list(rt),
+        "roster" => roster(rt, rest),
+        "nav" => nav(rt),
+        "vision" => vision(rt, rest),
+        "brain" => brain(rt, rest),
+        "profile" => profile(rt, rest),
         "status" => status(rt),
         "perf" => perf(rt, rest),
         "compat" => rt.compat.to_yaml().lines().map(String::from).collect(),
@@ -50,7 +74,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "kick" => kick(rt, host, rest),
         "kill" => kill(rt, rest),
         "quota" => quota(rt, host, rest),
-        "config" => config(rt, rest),
+        "config" => config(rt, host, rest),
         "test" => test(rt, host, rest),
         "debug" => debug(rt, host, rest),
         other => vec![format!("lb: unknown command `{other}`, see `lb help`")],
@@ -66,17 +90,25 @@ fn list(rt: &Runtime) -> Vec<String> {
     )];
     for b in &rt.bots {
         let body = &b.self_state.body;
+        let goal = b
+            .brain
+            .mind
+            .goal
+            .map(|g| goal_text(rt, b, g.kind))
+            .unwrap_or_else(|| "-".into());
         out.push(format!(
-            "  #{:<4} slot {:<2} {:<20} {:<10} hp {:>3} ap {:>3} yaw {:>4.0}/{:<4.0} weapon {}",
+            "  #{:<4} slot {:<2} {:<20} {:<10} {:>3} {:<10} hp {:>3} ap {:>3} frags {:>3} weapon {:<18} {}",
             b.userid,
             b.id.slot,
-            b.identity.name,
+            b.persona.name,
+            b.persona.style.as_str(),
+            b.persona.skill,
             b.state.as_str(),
             body.health as i32,
             body.armor as i32,
-            b.view.y,
-            body.v_angle.y,
+            body.frags as i32,
             b.self_state.current_weapon.get().map(|w| w.classname()).unwrap_or("-"),
+            goal,
         ));
     }
     out
@@ -85,6 +117,7 @@ fn list(rt: &Runtime) -> Vec<String> {
 fn status(rt: &Runtime) -> Vec<String> {
     let s = &rt.stats;
     vec![
+        rt.startup_summary(),
         format!("map: {}", rt.map.as_ref().map(|m| m.name.as_str()).unwrap_or("-")),
         format!("mode: {:?}", rt.game.mode),
         format!("safe mode: {}", rt.safe_mode.as_deref().unwrap_or("no")),
@@ -124,7 +157,7 @@ fn perf(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
             let d = &b.driver;
             out.push(format!(
                 "{:<20} {:>8} {:>12.1} {:>12} {:>10.1} {:>9.2}",
-                b.identity.name,
+                b.persona.name,
                 d.commands_sent,
                 d.total_frame_ms,
                 d.total_sent_ms,
@@ -155,6 +188,351 @@ fn perf(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
     ]
 }
 
+fn nav(rt: &Runtime) -> Vec<String> {
+    let mut out = vec![format!("graph: {}", rt.nav_status)];
+    let Some(g) = rt.graph.as_deref() else { return out };
+    for b in &rt.bots {
+        let line = match b.nav.follower.as_ref() {
+            Some(f) => {
+                let target = f.target().map(|t| t.to_string()).unwrap_or_else(|| "-".into());
+                let left = f.remaining().len();
+                let goal = g.node(f.goal()).origin;
+                format!(
+                    "  {:<20} goal {} ({:.0} u away), next node {target}, {left} nodes left",
+                    b.persona.name,
+                    f.goal(),
+                    goal.distance(b.self_state.body.origin)
+                )
+            }
+            None => format!("  {:<20} {}", b.persona.name, b.state.as_str()),
+        };
+        out.push(line);
+    }
+    out
+}
+
+fn vision(rt: &Runtime, args: &[&str]) -> Vec<String> {
+    let target = (!args.is_empty()).then(|| args.join(" "));
+    let indices = find_bots(rt, target.as_deref());
+    if indices.is_empty() {
+        return vec!["no such bot".into()];
+    }
+    let now = rt.now;
+    let name = |slot: u8| {
+        rt.clients
+            .get(slot)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("slot {slot}"))
+    };
+    let mut out = vec![format!(
+        "visibility sets: {}",
+        match rt.vis.as_deref() {
+            Some(v) => format!("{} leaves", v.visleafs()),
+            None => "not loaded (everything passes the PVS test)".into(),
+        }
+    )];
+    for i in indices {
+        let b = &rt.bots[i];
+        let v = &b.brain.perception.vision.stats;
+        let h = &b.brain.perception.hearing.stats;
+        let first = v.recognitions - v.reacquisitions;
+        let mean = if first > 0 { v.latency_sum / first as f64 } else { 0.0 };
+        out.push(format!(
+            "{} ({}, skill {}, {}): looking at {}",
+            b.persona.name,
+            b.persona.style.as_str(),
+            b.persona.skill,
+            b.state.as_str(),
+            b.attention.map(|a| a.reason.as_str()).unwrap_or("path"),
+        ));
+        out.push(format!(
+            "  vision: {} ticks, {:.1} traces per tick, {} skipped; recognized {first} (mean {mean:.2} s, max {:.2} s), found again {}",
+            v.ticks,
+            if v.ticks > 0 { v.traces as f64 / v.ticks as f64 } else { 0.0 },
+            v.skipped,
+            v.latency_max,
+            v.reacquisitions
+        ));
+        out.push(format!("  hearing: {} heard, {} too quiet", h.heard, h.too_quiet));
+        for c in &b.brain.perception.vision.contacts {
+            out.push(if c.recognized {
+                format!(
+                    "  sees {:<20} {:>5.0} u, {:.0}% visible{}",
+                    name(c.who.slot),
+                    c.distance,
+                    c.visibility * 100.0,
+                    if c.lost_at.is_some() { ", just out of sight" } else { "" }
+                )
+            } else {
+                format!(
+                    "  notices {:<17} {:>5.0} u, evidence {:.2} of 1 (delay {:.2} s)",
+                    name(c.who.slot),
+                    c.distance,
+                    c.evidence,
+                    c.delay
+                )
+            });
+        }
+        for t in &b.brain.beliefs.tracks {
+            out.push(format!(
+                "  track {:<19} {:<9} {:>4.1} s ago, {:>5.0} u away, sigma {:>4.0} u, weapon {}{}",
+                name(t.who.slot),
+                t.state.as_str(),
+                now.since(t.last_seen),
+                t.pos.distance(b.self_state.body.origin),
+                t.sigma,
+                t.traits.weapon.map(|w| w.classname()).unwrap_or("-"),
+                t.last_heard
+                    .map(|h| format!(", heard {:.1} s ago", now.since(h)))
+                    .unwrap_or_default()
+            ));
+        }
+        for hyp in &b.brain.beliefs.hypotheses {
+            let what = match hyp.kind {
+                lb_knowledge::HypothesisKind::Sound(k) => k.as_str(),
+                lb_knowledge::HypothesisKind::Damage => "damage",
+                lb_knowledge::HypothesisKind::Cue => "glimpse",
+            };
+            out.push(format!(
+                "  {what:<9} {:>4.1} s ago, bearing {:>4.0} deg +-{:.0}{}{}",
+                now.since(hyp.t),
+                hyp.bearing,
+                hyp.bearing_sigma,
+                hyp.pos
+                    .map(|p| format!(", {:.0} u", p.distance(b.self_state.body.origin)))
+                    .unwrap_or_default(),
+                hyp.weapon.map(|w| format!(", {}", w.classname())).unwrap_or_default()
+            ));
+        }
+    }
+    out
+}
+
+fn goal_text(rt: &Runtime, b: &crate::manager::Bot, kind: lb_decision::GoalKind) -> String {
+    let name = |slot: u8| rt.clients.get(slot).map(|c| c.name.clone()).unwrap_or_default();
+    match kind {
+        lb_decision::GoalKind::Engage(k) => format!("engage {}", name(k.slot)),
+        lb_decision::GoalKind::Hunt(k) => format!("hunt {}", name(k.slot)),
+        lb_decision::GoalKind::CollectItem(i) => format!(
+            "collect {}",
+            b.brain
+                .items
+                .as_ref()
+                .and_then(|items| items.spots.get(i))
+                .map(|s| s.kind.as_str())
+                .unwrap_or_default()
+        ),
+        k => k.as_str().to_string(),
+    }
+}
+
+fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
+    let target = (!args.is_empty()).then(|| args.join(" "));
+    let indices = find_bots(rt, target.as_deref());
+    if indices.is_empty() {
+        return vec!["no such bot".into()];
+    }
+    let now = rt.now;
+    let name = |slot: u8| rt.clients.get(slot).map(|c| c.name.clone()).unwrap_or_default();
+    let mut out = Vec::new();
+    for i in indices {
+        let b = &rt.bots[i];
+        let m = &b.brain.mind;
+        let goal = match m.decider.current {
+            Some(a) => format!(
+                "{} (rank {}, weight {:.2}, for {:.1} s{})",
+                goal_text(rt, b, a.goal.kind),
+                a.goal.rank,
+                a.goal.weight,
+                now.since(a.since),
+                if now < a.hold_until { ", held" } else { "" }
+            ),
+            None => "-".into(),
+        };
+        out.push(format!(
+            "{} ({} {}, {}, hp {}): {goal}",
+            b.persona.name,
+            b.persona.style.as_str(),
+            b.persona.skill,
+            b.state.as_str(),
+            b.self_state.body.health as i32
+        ));
+        let candidates: Vec<String> = m
+            .decider
+            .last
+            .iter()
+            .map(|g| format!("{} {}/{:.2}", goal_text(rt, b, g.kind), g.rank, g.weight))
+            .collect();
+        out.push(format!("  candidates: {}", candidates.join(" | ")));
+        let target = m.target.map(|k| {
+            let track = b.brain.beliefs.track(k);
+            format!(
+                "{} {}{}",
+                name(k.slot),
+                track.map(|t| t.state.as_str()).unwrap_or("-"),
+                track
+                    .map(|t| format!(", {:.0} u", t.pos.distance(b.self_state.body.origin)))
+                    .unwrap_or_default()
+            )
+        });
+        out.push(format!(
+            "  target: {}; weapon: {:?} (holding {}){}{}",
+            target.unwrap_or_else(|| "none".into()),
+            m.choice,
+            b.self_state.current_weapon.get().map(|w| w.classname()).unwrap_or("-"),
+            if m.aim.aims_at_head() { ", aims at the head" } else { "" },
+            if m.firing { ", firing" } else { "" }
+        ));
+        let i = &b.brain.intents;
+        let owner = |p: Option<lb_motor::Prio>| p.map(|p| format!("{p:?}")).unwrap_or_else(|| "-".into());
+        out.push(format!(
+            "  channels: look {}, move {}, stance {}, weapon {}",
+            owner(i.look.map(|x| x.0)),
+            owner(i.movement.map(|x| x.0)),
+            owner(i.stance.map(|x| x.0)),
+            owner(i.weapon.as_ref().map(|x| x.0)),
+        ));
+        let r = &m.reactions;
+        if r.count > 0 {
+            out.push(format!(
+                "  reactions: {} contacts answered; first glimpse to first shot mean {:.2} s, median {:.2} s, worst {:.2} s; recognition to shot mean {:.2} s",
+                r.count,
+                r.evidence_to_shot / r.count as f64,
+                r.median().unwrap_or(0.0),
+                r.worst,
+                r.recognition_to_shot / r.count as f64
+            ));
+        }
+    }
+    out
+}
+
+fn roster(rt: &Runtime, args: &[&str]) -> Vec<String> {
+    let all = args.first() == Some(&"all");
+    let mut out = vec![format!("roster: {}", rt.roster_summary())];
+    for p in &rt.roster.problems {
+        out.push(format!("problem: {p}"));
+    }
+    if rt.roster.shadowed > 0 {
+        out.push(format!(
+            "{} entries of {} are hidden by profiles with the same name",
+            rt.roster.shadowed,
+            rt.roster.generated_path().display()
+        ));
+    }
+    let playing = |name: &str| {
+        rt.bots
+            .iter()
+            .any(|b| b.is_active() && b.persona.name.eq_ignore_ascii_case(name))
+    };
+    let mut rows: Vec<(u8, &lb_styles::Persona)> = rt
+        .roster
+        .iter()
+        .map(|p| {
+            let rank = if playing(&p.name) {
+                0
+            } else if rt.filter.admits(p) {
+                1
+            } else {
+                2
+            };
+            (rank, p.as_ref())
+        })
+        .filter(|(rank, _)| all || *rank < 2)
+        .collect();
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
+    });
+    out.push(format!(
+        "  {:<22} {:<10} {:>5} {:>6}  {:<9}  {}",
+        "name", "style", "skill", "weight", "source", "state"
+    ));
+    for (rank, p) in &rows {
+        let state = match rank {
+            0 => "playing",
+            1 if p.weight <= 0.0 => "on request",
+            1 => "available",
+            _ => "filtered out",
+        };
+        out.push(format!(
+            "  {:<22} {:<10} {:>5} {:>6.1}  {:<9}  {state}",
+            p.name,
+            p.style.as_str(),
+            p.skill,
+            p.weight,
+            p.source.short()
+        ));
+    }
+    if !all {
+        let hidden = rt.roster.len() - rows.len();
+        if hidden > 0 {
+            out.push(format!("{hidden} more outside the filter: `lb roster all`"));
+        }
+    }
+    out
+}
+
+fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
+    if args.is_empty() {
+        return vec!["usage: lb profile <name>".into()];
+    }
+    let name = args.join(" ");
+    let Some(p) = rt.roster.get(&name) else {
+        return vec![format!("no personality named `{name}`; see `lb roster all`")];
+    };
+    let k = p.skill_params(&rt.presets);
+    let opt = |v: Option<f32>, unit: &str| v.map(|v| format!("{v:.2}{unit}")).unwrap_or_else(|| "never".into());
+    let overrides = lb_config::yaml::to_string(&p.overrides).unwrap_or_default();
+    vec![
+        format!("{}: {}, skill {} ({})", p.name, p.style, p.skill, p.source.describe()),
+        format!("  look: model {}, colors {} / {}", p.model, p.colors[0], p.colors[1]),
+        format!(
+            "  traits: aggression {:.2}, fear {:.2}; weight {}; seed {:#x}",
+            p.aggression, p.fear, p.weight, p.seed
+        ),
+        format!(
+            "  weapons: {}; tags: {}",
+            if p.weapons.is_empty() {
+                "style default".into()
+            } else {
+                p.weapons.join(", ")
+            },
+            if p.tags.is_empty() {
+                "-".into()
+            } else {
+                p.tags.join(", ")
+            }
+        ),
+        format!(
+            "  skill: recognition {:.2}-{:.2} s, aim latency {:.2} s, {:?} aim, headshot {:.0}%, turn {:.0} deg/s",
+            k.recognition_delay[0],
+            k.recognition_delay[1],
+            k.aim_latency,
+            k.aim_model,
+            k.headshot * 100.0,
+            k.turn_speed
+        ),
+        format!(
+            "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, bhop {}",
+            k.hearing_threshold,
+            k.sound_bearing_sigma,
+            k.track_forget,
+            opt(k.dodge_hop_cooldown, " s"),
+            if k.tricks { "yes" } else { "no" },
+            opt(k.bhop_speed, "x"),
+        ),
+        format!(
+            "  overrides: {}",
+            if p.overrides.is_empty() {
+                "none".into()
+            } else {
+                overrides.trim().replace('\n', ", ")
+            }
+        ),
+    ]
+}
+
 fn find_bots(rt: &Runtime, target: Option<&str>) -> Vec<usize> {
     match target {
         None | Some("all") => (0..rt.bots.len()).collect(),
@@ -165,7 +543,7 @@ fn find_bots(rt: &Runtime, target: Option<&str>) -> Vec<usize> {
         Some(name) => rt
             .bots
             .iter()
-            .position(|b| b.identity.name.eq_ignore_ascii_case(name))
+            .position(|b| b.persona.name.eq_ignore_ascii_case(name))
             .into_iter()
             .collect(),
     }
@@ -177,6 +555,34 @@ fn set_quota(rt: &mut Runtime, host: &mut dyn Host, count: u32) {
 }
 
 fn add(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
+    if let Some(first) = args.first()
+        && first.parse::<u32>().is_err()
+    {
+        let name = args.join(" ");
+        let Some(p) = rt.roster.get(&name) else {
+            return vec![format!("no personality named `{name}`; see `lb roster all`")];
+        };
+        if rt
+            .bots
+            .iter()
+            .any(|b| b.is_active() && b.persona.name.eq_ignore_ascii_case(&p.name))
+        {
+            return vec![format!("{} is already playing", p.name)];
+        }
+        rt.requested.push(p.name.clone());
+        let count = rt.config.quota.count + 1;
+        set_quota(rt, host, count);
+        rt.creation.next_at = Some(rt.now);
+        let note = if rt.filter.admits(&p) {
+            ""
+        } else {
+            " (outside the roster filter, joins anyway)"
+        };
+        return vec![format!(
+            "{} joins next{note}; quota is now {}",
+            p.name, rt.config.quota.count
+        )];
+    }
     let n: u32 = args.first().and_then(|a| a.parse().ok()).unwrap_or(1).clamp(1, 32);
     let count = rt.config.quota.count + n;
     set_quota(rt, host, count);
@@ -197,7 +603,7 @@ fn kick(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
         return vec!["no such bot".into()];
     }
     let n = indices.len() as u32;
-    let names: Vec<String> = indices.iter().map(|&i| rt.bots[i].identity.name.clone()).collect();
+    let names: Vec<String> = indices.iter().map(|&i| rt.bots[i].persona.name.clone()).collect();
     for &i in indices.iter().rev() {
         rt.kick_bot_index(host, i, "kicked by admin");
     }
@@ -235,22 +641,9 @@ fn quota(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     vec![format!("quota {} {:?}", rt.config.quota.count, rt.config.quota.mode)]
 }
 
-fn config(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+fn config(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     match args.first().copied() {
-        Some("reload") => {
-            let path = rt.init.install_dir.join("config").join("lambdabots.yaml");
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|t| MainConfig::parse(&t, &path.display().to_string()).map_err(|e| e.to_string()))
-            {
-                Ok(cfg) => {
-                    rt.config = cfg;
-                    rt.config_source = path.display().to_string();
-                    vec!["config reloaded".into()]
-                }
-                Err(e) => vec![format!("config not reloaded: {e}")],
-            }
-        }
+        Some("reload") => rt.reload(host),
         _ => {
             let mut out = vec![format!("# source: {}", rt.config_source)];
             match lb_config::yaml::to_string(&rt.config) {
@@ -363,6 +756,17 @@ fn debug(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
                 lb_ffi::LB_MOVE_STALE
             )]
         }
+        Some("tracedump") => {
+            let n: usize = args
+                .get(1)
+                .and_then(|a| a.parse().ok())
+                .unwrap_or(2000)
+                .clamp(1, 100_000);
+            match trace_dump(rt, host, n) {
+                Ok((path, written)) => vec![format!("{written} engine traces written to {}", path.display())],
+                Err(e) => vec![format!("tracedump failed: {e}")],
+            }
+        }
         Some("capture") => {
             let secs: f64 = args
                 .get(1)
@@ -384,6 +788,60 @@ fn debug(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
             rt.safe_mode = Some("entered by lb debug safemode".into());
             vec!["safe mode entered".into()]
         }
-        _ => vec!["usage: lb debug panic <#userid|all> | stall <ms> | stalecmd | capture <s> | safemode".into()],
+        _ => vec![
+            "usage: lb debug panic <#userid|all> | stall <ms> | stalecmd | capture <s> | tracedump [n] | safemode"
+                .into(),
+        ],
     }
+}
+
+/// Random engine traces from the bots' positions, for comparing the offline BSP tracer with the engine
+/// (`lb-cli nav tracecheck <map.bsp> <dump>`). One JSON object per line.
+fn trace_dump(rt: &mut Runtime, host: &mut dyn Host, n: usize) -> std::io::Result<(std::path::PathBuf, usize)> {
+    use std::io::Write;
+    let origins: Vec<lb_core::Vec3> = rt
+        .bots
+        .iter()
+        .filter(|b| b.state == BotState::Alive)
+        .map(|b| b.self_state.body.origin)
+        .collect();
+    if origins.is_empty() {
+        return Err(std::io::Error::other("no living bots to trace from"));
+    }
+    let map = rt.map.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| "none".into());
+    let dir = rt.init.install_dir.join("logs");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("tracedump-{map}.jsonl"));
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    for i in 0..n {
+        let start = origins[i % origins.len()] + lb_core::Vec3::new(0.0, 0.0, rt.rng.range_f32(-20.0, 30.0));
+        let yaw = rt.rng.range_f32(0.0, std::f32::consts::TAU);
+        let pitch = rt.rng.range_f32(-1.2, 1.2);
+        let len = rt.rng.range_f32(16.0, 1500.0);
+        let dir = lb_core::Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin());
+        let end = start + dir * len;
+        let hull = rt.rng.range_i32(0, 3) as u8;
+        let kind = if hull == 0 {
+            TraceKind::Line
+        } else {
+            TraceKind::Hull(hull)
+        };
+        let tr = host.trace(&TraceRequest {
+            start,
+            end,
+            kind,
+            ignore_monsters: true,
+            ignore_glass: false,
+            ignore: None,
+        });
+        let v = |v: lb_core::Vec3| [v.x, v.y, v.z];
+        let line = serde_json::json!({
+            "start": v(start), "end": v(end), "hull": hull,
+            "fraction": tr.fraction, "endpos": v(tr.end_pos), "normal": v(tr.plane_normal),
+            "start_solid": tr.start_solid, "all_solid": tr.all_solid, "hit": tr.hit.index,
+        });
+        writeln!(out, "{line}")?;
+    }
+    out.flush()?;
+    Ok((path, n))
 }

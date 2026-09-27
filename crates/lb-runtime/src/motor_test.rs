@@ -4,7 +4,7 @@
 use lb_core::Vec3;
 use lb_core::time::SimTime;
 
-use crate::buttons::*;
+use lb_game::input::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Script {

@@ -16,6 +16,7 @@ lb-kin.workspace = true
 lb-nav-api.workspace = true
 lb-config.workspace = true
 smallvec.workspace = true
+bitflags.workspace = true
 thiserror.workspace = true
 postcard.workspace = true
 lz4_flex.workspace = true

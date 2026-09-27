@@ -1,31 +1,32 @@
 # M0 acceptance: skeleton and integration
 
-State as of 2026-09-26. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS 1.0.0.223 + hlsdk-portable, macOS.
-The ReHLDS VM and Windows have not been run yet: scripts and instructions for them are ready (`docs/stands/`).
+State as of 2026-09-27. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS 1.0.0.223 + hlsdk-portable, macOS.
+Production-like server (2026-09-27): ReHLDS 3.15 + Metamod-r 1.3.0.131 + BugfixedHL + AMX Mod X 1.9 + GunGame 2.3,
+Linux i386, `sys_ticrate 1000`. Windows has not been run yet (`docs/stands/windows-smoke.md`).
 
 ## Results against the plan's criteria
 
-| Criterion                                 | Status           | How it was checked                                    |
-|-------------------------------------------|------------------|-------------------------------------------------------|
-| Three binaries, exactly 5 exports         | 2 of 3           | `check-binary.sh`: macOS, Linux i386; Windows — CI    |
-| `.so`: GLIBC ≤ 2.27, no C++ runtime       | yes              | max GLIBC 2.25, NEEDED is glibc only                  |
-| Loads under Metamod-FWGS/Xash             | yes              | test stand                                            |
-| Loads under Metamod-r/ReHLDS              | not run          | VM: `scripts/rehlds-vm/provision.sh`                  |
-| AMXX sees bots, GunGame gives weapons     | not run          | VM only (no AMXX on arm64)                            |
-| SelfState is correct                      | yes              | `lb list`, golden message fixtures                    |
-| 100 kill → respawn cycles                 | yes              | `check-respawn.sh 100`: 0 failures, worst respawn 3 s |
-| Slot reuse rejects the old gen            | yes              | `lb debug stalecmd` → STALE; slot "ghosts"            |
-| 20 map changes, names preserved           | yes              | `check-changelevel.sh 20`: 0 failures                 |
-| Autovacate on 24 slots                    | yes              | quota 24 normal → 23 bots                             |
-| Golden decoder fixtures                   | yes              | `lb-game/tests/decode_fixtures.rs` + snapshot         |
-| msec measurement, choice of `lb_cmd_rate` | yes (Xash)       | `msec-matrix.sh`, table below; ReHLDS — on the VM     |
-| 300 ms long frame                         | yes              | `lb debug stall 300`: debt is capped, bots alive      |
-| fixangle after spawn                      | yes              | mode 1 events = spawn angles, v_angle matches         |
-| fixangle after teleport                   | deferred         | M2: obstacle course with a Teleport transition        |
-| Panic isolation                           | yes              | `lb debug panic`: bot faulted → kick, server runs     |
-| Unsigned telemetry command is rejected    | yes              | no signature/wrong key/nonce replay — rejected        |
-| Performance, 12 bots, 1000 fps            | yes (Xash)       | release: core p99 61 µs, process CPU 13.7%            |
-| Late load and unload                      | yes, with caveat | see "Known limitations"                               |
+| Criterion                                 | Status           | How it was checked                                       |
+|-------------------------------------------|------------------|----------------------------------------------------------|
+| Three binaries, exactly 5 exports         | 2 of 3           | `check-binary.sh`: macOS, Linux i386; Windows — CI       |
+| `.so`: GLIBC ≤ 2.27, no C++ runtime       | yes              | max GLIBC 2.25, NEEDED is glibc only                     |
+| Loads under Metamod-FWGS/Xash             | yes              | test stand                                               |
+| Loads under Metamod-r/ReHLDS              | yes              | ReHLDS server: `lb compat`, all ReHLDS channels on       |
+| AMXX sees bots, GunGame gives weapons     | likely yes       | bots got the GunGame warmup crowbar instead of the glock |
+| SelfState is correct                      | yes              | `lb list`, golden message fixtures                       |
+| 100 kill → respawn cycles                 | yes              | `check-respawn.sh 100`: 0 failures, worst respawn 3 s    |
+| Slot reuse rejects the old gen            | yes              | `lb debug stalecmd` → STALE; slot "ghosts"               |
+| 20 map changes, names preserved           | yes              | `check-changelevel.sh 20`: 0 failures                    |
+| Autovacate on 24 slots                    | yes              | quota 24 normal → 23 bots                                |
+| Golden decoder fixtures                   | yes              | `lb-game/tests/decode_fixtures.rs` + snapshot            |
+| msec measurement, choice of `lb_cmd_rate` | yes              | Xash: `msec-matrix.sh`; ReHLDS: motor tests at rate 100  |
+| 300 ms long frame                         | yes              | `lb debug stall 300`: debt is capped, bots alive         |
+| fixangle after spawn                      | yes              | mode 1 events = spawn angles, v_angle matches            |
+| fixangle after teleport                   | deferred         | M2: obstacle course with a Teleport transition           |
+| Panic isolation                           | yes              | `lb debug panic`: bot faulted → kick, server runs        |
+| Unsigned telemetry command is rejected    | yes              | no signature/wrong key/nonce replay — rejected           |
+| Performance, 12 bots, 1000 fps            | yes (Xash)       | release: core p99 61 µs, process CPU 13.7%               |
+| Late load and unload                      | yes, with caveat | see "Known limitations"                                  |
 
 ## msec semantics (Xash, crossfire, 4 bots)
 
@@ -48,6 +49,10 @@ Speed and apex are exact in all combinations (target: ±1% and ±1u). Drift does
 one command quantum, and `lb perf bots` shows a remainder below one quantum even after minutes of running. The
 default `lb_cmd_rate 100` is kept: the physics is the same, and `PM_Move` costs 10 times less than sending a
 command every frame at 1000 fps.
+
+On ReHLDS (7 bots, `lb_cmd_rate 100`, ~710 fps) the motor tests gave a steady run speed of 300.0 (the server's
+maxspeed), jump apexes of 45.0 in all 21 jumps, 10.3 ms per command and a drift within ±5.3 ms. Two bots that ran
+into other players stopped early; the test picks the most open direction by walls only.
 
 ## Performance (release, Xash arm64, 12 bots, ~1000 fps, 60 s)
 
@@ -99,7 +104,7 @@ This is the M0 pipeline without AI: a baseline for comparison in later milestone
 
 ## What is left of M0
 
-1. A run on the ReHLDS VM following `docs/stands/rehlds-vm.md`: loading, ReHLDS channels (`SV_StartSound`,
-   `IMessageManager`, `DropClient`), AMXX and GunGame, msec matrix, performance.
+1. On ReHLDS: the full msec matrix (`msec-matrix.sh` on the VM), an explicit AMXX check (`amx_who`, GunGame level
+   weapons after warmup) and a performance measurement.
 2. First CI run: Windows build and export check via `dumpbin`.
 3. Windows smoke test following `docs/stands/windows-smoke.md` (optional).

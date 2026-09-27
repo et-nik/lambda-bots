@@ -49,7 +49,8 @@ CONTENT_TYPES = {
 }
 
 # Index of each bot state in the page's TASKS list (index.html).
-STATES = ["alive", "dead", "respawning", "connecting", "spawned", "leaving", "faulted"]
+STATES = ["roam", "engage", "hunt", "retreat", "collect",
+          "dead", "respawning", "connecting", "spawned", "leaving", "faulted"]
 # Weapon ids for the page's WEAPONS table.
 WEAPON_IDS = {
     "weapon_crowbar": 1, "weapon_9mmhandgun": 2, "weapon_glock": 2, "weapon_357": 3, "weapon_python": 3,
@@ -209,14 +210,20 @@ class Bridge:
             })
         for b in msg.get("bots", []):
             state = b.get("st", "alive")
+            # A living bot shows its goal; the others their lifecycle state.
+            task = (b.get("goal") or "roam") if state == "alive" else state
             players = [p for p in players if p["e"] != b.get("slot")]
             players.append({
                 "e": b.get("slot"), "n": b.get("n", "?"), "bot": True,
                 "al": state == "alive", "o": b.get("o", [0, 0, 0]), "ya": b.get("ya", 0),
                 "hp": int(b.get("hp", 0)), "ap": int(b.get("ap", 0)),
                 "w": WEAPON_IDS.get(b.get("w") or "", 0),
-                "task": STATES.index(state) if state in STATES else -1, "tstk": [],
-                "en": -1, "le": -1,
+                "task": STATES.index(task) if task in STATES else -1,
+                "tstk": [STATES.index(c[0]) for c in b.get("cand", []) if c and c[0] in STATES],
+                "cand": b.get("cand", []), "gw": b.get("gw"),
+                "en": b.get("tg", -1), "see": bool(b.get("see")), "fire": bool(b.get("fire")),
+                "le": -1, "at": b.get("at"), "tr": b.get("tr", []),
+                "agr": b.get("agr"), "fear": b.get("fear"), "sty": b.get("sty"), "sk": b.get("sk"),
             })
         events, self.pending_events = self.pending_events, []
         return {"type": "frame", "seq": msg.get("seq", 0), "t": msg.get("ts", 0), "map": self.map_name,

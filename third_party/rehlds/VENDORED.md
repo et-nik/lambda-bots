@@ -17,4 +17,4 @@ Source headers: `rehlds/public/rehlds/{rehlds_api,rehlds_interfaces,hookchains,I
 | API      | 3.15                                              |
 | License  | MIT since July 2025 (`LICENSE`)                   |
 
-Feature gates in the bridge: API 3.7+ for the host frame time, 3.14 build 830+ for the message manager.
+Feature gates in the bridge: API 3.7+ for the host frame time, 3.14+ for the message manager.

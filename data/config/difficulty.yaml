@@ -1,0 +1,134 @@
+schema: lambdabots/difficulty@1
+
+# Skill parameters at the five presets. A personality's skill (0..100) picks a point on this scale:
+# noob = 0, easy = 25, normal = 50, hard = 75, expert = 100. Between two presets numbers are mixed
+# linearly (skill 62 is halfway between normal and hard); switches (aim_model, tricks, dodge jumps,
+# bunny hop) keep the lower preset's value. A personality can override any single parameter. A preset that
+# leaves a parameter out keeps its built-in value.
+#
+#   recognition_delay     seconds from first sight to recognizing an enemy, drawn once per contact [min, max]
+#   peripheral_gain       recognition speed at the edge of the view relative to its center
+#   reacquire_delay       seconds to recognize again an enemy lost less than reacquire_grace seconds ago
+#   reacquire_grace       seconds after losing sight during which an enemy is recognized again quickly
+#   aim_latency           view latency of the aim, seconds
+#   aim_model             newbie | spring | spring_combat
+#   headshot              chance to aim at the head for a contact
+#   aim_error             aim error amplitude x, y, z (units)
+#   turn_speed            maximum turn rate, degrees per second
+#   semi_auto_delay       extra pause between semi-automatic shots, seconds [min, max]
+#   stay_mid / stay_far   chance to stand still in a fight at 768..1024 / beyond 1024 units
+#   crouch_tap            chance of a crouch tap while strafing
+#   dodge_hop_cooldown    seconds between dodge jumps; ~ = never
+#   hearing_threshold     quietest sound gain noticed
+#   sound_bearing_sigma   bearing error of a heard sound, degrees
+#   track_forget          seconds a lost enemy stays in memory
+#   gauss_precharge       share of gauss charge held before an expected fight
+#   tricks                gauss jump, satchel jump and attacking long jumps
+#   bhop_speed            bunny hop speed limit, multiple of maxspeed; ~ = no bunny hopping
+
+presets:
+  noob:
+    recognition_delay: [1.5, 2.0]
+    peripheral_gain: 0.35
+    reacquire_delay: 0.35
+    reacquire_grace: 1.0
+    aim_latency: 0.30
+    aim_model: newbie
+    headshot: 0.15
+    aim_error: [20, 20, 40]
+    turn_speed: 180
+    semi_auto_delay: [0.7, 0.8]
+    stay_mid: 0.60
+    stay_far: 0.85
+    crouch_tap: 0.0
+    dodge_hop_cooldown: ~
+    hearing_threshold: 0.07
+    sound_bearing_sigma: 35
+    track_forget: 4
+    gauss_precharge: 0.0
+    tricks: false
+    bhop_speed: ~
+  easy:
+    recognition_delay: [1.0, 1.5]
+    peripheral_gain: 0.40
+    reacquire_delay: 0.25
+    reacquire_grace: 1.5
+    aim_latency: 0.24
+    aim_model: spring
+    headshot: 0.20
+    aim_error: [15, 15, 30]
+    turn_speed: 300
+    semi_auto_delay: [0.5, 0.6]
+    stay_mid: 0.40
+    stay_far: 0.70
+    crouch_tap: 0.0
+    dodge_hop_cooldown: 5.25
+    hearing_threshold: 0.055
+    sound_bearing_sigma: 28
+    track_forget: 6
+    gauss_precharge: 0.5
+    tricks: false
+    bhop_speed: ~
+  normal:
+    recognition_delay: [0.5, 1.0]
+    peripheral_gain: 0.45
+    reacquire_delay: 0.15
+    reacquire_grace: 2.0
+    aim_latency: 0.18
+    aim_model: spring
+    headshot: 0.25
+    aim_error: [10, 10, 20]
+    turn_speed: 450
+    semi_auto_delay: [0.4, 0.5]
+    stay_mid: 0.20
+    stay_far: 0.45
+    crouch_tap: 0.04
+    dodge_hop_cooldown: 4.0
+    hearing_threshold: 0.04
+    sound_bearing_sigma: 20
+    track_forget: 8
+    gauss_precharge: 0.6
+    tricks: true
+    bhop_speed: 1.25
+  hard:
+    recognition_delay: [0.25, 0.5]
+    peripheral_gain: 0.50
+    reacquire_delay: 0.10
+    reacquire_grace: 2.5
+    aim_latency: 0.12
+    aim_model: spring_combat
+    headshot: 0.50
+    aim_error: [5, 5, 10]
+    turn_speed: 650
+    semi_auto_delay: [0.3, 0.4]
+    stay_mid: 0.08
+    stay_far: 0.20
+    crouch_tap: 0.06
+    dodge_hop_cooldown: 2.75
+    hearing_threshold: 0.03
+    sound_bearing_sigma: 14
+    track_forget: 10
+    gauss_precharge: 0.7
+    tricks: true
+    bhop_speed: 1.5
+  expert:
+    recognition_delay: [0.1, 0.25]
+    peripheral_gain: 0.55
+    reacquire_delay: 0.05
+    reacquire_grace: 3.0
+    aim_latency: 0.06
+    aim_model: spring_combat
+    headshot: 0.75
+    aim_error: [1.5, 1.5, 3.0]
+    turn_speed: 900
+    semi_auto_delay: [0.1, 0.2]
+    stay_mid: 0.0
+    stay_far: 0.10
+    crouch_tap: 0.08
+    dodge_hop_cooldown: 1.5
+    hearing_threshold: 0.02
+    sound_bearing_sigma: 10
+    track_forget: 12
+    gauss_precharge: 0.8
+    tricks: true
+    bhop_speed: 1.7

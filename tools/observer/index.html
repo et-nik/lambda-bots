@@ -188,7 +188,7 @@
 
 /* ---------------------------------------------------------------- consts */
 /* lambdabots bot lifecycle states; bridge.py sends their index as `task` */
-const TASKS = ["alive","dead","respawning","connecting","spawned","leaving","faulted"];
+const TASKS = ["roam","engage","hunt","retreat","collect","dead","respawning","connecting","spawned","leaving","faulted"];
 
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const C = {
@@ -202,10 +202,14 @@ const C = {
 
 /* identity color = task group (fixed slots, never cycled) */
 const TASK_GROUPS = {
-  alive:   { color: C.green,   label: "жив",          tasks: [0] },
-  dead:    { color: C.muted,   label: "мёртв/респаун", tasks: [1,2] },
-  joining: { color: C.blue,    label: "заходит",      tasks: [3,4] },
-  leaving: { color: C.red,     label: "уходит/сбой",  tasks: [5,6] },
+  roam:    { color: C.green,   label: "бродит",        tasks: [0] },
+  engage:  { color: C.red,     label: "бой",           tasks: [1] },
+  hunt:    { color: C.orange,  label: "охота",         tasks: [2] },
+  retreat: { color: C.yellow,  label: "отступает",     tasks: [3] },
+  collect: { color: C.aqua,    label: "за предметом",  tasks: [4] },
+  dead:    { color: C.muted,   label: "мёртв/респаун", tasks: [5,6] },
+  joining: { color: C.blue,    label: "заходит",       tasks: [7,8] },
+  leaving: { color: C.violet,  label: "уходит/сбой",   tasks: [9,10] },
 };
 const taskGroup = id => {
   for (const g of Object.values(TASK_GROUPS)) if (g.tasks.includes(id)) return g;
@@ -388,18 +392,18 @@ function updateSidebar() {
       <tr><td>позиция</td><td class="mono">${p.o.map(v=>v.toFixed(0)).join(", ")}</td></tr></table>`;
     return;
   }
-  const chips = (p.tstk || []).map(t => `<span>${taskName(t)}</span>`).join("");
+  const chips = (p.cand || []).map(c => `<span>${esc(c[0])} ${c[1]}/${Number(c[2]).toFixed(2)}</span>`).join("");
   const en = p.en >= 0 ? pname(p.en) : "—";
   insp.innerHTML = `<table>
     <tr><td>имя</td><td>${esc(p.n)} <span style="color:${taskGroup(p.task).color}">●</span> ${taskName(p.task)}</td></tr>
     <tr><td>hp / ap</td><td>${p.al ? p.hp + " / " + p.ap : "мёртв"}</td></tr>
     <tr><td>оружие</td><td>${WEAPONS[p.w] || p.w}</td></tr>
-    <tr><td>стек задач</td><td class="chips">${chips || "—"}</td></tr>
-    <tr><td>нода / цель</td><td class="mono">${p.cn} → ${p.goal}${p.mtg ? "" : " (не идёт)"}</td></tr>
-    <tr><td>путь</td><td class="mono">${(p.path||[]).length} нод</td></tr>
-    <tr><td>враг</td><td>${esc(en)}${p.see ? ' <span style="color:var(--st-critical)">видит</span>' : ""}${p.le >= 0 ? " (посл.: " + esc(pname(p.le)) + ")" : ""}</td></tr>
-    <tr><td>скорость</td><td class="mono">${p.ms?.toFixed(0)} / ${p.ss?.toFixed(0)}${p.stuck ? ' <span style="color:var(--st-warn)">застрял!</span>' : ""}</td></tr>
-    <tr><td>характер</td><td>${PERS[p.pers] ?? p.pers}, сложн. ${p.diff}, страх ${p.fear?.toFixed(2)}, агр. ${p.agr?.toFixed(2)}</td></tr>
+    <tr><td>вес цели</td><td class="mono">${p.gw != null ? Number(p.gw).toFixed(2) : "—"}</td></tr>
+    <tr><td>кандидаты</td><td class="chips">${chips || "—"}</td></tr>
+    <tr><td>враг</td><td>${esc(en)}${p.see ? ' <span style="color:var(--st-critical)">видит</span>' : ""}${p.fire ? ' <span style="color:var(--st-critical)">стреляет</span>' : ""}</td></tr>
+    <tr><td>память</td><td class="mono">${(p.tr||[]).map(t => esc(pname(t.slot)) + " " + t.st + " ±" + Number(t.sig).toFixed(0)).join(", ") || "—"}</td></tr>
+    <tr><td>внимание</td><td>${esc(p.at || "путь")}</td></tr>
+    <tr><td>характер</td><td>${esc(p.sty || "")}, мастерство ${p.sk ?? "—"}, страх ${p.fear?.toFixed(2)}, агр. ${p.agr?.toFixed(2)}</td></tr>
     <tr><td>позиция</td><td class="mono">${p.o.map(v=>v.toFixed(0)).join(", ")} yaw ${p.ya?.toFixed(0)}°</td></tr>
     </table>
     <label style="color:var(--muted);cursor:pointer"><input type="checkbox" id="rawToggle" ${ui.showRaw?"checked":""}> raw json</label>

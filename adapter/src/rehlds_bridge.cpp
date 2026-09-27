@@ -92,9 +92,9 @@ void on_message(rehlds::IVoidHookChain<rehlds::IMessage *> *chain, rehlds::IMess
     chain->callNext(msg);
 }
 
+// GetBuildNumber is the engine's date-based build (e.g. 4419), not a commit count, so only the API minor counts.
 bool has_message_manager(const Bridge &b) {
-    return b.minor > rehlds::kMessageManagerMinor ||
-           (b.minor == rehlds::kMessageManagerMinor && b.build >= rehlds::kMessageManagerBuild);
+    return b.minor >= rehlds::kMessageManagerMinor;
 }
 
 void unhook_messages() {

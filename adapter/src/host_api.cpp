@@ -130,7 +130,8 @@ void trace_one(const LbTraceRequest *req, LbTraceResult *out) {
     edict_t *skip = nullptr;
     if (req->ignore.index) {
         edict_t *ed = edict_of(req->ignore.index);
-        if (ed && static_cast<uint32_t>(ed->serialnumber) == req->ignore.serial) skip = ed;
+        // Player edicts are never reallocated, so a slot needs no serial check.
+        if (ed && (is_player_edict(ed) || static_cast<uint32_t>(ed->serialnumber) == req->ignore.serial)) skip = ed;
     }
     switch (req->kind) {
         case LB_TRACE_HULL:

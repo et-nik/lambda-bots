@@ -214,8 +214,16 @@ fn check_binary(root: &Path, files: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Files next to the module in every package, relative to the repository root.
-const PACKAGE_DOCS: &[&str] = &["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md", "README.md"];
+/// Files in `addons/lambdabots/` of every package, at the same paths as in the repository.
+const PACKAGE_DOCS: &[&str] = &[
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_LICENSES.md",
+    "README.md",
+    "docs/personas.md",
+    "docs/perception.md",
+    "docs/behavior.md",
+];
 /// Data directories copied into `addons/lambdabots/`.
 const PACKAGE_DATA: &[&str] = &["config", "names", "profiles", "maps", "amxx"];
 
@@ -259,7 +267,11 @@ fn package(root: &Path, args: &[String]) -> Result<()> {
         for doc in PACKAGE_DOCS {
             let src = root.join(doc);
             if src.exists() {
-                std::fs::copy(&src, addon.join(doc))?;
+                let dst = addon.join(doc);
+                if let Some(dir) = dst.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::copy(&src, dst)?;
             }
         }
         std::fs::write(

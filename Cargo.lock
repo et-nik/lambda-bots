@@ -554,6 +554,7 @@ version = "0.1.0"
 dependencies = [
  "lb-actions",
  "lb-combat",
+ "lb-config",
  "lb-core",
  "lb-decision",
  "lb-game",
@@ -564,6 +565,7 @@ dependencies = [
  "lb-perception",
  "lb-raw",
  "lb-styles",
+ "lb-worldq",
  "smallvec",
  "tracing",
 ]
@@ -590,6 +592,8 @@ dependencies = [
  "lb-ffi",
  "lb-nav",
  "lb-navgen",
+ "lb-worldq",
+ "serde_json",
 ]
 
 [[package]]
@@ -602,6 +606,7 @@ dependencies = [
  "lb-motor",
  "lb-nav-api",
  "lb-styles",
+ "lb-worldq",
  "smallvec",
 ]
 
@@ -731,6 +736,7 @@ name = "lb-motor"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "lb-config",
  "lb-core",
  "lb-game",
  "lb-styles",
@@ -741,6 +747,7 @@ dependencies = [
 name = "lb-nav"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "crc32c",
  "lb-bsp",
  "lb-config",
@@ -781,6 +788,7 @@ dependencies = [
 name = "lb-perception"
 version = "0.1.0"
 dependencies = [
+ "lb-config",
  "lb-core",
  "lb-game",
  "lb-knowledge",
@@ -817,14 +825,22 @@ dependencies = [
  "arc-swap",
  "crossbeam-channel",
  "lb-brain",
+ "lb-bsp",
+ "lb-combat",
  "lb-config",
  "lb-core",
+ "lb-decision",
  "lb-ext",
  "lb-ffi",
  "lb-game",
  "lb-host",
+ "lb-knowledge",
+ "lb-motor",
+ "lb-nav",
  "lb-nav-api",
+ "lb-perception",
  "lb-raw",
+ "lb-styles",
  "lb-telemetry",
  "lb-worldq",
  "parking_lot",

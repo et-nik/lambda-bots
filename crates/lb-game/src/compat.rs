@@ -24,6 +24,9 @@ pub struct CompatibilityProfile {
     pub plugins: Vec<(String, String)>,
     pub map: String,
     pub late_load: bool,
+    pub install_dir: String,
+    pub config: String,
+    pub names: String,
 }
 
 impl CompatibilityProfile {
@@ -44,6 +47,9 @@ impl CompatibilityProfile {
         let _ = writeln!(s, "bugfixedhl: {}", self.bugfixedhl);
         let _ = writeln!(s, "map: {}", self.map);
         let _ = writeln!(s, "late_load: {}", self.late_load);
+        let _ = writeln!(s, "install_dir: \"{}\"", self.install_dir);
+        let _ = writeln!(s, "config: \"{}\"", self.config);
+        let _ = writeln!(s, "names: \"{}\"", self.names);
         let _ = writeln!(s, "sys_ticrate: {}", self.sys_ticrate);
         let _ = writeln!(s, "channels:");
         for (name, on) in &self.channels {

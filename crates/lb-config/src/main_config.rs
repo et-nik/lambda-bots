@@ -1,8 +1,12 @@
 //! `config/lambdabots.yaml`: server-level settings (quota, engine, telemetry, access, logging).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
+use crate::profiles::STYLE_IDS;
+use crate::skill::SkillBand;
 use crate::yaml;
 
 pub const KIND: &str = "main";
@@ -14,6 +18,7 @@ pub struct MainConfig {
     pub schema: String,
     pub quota: QuotaConfig,
     pub bots: BotsConfig,
+    pub roster: RosterConfig,
     pub engine: EngineConfig,
     pub telemetry: TelemetryConfig,
     pub access: AccessConfig,
@@ -28,6 +33,7 @@ impl Default for MainConfig {
             schema: format!("lambdabots/{KIND}@{MAJOR}"),
             quota: QuotaConfig::default(),
             bots: BotsConfig::default(),
+            roster: RosterConfig::default(),
             engine: EngineConfig::default(),
             telemetry: TelemetryConfig::default(),
             access: AccessConfig::default(),
@@ -81,14 +87,13 @@ impl Default for QuotaConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct BotsConfig {
-    /// `noob | easy | normal | hard | expert` or `0..4`.
-    pub difficulty: String,
-    /// Style id or `random`.
-    pub style: String,
+    /// Shown before every bot name, e.g. `[BOT] `; not part of the personality.
     pub name_prefix: String,
+    /// The same bots come back after a map change.
     pub save_names: bool,
+    /// `names/<language>.yaml`: nicknames for new personalities.
     pub language: String,
-    pub use_profiles: bool,
+    /// Models new personalities choose from.
     pub models: Vec<String>,
     pub rotate: RotateConfig,
     pub force_respawn: bool,
@@ -100,12 +105,9 @@ pub struct BotsConfig {
 impl Default for BotsConfig {
     fn default() -> Self {
         BotsConfig {
-            difficulty: "normal".into(),
-            style: "random".into(),
             name_prefix: String::new(),
             save_names: true,
             language: "en".into(),
-            use_profiles: true,
             models: [
                 "barney",
                 "gina",
@@ -127,6 +129,72 @@ impl Default for BotsConfig {
             stuck_kill_time: 20.0,
         }
     }
+}
+
+/// Which personalities may join and how new ones are created.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct RosterConfig {
+    /// Skill filter: `any`, a preset (`hard` = 63..87), a number (`60` = 48..72) or a range (`normal-hard`,
+    /// `40-70`). A personality's own skill never changes; this only chooses who joins.
+    pub difficulty: String,
+    /// Style filter: `any` or a comma list (`rusher,sniper`).
+    pub styles: String,
+    pub generate: GenerateConfig,
+}
+
+impl Default for RosterConfig {
+    fn default() -> Self {
+        RosterConfig {
+            difficulty: "normal".into(),
+            styles: "any".into(),
+            generate: GenerateConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct GenerateConfig {
+    /// Create personalities for new nicknames from `names/<language>.yaml` and keep them in `data/profiles.yaml`.
+    pub enabled: bool,
+    /// Keep at least this many personalities that pass the filters; fewer, and the next bot is a new one.
+    pub pool: u32,
+    /// Style mix of new personalities (relative weights).
+    pub styles: BTreeMap<String, f32>,
+}
+
+impl Default for GenerateConfig {
+    fn default() -> Self {
+        GenerateConfig {
+            enabled: true,
+            pool: 16,
+            styles: [
+                ("balanced", 4.0),
+                ("rusher", 2.0),
+                ("sniper", 1.0),
+                ("controller", 2.0),
+                ("trapper", 1.0),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        }
+    }
+}
+
+/// `any` or a comma list of style ids; `None` for an invalid list.
+pub fn parse_style_filter(s: &str) -> Option<Vec<String>> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() || s == "any" {
+        return Some(Vec::new());
+    }
+    let styles: Vec<String> = s
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    styles.iter().all(|p| STYLE_IDS.contains(&p.as_str())).then_some(styles)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -305,24 +373,35 @@ impl MainConfig {
         if self.bots.rotate.stay[0] > self.bots.rotate.stay[1] {
             return err("bots.rotate.stay", "must be [min, max] with min <= max");
         }
-        if crate::main_config::parse_difficulty(&self.bots.difficulty).is_none() {
-            return err("bots.difficulty", "expected noob|easy|normal|hard|expert or 0..4");
+        if SkillBand::parse(&self.roster.difficulty).is_none() {
+            return err(
+                "roster.difficulty",
+                "expected any, noob..expert, a number 0..100 or a range like normal-hard",
+            );
+        }
+        if parse_style_filter(&self.roster.styles).is_none() {
+            return err(
+                "roster.styles",
+                "expected any or a comma list of balanced, rusher, sniper, controller, trapper",
+            );
+        }
+        let g = &self.roster.generate;
+        if let Some(bad) = g.styles.keys().find(|k| !STYLE_IDS.contains(&k.as_str())) {
+            return err("roster.generate.styles", &format!("unknown style `{bad}`"));
+        }
+        if g.styles.values().any(|w| !w.is_finite() || *w < 0.0) || g.styles.values().sum::<f32>() <= 0.0 {
+            return err(
+                "roster.generate.styles",
+                "weights must be 0 or more with a positive sum",
+            );
+        }
+        if self.bots.models.is_empty() {
+            return err("bots.models", "must list at least one model");
         }
         if !(1.0..=1000.0).contains(&self.gungame.frags_per_level) {
             return err("gungame.frags_per_level", "must be in 1..=1000");
         }
         Ok(())
-    }
-}
-
-pub fn parse_difficulty(s: &str) -> Option<u8> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "0" | "noob" => Some(0),
-        "1" | "easy" => Some(1),
-        "2" | "normal" => Some(2),
-        "3" | "hard" => Some(3),
-        "4" | "expert" => Some(4),
-        _ => None,
     }
 }
 
@@ -350,8 +429,17 @@ mod tests {
         assert!(MainConfig::parse("schema: lambdabots/main@1\nquota:\n  cuont: 3\n", "t.yaml").is_err());
         assert!(MainConfig::parse("schema: lambdabots/main@1\nquota:\n  count: 99\n", "t.yaml").is_err());
         assert!(MainConfig::parse("schema: lambdabots/main@2\n", "t.yaml").is_err());
-        let e = MainConfig::parse("schema: lambdabots/main@1\nbots:\n  difficulty: insane\n", "t.yaml").unwrap_err();
-        assert!(e.to_string().contains("bots.difficulty"));
+        let e = MainConfig::parse("schema: lambdabots/main@1\nroster:\n  difficulty: insane\n", "t.yaml").unwrap_err();
+        assert!(e.to_string().contains("roster.difficulty"));
+        let e = MainConfig::parse("schema: lambdabots/main@1\nroster:\n  styles: camper\n", "t.yaml").unwrap_err();
+        assert!(e.to_string().contains("roster.styles"));
+        assert!(
+            MainConfig::parse(
+                "schema: lambdabots/main@1\nroster:\n  difficulty: normal-hard\n",
+                "t.yaml"
+            )
+            .is_ok()
+        );
     }
 }
 
@@ -367,6 +455,7 @@ mod shipped {
         assert_eq!(cfg.quota, QuotaConfig::default());
         assert_eq!(cfg.engine, EngineConfig::default());
         assert_eq!(cfg.bots, BotsConfig::default());
+        assert_eq!(cfg.roster, RosterConfig::default());
     }
 
     #[test]

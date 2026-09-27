@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 lb-core.workspace = true
+lb-worldq.workspace = true
 lb-game.workspace = true
 lb-knowledge.workspace = true
 lb-styles.workspace = true

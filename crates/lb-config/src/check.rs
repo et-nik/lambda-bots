@@ -3,6 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::names::NamesFile;
+use crate::profiles::ProfilesFile;
+use crate::skill::DifficultyFile;
+use crate::styles::StyleFile;
 use crate::{ConfigError, MainConfig};
 
 /// `schema: lambdabots/<kind>@<major>` from the first lines of a file.
@@ -25,6 +28,9 @@ pub fn check_text(text: &str, path: &str) -> Result<String, ConfigError> {
     match kind {
         "main" => MainConfig::parse(text, path).map(|_| ()),
         "names" => NamesFile::parse(text, path).map(|_| ()),
+        "profiles" => ProfilesFile::parse(text, path).map(|_| ()),
+        "difficulty" => DifficultyFile::parse(text, path).map(|_| ()),
+        "style" => StyleFile::parse(text, path).map(|_| ()),
         other => Err(ConfigError::Invalid {
             path: path.to_string(),
             field: "schema".into(),

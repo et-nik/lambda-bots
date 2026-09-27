@@ -2,7 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod buttons;
 pub mod capture;
 pub mod clients;
 pub mod commands;
@@ -11,13 +10,17 @@ pub mod logging;
 pub mod manager;
 pub mod motor_test;
 pub mod names;
+pub mod nav;
 pub mod perf;
+pub mod roster;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use lb_combat::Armed;
 use lb_config::MainConfig;
-use lb_config::main_config::{QuotaMode, parse_difficulty};
+use lb_config::main_config::QuotaMode;
 use lb_core::Vec3;
 use lb_core::handles::{BotId, MapEpoch};
 use lb_core::math::normalize_angle;
@@ -25,22 +28,35 @@ use lb_core::rng::{Pcg32, splitmix64};
 use lb_core::time::SimTime;
 use lb_ffi::{LB_CMD_SET_SEED, LbBotCommand, LbMoveFeedback, LbVec3};
 use lb_game::compat::CompatibilityProfile;
+use lb_game::items::{Ammo, ItemKind};
 use lb_game::messages::{self, GameMsg};
 use lb_game::mode::{GameModeKind, ModeInputs};
 use lb_game::rules::{PublicRules, RULE_CVARS};
 use lb_game::scoreboard::Scoreboard;
+use lb_game::self_state::SelfState;
 use lb_game::self_state::WeaponRegistry;
+use lb_game::sounds::{classify_event, classify_sample};
+use lb_game::weapons::{WeaponId, weapons_in_mask};
 use lb_host::strings::StringTable;
 use lb_host::{CreateBotOutcome, CreateBotRequest, Host, TrackRule};
-use lb_raw::{ClientEventKind, RawEvent, RawFrame};
+use lb_knowledge::{BeliefParams, ItemSpot, PlayerKey, PublicEvent};
+use lb_perception::items::ItemEntity;
+use lb_perception::vision::DEFAULT_ASPECT;
+use lb_perception::{Listener, SoundEvent, StepSynth, Subject, Viewer};
+use lb_raw::{ClientEventKind, RawClient, RawEvent, RawFrame};
 use lb_telemetry::{CommandChannel, TelemetrySink};
+use lb_worldq::{AllVisible, VisSets};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
-use crate::buttons::*;
 use crate::clients::Clients;
 use crate::cvars::{Cv, Cvars};
-use crate::manager::{Bot, BotState, Creation, Identity, desired_bots, pick_bot_to_kick, random_color};
+use crate::manager::{Bot, BotState, Creation, desired_bots, pick_bot_to_kick};
 use crate::names::NamePool;
+use crate::roster::{Roster, RosterFilter};
+use lb_config::skill::{DifficultyFile, Presets, SkillBand};
+use lb_game::input::*;
+use lb_styles::{Persona, StyleId, StyleTable};
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -95,8 +111,20 @@ pub struct Runtime {
     pub clients: Clients,
     pub bots: Vec<Bot>,
     pub creation: Creation,
-    pub carry_over: Vec<Identity>,
+    /// Personalities that were playing before the map change; they come back first.
+    pub carry_over: Vec<String>,
+    /// Personalities an admin asked for with `lb add <name>`; they join next, whatever the filters say.
+    pub requested: Vec<String>,
+    /// The quota could not be filled; warned once until a bot joins again.
+    roster_warned: bool,
     pub names: NamePool,
+    pub roster: Roster,
+    pub filter: RosterFilter,
+    pub presets: Presets,
+    pub presets_source: String,
+    /// Trait ranges and goal weights of the play styles.
+    pub styles: StyleTable,
+    pub styles_source: String,
     pub rng: Pcg32,
     pub master_seed: u64,
     pub game: GameState,
@@ -123,6 +151,33 @@ pub struct Runtime {
     /// Other players from this frame's snapshots, for telemetry only.
     others: Vec<(u8, Vec3, f32, bool)>,
     pub capture: Option<capture::MessageCapture>,
+    /// Event names (PrecacheEvent) arrive with the first frame of a map; the profile is rebuilt then.
+    compat_pending: bool,
+    pub nav_loader: Option<nav::NavLoader>,
+    pub graph: Option<Arc<lb_nav::NavGraph>>,
+    /// What happened to the map's navigation graph, for `lb nav`.
+    pub nav_status: String,
+    /// PVS and PAS of the map; until they load, everything counts as potentially visible and audible.
+    pub vis: Option<Arc<lb_bsp::MapVis>>,
+    /// Player snapshots of this frame, kept from `frame_pre` for the senses in `frame_post`.
+    clients_now: Vec<RawClient>,
+    /// Sounds and weapon events of this frame.
+    sounds_now: Vec<SoundEvent>,
+    /// Kill feed of this frame.
+    public_now: Vec<PublicEvent>,
+    steps: StepSynth,
+    /// Last weapon event of every slot, for the muzzle flash a viewer may see.
+    last_shot: Vec<Option<SimTime>>,
+    /// Weapon shown by an interned `weaponmodel` string.
+    weapon_models: FxHashMap<u16, Option<WeaponId>>,
+    /// The ReHLDS `SV_StartSound` hook reports every sound, footsteps included.
+    sound_hook: bool,
+    /// Items the map places; `None` until the map is loaded.
+    pub item_spots: Option<Arc<Vec<ItemSpot>>>,
+    /// Item entities as the server has them, refreshed a few times a second for perception.
+    item_entities: Vec<ItemEntity>,
+    item_kinds: FxHashMap<u16, Option<ItemKind>>,
+    next_items_at: SimTime,
 }
 
 impl Runtime {
@@ -133,7 +188,11 @@ impl Runtime {
                 Ok(cfg) => (cfg, config_path.display().to_string(), None),
                 Err(e) => (MainConfig::default(), "defaults".to_string(), Some(e.to_string())),
             },
-            Err(_) => (MainConfig::default(), "defaults".to_string(), None),
+            Err(e) => (
+                MainConfig::default(),
+                "defaults".to_string(),
+                Some(format!("{} not readable ({e})", config_path.display())),
+            ),
         };
         let log_dir = config.logging.file.then(|| init.install_dir.join("logs"));
         logging::init(
@@ -143,7 +202,7 @@ impl Runtime {
             config.logging.max_files as usize,
         );
         if let Some(e) = &config_error {
-            tracing::error!("config error, using defaults: {e}");
+            tracing::error!("config: {e}; using built-in defaults");
         }
         let master_seed = if config.engine.master_seed != 0 {
             config.engine.master_seed
@@ -154,8 +213,20 @@ impl Runtime {
                 .unwrap_or(1);
             splitmix64(t)
         };
+        let (presets, presets_source) = load_presets(&init.install_dir);
+        let (styles, styles_source) = load_styles(&init.install_dir);
+        let roster = Roster::load(&init.install_dir, &config.bots.models, &styles);
+        let filter = RosterFilter::from_config(&config.roster);
         let mut rt = Runtime {
             names: NamePool::load(&init.install_dir, &config.bots.language),
+            roster,
+            filter,
+            presets,
+            presets_source,
+            styles,
+            styles_source,
+            requested: Vec::new(),
+            roster_warned: false,
             init,
             config,
             config_source,
@@ -192,31 +263,125 @@ impl Runtime {
             last_mono_ns: 0,
             others: Vec::new(),
             capture: None,
+            compat_pending: false,
+            nav_loader: None,
+            graph: None,
+            nav_status: "no map".into(),
+            vis: None,
+            clients_now: Vec::new(),
+            sounds_now: Vec::new(),
+            public_now: Vec::new(),
+            steps: StepSynth::default(),
+            last_shot: Vec::new(),
+            weapon_models: FxHashMap::default(),
+            sound_hook: false,
+            item_spots: None,
+            item_entities: Vec::new(),
+            item_kinds: FxHashMap::default(),
+            next_items_at: SimTime::ZERO,
         };
         rt.register_cvars(host);
         rt.open_telemetry();
-        tracing::info!(
-            "lambdabots {CORE_VERSION} started (adapter {}, config: {}, seed {:#x}, {} names)",
-            rt.init.adapter_version,
-            rt.config_source,
-            rt.master_seed,
-            rt.names.len()
-        );
+        let summary = rt.startup_summary();
+        tracing::info!("{summary}");
+        host.server_print(&format!("[lambdabots] {summary}\n"));
         rt
+    }
+
+    /// Where the core looked for its files and what it found; printed at start and by `lb status`.
+    pub fn startup_summary(&self) -> String {
+        format!(
+            "core {CORE_VERSION} (adapter {}): install dir {}, config {}, {} names from {}, {}",
+            self.init.adapter_version,
+            self.init.install_dir.display(),
+            self.config_source,
+            self.names.len(),
+            self.names
+                .source
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "built-in list".into()),
+            self.roster_summary(),
+        )
+    }
+
+    pub fn roster_summary(&self) -> String {
+        let from_profiles = self
+            .roster
+            .iter()
+            .filter(|p| matches!(p.source, lb_styles::PersonaSource::Profile(_)))
+            .count();
+        format!(
+            "{} personalities ({} from profiles, {} generated), {} admitted by the filter ({})",
+            self.roster.len(),
+            from_profiles,
+            self.roster.len() - from_profiles,
+            self.roster.count_admitted(&self.filter),
+            self.filter.describe()
+        )
+    }
+
+    /// `lb config reload`: re-reads the main config, the skill table, the names and the profiles. File values win
+    /// over earlier console changes of the same cvars; bots in the game take their updated personality at once.
+    pub fn reload(&mut self, host: &mut dyn Host) -> Vec<String> {
+        let path = self.init.install_dir.join("config").join("lambdabots.yaml");
+        let mut out = Vec::new();
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| MainConfig::parse(&t, &path.display().to_string()).map_err(|e| e.to_string()))
+        {
+            Ok(cfg) => {
+                self.config = cfg;
+                self.config_source = path.display().to_string();
+                out.push(format!("config: {}", self.config_source));
+            }
+            Err(e) => out.push(format!("config not reloaded, keeping the current one: {e}")),
+        }
+        let (presets, source) = load_presets(&self.init.install_dir);
+        self.presets = presets;
+        self.presets_source = source;
+        let (styles, source) = load_styles(&self.init.install_dir);
+        self.styles = styles;
+        self.styles_source = source;
+        self.names = NamePool::load(&self.init.install_dir, &self.config.bots.language);
+        self.roster = Roster::load(&self.init.install_dir, &self.config.bots.models, &self.styles);
+        self.filter = RosterFilter::from_config(&self.config.roster);
+        let c = &self.config;
+        let values = [
+            (Cv::Quota, c.quota.count.to_string()),
+            (Cv::QuotaMode, quota_mode_name(c.quota.mode).to_string()),
+            (Cv::Difficulty, c.roster.difficulty.clone()),
+            (Cv::Style, c.roster.styles.clone()),
+            (Cv::CmdRate, c.engine.cmd_rate.to_string()),
+            (Cv::ForceRespawn, (c.bots.force_respawn as u8).to_string()),
+        ];
+        for (cv, value) in values {
+            self.cvars.set(host, cv, &value);
+        }
+        for bot in &mut self.bots {
+            if let Some(p) = self.roster.get(&bot.persona.name) {
+                let skill = p.skill_params(&self.presets);
+                let affinity = self.styles.goals(p.style);
+                bot.set_persona(p, skill, affinity);
+            }
+            bot.driver.set_rate(self.config.engine.cmd_rate as f64);
+        }
+        out.push(format!("skill table: {}", self.presets_source));
+        out.push(format!("styles: {}", self.styles_source));
+        out.push(format!("roster: {}", self.roster_summary()));
+        out.extend(self.roster.problems.iter().map(|p| format!("problem: {p}")));
+        out
     }
 
     fn register_cvars(&mut self, host: &mut dyn Host) {
         let c = &self.config;
-        let mode = match c.quota.mode {
-            QuotaMode::Normal => "normal",
-            QuotaMode::Fill => "fill",
-            QuotaMode::Match => "match",
-        };
+        let mode = quota_mode_name(c.quota.mode);
         let defaults = vec![
             (Cv::Version, CORE_VERSION.to_string()),
             (Cv::Quota, c.quota.count.to_string()),
             (Cv::QuotaMode, mode.to_string()),
-            (Cv::Difficulty, c.bots.difficulty.clone()),
+            (Cv::Difficulty, c.roster.difficulty.clone()),
+            (Cv::Style, c.roster.styles.clone()),
             (Cv::CmdRate, c.engine.cmd_rate.to_string()),
             (Cv::ForceRespawn, (c.bots.force_respawn as u8).to_string()),
             (Cv::GameMode, "-1".to_string()),
@@ -281,7 +446,7 @@ impl Runtime {
         self.game.teamplay_message = false;
         self.strings.clear_map_scoped();
         if !self.bots.is_empty() {
-            let mut saved: Vec<Identity> = self.bots.drain(..).map(|b| b.identity).collect();
+            let mut saved: Vec<String> = self.bots.drain(..).map(|b| b.persona.name.clone()).collect();
             if self.config.bots.save_names {
                 saved.append(&mut self.carry_over);
                 self.carry_over = saved;
@@ -314,19 +479,24 @@ impl Runtime {
         self.resolve_messages(host);
         self.read_rules(host);
         self.build_compat(host);
+        self.compat_pending = true;
+        self.graph = None;
+        self.vis = None;
+        self.clients_now.clear();
+        self.sounds_now.clear();
+        self.public_now.clear();
+        self.steps.reset();
+        self.last_shot = vec![None; max_clients as usize + 1];
+        self.item_spots = None;
+        self.item_entities.clear();
+        self.next_items_at = SimTime::ZERO;
+        self.nav_status = format!("loading the graph for {name}");
+        self.nav_loader = Some(nav::NavLoader::start(&self.init.game_dir, &self.init.install_dir, name));
         tracing::info!(
             "map {name} (epoch {}, {} slots){}",
             epoch.0,
             max_clients,
             if late_load { ", late load" } else { "" }
-        );
-        for line in self.compat.to_yaml().lines() {
-            tracing::debug!("compat: {line}");
-        }
-        let _ = std::fs::create_dir_all(self.init.install_dir.join("logs"));
-        let _ = std::fs::write(
-            self.init.install_dir.join("logs").join(format!("compat-{name}.yaml")),
-            self.compat.to_yaml(),
         );
         self.telemetry.send(
             "hello",
@@ -344,11 +514,11 @@ impl Runtime {
 
     pub fn map_end(&mut self, _host: &mut dyn Host) {
         if self.config.bots.save_names {
-            let saved: Vec<Identity> = self
+            let saved: Vec<String> = self
                 .bots
                 .iter()
                 .filter(|b| !matches!(b.state, BotState::Leaving | BotState::Faulted))
-                .map(|b| b.identity.clone())
+                .map(|b| b.persona.name.clone())
                 .collect();
             self.carry_over = saved;
         }
@@ -388,6 +558,17 @@ impl Runtime {
         self.game.rules = rules;
     }
 
+    fn write_compat(&self) {
+        for line in self.compat.to_yaml().lines() {
+            tracing::debug!("compat: {line}");
+        }
+        let dir = self.init.install_dir.join("logs");
+        let path = dir.join(format!("compat-{}.yaml", self.compat.map));
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, self.compat.to_yaml())) {
+            tracing::warn!("cannot write {}: {e}", path.display());
+        }
+    }
+
     fn build_compat(&mut self, host: &mut dyn Host) {
         let f = host.compat_facts();
         let bhl = self.cvars.game_value(host, "mp_respawn_fix").is_some();
@@ -407,6 +588,7 @@ impl Runtime {
             }
         }
         let ch = |bit: u32| f.channels & bit != 0;
+        self.sound_hook = ch(lb_ffi::LB_CH_SV_STARTSOUND);
         self.compat = CompatibilityProfile {
             core_version: CORE_VERSION.to_string(),
             adapter_version: self.init.adapter_version.clone(),
@@ -446,11 +628,19 @@ impl Runtime {
                 .filter(|n| !self.game.resolved_msgs.iter().any(|(r, _)| r == *n))
                 .map(|n| n.to_string())
                 .collect(),
-            event_names: 0,
+            event_names: self.strings.event_count(),
             sys_ticrate: ticrate,
             plugins,
             map: self.map.as_ref().map(|m| m.name.clone()).unwrap_or_default(),
             late_load: self.map.as_ref().is_some_and(|m| m.late_load),
+            install_dir: self.init.install_dir.display().to_string(),
+            config: self.config_source.clone(),
+            names: self
+                .names
+                .source
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "built-in".into()),
         };
     }
 
@@ -511,6 +701,15 @@ impl Runtime {
                 }
             }
         }
+        if !self.sound_hook {
+            self.steps.frame(
+                &frame.clients,
+                self.game.rules.footsteps,
+                self.now,
+                &mut self.sounds_now,
+            );
+        }
+        self.clients_now = frame.clients;
         let force_respawn = self.config.bots.force_respawn;
         let delay = self.config.bots.respawn_delay;
         let now = self.now;
@@ -518,6 +717,48 @@ impl Runtime {
             bot.update_lifecycle(now, force_respawn, delay);
         }
         self.check_departures(host);
+        if let Some(result) = self.nav_loader.as_ref().and_then(|l| l.poll()) {
+            let map = self.nav_loader.take().map(|l| l.map).unwrap_or_default();
+            match result {
+                Ok(loaded) => {
+                    tracing::info!(
+                        "{map}: {} visibility leaves ({} KiB of PVS and PAS)",
+                        loaded.vis.visleafs(),
+                        loaded.vis.memory() / 1024
+                    );
+                    self.vis = Some(loaded.vis);
+                    tracing::info!("{map}: {} item spots", loaded.items.len());
+                    for bot in &mut self.bots {
+                        bot.brain.set_items(&loaded.items, self.now);
+                    }
+                    self.item_spots = Some(loaded.items);
+                    match loaded.graph {
+                        Ok(graph) => {
+                            let s = &graph.stats;
+                            self.nav_status = format!(
+                                "{map}: {} nodes, {} links ({} rejected by the check), {} ms, from {}",
+                                s.nodes, s.links, s.invalid, loaded.millis, graph.source
+                            );
+                            tracing::info!("navigation graph {}", self.nav_status);
+                            self.graph = Some(graph);
+                        }
+                        Err(e) => {
+                            self.nav_status = format!("{map}: {e}");
+                            tracing::warn!("no navigation on {map}: bots will stand still ({e})");
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.nav_status = format!("{map}: {e}");
+                    tracing::warn!("cannot read {map}: bots will stand still and see without the PVS pre-filter ({e})");
+                }
+            }
+        }
+        if self.compat_pending {
+            self.compat_pending = false;
+            self.build_compat(host);
+            self.write_compat();
+        }
         if self.capture.as_ref().is_some_and(|c| self.now >= c.until)
             && let Some(c) = self.capture.take()
         {
@@ -537,12 +778,38 @@ impl Runtime {
             self.last_quota_check = self.now;
             self.reconcile_quota(host);
         }
+        if self.now >= self.next_items_at {
+            self.next_items_at = self.now + 0.2;
+            self.refresh_items(host);
+        }
+    }
+
+    /// Item entities for perception: where each one is and whether it is there to take.
+    fn refresh_items(&mut self, host: &mut dyn Host) {
+        const EF_NODRAW: u32 = 128;
+        let mut snapshots = Vec::new();
+        host.snapshot_entities(1 << lb_game::entities::KIND_ITEM, &mut snapshots);
+        self.item_entities.clear();
+        for e in &snapshots {
+            let kind = *self
+                .item_kinds
+                .entry(e.classname_id)
+                .or_insert_with(|| ItemKind::from_classname(&self.strings.string_lossy(e.classname_id)));
+            let Some(kind) = kind else { continue };
+            self.item_entities.push(ItemEntity {
+                origin: Vec3::new(e.origin.x, e.origin.y, e.origin.z),
+                kind,
+                drawn: e.effects & EF_NODRAW == 0 && e.owner.index == 0,
+            });
+        }
     }
 
     pub fn frame_post(&mut self, host: &mut dyn Host, mono_ns: u64) {
         if self.safe_mode.is_none() {
             self.drive_bots(host);
         }
+        self.sounds_now.clear();
+        self.public_now.clear();
         self.poll_command_channel(host);
         self.emit_telemetry();
         let (lines, dropped) = logging::drain_console(20);
@@ -574,7 +841,7 @@ impl Runtime {
                         let ours = |b: &Bot| b.id.slot == e.slot && (!e.is_ours || b.id.generation == e.bot_gen);
                         if let Some(i) = self.bots.iter().position(ours) {
                             let bot = self.bots.remove(i);
-                            tracing::info!("bot {} left ({})", bot.identity.name, bot.state.as_str());
+                            tracing::info!("bot {} left ({})", bot.persona.name, bot.state.as_str());
                         }
                         self.game.scoreboard.clear_slot(e.slot);
                     }
@@ -615,6 +882,27 @@ impl Runtime {
                                 bot.self_state.on_spawn(self.now);
                             }
                             GameMsg::WeaponList(info) => self.game.weapons.insert(info.clone()),
+                            GameMsg::Damage {
+                                armor,
+                                health,
+                                bits,
+                                source,
+                            } => {
+                                bot.self_state.apply(&msg, self.now);
+                                let felt = lb_perception::damage::stimulus(
+                                    self.now,
+                                    *health,
+                                    *armor,
+                                    *bits,
+                                    *source,
+                                    bot.self_state.body.origin,
+                                    bot.view,
+                                    &mut bot.rng.perception,
+                                );
+                                if let Some(d) = felt {
+                                    bot.brain.on_damage(&d);
+                                }
+                            }
                             _ => bot.self_state.apply(&msg, self.now),
                         }
                     }
@@ -624,6 +912,12 @@ impl Runtime {
                         GameMsg::GameMode { teamplay } => self.game.teamplay_message = *teamplay,
                         GameMsg::DeathMsg { killer, victim, weapon } => {
                             tracing::debug!("kill: {killer} -> {victim} ({weapon})");
+                            self.public_now.push(PublicEvent::Death {
+                                t: self.now,
+                                killer: (*killer != 0 && killer != victim).then_some(*killer),
+                                victim: *victim,
+                                weapon: weapon.clone(),
+                            });
                             self.telemetry.send(
                                 "event",
                                 self.now.secs(),
@@ -671,6 +965,7 @@ impl Runtime {
                     } else {
                         bot.view = Vec3::new(angles.x, angles.y, 0.0);
                     }
+                    bot.brain.motor.set_view(bot.view);
                     bot.view_initialized = true;
                 }
             }
@@ -685,9 +980,71 @@ impl Runtime {
             RawEvent::Overflow { dropped_records, .. } => {
                 self.stats.dropped_events += dropped_records as u64;
             }
+            RawEvent::Sound(s) => self.on_sound(&s),
+            RawEvent::Playback(p) => self.on_playback(&p),
             RawEvent::RegisterMsg { .. } | RawEvent::PrecacheEvent { .. } => {}
-            RawEvent::Sound(_) | RawEvent::Playback(_) | RawEvent::Entity(_) => {}
+            RawEvent::Entity(_) => {}
         }
+    }
+
+    fn player_slot(&self, index: u16) -> Option<u8> {
+        let max = self.map.as_ref().map_or(0, |m| m.max_clients);
+        (index >= 1 && u32::from(index) <= max).then_some(index as u8)
+    }
+
+    fn on_sound(&mut self, s: &lb_raw::RawSound) {
+        const SND_STOP: i32 = 1 << 5;
+        const SND_CHANGE_VOL: i32 = 1 << 6;
+        const SND_CHANGE_PITCH: i32 = 1 << 7;
+        const SND_SPAWNING: i32 = 1 << 8;
+        if s.flags & (SND_STOP | SND_CHANGE_VOL | SND_CHANGE_PITCH | SND_SPAWNING) != 0 || s.volume <= 0.0 {
+            return;
+        }
+        self.sounds_now.push(SoundEvent {
+            t: self.now,
+            source: self.player_slot(s.entity.index),
+            origin: s.origin,
+            class: classify_sample(&s.sample),
+            volume: s.volume,
+            attenuation: s.attenuation,
+            global: s.attenuation <= 0.0,
+        });
+    }
+
+    fn on_playback(&mut self, p: &lb_raw::RawPlayback) {
+        const FEV_GLOBAL: i32 = 1 << 2;
+        const FEV_HOSTONLY: i32 = 1 << 4;
+        let Some(heard) = self
+            .strings
+            .event_name(i32::from(p.event_index))
+            .and_then(classify_event)
+        else {
+            return;
+        };
+        let source = self.player_slot(p.invoker.index);
+        if heard.class.kind == lb_game::sounds::SoundKind::Shot
+            && let Some(slot) = source
+            && let Some(t) = self.last_shot.get_mut(slot as usize)
+        {
+            *t = Some(self.now);
+        }
+        if p.flags & FEV_HOSTONLY != 0 {
+            return;
+        }
+        let origin = if p.origin == Vec3::ZERO {
+            p.invoker_origin
+        } else {
+            p.origin
+        };
+        self.sounds_now.push(SoundEvent {
+            t: self.now,
+            source,
+            origin,
+            class: heard.class,
+            volume: heard.volume,
+            attenuation: heard.attenuation,
+            global: p.flags & FEV_GLOBAL != 0,
+        });
     }
 
     fn client_command(&mut self, host: &mut dyn Host, slot: u8, argv: &[Vec<u8>]) {
@@ -726,11 +1083,24 @@ impl Runtime {
                     "match" => self.config.quota.mode = QuotaMode::Match,
                     other => tracing::warn!("lb_quota_mode: unknown mode `{other}`"),
                 },
-                Cv::Difficulty => {
-                    if parse_difficulty(&value).is_some() {
-                        self.config.bots.difficulty = value.trim().to_string();
+                Cv::Difficulty => match SkillBand::parse(&value) {
+                    Some(band) => {
+                        self.config.roster.difficulty = value.trim().to_string();
+                        self.filter.skill = band;
+                        tracing::info!("roster filter: {}", self.filter.describe());
                     }
-                }
+                    None => tracing::warn!(
+                        "lb_difficulty `{value}`: expected any, noob..expert, a number or a range like normal-hard"
+                    ),
+                },
+                Cv::Style => match roster::parse_styles(&value) {
+                    Some(styles) => {
+                        self.config.roster.styles = value.trim().to_string();
+                        self.filter.styles = styles;
+                        tracing::info!("roster filter: {}", self.filter.describe());
+                    }
+                    None => tracing::warn!("lb_style `{value}`: expected any or a comma list of styles"),
+                },
                 Cv::CmdRate => {
                     if let Ok(r) = value.trim().parse::<f32>() {
                         self.config.engine.cmd_rate = r.clamp(0.0, 1000.0);
@@ -816,19 +1186,35 @@ impl Runtime {
         }
     }
 
+    /// Adds the next personality (see [`Runtime::next_persona`]); returns its name.
     pub fn create_bot(&mut self, host: &mut dyn Host) -> Option<String> {
-        let identity = match self.carry_over.pop() {
-            Some(id) if self.clients.find_name(&id.name).is_none() => id,
-            _ => self.new_identity(),
+        let Some(persona) = self.next_persona() else {
+            if !self.roster_warned {
+                self.roster_warned = true;
+                tracing::warn!(
+                    "no personality can join: the roster has none left for the filter ({}) and generation is {}",
+                    self.filter.describe(),
+                    if self.config.roster.generate.enabled {
+                        "out of names"
+                    } else {
+                        "off"
+                    }
+                );
+            }
+            self.creation.hold_until = self.now + 10.0;
+            return None;
         };
-        let mut infokeys = vec![("model".to_string(), identity.model.clone())];
-        infokeys.push(("topcolor".to_string(), identity.topcolor.to_string()));
-        infokeys.push(("bottomcolor".to_string(), identity.bottomcolor.to_string()));
+        let display = lb_config::names::sanitize_name(&format!("{}{}", self.config.bots.name_prefix, persona.name));
+        let mut infokeys = vec![
+            ("model".to_string(), persona.model.clone()),
+            ("topcolor".to_string(), persona.colors[0].to_string()),
+            ("bottomcolor".to_string(), persona.colors[1].to_string()),
+        ];
         if self.config.disguise.scoreboard_bot_flag {
             infokeys.push(("*bot".to_string(), "1".to_string()));
         }
         let req = CreateBotRequest {
-            name: identity.name.clone(),
+            name: display,
             infokeys,
         };
         match host.create_bot(&req) {
@@ -837,18 +1223,31 @@ impl Runtime {
                     slot,
                     generation: bot_gen,
                 };
-                let bot = Bot::new(
+                let skill = persona.skill_params(&self.presets);
+                tracing::info!(
+                    "bot {} joined (slot {slot}, #{userid}): {}, skill {}, {}",
+                    persona.name,
+                    persona.style,
+                    persona.skill,
+                    persona.source.short()
+                );
+                let mut bot = Bot::new(
                     id,
                     userid,
-                    identity.clone(),
+                    persona.clone(),
+                    skill,
+                    self.styles.goals(persona.style),
                     self.now,
                     self.master_seed,
                     self.config.engine.cmd_rate as f64,
                     self.config.engine.max_cmd_debt_ms as f64,
                 );
-                tracing::info!("bot {} joined (slot {slot}, #{userid})", identity.name);
+                if let Some(spots) = &self.item_spots {
+                    bot.brain.set_items(spots, self.now);
+                }
                 self.bots.push(bot);
-                Some(identity.name)
+                self.roster_warned = false;
+                Some(persona.name.clone())
             }
             CreateBotOutcome::ServerFull => {
                 self.creation.hold_until = self.now + 10.0;
@@ -857,7 +1256,7 @@ impl Runtime {
             }
             CreateBotOutcome::Rejected(reason) => {
                 self.creation.hold_until = self.now + 10.0;
-                tracing::warn!("bot {} was rejected: {reason}", identity.name);
+                tracing::warn!("bot {} was rejected: {reason}", persona.name);
                 None
             }
             CreateBotOutcome::Failed(code) => {
@@ -868,26 +1267,97 @@ impl Runtime {
         }
     }
 
-    fn new_identity(&mut self) -> Identity {
-        let clients = &self.clients;
-        let bots = &self.bots;
-        let taken =
-            |n: &str| clients.find_name(n).is_some() || bots.iter().any(|b| b.identity.name.eq_ignore_ascii_case(n));
-        let name = self.names.pick(&mut self.rng, &self.config.bots.name_prefix, &taken);
-        let models = &self.config.bots.models;
-        let model = if models.is_empty() {
-            "gordon".to_string()
-        } else {
-            models[self.rng.range_i32(0, models.len() as i32 - 1) as usize].clone()
-        };
-        Identity {
-            name,
-            model,
-            difficulty: parse_difficulty(&self.config.bots.difficulty).unwrap_or(2),
-            style: self.config.bots.style.clone(),
-            topcolor: random_color(&mut self.rng),
-            bottomcolor: random_color(&mut self.rng),
+    /// A personality's nickname is in use: by one of our bots or by a connected player.
+    fn name_busy(clients: &Clients, bots: &[Bot], prefix: &str, name: &str) -> bool {
+        bots.iter()
+            .any(|b| b.is_active() && b.persona.name.eq_ignore_ascii_case(name))
+            || clients.find_name(name).is_some()
+            || (!prefix.is_empty() && clients.find_name(&format!("{prefix}{name}")).is_some())
+    }
+
+    /// Who joins next, in order: a personality an admin asked for (`lb add <name>`), one that played before the map
+    /// change, a new personality while the filtered roster is smaller than `roster.generate.pool`, a weighted pick
+    /// among the admitted ones, and a new personality when everyone admitted is already playing.
+    pub fn next_persona(&mut self) -> Option<Arc<Persona>> {
+        let (clients, bots, prefix) = (&self.clients, &self.bots, self.config.bots.name_prefix.as_str());
+        let busy = |name: &str| Self::name_busy(clients, bots, prefix, name);
+        while let Some(name) = self.requested.pop() {
+            match self.roster.get(&name) {
+                Some(p) if !busy(&p.name) => return Some(p),
+                Some(p) => tracing::warn!("{} is already playing", p.name),
+                None => tracing::warn!("no personality named {name}"),
+            }
         }
+        while let Some(name) = self.carry_over.pop() {
+            if let Some(p) = self.roster.get(&name)
+                && self.filter.admits(&p)
+                && !busy(&p.name)
+            {
+                return Some(p);
+            }
+        }
+        let generate = &self.config.roster.generate;
+        if generate.enabled
+            && (self.roster.count_admitted(&self.filter) as u32) < generate.pool
+            && let Some(p) = self.generate_persona()
+        {
+            return Some(p);
+        }
+        let (clients, bots, prefix) = (&self.clients, &self.bots, self.config.bots.name_prefix.as_str());
+        let busy = |name: &str| Self::name_busy(clients, bots, prefix, name);
+        if let Some(p) = self.roster.pick(&self.filter, &busy, &mut self.rng) {
+            return Some(p);
+        }
+        if self.config.roster.generate.enabled {
+            return self.generate_persona();
+        }
+        None
+    }
+
+    /// A personality for a nickname from `names/<language>.yaml` that has none yet; saved to `data/profiles.yaml`.
+    fn generate_persona(&mut self) -> Option<Arc<Persona>> {
+        let (clients, bots, prefix, roster) = (
+            &self.clients,
+            &self.bots,
+            self.config.bots.name_prefix.as_str(),
+            &self.roster,
+        );
+        let used = |name: &str| roster.knows(name) || Self::name_busy(clients, bots, prefix, name);
+        let name = self.names.pick_unused(&mut self.rng, &used)?;
+        let allowed = |s: &StyleId| self.filter.styles.is_empty() || self.filter.styles.contains(s);
+        let mut weights: Vec<(StyleId, f32)> = self
+            .config
+            .roster
+            .generate
+            .styles
+            .iter()
+            .filter_map(|(k, w)| StyleId::parse(k).map(|s| (s, *w)))
+            .filter(|(s, w)| allowed(s) && *w > 0.0)
+            .collect();
+        if weights.is_empty() {
+            weights = StyleId::ALL
+                .into_iter()
+                .filter(|s| allowed(s))
+                .map(|s| (s, 1.0))
+                .collect();
+        }
+        let persona = lb_styles::generate(
+            &name,
+            &weights,
+            self.filter.skill,
+            &self.config.bots.models,
+            &self.styles,
+            &mut self.rng,
+        );
+        let persona = self.roster.add_generated(persona, &roster::today());
+        tracing::info!(
+            "new personality {}: {}, skill {} ({})",
+            persona.name,
+            persona.style,
+            persona.skill,
+            persona.source.describe()
+        );
+        Some(persona)
     }
 
     pub fn kick_bot_index(&mut self, host: &mut dyn Host, index: usize, reason: &str) {
@@ -896,7 +1366,7 @@ impl Runtime {
             bot.set_state(BotState::Leaving, self.now);
             bot.kick_attempts = 1;
         } else {
-            tracing::warn!("kick of {} failed; dropping it from the manager", bot.identity.name);
+            tracing::warn!("kick of {} failed; dropping it from the manager", bot.persona.name);
             self.bots.remove(index);
         }
     }
@@ -909,7 +1379,7 @@ impl Runtime {
             if ghost {
                 tracing::warn!(
                     "slot {slot} was taken before {} reported leaving ({}); dropping it (missed ClientDisconnect)",
-                    b.identity.name,
+                    b.persona.name,
                     b.state.as_str()
                 );
             }
@@ -933,7 +1403,7 @@ impl Runtime {
             if waited >= GIVE_UP_AFTER {
                 tracing::warn!(
                     "{} did not leave {GIVE_UP_AFTER} s after the kick; forgetting it",
-                    bot.identity.name
+                    bot.persona.name
                 );
                 self.bots.remove(i);
                 continue;
@@ -962,6 +1432,38 @@ impl Runtime {
     // Motor (M0: lifecycle, respawn protocol and scripted motor tests)
     // -----------------------------------------------------------------------------------------
 
+    /// Team index of every slot from the public scoreboard; all 0 unless the mode has teams.
+    fn teams(&self) -> Vec<u8> {
+        let slots = self.clients_now.len().max(self.game.scoreboard.entries.len());
+        let mut teams = vec![0u8; slots + 1];
+        let team_mode = matches!(
+            self.game.mode,
+            Some(lb_game::mode::GameModeKind::Teamplay | lb_game::mode::GameModeKind::GunGame { team: true })
+        );
+        if !team_mode {
+            return teams;
+        }
+        let mut names: Vec<String> = self
+            .game
+            .rules
+            .teamlist
+            .iter()
+            .map(|t| t.to_ascii_lowercase())
+            .collect();
+        for (slot, e) in self.game.scoreboard.entries.iter().enumerate() {
+            let name = e.team.trim().to_ascii_lowercase();
+            if name.is_empty() || slot >= teams.len() {
+                continue;
+            }
+            let i = names.iter().position(|n| *n == name).unwrap_or_else(|| {
+                names.push(name);
+                names.len() - 1
+            });
+            teams[slot] = (i + 1).min(255) as u8;
+        }
+        teams
+    }
+
     fn drive_bots(&mut self, host: &mut dyn Host) {
         let frame_ms = self.frame_time * 1000.0;
         let cmd_rate = self.config.engine.cmd_rate;
@@ -969,20 +1471,77 @@ impl Runtime {
         let freeze = self.freeze;
         self.cmds.clear();
         let mut faulted = Vec::new();
+        let graph = self.graph.clone();
+        let stuck_kill = f64::from(self.config.bots.stuck_kill_time);
+        let teams = self.teams();
+        let vis_sets = self.vis.clone();
+        let subjects = subjects(
+            &self.clients_now,
+            &self.strings,
+            &mut self.weapon_models,
+            &self.last_shot,
+            &teams,
+        );
+        let world = Senses {
+            now,
+            subjects: &subjects,
+            sounds: &self.sounds_now,
+            public: &self.public_now,
+            vis: vis_sets
+                .as_deref()
+                .map_or(&AllVisible as &dyn VisSets, |v| v as &dyn VisSets),
+            maxspeed: self.game.rules.maxspeed,
+            teams: &teams,
+            items: &self.item_entities,
+        };
+        let opponents = subjects.len().saturating_sub(1);
+        let registry = &self.game.weapons;
+        let mut recognized = Vec::new();
+        let mut tracer = nav::LiveTracer { host, count: 0 };
         for (i, bot) in self.bots.iter_mut().enumerate() {
             if matches!(bot.state, BotState::Leaving | BotState::Faulted) {
                 continue;
             }
-            let result = catch_unwind(AssertUnwindSafe(|| drive_one(bot, now, frame_ms, freeze)));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                sense(bot, &world, &mut tracer, &mut recognized);
+                let ctx = DriveCtx {
+                    now,
+                    frame_ms,
+                    freeze,
+                    graph: graph.as_deref(),
+                    stuck_kill,
+                    registry,
+                    opponents,
+                };
+                drive_one(bot, &ctx, &mut tracer)
+            }));
             match result {
                 Ok(Some(cmd)) => self.cmds.push(cmd),
                 Ok(None) => {}
                 Err(payload) => {
                     let msg = panic_message(&payload);
-                    tracing::error!("bot {} faulted: {msg}", bot.identity.name);
+                    tracing::error!("bot {} faulted: {msg}", bot.persona.name);
                     faulted.push(i);
                 }
             }
+        }
+        let host = tracer.host;
+        for (bot, r) in recognized {
+            let name = self.clients.get(r.who.slot).map(|c| c.name.clone()).unwrap_or_default();
+            tracing::debug!(
+                "{bot} {} {name} after {:.2} s at {:.0} u",
+                if r.reacquired { "found again" } else { "recognized" },
+                r.latency,
+                r.distance
+            );
+            self.telemetry.send(
+                "event",
+                now.secs(),
+                &serde_json::json!({
+                    "kind": "seen", "bot": bot, "who": r.who.slot, "name": name,
+                    "latency": r.latency, "dist": r.distance, "again": r.reacquired,
+                }),
+            );
         }
         for i in faulted.into_iter().rev() {
             self.stats.bot_faults += 1;
@@ -1018,7 +1577,7 @@ impl Runtime {
             .filter_map(|bot| {
                 let done = bot.test.as_ref().is_some_and(|t| t.finished);
                 if done {
-                    bot.test.take().map(|t| t.report(&bot.identity.name, now, cmd_rate))
+                    bot.test.take().map(|t| t.report(&bot.persona.name, now, cmd_rate))
                 } else {
                     None
                 }
@@ -1066,15 +1625,48 @@ impl Runtime {
                 .iter()
                 .map(|b| {
                     let body = &b.self_state.body;
+                    let tracks: Vec<serde_json::Value> = b
+                        .brain
+                        .beliefs
+                        .tracks
+                        .iter()
+                        .map(|t| {
+                            serde_json::json!({
+                                "slot": t.who.slot, "st": t.state.as_str(), "o": vec3(t.pos), "sig": t.sigma,
+                                "age": self.now.since(t.last_seen),
+                            })
+                        })
+                        .collect();
+                    let m = &b.brain.mind;
+                    let candidates: Vec<serde_json::Value> = m
+                        .decider
+                        .last
+                        .iter()
+                        .take(4)
+                        .map(|g| serde_json::json!([g.kind.as_str(), g.rank, g.weight]))
+                        .collect();
+                    let target = m.target.and_then(|k| b.brain.beliefs.track(k));
                     serde_json::json!({
                         "slot": b.id.slot,
-                        "n": b.identity.name,
+                        "n": b.persona.name,
+                        "sty": b.persona.style.as_str(),
+                        "sk": b.persona.skill,
                         "st": b.state.as_str(),
                         "o": [body.origin.x, body.origin.y, body.origin.z],
                         "ya": b.view.y,
                         "hp": body.health,
                         "ap": body.armor,
                         "w": b.self_state.current_weapon.get().map(|w| w.classname()),
+                        "tr": tracks,
+                        "at": b.attention.map(|a| a.reason.as_str()),
+                        "goal": m.goal.map(|g| g.kind.as_str()),
+                        "gw": m.goal.map(|g| g.weight),
+                        "cand": candidates,
+                        "tg": target.map_or(-1, |t| i32::from(t.who.slot)),
+                        "see": target.is_some_and(|t| t.state == lb_knowledge::TrackState::Visible),
+                        "fire": m.firing,
+                        "agr": b.persona.aggression,
+                        "fear": b.persona.fear,
                     })
                 })
                 .collect();
@@ -1116,11 +1708,12 @@ impl Runtime {
 }
 
 /// Produces the command for one bot this frame, or `None` if nothing is due.
-fn drive_one(bot: &mut Bot, now: SimTime, frame_ms: f64, freeze: bool) -> Option<LbBotCommand> {
+fn drive_one(bot: &mut Bot, ctx: &DriveCtx<'_>, tracer: &mut nav::LiveTracer<'_>) -> Option<LbBotCommand> {
     if bot.fault_on_next_frame {
         bot.fault_on_next_frame = false;
         panic!("injected fault (lb debug panic)");
     }
+    let (now, frame_ms) = (ctx.now, ctx.frame_ms);
     let mut forward = 0.0f32;
     let mut side = 0.0f32;
     let mut buttons = 0u16;
@@ -1131,7 +1724,7 @@ fn drive_one(bot: &mut Bot, now: SimTime, frame_ms: f64, freeze: bool) -> Option
                 buttons |= IN_JUMP;
             }
         }
-        BotState::Alive if !freeze => {
+        BotState::Alive if !ctx.freeze => {
             if let Some(test) = bot.test.as_mut() {
                 let body = &bot.self_state.body;
                 let on_ground = body.flags & lb_game::self_state::FL_ONGROUND != 0;
@@ -1153,12 +1746,18 @@ fn drive_one(bot: &mut Bot, now: SimTime, frame_ms: f64, freeze: bool) -> Option
                 if out.done {
                     test.finished = true;
                 }
+            } else {
+                let out = behave(bot, ctx, tracer);
+                forward = out.forward;
+                side = out.side;
+                buttons |= out.buttons;
             }
         }
         _ => {}
     }
     buttons |= direction_buttons(forward, side);
     let sent = bot.driver.tick(frame_ms, buttons)?;
+    bot.brain.motor.sent(sent.buttons);
     if let Some(test) = bot.test.as_mut() {
         test.msec_sent += sent.msec as u64;
         test.commands += 1;
@@ -1184,6 +1783,208 @@ fn drive_one(bot: &mut Bot, now: SimTime, frame_ms: f64, freeze: bool) -> Option
     })
 }
 
+/// The bot's own state as its brain sees it.
+fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
+    let state = &bot.self_state;
+    let b = &state.body;
+    let arsenal = arsenal(state, ctx.registry);
+    let ammo_need = Ammo::ALL.map(|a| ammo_need(state, ctx.registry, a));
+    lb_brain::Body {
+        now: ctx.now,
+        dt: (ctx.frame_ms / 1000.0) as f32,
+        origin: b.origin,
+        eye: b.origin + b.view_ofs,
+        velocity: b.velocity,
+        maxspeed: if b.maxspeed > 0.0 { b.maxspeed } else { 270.0 },
+        health: b.health,
+        armor: b.armor,
+        has_longjump: b.has_longjump,
+        on_ground: b.flags & lb_game::self_state::FL_ONGROUND != 0,
+        on_ladder: b.movetype == lb_game::self_state::MOVETYPE_FLY,
+        underwater: b.waterlevel >= 3,
+        weapon: state.current_weapon.get(),
+        arsenal,
+        ammo_need,
+        opponents: ctx.opponents,
+    }
+}
+
+/// Weapons the bot carries, with the clip `CurWeapon` reported and the reserve `AmmoX` reported.
+fn arsenal(state: &SelfState, registry: &WeaponRegistry) -> smallvec::SmallVec<[Armed; 16]> {
+    weapons_in_mask(state.body.weapons_mask)
+        .map(|w| {
+            let reserve = registry
+                .get(w)
+                .filter(|i| i.ammo1 >= 0)
+                .and_then(|i| state.ammo.get(i.ammo1 as usize))
+                .and_then(|a| a.get());
+            Armed {
+                id: w,
+                clip: state.clip[w as usize].get(),
+                reserve,
+            }
+        })
+        .collect()
+}
+
+/// 0..1: how short the bot is of an ammo type it has a weapon for.
+fn ammo_need(state: &SelfState, registry: &WeaponRegistry, ammo: Ammo) -> f32 {
+    let Some(info) = ammo
+        .feeds()
+        .iter()
+        .filter(|w| state.owns(**w))
+        .find_map(|w| registry.get(*w))
+    else {
+        return 0.0;
+    };
+    let (index, max) = if ammo == Ammo::ArGrenades {
+        (info.ammo2, info.max_ammo2)
+    } else {
+        (info.ammo1, info.max_ammo1)
+    };
+    if index < 0 || max <= 0 {
+        return 0.0;
+    }
+    match state.ammo.get(index as usize).and_then(|a| a.get()) {
+        Some(have) => (1.0 - have as f32 / max as f32).clamp(0.0, 1.0),
+        None => 0.5,
+    }
+}
+
+/// Runs the brain for one frame: senses have run already; this decides, fights and walks.
+fn behave(bot: &mut Bot, ctx: &DriveCtx<'_>, tracer: &mut nav::LiveTracer<'_>) -> lb_motor::MotorOut {
+    let body = body_of(bot, ctx);
+    let input = lb_nav::follow::FollowInput {
+        origin: body.origin,
+        velocity: body.velocity,
+        on_ground: body.on_ground,
+        on_ladder: body.on_ladder,
+        now: ctx.now.secs(),
+        max_speed: body.maxspeed,
+    };
+    bot.brain.motor.view = bot.view;
+    let mut service = nav::BotNavService {
+        nav: &mut bot.nav,
+        graph: ctx.graph,
+        tracer,
+        input,
+        stuck_kill: ctx.stuck_kill,
+        kill: false,
+    };
+    let out = bot.brain.act(&body, &bot.character, &mut service, &mut bot.rng);
+    if service.kill {
+        tracing::info!("{} is stuck for {} s, using kill", bot.persona.name, ctx.stuck_kill);
+        bot.pending_client_cmds.push(vec!["kill".to_string()]);
+    }
+    bot.view = out.angles;
+    bot.attention = bot.brain.last_attention;
+    for command in &out.commands {
+        bot.pending_client_cmds.push(vec![command.clone()]);
+    }
+    out
+}
+
+/// The world as the senses get it this frame, shared by every bot.
+struct Senses<'a> {
+    now: SimTime,
+    subjects: &'a [Subject<'a>],
+    sounds: &'a [SoundEvent],
+    public: &'a [PublicEvent],
+    vis: &'a dyn VisSets,
+    maxspeed: f32,
+    teams: &'a [u8],
+    items: &'a [ItemEntity],
+}
+
+/// What driving a bot needs besides the bot itself.
+struct DriveCtx<'a> {
+    now: SimTime,
+    frame_ms: f64,
+    freeze: bool,
+    graph: Option<&'a lb_nav::NavGraph>,
+    stuck_kill: f64,
+    registry: &'a WeaponRegistry,
+    opponents: usize,
+}
+
+/// Players as vision gets them: the snapshot plus the weapon they show and their last shot.
+fn subjects<'a>(
+    clients: &'a [RawClient],
+    strings: &StringTable,
+    models: &mut FxHashMap<u16, Option<WeaponId>>,
+    last_shot: &[Option<SimTime>],
+    teams: &[u8],
+) -> Vec<Subject<'a>> {
+    clients
+        .iter()
+        .filter(|c| c.state == lb_raw::ClientState::Spawned)
+        .map(|c| {
+            let weapon = *models
+                .entry(c.weaponmodel)
+                .or_insert_with(|| WeaponId::from_player_model(&strings.string_lossy(c.weaponmodel)));
+            Subject {
+                raw: c,
+                key: PlayerKey {
+                    slot: c.slot,
+                    userid: c.userid,
+                },
+                team: teams.get(c.slot as usize).copied().unwrap_or(0),
+                weapon,
+                shot_at: last_shot.get(c.slot as usize).copied().flatten(),
+            }
+        })
+        .collect()
+}
+
+/// One bot's senses for this frame: the kill feed always, hearing every frame and vision on the bot's tick while it
+/// lives, then its beliefs age to now.
+fn sense(
+    bot: &mut Bot,
+    w: &Senses<'_>,
+    tracer: &mut nav::LiveTracer<'_>,
+    recognized: &mut Vec<(String, lb_perception::Recognition)>,
+) {
+    for e in w.public {
+        bot.brain.on_public(e);
+    }
+    if bot.state == BotState::Alive {
+        let body = &bot.self_state.body;
+        let eye = body.origin + body.view_ofs;
+        let listener = Listener {
+            slot: bot.id.slot,
+            origin: body.origin,
+            eye,
+            yaw: bot.view.y,
+            speed: body.velocity.truncate().length(),
+        };
+        bot.brain.hear(w.sounds, &listener, w.vis, &mut bot.rng.perception);
+        let viewer = Viewer {
+            index: u16::from(bot.id.slot),
+            eye,
+            angles: bot.view,
+            fov: body.fov,
+            aspect: DEFAULT_ASPECT,
+            head_in_water: body.waterlevel >= 3,
+            team: w.teams.get(bot.id.slot as usize).copied().unwrap_or(0),
+        };
+        if bot
+            .brain
+            .see(w.now, &viewer, w.subjects, w.vis, tracer, &mut bot.rng.perception)
+        {
+            for r in &bot.brain.last_vision.recognitions {
+                recognized.push((bot.persona.name.clone(), *r));
+            }
+            let range = 900.0 + 11.0 * f32::from(bot.persona.skill);
+            bot.brain.see_items(w.now, &viewer, w.items, range, w.vis, tracer);
+        }
+    }
+    let params = BeliefParams {
+        track_forget: bot.skill.track_forget,
+        maxspeed: w.maxspeed,
+    };
+    bot.brain.update(w.now, &params);
+}
+
 pub fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -1196,4 +1997,56 @@ pub fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 pub fn vec3(v: Vec3) -> [f32; 3] {
     [v.x, v.y, v.z]
+}
+
+/// Built-in styles with `config/styles/*.yaml` applied; broken files are reported and skipped.
+fn load_styles(install_dir: &std::path::Path) -> (StyleTable, String) {
+    let dir = install_dir.join("config").join("styles");
+    let mut table = StyleTable::default();
+    let mut used = Vec::new();
+    for path in lb_config::check::yaml_files(&dir) {
+        let shown = path.display().to_string();
+        let parsed = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| lb_config::styles::StyleFile::parse(&t, &shown).map_err(|e| e.to_string()));
+        match parsed {
+            Ok(f) => {
+                table.apply(&f);
+                used.push(f.id);
+            }
+            Err(e) => tracing::error!("{e}; this style keeps its built-in values"),
+        }
+    }
+    let source = if used.is_empty() {
+        "built-in".to_string()
+    } else {
+        format!("{} ({})", dir.display(), used.join(", "))
+    };
+    (table, source)
+}
+
+/// `config/difficulty.yaml`, or the built-in table when it is missing or broken.
+fn load_presets(install_dir: &std::path::Path) -> (Presets, String) {
+    let path = install_dir.join("config").join("difficulty.yaml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match DifficultyFile::parse(&text, &path.display().to_string()) {
+            Ok(f) => (f.presets, path.display().to_string()),
+            Err(e) => {
+                tracing::error!("{e}; using the built-in skill table");
+                (Presets::default(), "built-in".into())
+            }
+        },
+        Err(e) => {
+            tracing::warn!("{}: {e}; using the built-in skill table", path.display());
+            (Presets::default(), "built-in".into())
+        }
+    }
+}
+
+fn quota_mode_name(mode: QuotaMode) -> &'static str {
+    match mode {
+        QuotaMode::Normal => "normal",
+        QuotaMode::Fill => "fill",
+        QuotaMode::Match => "match",
+    }
 }
