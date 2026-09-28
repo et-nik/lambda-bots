@@ -238,9 +238,15 @@ impl Airburst {
                 dir: (h.origin - e).truncate().normalize_or_zero(),
                 speed: BACK_OFF_SPEED,
             });
+        // Both kept in view: the satchel, and the enemy it flies at.
+        let watch = match (b.satchel, b.enemy) {
+            (Some(s), Some(e)) => Some((s + e) * 0.5),
+            (s, e) => s.or(e),
+        };
         Status::Running(Request {
             weapon: Some(hold(WeaponId::Satchel)),
             movement: back,
+            look: watch.map(|at| LookIntent::Point { at, engaged: false }),
             ..Request::default()
         })
     }

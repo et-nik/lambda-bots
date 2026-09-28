@@ -385,6 +385,10 @@ priority on each wins:
   from, as it glances at sounds.
 - A point right above or below the eyes (closer than 16 units across) gives no direction: the view holds still
   instead of spinning to it, unless it is an enemy.
+- **A throwable in hand** is not aimed at anyone: a grenade or a satchel turns to its own arc, snarks turn to the
+  enemy they are let go at, the satchel radio waiting for an enemy watches the charge nearest to where one is
+  believed to be, and a satchel flying at an enemy is watched together with it. Otherwise the bot looks along its
+  path while its gun comes out; the aim comes back with the gun.
 
 ## Inspecting
 

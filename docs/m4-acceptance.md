@@ -2,19 +2,19 @@
 
 State as of 2026-09-28, after sub-stages M4.1, the arsenal, and M4.2, knowledge, goals and styles. Still to come:
 the tricks (M4.3) and the M4 acceptance runs. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS + hlsdk-portable,
-macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61). The ReHLDS server with BugfixedHL has run
-neither sub-stage yet.
+macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61); the feedback round after M4.2 ran on dm_snow, a
+small map where a run takes a minute or two. The ReHLDS server with BugfixedHL has run neither sub-stage yet.
 
 ## Results against the plan's criteria
 
-| Criterion                                | Status | How it was checked                                                           |
-|------------------------------------------|--------|------------------------------------------------------------------------------|
-| A scenario for every weapon              | yes    | `scripts/stand/weapon-scenarios.sh`: each weapon on its own, table below     |
-| Deaths by own hand an hour below a limit | yes    | M4.2's last mixed game: 0.7 a bot-hour (one snark); the games before, below  |
-| Accuracy tables                          | yes    | `lb stats`: hit rate by distance for every weapon and fire mode              |
-| The game DLL's weapon rules              | partly | `lb selftest` on hlsdk-portable; BugfixedHL and the classic SDK not run live |
-| Target switches ≤ 6 a minute             | yes    | M4.2's last mixed game: 1.2–3.3 a minute a bot (7.8 before the fix below)    |
-| Tricks, the 60-minute run                | later  | M4.3 and the M4 acceptance runs                                              |
+| Criterion                                | Status | How it was checked                                                          |
+|------------------------------------------|--------|-----------------------------------------------------------------------------|
+| A scenario for every weapon              | yes    | `scripts/stand/weapon-scenarios.sh`: each weapon on its own, table below    |
+| Deaths by own hand an hour below a limit | yes    | M4.2's last mixed game: 0.7 a bot-hour (one snark); the games before, below |
+| Accuracy tables                          | yes    | `lb stats`: hit rate by distance for every weapon and fire mode             |
+| The game DLL's weapon rules              | partly | `lb selftest` on hlsdk-portable; the classic SDK in tests, not run live     |
+| Target switches ≤ 6 a minute             | yes    | M4.2's last mixed game: 1.2–3.3 a minute a bot (7.8 before the fix below)   |
+| Tricks, the 60-minute run                | later  | M4.3 and the M4 acceptance runs                                             |
 
 The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game. The mixed
 games of the day came to 0.75 and 1.5 a bot-hour (two grenades and one charged gauss shot), then 2.25 (three snarks,
@@ -44,10 +44,13 @@ What the bots do with every weapon is in `docs/behavior.md` (*Fighting*, *Explos
 - the crossbow's scope narrows the view to 20°;
 - a grenade thrown level leaves at 647 units per second.
 
-So hlsdk-portable plays by the 2023 update's rules, as BugfixedHL does. The classic SDK's rules differ: the primary
-attack sets satchels off, and a grenade leaves at 400 units per second. The bots take any DLL that is not BugfixedHL
-(told by its cvars) to play by the 2023 rules; `game.dll` in `config/lambdabots.yaml` can name it. A bot that sees
-the detonate button throw a satchel learns the buttons are the other way round.
+So hlsdk-portable plays by the 2023 update's rules, as BugfixedHL-Rebased does. The classic SDK's rules differ: the
+secondary attack always throws a satchel and the primary sets them off, and a grenade leaves at 400 units per second.
+Since the feedback after M4.2 the bots take any DLL but BugfixedHL-Rebased (told by its cvars) to throw grenades by the
+2023 rules and to work satchels the classic way, as the production server does; `game.dll` in
+`config/lambdabots.yaml` can name it. The bots check the satchel buttons as they use them (see *Satchels, snarks and
+going for the enemy*): on the stand the first bot to throw a satchel found hlsdk-portable's buttons within half a
+minute of the map's start, in every run.
 
 In multiplayer the game sets explosive damage itself, whatever `skill.cfg` says:
 
@@ -312,6 +315,69 @@ same (`lb-cli replay`), the map's tactics included.
 - **Targets flicked between two enemies.** Facing and firing flicker as enemies strafe; the target in sight is kept
   for a second and another takes over only when 1.6 times as pressing (was 1.3).
 
+## Satchels, snarks and going for the enemy (feedback after M4.2)
+
+On the production server the bots hardly ever set their satchels off, and never once they had thrown several around
+the map; they spared their snarks; they did not always go for the enemy, as if waiting for something; and with a
+throwable in hand they kept aiming at the enemy, which got in the way of what they were doing.
+
+**Why the satchels stayed.** The bots took any DLL but BugfixedHL-Rebased to work satchels by the 2023 update, setting
+them off with the secondary attack. The production server works them the classic way, as yapb played: there the
+secondary attack throws. A detonation press threw another satchel, or did nothing with the pocket empty. The check
+that should have caught it gave up too early: after a throw the game holds the primary attack back for a second,
+and the check waited 0.6 s for the charges to go off. Nothing was learned, and the satchels scattered over the map
+were never set off.
+
+| What                 | Before                                                                                                  | After                                                                                                                                                                                                            |
+|----------------------|---------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Satchel buttons      | the 2023 update's: the primary throws, the secondary sets them off                                      | the classic ones: the secondary always throws, the primary sets them off; BugfixedHL-Rebased (told by its cvars) keeps its own                                                                                   |
+| Checking the buttons | a detonation press that threw a satchel, given up after 0.6 s                                           | every press: a detonation that throws or does nothing, a throw that does nothing or sets the charges off; a button is pressed once the game takes it                                                             |
+| When satchels go off | an enemy within 200 units of a charge; the enemy they were thrown at out of sight by them; 8–15 s lying | 40 damage to an enemy from the blasts together, where it will be when they go off, or one coming into them; someone heard by them; the bot about to die; an enemy seen in their blast a moment ago; 8–15 s lying |
+| The satchel radio    | drawn (a second) when the charges were to go off                                                        | up after a pile thrown at an enemy and while a trap is watched, watching the charges, and pressed the moment an enemy is in the blast                                                                            |
+| Snarks               | 0.25 a weighing at an enemy in sight, 0.35 out of sight; 150–800 units; the next throw 3–6 s later      | 0.6; 200–1000 units; a stream of one to three at an enemy in sight; the next 1–2.5 s later, and no closing in for 3 s                                                                                            |
+| The snark barrage    | 0.35 a weighing                                                                                         | 0.5                                                                                                                                                                                                              |
+| Fighting far off     | strafing where it stands; only skilled bots feeling strong drifted in                                   | a run at the enemy along the path, strafing, when further off than the weapon in hand does well at (shotgun 350, glock and MP5 700, …) and health × aggression is 30 or more                                     |
+| A lost enemy         | hunted for about 2 s                                                                                    | about 6 s; a search place is looked from for half a second before the next                                                                                                                                       |
+| Standing still       | spots 8–15 s (ambush 10–20 s), a sound looked at for 1.5 s, a satchel trap watched 20–30 s              | 6–10 s (8–14 s), 0.8 s, 12–20 s; balanced, controller and trapper bots hold spots and wait for items less                                                                                                        |
+| A throwable in hand  | aimed at the enemy                                                                                      | not aimed: throws turn to their own arcs, the radio watches the charges, a satchel in flight is watched with its enemy                                                                                           |
+
+On the stand (hlsdk-portable, which works satchels the 2023 way) the first bot to throw a satchel found the buttons
+within half a minute of the map's start in every run, by the press that did nothing: "satchel buttons checked by
+bisTEK in the game: the primary attack throws, the secondary sets the charges off".
+
+The sets on dm_snow, 8 bots, 90 s each:
+- **Satchels** (the crowbar and satchels): 87 thrown, 24 set off, 8 kills, no death by own hand, 81 damage from the
+  bots' own blasts. Why they went off: someone heard by them 15 times, an enemy seen by them a moment ago 5, in flight
+  by the enemy 3, an enemy in their blast once.
+- **Snarks** (the crowbar and snarks): 293 thrown, 38 kills, 10 deaths by own hand: with nothing but a crowbar and
+  fifteen snarks each the swarms turn on their owners.
+
+A mixed game on dm_snow, 5 minutes, 8 bots, every weapon, the build before the feedback and after it (the
+personalities are drawn afresh for each game; nobody picked up snarks or grenades on this map):
+
+| In the game                                        | Before      | After      |
+|----------------------------------------------------|-------------|------------|
+| Kills a minute                                     | 21.6        | 23.6       |
+| Deaths by own hand                                 | 0           | 0          |
+| Share of the time a bot stood still, out of fights | 19% (14–31) | 14% (9–19) |
+| Share of the time a bot stood still, in fights     | 9% (6–12)   | 8% (4–19)  |
+| Hunts taken                                        | 159         | 238        |
+| Satchels thrown, set off                           | 1, 1        | 4, 3       |
+| Core time p99                                      | 161 µs      | 180 µs     |
+
+### Found on the stand and fixed
+
+- **The radio came up and went away again**, up to 40 times a bot in 2.5 minutes: an enemy by the satchels, judged
+  1.5 s ahead, had walked out of their blast and counted as a threat away from them. Now an enemy in or coming into
+  the blast is never such a threat, and the radio does not come up with a real threat near.
+- **Satchels went off half a second after the throw**, still in the air close to the bot (it took them for lying where
+  they would land): 654 damage from the bots' own blasts in a 150 s satchel set on crossfire, 3 deaths by own hand.
+  None goes off within a second of a throw now, but one flying at an enemy, which is watched.
+- **A satchel flying by an enemy** was set off with the bot out of the blast of each charge rather than of all of
+  them together.
+- **A wider snark barrage** (300 units, 40 health) turned the swarms on their owners: 19 deaths by own hand in a snark
+  set. Back to 200 units and 50 health.
+
 ## Tools
 
 - `lb weapons <weapon>… give`, `lb weapons all`: a scenario's weapons, handed out on every spawn (needs
@@ -330,8 +396,8 @@ same (`lb-cli replay`), the map's tactics included.
 - Own blast incidents are logged with the distances involved (`own blast:` in `logs/lambdabots.*.log`), and a death
   by the bot's own gauss with its last charge (`killed itself with the gauss`).
 - `lb map [spots|mines|danger]`: the map's tactics and where the bots got hurt.
-- `lb brain` also shows each bot's goal task, mood, goals taken, goal and target changes, and what came of the new
-  goals; `lb profile <name>` shows a personality's goal weights, favourite weapons and whether it shoots the gauss
+- `lb brain` also shows each bot's goal task, mood, goals taken, goal and target changes, what came of the new
+  goals, and the share of the time it stood still out of fights and in them; `lb profile <name>` shows a personality's goal weights, favourite weapons and whether it shoots the gauss
   through walls.
 - `scripts/stand/style-scenarios.sh [--seconds 180] [--bots 8] [style…]`: the per-style runs above, reports in
   `stand-runs/current/styles/`.
@@ -339,7 +405,8 @@ same (`lb-cli replay`), the map's tactics included.
 ## Not done yet
 
 - **A satchel from a jump** goes off by the enemy about one time in seven.
-- **A bot's own snarks** still turn on it now and then, most with only a crowbar and a pocketful of snarks.
+- **A bot's own snarks** still turn on it, most with only a crowbar and a pocketful of snarks: 10 deaths by own hand
+  in the snark set on dm_snow. Left as it is.
 - **A tripmine's planter** may still be near when an enemy trips it (two deaths in four runs of its set).
 - **Holding spots and waiting for items** rarely come through in a crowded game: with 8 bots on crossfire a fight
   cuts them short almost every time.
@@ -350,4 +417,5 @@ same (`lb-cli replay`), the map's tactics included.
   looking a little up, no wall near along the view): a beam glancing off more than one surface may come back.
 - **Shots through walls** came 3 times in 3 minutes of four expert bots with the gauss only (55 kills, no death by own
   hand); whether they hit is not counted yet.
-- **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live.
+- **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live; the classic satchel buttons are
+  checked against a model of the three DLLs in the tests.

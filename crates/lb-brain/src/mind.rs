@@ -65,6 +65,8 @@ const REACTION_SAMPLES: usize = 128;
 const COLLECTED_REST: f64 = 3.0;
 /// A target in sight is kept at least this long.
 const TARGET_HOLD: f64 = 1.0;
+/// Slower than this the bot stands still (for the statistics).
+const STILL_SPEED: f32 = 60.0;
 
 /// How fast the bot answers an enemy: from the first glimpse and from recognition to the first shot at it.
 #[derive(Clone, Debug, Default)]
@@ -217,6 +219,22 @@ pub struct MindStats {
     /// Items waited for and taken as they came back.
     pub controlled: u32,
     pub traps: u32,
+    /// Seconds alive out of a fight and in one (a target in sight), and of them standing still.
+    pub alive: [f64; 2],
+    pub still: [f64; 2],
+}
+
+impl MindStats {
+    /// Shares of the time alive the bot stood still, out of a fight and in one.
+    pub fn still_shares(&self) -> [f64; 2] {
+        [0, 1].map(|i| {
+            if self.alive[i] > 0.0 {
+                self.still[i] / self.alive[i]
+            } else {
+                0.0
+            }
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -358,6 +376,16 @@ impl BotBrain {
             ..ch.clone()
         };
         self.combat_tick(body, ch, nav, rng);
+        let fighting = usize::from(
+            self.mind
+                .target
+                .and_then(|k| self.beliefs.track(k))
+                .is_some_and(|t| t.state == TrackState::Visible),
+        );
+        self.mind.stats.alive[fighting] += f64::from(body.dt);
+        if body.velocity.truncate().length() < STILL_SPEED {
+            self.mind.stats.still[fighting] += f64::from(body.dt);
+        }
         self.decide(body, ch, map, rng);
         self.pursue(body, ch, nav, map, rng);
         self.dodge(body, nav);
@@ -558,7 +586,8 @@ impl BotBrain {
                 };
                 let class = body.weapon.map_or(WeaponClass::Melee, |w| spec(w).class);
                 let distance = t.pos.distance(body.origin);
-                if class == WeaponClass::Melee && distance > MELEE_CHARGE {
+                // Not at an enemy its own snarks or blasts are on the way to.
+                if class == WeaponClass::Melee && distance > MELEE_CHARGE && now >= m.arms.hold_until {
                     let (status, step) = nav.go_to(t.pos);
                     if let Some(step) = step {
                         apply_step(&mut self.intents, &step, body.eye, m);
@@ -742,6 +771,9 @@ impl BotBrain {
         }
         let weapon_choice = m.choice.map(Choice::weapon);
         m.firing = false;
+        // A throwable in hand is not aimed at anyone: a throw turns to its own arc, the satchel radio watches its
+        // charges, and the aim waits for the gun to come out.
+        let throwable = body.weapon.is_some_and(|w| spec(w).class == WeaponClass::Throwable);
         match (track, m.choice) {
             (Some(t), Some(choice)) if t.state == TrackState::Visible => {
                 m.target_at = now;
@@ -760,8 +792,10 @@ impl BotBrain {
                     return;
                 };
                 m.last_aim = Some(aim);
-                self.intents
-                    .look(Prio::Threat, LookIntent::Point { at: aim, engaged: true });
+                if !throwable {
+                    self.intents
+                        .look(Prio::Threat, LookIntent::Point { at: aim, engaged: true });
+                }
                 let intent = match choice {
                     Choice::Use(w) => {
                         let in_hand = body.weapon == Some(w) && !m.reloading(now);
@@ -797,13 +831,15 @@ impl BotBrain {
                 self.intents.weapon(Prio::Threat, intent);
             }
             (Some(t), _) if now.since(t.last_seen) <= LOST_STARE => {
-                self.intents.look(
-                    Prio::Threat,
-                    LookIntent::Point {
-                        at: t.pos + Vec3::Z * 8.0,
-                        engaged: false,
-                    },
-                );
+                if !throwable {
+                    self.intents.look(
+                        Prio::Threat,
+                        LookIntent::Point {
+                            at: t.pos + Vec3::Z * 8.0,
+                            engaged: false,
+                        },
+                    );
+                }
                 if let Some(w) = weapon_choice {
                     self.intents.weapon(Prio::Threat, WeaponIntent::hold(w));
                 }

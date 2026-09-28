@@ -838,7 +838,7 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         out.push(format!(
             "  mind: {}; aggression {:.2} (own {:.2}), fear {:.2} (own {:.2}); goals taken: {}; {} goal changes ({} \
              before the hold ran out, {} with no fight in them), {} target changes; {} sounds seen about, {} covers, {} \
-             spots held, {} items waited for, {} traps{}",
+             spots held, {} items waited for, {} traps; stood still {:.0}% of the time out of fights, {:.0}% in them{}",
             m.task.as_ref().map(|t| task_text(t, now)).unwrap_or_else(|| "-".into()),
             m.mood.aggression,
             own_aggr,
@@ -854,6 +854,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             ms.camps,
             ms.controlled,
             ms.traps,
+            ms.still_shares()[0] * 100.0,
+            ms.still_shares()[1] * 100.0,
             b.brain
                 .expect
                 .map(|(k, p)| format!(
