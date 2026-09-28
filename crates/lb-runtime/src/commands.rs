@@ -989,7 +989,11 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             yes(told.gauss_boost),
             yes(told.boost_now),
             m.tricks.uranium,
-            if m.tricks.gauss_why.is_empty() { "-" } else { m.tricks.gauss_why },
+            if m.tricks.gauss_why.is_empty() {
+                "-"
+            } else {
+                m.tricks.gauss_why
+            },
             if went.is_empty() { "-".into() } else { went.join(", ") },
             ts.leaps,
             ts.gauss_jumps,

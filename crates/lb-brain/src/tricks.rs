@@ -190,7 +190,9 @@ impl BotBrain {
         // Not into snarks, the bot's own or anyone's: they bite whoever comes down among them.
         let snarks_by = |p: Vec3| {
             self.explosives.flying.iter().any(|f| {
-                f.kind == ProjectileKind::Snark && now.since(f.seen) <= LEAP_SNARKS_SEEN && f.pos.distance(p) < LEAP_SNARKS
+                f.kind == ProjectileKind::Snark
+                    && now.since(f.seen) <= LEAP_SNARKS_SEEN
+                    && f.pos.distance(p) < LEAP_SNARKS
             })
         };
         if snarks_by(enemy) || snarks_by(body.origin) {

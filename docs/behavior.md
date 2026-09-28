@@ -385,7 +385,9 @@ up; between presets a switch keeps the lower one's value), and the server can tu
   below or 40 above, the will to close in (health × aggression) of 20 at least, the view on it (within 18° across, no
   more than 15° up or down), moving, no weapon protocol running, not reloading and no rocket of its own on the way.
   Every half second the style's chance is rolled; the flight, followed through the server's traces from where the
-  bot is, must come down on a floor (or in water) without fall damage, out of lava and slime, and nearer the enemy.
+  bot is, must come down on a floor (or in water) without fall damage, out of lava and slime, and nearer the enemy,
+  and no snark (the bot's own or anyone's) may have been seen in the last second within 300 units of the bot, the
+  enemy or the landing: they bite whoever comes down among them.
   Then 0.9–1.4 s before the next. The keys are pressed for 0.15 s (the motor lets go of duck for a command first when
   it is held); the aim and the shots go on in the air. yapb leaped at 400–750 units with a will of 30.
 - **A gauss jump on the way** somewhere more than 1400 units or 12 nodes off (any goal but a fight), with the gauss

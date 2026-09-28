@@ -653,11 +653,11 @@ fn a_gauss_jump_on_the_way_lands_nearer_the_goal_and_the_way_goes_on() {
     w.floor(0.0, 4096.0);
     w.solid(Vec3::new(600.0, -200.0, 0.0), Vec3::new(640.0, 2000.0, 160.0));
     let mut g = Builder::default();
-    let mut round = vec![g.node(0.0, 0.0, 36.0)];
-    for y in [-400.0f32] {
-        round.push(g.node(300.0, y, 36.0));
-        round.push(g.node(900.0, y, 36.0));
-    }
+    let round = [
+        g.node(0.0, 0.0, 36.0),
+        g.node(300.0, -400.0, 36.0),
+        g.node(900.0, -400.0, 36.0),
+    ];
     let goal = g.node(1500.0, 0.0, 36.0);
     let beyond = g.node(1200.0, 0.0, 36.0);
     for p in round.windows(2) {

@@ -1421,7 +1421,11 @@ impl TrickExec {
                     if jumped_only || pushed_off {
                         tracing::info!(
                             "gauss boost: {} (velocity {:.0} up, {:.0} along)",
-                            if jumped_only { "a jump and no throw" } else { "pushed off the takeoff" },
+                            if jumped_only {
+                                "a jump and no throw"
+                            } else {
+                                "pushed off the takeoff"
+                            },
                             i.velocity.z,
                             flat(i.velocity).dot(dir)
                         );

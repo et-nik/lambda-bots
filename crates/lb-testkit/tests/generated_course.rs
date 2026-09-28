@@ -295,7 +295,10 @@ fn debug_link() {
     c.place(&mut bot);
     bot.nav.follower = Some(PathFollower::new(vec![a, b], c.now));
     bot.nav.goal = Some(b);
-    let every: usize = std::env::var("LB_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    let every: usize = std::env::var("LB_EVERY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
     for i in 0..1500 {
         let st = c.frame(&mut bot, dest, 10.0);
         if i % every == 0 {
@@ -349,10 +352,16 @@ fn debug_longjump_check() {
         p.velocity = lb_core::Vec3::new(vx, vy, 0.0);
         let yaw = lb_core::math::dir_to_view_angles((b - p.origin).truncate().extend(0.0)).y;
         let v = lb_kin::tricks::longjump_from(&mut world, &phys, p, yaw, Some(b));
-        eprintln!("from the given state: ok {} landing {:?} flight {:.2}", v.ok, v.landing, v.flight);
+        eprintln!(
+            "from the given state: ok {} landing {:?} flight {:.2}",
+            v.ok, v.landing, v.flight
+        );
     }
     for (along, side) in [(0.0f32, 0.0f32), (-12.0, 0.0), (12.0, 0.0), (0.0, -8.0), (0.0, 8.0)] {
         let v = lb_kin::tricks::simulate_longjump(&mut world, &phys, a + dir * along, b + dir * along, side);
-        eprintln!("along {along} side {side}: ok {} landing {:?} flight {:.2} impact {:.0}", v.ok, v.landing, v.flight, v.impact);
+        eprintln!(
+            "along {along} side {side}: ok {} landing {:?} flight {:.2} impact {:.0}",
+            v.ok, v.landing, v.flight, v.impact
+        );
     }
 }

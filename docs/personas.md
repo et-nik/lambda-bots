@@ -75,6 +75,9 @@ A style is data in `config/styles/<style>.yaml`:
 - `weapons`: `guns`, multipliers of how good the style finds each gun (by its classname without `weapon_`; 1 = as
   good as its damage says; a list given replaces the built-in one), and `throwables`, how readily it throws grenades,
   satchels and snarks.
+- `tricks`: chances 0..1 of long jumps along straight stretches of the way (with the module), long jumps at an
+  enemy, gauss jumps on the way somewhere far, and satchels thrown from a jump. Below the normal preset's skill only
+  the long jumps on the way are done (see `docs/behavior.md`, *Tricks*).
 
 The goals are (see `docs/behavior.md` for what each does):
 
@@ -108,6 +111,14 @@ Built-in values:
 | `sniper`     | crossbow 1.35, 357 1.25, gauss 1.1, egon 0.9, shotgun 0.8 | 0.8    |
 | `controller` | gauss 1.15, rpg 1.1, egon 1.1                             | 1.0    |
 | `trapper`    | 9mmAR 1.1                                                 | 1.6    |
+
+| Style        | `longjump` | `lj_attack` | `gauss_jump` | `satchel_jump` |
+|--------------|------------|-------------|--------------|----------------|
+| `balanced`   | 0.8        | 0.6         | 0.33         | 0.4            |
+| `rusher`     | 0.8        | 1.0         | 0.33         | 0.6            |
+| `sniper`     | 0.8        | 0.6         | 0.33         | 0.2            |
+| `controller` | 1.0        | 0.6         | 0.5          | 0.4            |
+| `trapper`    | 0.8        | 0.6         | 0.33         | 0.7            |
 
 A personality's own `weapons` are its favourites on top of the style's: the first one listed counts 1.2 times more,
 the others 1.1 times.

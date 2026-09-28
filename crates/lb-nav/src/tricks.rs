@@ -22,7 +22,9 @@ const LEAP_GAIN: f32 = 2.0;
 const LEAP_NEAR: f32 = 160.0;
 const LEAP_SHORT: f32 = 0.4;
 const LEAP_ABOVE: f32 = 160.0;
-const LEAP_TRIES: usize = 3;
+const LEAP_TRIES: usize = 2;
+/// Ways a boost on the way is tried along: the flights are followed through the server's traces, some hundreds each.
+const LEAP_WAYS: usize = 3;
 /// How far a gauss beam goes.
 const BEAM_REACH: f32 = 8192.0;
 
@@ -117,8 +119,8 @@ fn leap_spec(graph: &NavGraph, from: Vec3, to: NodeId, flight: f32, damage: f32)
     }
 }
 
-/// A gauss boost from where the bot stands toward its goal (`path[next..]`, the goal last). The ways toward the next
-/// few nodes of the path and toward the goal are tried: where each flight comes down unsteered is followed, and the
+/// A gauss boost from where the bot stands toward its goal (`path[next..]`, the goal last). The ways toward the goal
+/// and the next two nodes of the path are tried: where each flight comes down unsteered is followed, and the
 /// nodes along its line short of that (the air brakes a flight onto them) are the landings to steer for. The one the
 /// planner reckons most seconds nearer the goal, `LEAP_GAIN` at least, is taken if the steered flight gets there,
 /// comes down leaving the bot `BOOST_HEALTH_AFTER` health, and the beam spares the bot. Off the path, the way on is
@@ -141,8 +143,11 @@ pub fn leap_along(
     let from_here = crate::plan::estimate(graph, here, goal);
     let unfit = NodeFlags::LADDER | NodeFlags::WATER | NodeFlags::AIRBORNE | NodeFlags::ON_MOVER | NodeFlags::CROUCH;
     let mut ways: smallvec::SmallVec<[lb_core::Vec2; 5]> = smallvec::SmallVec::new();
-    let targets = (next + 1..(next + 4).min(path.len())).chain(std::iter::once(path.len() - 1));
+    let targets = std::iter::once(path.len() - 1).chain(next + 1..(next + 3).min(path.len()));
     for k in targets {
+        if ways.len() >= LEAP_WAYS {
+            break;
+        }
         let d = (graph.node(path[k]).origin - input.origin).truncate();
         if d.length() < 128.0 {
             continue;

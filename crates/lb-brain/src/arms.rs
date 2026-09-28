@@ -1308,7 +1308,11 @@ impl BotBrain {
                         tracing::info!(
                             "gauss boost given up in its {} phase: {why}{}",
                             b.phase(),
-                            if b.held.is_some() { "; the charge is held on" } else { "" }
+                            if b.held.is_some() {
+                                "; the charge is held on"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     if let Active::Airburst(a) = &active {

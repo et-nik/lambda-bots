@@ -55,14 +55,22 @@ fn usage(g: &lb_nav::NavGraph) {
     let mut saved = 0.0f32;
     for _ in 0..3000 {
         let (a, b) = (rng.range_i32(0, n - 1) as NodeId, rng.range_i32(0, n - 1) as NodeId);
-        let Some(plain_path) = plan(g, a, b, &plain) else { continue };
-        let Some(tricky) = plan(g, a, b, &|_, _| 0.0) else { continue };
+        let Some(plain_path) = plan(g, a, b, &plain) else {
+            continue;
+        };
+        let Some(tricky) = plan(g, a, b, &|_, _| 0.0) else {
+            continue;
+        };
         total += 1;
         let d = g.node(a).origin.distance(g.node(b).origin);
         if d > 1400.0 || plain_path.len() > 13 {
             far += 1;
         }
-        let kinds: Vec<LinkKind> = tricky.windows(2).filter_map(|w| g.find_link(w[0], w[1])).map(|l| l.kind).collect();
+        let kinds: Vec<LinkKind> = tricky
+            .windows(2)
+            .filter_map(|w| g.find_link(w[0], w[1]))
+            .map(|l| l.kind)
+            .collect();
         if kinds.contains(&LinkKind::GaussBoost) {
             with_boost += 1;
             saved += path_time(g, &plain_path) - path_time(g, &tricky);

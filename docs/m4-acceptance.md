@@ -1,9 +1,10 @@
-# M4 acceptance: the arsenal (M4.1), knowledge, goals and styles (M4.2)
+# M4 acceptance: the arsenal (M4.1), knowledge, goals and styles (M4.2), tricks (M4.3)
 
-State as of 2026-09-28, after sub-stages M4.1, the arsenal, and M4.2, knowledge, goals and styles. Still to come:
-the tricks (M4.3) and the M4 acceptance runs. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS + hlsdk-portable,
-macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61); the feedback round after M4.2 ran on dm_snow, a
-small map where a run takes a minute or two. The ReHLDS server with BugfixedHL has run neither sub-stage yet.
+State as of 2026-09-29, after sub-stages M4.1, the arsenal, M4.2, knowledge, goals and styles, and M4.3, the tricks.
+Still to come: the M4 acceptance runs (the 60-minute soak). Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS +
+hlsdk-portable, macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61); the feedback round after M4.2
+and the tricks ran on dm_snow, a small map where a run takes a minute or two, and stalkyard. The ReHLDS server with
+BugfixedHL has run none of the sub-stages yet.
 
 ## Results against the plan's criteria
 
@@ -14,7 +15,8 @@ small map where a run takes a minute or two. The ReHLDS server with BugfixedHL h
 | Accuracy tables                          | yes    | `lb stats`: hit rate by distance for every weapon and fire mode             |
 | The game DLL's weapon rules              | partly | `lb selftest` on hlsdk-portable; the classic SDK in tests, not run live     |
 | Target switches ≤ 6 a minute             | yes    | M4.2's last mixed game: 1.2–3.3 a minute a bot (7.8 before the fix below)   |
-| Tricks, the 60-minute run                | later  | M4.3 and the M4 acceptance runs                                             |
+| Tricks succeed in ≥ 90% of scenarios     | yes    | long jumps 41/42 and boosts 349/352 offline, 52/52 boosts live; see M4.3    |
+| The 60-minute run                        | later  | the M4 acceptance runs                                                      |
 
 The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game. The mixed
 games of the day came to 0.75 and 1.5 a bot-hour (two grenades and one charged gauss shot), then 2.25 (three snarks,
@@ -378,6 +380,95 @@ personalities are drawn afresh for each game; nobody picked up snarks or grenade
 - **A wider snark barrage** (300 units, 40 health) turned the swarms on their owners: 19 deaths by own hand in a snark
   set. Back to 200 units and 50 health.
 
+## Tricks (M4.3)
+
+What the bots do and how is in `docs/behavior.md` (*Tricks*) and `docs/navigation.md` (*Long jumps and gauss
+boosts*). The owner's choices for this sub-stage:
+- **Long jump:** links across gaps in the graph (only for a bot with the module), and long jumps along straight
+  stretches of the way for speed, as yapb did, the landing checked by following the flight.
+- **Gauss jump:** on the way somewhere far (the gauss in hand, as yapb), and gauss boost links in the graph onto
+  ledges and across (the bot draws the gauss for one).
+- **Long jump at the enemy:** wider and more often than yapb: 300–900 units, a will to close in of 20.
+- **Skill and styles** as the plan says: from the normal preset up (long jumps on the way for everyone), with the
+  styles' chances; the satchel from a jump goes by the same switch.
+- **Health:** 60 to start a gauss jump, 40 left after its landing.
+- **Switches:** `tricks` in `config/lambdabots.yaml` (`longjump`, `gauss_jump`, `gauss_boost`, `satchel_jump`).
+- **Stand:** dm_snow with the module and the gauss given on spawn, plus the offline courses.
+
+**The graphs.** Long jump links are made only where every takeoff of the check lands (a long jump near its full reach
+falls short when it takes off a little early): dm_snow has 1, crossfire 3, stalkyard 8. Gauss boosts go onto ledges
+the graph reaches only by a way at least 1.3 times as costly: dm_snow 248 (its snowy rises are 88–192 units high),
+crossfire 68, stalkyard 74. Both stages together take 90–120 ms of the generator's time on these maps (crossfire in
+0.46 s all told).
+
+**Offline** (`generated_course`, 12 standard maps, the bot with the module and a gauss; `obstacles`):
+
+| Traversal                          | Result                                                          |
+|------------------------------------|-----------------------------------------------------------------|
+| long jump links                    | 41/42 (bounce: one lands short)                                 |
+| gauss boost links                  | 349/352                                                         |
+| a long jump across a gap           | made with the module; without it the bot goes round             |
+| a gauss boost onto a 200-unit rise | made; without the gun there is no way                           |
+| long jumps along a straight run    | 1800 units 15% faster at least than running                     |
+| a gauss jump over a wall           | lands off the path nearer the goal, the way on is planned again |
+
+**Live `lb nav test`** (one hard bot, the module and the gauss given, health and uranium topped up before each link):
+
+| Map       | Links           | Result                                                                          |
+|-----------|-----------------|---------------------------------------------------------------------------------|
+| dm_snow   | 40 gauss boosts | 40/40, 3.0 s each                                                               |
+| stalkyard | 20 gauss boosts | 12/12; 8 entries not reached (the way there fails on the map's jumps)           |
+| stalkyard | 8 long jumps    | 6/7, 1 entry not reached; the failure (a run-up start a step below) fixed after |
+| dm_snow   | 2 long jumps    | 1/2 before the run-up was reworked (see below)                                  |
+
+**Live games on dm_snow**, 8 hard bots (a normal bot below skill 50 does no fighting tricks), 150 s a set
+(`scripts/stand/tricks-scenarios.sh`; `longjump`: the module and the map's weapons; `plain`: the same without the
+module):
+
+| Set                       | Kills | Deaths by own hand | Long jumps on the way landed | Long jumps at enemies |
+|---------------------------|-------|--------------------|------------------------------|-----------------------|
+| longjump                  | 93    | 0                  | 25/26                        | 278                   |
+| plain                     | 102   | 0                  | —                            | —                     |
+| longjump                  | 93    | 0                  | 24/26                        | 254                   |
+| plain                     | 90    | 1                  | —                            | —                     |
+| longjump, snark rule      | 73    | 0                  | 25/25                        | 249                   |
+| both (module, gauss only) | 121   | 0                  | 23/27                        | 145                   |
+
+The long jumps that missed left the ground at full speed and were stopped in the air: by another bot in the way or,
+in the gauss set, by the knock of a gauss hit. With the gauss alone and 8 bots, boosts hardly happen: the uranium
+goes on the fight (a boost link wants 40, a gauss jump 30) and there are never two calm seconds; with one bot
+alone the gauss jump on the way came 1 of 1 landed, and in the `both` set one was started and called off when an
+enemy came into sight (its charge was held on for the enemy).
+
+**A mixed game** on dm_snow, 5 minutes, 8 normal bots, no cheats (dm_snow has no long jump module, so the tricks there
+are the gauss's), the build before M4.3 and after it:
+
+| In the game                                        | Before | After  |
+|----------------------------------------------------|--------|--------|
+| Kills a minute                                     | 24.0   | 23.4   |
+| Deaths by own hand                                 | 0      | 0      |
+| Share of the time a bot stood still, out of fights | 16%    | 13%    |
+| Share of the time a bot stood still, in fights     | 10%    | 7%     |
+| Core time p99                                      | 158 µs | 179 µs |
+
+### Found on the stand and fixed
+
+- **A long jump link's bot walked off the ledge** while its view was still turning to the landing (the entry is
+  often at the edge), or took off from a floor below the entry into the ledge's wall: 51/83 links offline. Now it
+  stops at the start of the run-up behind the takeoff (only as far back as there is floor), turns there, runs and
+  takes off within the window the check tried, on the entry's floor; a link is made only when every takeoff of the
+  check lands: 41/42.
+- **A trick's flight was lost** when the goal changed in the air (the path was replaced) or a fight began (nobody
+  steered): it is flown to its end now whatever the brain does.
+- **A gauss jump on the way was hardly ever found**: its landing had to be by a node of the path, and paths bend.
+  Now any node along the flight's line the planner reckons two seconds nearer the goal will do; the way on is planned
+  again after the landing.
+- **A dumped charge killed its bot**: no level way was clear of the beam's burst on a wall (372 units off, the burst
+  reaching 382). A dump goes straight up now when the sky or a high ceiling is farther than every wall around.
+- **Snarks and leaps**: a leap at the enemy is not taken with a snark seen by the bot, the enemy or the landing.
+- **Giving every weapon and its ammo** on every spawn filled dm_snow with ammo the bots could not take until the
+  server ran out of entities; the trick sets use the map's weapons.
+
 ## Tools
 
 - `lb weapons <weapon>… give`, `lb weapons all`: a scenario's weapons, handed out on every spawn (needs
@@ -401,6 +492,12 @@ personalities are drawn afresh for each game; nobody picked up snarks or grenade
   through walls.
 - `scripts/stand/style-scenarios.sh [--seconds 180] [--bots 8] [style…]`: the per-style runs above, reports in
   `stand-runs/current/styles/`.
+- `lb items <item>…` hands items out on every spawn (`longjump`), `scripts/stand/tricks-scenarios.sh [--seconds 150]
+  [--bots 8] [set…]` runs the trick sets with hard bots, reports in `stand-runs/current/tricks/`.
+- `lb brain` shows each bot's tricks, `lb stats` their sums; missed tricks are logged (`missed:`) with how fast they
+  left the ground and where they came down, gauss boosts when thrown and when given up.
+- `lb nav test longjump|gauss_boost [count]` runs the trick links live; `cargo run -p lb-nav --example tricks_debug
+  <graph.lbnav>` lists a graph's trick links and how often random plans take them.
 
 ## Not done yet
 
@@ -419,3 +516,8 @@ personalities are drawn afresh for each game; nobody picked up snarks or grenade
   hand); whether they hit is not counted yet.
 - **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live; the classic satchel buttons are
   checked against a model of the three DLLs in the tests.
+- **Gauss boosts in a fight-heavy game** are rare: the uranium goes on the fight and a boost wants two calm seconds.
+- **A long jump at the enemy** is checked before it is taken, but whether it helped (a kill, a hit) is not counted.
+- **Tricks and GunGame** (twice the leaps in warmup, gauss jumps only at 80 health with descore) come with M5.
+- **The long jump links are few** (1–8 a map): only those every checked takeoff makes; the rest of the gaps are
+  walked round.
