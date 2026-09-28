@@ -676,6 +676,14 @@ fn gather_files(init: &InitData, map: &str) -> Vec<(Root, String, Vec<u8>)> {
     if generated.is_file() {
         add(Root::Install, "data/profiles.yaml".into(), &generated);
     }
+    let experience = crate::learned::experience_file(install, map);
+    if experience.is_file() {
+        add(Root::Install, format!("data/experience/{map}.json"), &experience);
+    }
+    let respawns = crate::learned::respawn_file(install);
+    if respawns.is_file() {
+        add(Root::Install, "data/learned/respawn.json".into(), &respawns);
+    }
     let map_files = nav::map_files(&init.game_dir, install, map);
     if let Some(bsp) = &map_files.bsp {
         add(Root::Game, format!("maps/{map}.bsp"), bsp);

@@ -8,7 +8,9 @@ use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
 
 use crate::obs::*;
+use crate::places::{Spread, Watch};
 use lb_core::dmath;
+use lb_nav_api::MapView;
 
 /// A track counts as in sight while its last sighting is this recent (vision runs at 20 Hz).
 const VISIBLE_AGE: f64 = 0.12;
@@ -94,6 +96,8 @@ pub struct EnemyTrack {
     pub parts: u8,
     pub traits: ObservedTraits,
     pub prov: Provenance,
+    /// Where it may be while out of sight, over the map's places.
+    pub spread: Option<Box<Spread>>,
     fix_pos: Vec3,
     fix_sigma: f32,
     fix_t: SimTime,
@@ -117,10 +121,16 @@ impl EnemyTrack {
             parts: s.parts,
             traits: traits_of(s, None),
             prov: Provenance::new(Sensor::Vision, s.t),
+            spread: None,
             fix_pos: s.pos,
             fix_sigma: s.sigma,
             fix_t: s.t,
         }
+    }
+
+    /// When the player was last placed, by sight or sound.
+    pub fn fixed_at(&self) -> SimTime {
+        self.fix_t
     }
 
     pub fn velocity_known(&self, now: SimTime) -> bool {
@@ -215,6 +225,8 @@ pub enum HypothesisKind {
 /// Something suggests a player is somewhere, without saying who.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hypothesis {
+    /// Numbers hypotheses in the order they came, for goals to refer to one.
+    pub id: u32,
     pub kind: HypothesisKind,
     pub t: SimTime,
     /// Estimated position; damage gives only a bearing.
@@ -238,6 +250,7 @@ pub struct Beliefs {
     alert_until: SimTime,
     /// `track_forget` of the last update: how long after a sighting sounds may still be tied to a track.
     memory: f64,
+    next_hypothesis: u32,
 }
 
 impl Default for Beliefs {
@@ -248,6 +261,7 @@ impl Default for Beliefs {
             last_damage: None,
             alert_until: SimTime::ZERO,
             memory: 8.0,
+            next_hypothesis: 1,
         }
     }
 }
@@ -276,6 +290,7 @@ impl Beliefs {
     pub fn on_cue(&mut self, c: &AnonymousCue) {
         let bearing = dmath::atan2(c.dir.y, c.dir.x).to_degrees();
         self.push_hypothesis(Hypothesis {
+            id: 0,
             kind: HypothesisKind::Cue,
             t: c.t,
             pos: Some(c.pos),
@@ -314,6 +329,7 @@ impl Beliefs {
             track = Some(t.who);
         }
         self.push_hypothesis(Hypothesis {
+            id: 0,
             kind: HypothesisKind::Sound(s.kind),
             t: s.t,
             pos: Some(s.pos),
@@ -330,6 +346,7 @@ impl Beliefs {
         self.last_damage = Some(*d);
         if let Some(bearing) = d.bearing {
             self.push_hypothesis(Hypothesis {
+                id: 0,
                 kind: HypothesisKind::Damage,
                 t: d.t,
                 pos: None,
@@ -355,7 +372,13 @@ impl Beliefs {
         self.alert_until = SimTime::ZERO;
     }
 
-    fn push_hypothesis(&mut self, h: Hypothesis) {
+    pub fn hypothesis(&self, id: u32) -> Option<&Hypothesis> {
+        self.hypotheses.iter().find(|h| h.id == id)
+    }
+
+    fn push_hypothesis(&mut self, mut h: Hypothesis) {
+        h.id = self.next_hypothesis;
+        self.next_hypothesis = self.next_hypothesis.wrapping_add(1).max(1);
         if self.hypotheses.len() >= MAX_HYPOTHESES {
             let weakest = self
                 .hypotheses
@@ -382,6 +405,34 @@ impl Beliefs {
             };
             now.since(h.t) <= life
         });
+    }
+
+    /// The navigation graph was replaced: spreads are over the old one's nodes, whatever their number.
+    pub fn on_new_graph(&mut self) {
+        for t in &mut self.tracks {
+            t.spread = None;
+        }
+    }
+
+    /// Spreads every enemy out of sight over the places it may be at by now, starting over from each new fix (a
+    /// sighting or a sound tied to it); `horizon`: how many seconds' run from the fix it is looked for.
+    pub fn spread(&mut self, now: SimTime, map: &dyn MapView, watch: Option<&Watch>, horizon: f32) {
+        for t in self.tracks.iter_mut().filter(|t| t.relation == Relation::Enemy) {
+            // In sight, or forgotten (nobody looks for it any more).
+            if matches!(t.state, TrackState::Visible | TrackState::Stale) {
+                t.spread = None;
+                continue;
+            }
+            match t.spread.as_mut() {
+                // Steps heard every few tenths of a second each move the fix: twice a second is enough.
+                Some(s) if s.fresh(now) => {}
+                Some(s) if s.lost_at == t.fix_t => s.update(now, map, watch),
+                _ => {
+                    let vel = (t.fix_t == t.last_seen && t.vel != Vec3::ZERO).then_some(t.vel);
+                    t.spread = Spread::new(map, t.fix_pos, vel, t.fix_t, horizon, now, watch).map(Box::new);
+                }
+            }
+        }
     }
 
     /// In a fight: an enemy was recognized or damage taken within the last 3 s.
@@ -419,6 +470,7 @@ impl Beliefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::places::testmap::Corridor;
 
     const P: BeliefParams = BeliefParams {
         track_forget: 8.0,
@@ -527,5 +579,19 @@ mod tests {
             weapon: "9mmhandgun".into(),
         });
         assert!(b.tracks.is_empty());
+    }
+
+    #[test]
+    fn a_new_graph_drops_the_spreads_over_the_old_one() {
+        let mut b = Beliefs::default();
+        b.on_sighting(&sighting(3, 0.0, Vec3::new(500.0, 0.0, 0.0), true));
+        b.update(SimTime(2.0), &P);
+        b.spread(SimTime(2.0), &Corridor { n: 12 }, None, 8.0);
+        assert_eq!(b.track_by_slot(3).unwrap().spread.as_ref().unwrap().from, 5);
+        b.on_new_graph();
+        // Node 5 is no more: the spread starts over on the new graph.
+        b.update(SimTime(2.6), &P);
+        b.spread(SimTime(2.6), &Corridor { n: 4 }, None, 8.0);
+        assert_eq!(b.track_by_slot(3).unwrap().spread.as_ref().unwrap().from, 3);
     }
 }

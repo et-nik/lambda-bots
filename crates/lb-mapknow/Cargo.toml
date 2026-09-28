@@ -10,10 +10,18 @@ publish.workspace = true
 
 [dependencies]
 lb-core.workspace = true
+lb-worldq.workspace = true
 lb-bsp.workspace = true
 lb-nav.workspace = true
 lb-nav-api.workspace = true
 smallvec.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+lb-navgen.workspace = true
 
 [lints]
 workspace = true

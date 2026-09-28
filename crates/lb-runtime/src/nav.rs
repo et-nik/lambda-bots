@@ -63,6 +63,8 @@ pub struct LoadedMap {
     pub chargers: Arc<Vec<lb_knowledge::ChargerSpot>>,
     pub mechs: Arc<MapMechs>,
     pub graph: Result<Arc<NavGraph>, String>,
+    /// Who sees whom, chokepoints, spots to hold and to mine, worked out from the graph; `None` without one.
+    pub tactics: Option<Arc<lb_mapknow::MapTactics>>,
     /// Where the graph came from: "cache", "generated" or "yapb".
     pub origin: &'static str,
     /// The map's overlays (editor's, then the hand-written one) and what applying their patches came to.
@@ -125,7 +127,7 @@ impl NavLoader {
 pub fn summary(result: &Result<LoadedMap, String>) -> String {
     match result {
         Ok(m) => format!(
-            "{} leaves, {} items, {} movers, {} breakables, {}",
+            "{} leaves, {} items, {} movers, {} breakables, {}{}",
             m.vis.visleafs(),
             m.items.len(),
             m.mechs.movers,
@@ -140,7 +142,17 @@ pub fn summary(result: &Result<LoadedMap, String>) -> String {
                     g.stats.kinds()
                 ),
                 Err(_) => "no graph".into(),
-            }
+            },
+            m.tactics
+                .as_ref()
+                .map(|t| format!(
+                    "; {} pairs in sight, {} chokepoints, {} spots to hold, {} to mine",
+                    t.stats.pairs,
+                    t.chokes.len(),
+                    t.camps.len(),
+                    t.mines.len()
+                ))
+                .unwrap_or_default()
         ),
         Err(_) => "not loaded".into(),
     }
@@ -187,7 +199,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     let bytes = std::fs::read(bsp_path).map_err(|e| format!("{}: {e}", bsp_path.display()))?;
     let mut world = lb_bsp::BspWorld::load(&bytes).map_err(|e| format!("{}: {e}", bsp_path.display()))?;
     let vis = Arc::new(lb_bsp::MapVis::build(&world.bsp));
-    let items = world
+    let items: Vec<ItemSpot> = world
         .entities
         .iter()
         .filter_map(|e| {
@@ -239,6 +251,32 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         other => (other, String::new()),
     };
     let graph = graph.map(|g| Arc::new(Arc::try_unwrap(g).unwrap_or_else(|g| (*g).clone()).with_landmarks()));
+    let tactics = match &graph {
+        Ok(g) => {
+            // Doors, lifts and breakables where the map starts them, whether the graph was made now or read back.
+            lb_navgen::site::rest_poses(&mut world, &mech);
+            let points: Vec<Vec3> = items.iter().map(|i| i.origin).collect();
+            match pool(opts.threads, "lb-tactics") {
+                Ok(pool) => {
+                    let t = pool.install(|| lb_mapknow::MapTactics::build(g, &world, &vis, &spawns, &points));
+                    tracing::info!(
+                        "{map}: tactics in {} ms: {} pairs in sight, {} chokepoints, {} spots to hold, {} to mine",
+                        t.stats.millis,
+                        t.stats.pairs,
+                        t.chokes.len(),
+                        t.camps.len(),
+                        t.mines.len()
+                    );
+                    Some(Arc::new(t))
+                }
+                Err(e) => {
+                    tracing::warn!("{map}: no tactics: {e}");
+                    None
+                }
+            }
+        }
+        Err(_) => None,
+    };
     Ok(LoadedMap {
         vis,
         items: Arc::new(items),
@@ -246,6 +284,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         chargers: Arc::new(chargers),
         mechs,
         graph,
+        tactics,
         origin,
         overlays: Arc::new(overlays),
         patches,
@@ -305,18 +344,8 @@ fn generated_graph(
     if let Some(graph) = cache.load(&key) {
         return Ok((Arc::new(graph), "cache"));
     }
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as i32;
-    let threads = if opts.threads > 0 {
-        opts.threads
-    } else {
-        cores + opts.threads
-    }
-    .max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads as usize)
-        .thread_name(|i| format!("lb-navgen-{i}"))
-        .build()
-        .map_err(|e| format!("cannot start the generator's threads: {e}"))?;
+    let pool = pool(opts.threads, "lb-navgen")?;
+    let threads = pool.current_num_threads();
     let generated = pool.install(|| lb_navgen::generate(world, mech, &gen_opts, "generated"));
     if generated.graph.is_empty() {
         return Err("the generator found no floor".into());
@@ -338,6 +367,17 @@ fn generated_graph(
         Err(e) => tracing::warn!("{map}: the graph is not kept: {e}"),
     }
     Ok((Arc::new(generated.graph), "generated"))
+}
+
+/// Worker threads for the map's heavy work: `threads` of them, or all cores but `-threads` when not positive.
+fn pool(threads: i32, name: &'static str) -> Result<rayon::ThreadPool, String> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as i32;
+    let threads = if threads > 0 { threads } else { cores + threads }.max(1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads as usize)
+        .thread_name(move |i| format!("{name}-{i}"))
+        .build()
+        .map_err(|e| format!("cannot start the {name} threads: {e}"))
 }
 
 fn load_graph(
@@ -530,10 +570,19 @@ impl MechView for LiveMechs {
     }
 }
 
+/// Seconds of running within which cover is looked for.
+const COVER_REACH: f32 = 4.0;
+/// Cover candidates checked with live traces.
+const COVER_CHECKS: usize = 3;
+
 /// Navigation as one bot's behavior sees it for one frame: its navigator, the graph, live traces and mechanisms.
 pub struct BotNavService<'a, 'h> {
     pub nav: &'a mut Navigator,
     pub graph: Option<&'a NavGraph>,
+    /// Who sees whom, for cover.
+    pub tactics: Option<&'a lb_mapknow::MapTactics>,
+    /// Where bots got hurt, cover there is worse.
+    pub experience: Option<&'a lb_mapknow::Experience>,
     pub tracer: &'a mut LiveTracer<'h>,
     pub mechs: &'a LiveMechs,
     pub health: &'a mut LinkHealth,
@@ -618,6 +667,24 @@ impl NavService for BotNavService<'_, '_> {
             budget: None,
         };
         Navigator::away_from(&ctx, self.input.origin, threat)
+    }
+
+    fn cover_from(&mut self, threat: Vec3) -> Option<Vec3> {
+        let (graph, t) = (self.graph?, self.tactics?);
+        let experience = self.experience;
+        let danger = |n: lb_nav_api::NodeId| experience.map_or(0.0, |x| x.danger(n));
+        let found = lb_mapknow::cover::cover(graph, t, self.input.origin, threat, COVER_REACH, &danger);
+        // The table says out of sight; a live look from where the threat is makes sure (doors, lifts, crates).
+        let eye = threat + Vec3::Z * lb_nav::exec::EYE_HEIGHT;
+        found
+            .iter()
+            .take(COVER_CHECKS)
+            .map(|&n| t.origins[n as usize])
+            .find(|p| {
+                let mut q = TraceQuery::line(eye, *p + Vec3::Z * lb_nav::exec::EYE_HEIGHT);
+                q.ignore_glass = true;
+                self.tracer.trace(&q).fraction < 1.0
+            })
     }
 
     fn available(&self) -> bool {

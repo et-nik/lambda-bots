@@ -1,5 +1,6 @@
 //! Where a bot looks when something calls for it: a recognized enemy, the damage compass, an enemy lost a moment
-//! ago, an unrecognized glimpse, a sound. Stands in for the vigilance layer and the combat look until the arbiter
+//! ago, where a lost enemy would come into view, an unrecognized glimpse, a sound, and, with nothing going on at a
+//! place where bots got hurt before, where that came from. Stands in for the vigilance layer and the combat look until the arbiter
 //! arrives; the path follower looks along the path otherwise.
 //!
 //! A bot on the move does not turn its head at every noise: only at sounds near enough to matter, not already in
@@ -25,6 +26,8 @@ const FRESH: f64 = 0.5;
 const IN_VIEW: f32 = 40.0;
 /// Steepest glance up or down at a sound: the tangent of about 15°.
 const SOUND_TILT: f32 = 0.27;
+/// No enemy seen for this long before a glance where danger comes from.
+const DANGER_CALM: f64 = 4.0;
 
 /// A sound of `kind` about `distance` away is worth a glance.
 fn worth_a_look(kind: SoundKind, distance: f32) -> bool {
@@ -43,6 +46,10 @@ pub enum LookReason {
     Enemy(PlayerKey),
     Damage,
     Lost(PlayerKey),
+    /// Where a lost enemy would come into view.
+    Expect(PlayerKey),
+    /// Where bots at this place were mostly hurt from.
+    Danger,
     Glimpse,
     Sound(SoundKind),
 }
@@ -53,6 +60,8 @@ impl LookReason {
             LookReason::Enemy(_) => "enemy",
             LookReason::Damage => "damage",
             LookReason::Lost(_) => "lost",
+            LookReason::Expect(_) => "expect",
+            LookReason::Danger => "danger",
             LookReason::Glimpse => "glimpse",
             LookReason::Sound(_) => "sound",
         }
@@ -118,6 +127,12 @@ pub(crate) fn pick(brain: &mut BotBrain, now: SimTime, eye: Vec3) -> Option<Atte
         }
         brain.glance.current = None;
     }
+    if let Some((who, point)) = brain.expect {
+        return Some(Attention {
+            point,
+            reason: LookReason::Expect(who),
+        });
+    }
     if now < brain.glance.quiet_until {
         return None;
     }
@@ -146,7 +161,18 @@ pub(crate) fn pick(brain: &mut BotBrain, now: SimTime, eye: Vec3) -> Option<Atte
                 reason: LookReason::Sound(k),
             })
     };
-    let a = glimpse.or_else(sound)?;
+    // With nothing going on, a look where the damage taken at this place came from before.
+    let danger = || {
+        let calm = now.since(brain.mind.last_enemy_seen()) >= DANGER_CALM;
+        brain
+            .danger
+            .filter(|p| calm && angle_diff(dmath::atan2(p.y - eye.y, p.x - eye.x).to_degrees(), yaw).abs() > IN_VIEW)
+            .map(|p| Attention {
+                point: level(eye, p),
+                reason: LookReason::Danger,
+            })
+    };
+    let a = glimpse.or_else(sound).or_else(danger)?;
     // The gap varies from glance to glance without a random stream: by the time of the glance.
     let jitter = (now.secs() * 7.31).fract();
     brain.glance.current = Some((a, now + GLANCE_FOR));

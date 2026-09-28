@@ -30,7 +30,7 @@ Only `name` is required. Missing fields are derived from the nickname once and n
 | `model`     | player model; default: one of `bots.models`                                    |
 | `colors`    | `[top, bottom]`, 0–255                                                         |
 | `traits`    | `{ aggression: 0–1, fear: 0–1 }`; default: drawn within the style's range      |
-| `weapons`   | preferred weapons, best first: `[crossbow, "357", shotgun]`                    |
+| `weapons`   | favourite weapons, best first: `[crossbow, "357", shotgun]`                    |
 | `weight`    | how often it joins relative to others; default 1; 0 = only on `lb add <name>`  |
 | `tags`      | free labels                                                                    |
 | `seed`      | seed of its own random habits; default: derived from the nickname              |
@@ -58,7 +58,8 @@ bots:
 ## Skill
 
 Skill is a 0–100 scale with five presets at 0, 25, 50, 75 and 100. `config/difficulty.yaml` sets the parameters at
-these points: recognition time, aim latency and error, turn speed, hearing, memory, tricks and so on. Between two
+these points: recognition time, aim latency and error, turn speed, hearing, memory, tricks, shooting the gauss
+through walls (`gauss_walls`, hard and expert) and so on. Between two
 presets numbers are mixed linearly, so skill 62 is about halfway between normal and hard. Switches (aim model,
 tricks, dodge jumps, bunny hopping) keep the lower preset's value until the next point. `overrides` in a
 personality then change single parameters.
@@ -69,27 +70,47 @@ personality then change single parameters.
 
 A style is data in `config/styles/<style>.yaml`:
 - `traits`: the ranges of aggression and fear that new personalities of the style draw from.
-- `goals`: multipliers of the goal weights, where 1 is the balanced style.
+- `goals`: multipliers of the goal weights, where 1 is the balanced style's weight of fighting, chasing, backing off,
+  collecting and wandering.
+- `weapons`: `guns`, multipliers of how good the style finds each gun (by its classname without `weapon_`; 1 = as
+  good as its damage says; a list given replaces the built-in one), and `throwables`, how readily it throws grenades,
+  satchels and snarks.
 
-The goals are:
+The goals are (see `docs/behavior.md` for what each does):
 
-| Goal      | What the bot does                                          |
-|-----------|------------------------------------------------------------|
-| `engage`  | fights an enemy in sight                                   |
-| `hunt`    | chases an enemy lost moments ago                           |
-| `retreat` | backs off when hurt and scared                             |
-| `collect` | goes for weapons, ammo, health, armor and the long jump    |
-| `roam`    | wanders around the map                                     |
+| Goal          | What the bot does                                       |
+|---------------|---------------------------------------------------------|
+| `engage`      | fights an enemy in sight                                |
+| `hunt`        | looks for an enemy lost moments ago                     |
+| `retreat`     | backs off to cover when hurt and scared                 |
+| `collect`     | goes for weapons, ammo, health, armor and the long jump |
+| `roam`        | wanders around the map                                  |
+| `investigate` | goes to see what made a sound                           |
+| `camp`        | holds a spot with long sightlines                       |
+| `ambush`      | waits out of the way by a chokepoint                    |
+| `control`     | waits by an item about to come back                     |
+| `trap`        | lays tripmines and satchels where players pass          |
 
 Built-in values:
 
-| Style        | aggression | fear      | engage | hunt | retreat | collect |
-|--------------|------------|-----------|--------|------|---------|---------|
-| `balanced`   | 0.40–0.70  | 0.40–0.70 | 1.0    | 1.0  | 1.0     | 1.0     |
-| `rusher`     | 0.70–1.00  | 0.00–0.40 | 1.2    | 1.4  | 0.6     | 1.0     |
-| `sniper`     | 0.20–0.50  | 0.70–1.00 | 1.0    | 0.3  | 1.4     | 1.0     |
-| `controller` | 0.45–0.70  | 0.40–0.60 | 1.0    | 1.0  | 1.0     | 1.3     |
-| `trapper`    | 0.30–0.60  | 0.50–0.80 | 1.0    | 0.8  | 1.2     | 1.0     |
+| Style        | aggression | fear      | engage | hunt | retreat | collect | investigate | camp | ambush | control | trap |
+|--------------|------------|-----------|--------|------|---------|---------|-------------|------|--------|---------|------|
+| `balanced`   | 0.40–0.70  | 0.40–0.70 | 1.0    | 1.0  | 1.0     | 1.0     | 1.0         | 0.25 | 0.3    | 0.4     | 0.4  |
+| `rusher`     | 0.70–1.00  | 0.00–0.40 | 1.2    | 1.4  | 0.6     | 1.0     | 1.3         | 0    | 0.2    | 0.4     | 0.3  |
+| `sniper`     | 0.20–0.50  | 0.70–1.00 | 1.0    | 0.3  | 1.4     | 1.0     | 0.6         | 2.0  | 1.2    | 0.6     | 0.5  |
+| `controller` | 0.45–0.70  | 0.40–0.60 | 1.0    | 1.0  | 1.0     | 1.3     | 0.9         | 0.3  | 0.4    | 2.0     | 0.4  |
+| `trapper`    | 0.30–0.60  | 0.50–0.80 | 1.0    | 0.8  | 1.2     | 1.0     | 0.8         | 0.4  | 1.2    | 0.6     | 2.0  |
+
+| Style        | Guns                                                      | Throws |
+|--------------|-----------------------------------------------------------|--------|
+| `balanced`   | —                                                         | 1.0    |
+| `rusher`     | shotgun 1.25, 9mmAR 1.15, egon 1.1, 357 0.9, crossbow 0.8 | 1.0    |
+| `sniper`     | crossbow 1.35, 357 1.25, gauss 1.1, egon 0.9, shotgun 0.8 | 0.8    |
+| `controller` | gauss 1.15, rpg 1.1, egon 1.1                             | 1.0    |
+| `trapper`    | 9mmAR 1.1                                                 | 1.6    |
+
+A personality's own `weapons` are its favourites on top of the style's: the first one listed counts 1.2 times more,
+the others 1.1 times.
 
 A file may leave values out; they keep the built-in ones. Personalities that are already saved keep their traits:
 a new trait range only affects personalities generated later and hand-written profiles without `traits`.

@@ -9,6 +9,7 @@ use lb_core::handles::BotId;
 use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
 use lb_game::self_state::{DEAD_NO, DEAD_RESPAWNABLE, SelfState};
+use lb_game::weapons::WeaponId;
 use lb_host::driver::CommandDriver;
 
 use crate::motor_test::MotorTest;
@@ -87,7 +88,7 @@ impl Bot {
         userid: i32,
         persona: Arc<lb_styles::Persona>,
         skill: SkillParams,
-        affinity: lb_styles::GoalAffinity,
+        style: (lb_styles::GoalAffinity, &lb_styles::WeaponLikes),
         now: SimTime,
         master_seed: u64,
         cmd_rate: f64,
@@ -95,7 +96,7 @@ impl Bot {
     ) -> Bot {
         let rng = BotRng::new(master_seed, persona.seed);
         let brain = lb_brain::BotBrain::new(id.slot, lb_perception::PerceptionParams::from_skill(&skill));
-        let character = character(&persona, &skill, affinity);
+        let character = character(&persona, &skill, style);
         Bot {
             id,
             userid,
@@ -133,10 +134,10 @@ impl Bot {
         &mut self,
         persona: Arc<lb_styles::Persona>,
         skill: SkillParams,
-        affinity: lb_styles::GoalAffinity,
+        style: (lb_styles::GoalAffinity, &lb_styles::WeaponLikes),
     ) {
         self.brain.params = lb_perception::PerceptionParams::from_skill(&skill);
-        self.character = character(&persona, &skill, affinity);
+        self.character = character(&persona, &skill, style);
         self.skill = skill;
         self.persona = persona;
     }
@@ -207,17 +208,43 @@ impl Bot {
     }
 }
 
+/// A favourite weapon of the personality counts this much more, the first one listed; the others half as much.
+const FAVOURITE: f32 = 1.2;
+
 fn character(
     persona: &lb_styles::Persona,
     skill: &SkillParams,
-    affinity: lb_styles::GoalAffinity,
+    (affinity, likes): (lb_styles::GoalAffinity, &lb_styles::WeaponLikes),
 ) -> lb_brain::Character {
+    let mut weapons = lb_brain::WeaponLike {
+        throwables: likes.throwables,
+        ..Default::default()
+    };
+    for (name, v) in &likes.guns {
+        match WeaponId::from_classname(name.trim()) {
+            Some(w) => weapons.guns[w as usize] = *v,
+            None => tracing::warn!("style {}: no weapon `{name}`", persona.style.as_str()),
+        }
+    }
+    for (i, name) in persona.weapons.iter().enumerate() {
+        match WeaponId::from_classname(name.trim()) {
+            Some(w) => {
+                weapons.guns[w as usize] *= if i == 0 {
+                    FAVOURITE
+                } else {
+                    1.0 + (FAVOURITE - 1.0) / 2.0
+                }
+            }
+            None => tracing::warn!("{}: no weapon `{name}`", persona.name),
+        }
+    }
     lb_brain::Character {
         skill: skill.clone(),
         level: persona.skill,
         aggression: persona.aggression,
         fear: persona.fear,
         affinity,
+        weapons,
     }
 }
 

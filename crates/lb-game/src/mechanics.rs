@@ -32,6 +32,22 @@ pub enum Attack {
     Secondary,
 }
 
+impl Attack {
+    pub fn other(self) -> Attack {
+        match self {
+            Attack::Primary => Attack::Secondary,
+            Attack::Secondary => Attack::Primary,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Attack::Primary => "primary",
+            Attack::Secondary => "secondary",
+        }
+    }
+}
+
 /// What the secondary attack does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AltFire {

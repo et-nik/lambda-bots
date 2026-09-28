@@ -10,7 +10,8 @@ use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 /// A target counts as aiming at the bot when its observed facing is this close to the bot's bearing.
 pub const FACING_ME_DEGREES: f32 = 15.0;
 const FIRING_RECENT: f64 = 1.0;
-const CURRENT_BONUS: f32 = 1.3;
+/// Another enemy takes over only when this much more pressing: facing and firing flicker as enemies strafe.
+const CURRENT_BONUS: f32 = 1.6;
 
 /// The track's observed facing points at `me`.
 pub fn faces(track: &EnemyTrack, me: Vec3) -> bool {

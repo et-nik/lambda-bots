@@ -332,7 +332,7 @@ mod tests {
     const BHL: DllProfile = DllProfile {
         kind: DllKind::Bugfixed,
         detected: true,
-        satchel_swapped: false,
+        satchel: lb_game::dll::SatchelButtons::PrimaryThrows,
     };
 
     fn lands(t: &Throw, gravity: f32, target: Vec3) -> f32 {

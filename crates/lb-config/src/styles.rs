@@ -34,6 +34,27 @@ pub struct StyleGoals {
     pub collect: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roam: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub investigate: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camp: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ambush: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trap: Option<f32>,
+}
+
+/// Weapons the style favours: gun multipliers by classname without `weapon_` (replacing the built-in list when
+/// given), and how readily it throws.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct StyleWeapons {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guns: Option<std::collections::BTreeMap<String, f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throwables: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -46,6 +67,8 @@ pub struct StyleFile {
     pub traits: StyleTraits,
     #[serde(default)]
     pub goals: StyleGoals,
+    #[serde(default)]
+    pub weapons: StyleWeapons,
 }
 
 impl StyleFile {
@@ -80,9 +103,25 @@ impl StyleFile {
             ("goals.retreat", g.retreat),
             ("goals.collect", g.collect),
             ("goals.roam", g.roam),
+            ("goals.investigate", g.investigate),
+            ("goals.camp", g.camp),
+            ("goals.ambush", g.ambush),
+            ("goals.control", g.control),
+            ("goals.trap", g.trap),
         ] {
             if v.is_some_and(|v| !(0.0..=10.0).contains(&v)) {
                 return Err(bad(name, "must be in 0..=10".into()));
+            }
+        }
+        let guns = f
+            .weapons
+            .guns
+            .iter()
+            .flatten()
+            .map(|(n, v)| (format!("weapons.guns.{n}"), Some(*v)));
+        for (name, v) in guns.chain([("weapons.throwables".to_string(), f.weapons.throwables)]) {
+            if v.is_some_and(|v| !(0.0..=10.0).contains(&v)) {
+                return Err(bad(&name, "must be in 0..=10".into()));
             }
         }
         Ok(f)
@@ -110,6 +149,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(StyleFile::parse("schema: lambdabots/style@1\nid: sniper\ngoals:\n  camp: 2\n", "x").is_err());
+        assert!(StyleFile::parse("schema: lambdabots/style@1\nid: sniper\ngoals:\n  sniping: 2\n", "x").is_err());
+        assert!(StyleFile::parse("schema: lambdabots/style@1\nid: sniper\ngoals:\n  camp: 11\n", "x").is_err());
     }
 }

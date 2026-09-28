@@ -88,6 +88,15 @@ pub struct GaussInput {
     pub allowed: bool,
     /// Share of fights fought with the charged shot, 0..1.
     pub charge_share: f32,
+    /// View angles to dump a charge along, found clear of walls ahead and drops behind; `None`: back the way the bot
+    /// goes.
+    pub dump: Option<lb_core::Vec3>,
+    /// A charged shot of this much damage or less, missing, comes back at its shooter: in vanilla HLDM a beam that
+    /// fails to punch through a wall met square starts over from the gun, the shooter no longer left out. Zero where
+    /// it never does (BugfixedHL by default) or the wall along the view is punched through or glanced off.
+    pub backfire: f32,
+    /// The shot at the target needs this much damage at least: one through a wall, to come out with enough left.
+    pub min_damage: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -122,6 +131,21 @@ pub struct Gauss {
     pub dumped: u32,
     pub plain_rolls: u32,
     pub cramped: u32,
+    /// The last charge let go, for the log when a bot dies by its own gauss.
+    pub last: Option<Release>,
+}
+
+/// A charge let go: when, how strong, whether dumped or at a target (and how far), the view, and how far the first
+/// wall along it was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Release {
+    pub at: SimTime,
+    pub damage: f32,
+    pub dump: bool,
+    pub target: Option<f32>,
+    pub view: lb_core::Vec3,
+    pub wall_ahead: f32,
+    pub recoil_room: f32,
 }
 
 impl Gauss {
@@ -203,11 +227,18 @@ impl Gauss {
                     || h.on_ladder
                     || (!combat && !i.expected && i.target.is_none() && age >= READY_HOLD);
                 if must_dump {
-                    self.state = State::Dumping {
-                        angles: dump_angles(h, i.heading),
-                        since: now,
-                    };
+                    let angles = i.dump.unwrap_or_else(|| dump_angles(h, i.heading));
+                    self.state = State::Dumping { angles, since: now };
                     self.dumped += 1;
+                    self.last = Some(Release {
+                        at: now,
+                        damage: charged_damage(age, i.full_damage),
+                        dump: true,
+                        target: None,
+                        view: angles,
+                        wall_ahead: i.wall_ahead,
+                        recoil_room: i.recoil_room,
+                    });
                     return Some(charge_request());
                 }
                 let wait = if combat { release_after } else { GAUSS_MIN_CHARGE };
@@ -219,12 +250,23 @@ impl Gauss {
                     && age >= wait
                     && throw <= i.recoil_room
                     && i.wall_ahead >= wall_blast(damage)
+                    && damage > i.backfire
+                    && damage >= i.min_damage
                 {
                     self.state = State::Releasing {
                         since: now,
                         angles: None,
                     };
                     self.fired += 1;
+                    self.last = Some(Release {
+                        at: now,
+                        damage,
+                        dump: false,
+                        target: i.target.map(|t| t.0),
+                        view: h.view,
+                        wall_ahead: i.wall_ahead,
+                        recoil_room: i.recoil_room,
+                    });
                     return Some(Request {
                         weapon: Some(hold(WeaponId::Gauss)),
                         ..Request::default()
@@ -440,6 +482,9 @@ mod tests {
             heading: Vec2::X,
             allowed: true,
             charge_share: 1.0,
+            dump: None,
+            backfire: 0.0,
+            min_damage: 0.0,
         }
     }
 
@@ -558,6 +603,22 @@ mod tests {
         assert!(game.shots.is_empty() && g.cramped > 0);
         assert!(plain.iter().all(|p| *p), "plain shots against the wall");
         assert!(wall_blast(200.0) > 350.0 && wall_blast(70.0) < 160.0);
+    }
+
+    #[test]
+    fn a_shot_through_a_wall_waits_for_the_damage_it_needs() {
+        // Up close a charge is let go after 0.5–0.75 s (70–110 damage); through a wall it needs 150 (1.125 s).
+        let close = |_: f64| Some((300.0, true));
+        let (_, game, _, _) = run_with(input(), close, 3.0);
+        assert!(!game.shots.is_empty());
+        assert!(game.shots.iter().all(|(_, c)| *c < 0.8), "{:?}", game.shots);
+        let through = GaussInput {
+            min_damage: 150.0,
+            ..input()
+        };
+        let (_, game, _, _) = run_with(through, close, 3.0);
+        assert!(!game.shots.is_empty());
+        assert!(game.shots.iter().all(|(_, c)| *c >= 1.05), "{:?}", game.shots);
     }
 
     #[test]

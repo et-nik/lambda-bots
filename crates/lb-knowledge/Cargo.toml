@@ -13,6 +13,7 @@ lb-core.workspace = true
 lb-game.workspace = true
 lb-nav-api.workspace = true
 smallvec.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

@@ -86,29 +86,41 @@ units lights every indicator and gives no direction.
 
 A recognized player becomes a track:
 
-| State         | When                                                                 |
-|---------------|----------------------------------------------------------------------|
-| visible       | seen on the latest look                                              |
-| lost          | out of sight for up to 1 s; position extrapolated for 0.3 s at most  |
-| predicted     | not located for up to `track_forget` seconds                         |
-| stale         | older than that; dropped 30 s after the last position fix            |
+| State     | When                                                                |
+|-----------|---------------------------------------------------------------------|
+| visible   | seen on the latest look                                             |
+| lost      | out of sight for up to 1 s; position extrapolated for 0.3 s at most |
+| predicted | not located for up to `track_forget` seconds                        |
+| stale     | older than that; dropped 30 s after the last position fix           |
 
 The position error grows by 60% of the server's maximum speed per second since the last fix. A player who dies in
 the kill feed is forgotten at once.
+
+**Places.** With the map's graph loaded, a bot also keeps in mind the map's places (graph nodes):
+- when it last had each place in sight, looked at four times a second: the places its own place sees (the map's
+  table of who sees whom), within 1500 units and in its view, or within 128 units wherever it looks;
+- where each enemy out of sight may be now: the places it could have run to since it was last placed (by sight or by
+  a sound tied to it), not through a place the bot has watched all along since before the enemy could have got there,
+  weighted by the way it ran, by the traffic there, and less for places in sight since (see `docs/behavior.md`,
+  *Looking for a lost enemy*).
+
+**Items** are seen at their spots, and heard: a pickup or a respawn heard where only one item spot is within reach of
+the sound's place (a third of its distance, 96 units at least) is that item's. `lb brain` shows what the bot does with
+all this.
 
 ## Skill parameters
 
 The parameters live in `config/difficulty.yaml` and can be overridden per personality (see `docs/personas.md`):
 
-| Parameter             | noob     | easy     | normal   | hard      | expert    |
-|-----------------------|----------|----------|----------|-----------|-----------|
-| `recognition_delay`   | 1.5–2.0  | 1.0–1.5  | 0.5–1.0  | 0.25–0.5  | 0.1–0.25  |
-| `peripheral_gain`     | 0.35     | 0.40     | 0.45     | 0.50      | 0.55      |
-| `reacquire_delay`     | 0.35     | 0.25     | 0.15     | 0.10      | 0.05      |
-| `reacquire_grace`     | 1.0      | 1.5      | 2.0      | 2.5       | 3.0       |
-| `hearing_threshold`   | 0.07     | 0.055    | 0.04     | 0.03      | 0.02      |
-| `sound_bearing_sigma` | 35       | 28       | 20       | 14        | 10        |
-| `track_forget`        | 4        | 6        | 8        | 10        | 12        |
+| Parameter             | noob    | easy    | normal  | hard     | expert   |
+|-----------------------|---------|---------|---------|----------|----------|
+| `recognition_delay`   | 1.5–2.0 | 1.0–1.5 | 0.5–1.0 | 0.25–0.5 | 0.1–0.25 |
+| `peripheral_gain`     | 0.35    | 0.40    | 0.45    | 0.50     | 0.55     |
+| `reacquire_delay`     | 0.35    | 0.25    | 0.15    | 0.10     | 0.05     |
+| `reacquire_grace`     | 1.0     | 1.5     | 2.0     | 2.5      | 3.0      |
+| `hearing_threshold`   | 0.07    | 0.055   | 0.04    | 0.03     | 0.02     |
+| `sound_bearing_sigma` | 35      | 28      | 20      | 14       | 10       |
+| `track_forget`        | 4       | 6       | 8       | 10       | 12       |
 
 ## Inspecting
 

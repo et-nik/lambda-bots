@@ -226,6 +226,8 @@ skill_params! {
     throw_rate: f32,
     /// Gauss jump, satchel jump and attacking long jumps are allowed.
     tricks: bool,
+    /// Charged gauss shots through thin walls at an enemy lost behind one a moment ago.
+    gauss_walls: bool,
     /// Bunny hop speed limit as a multiple of maxspeed; none = no bunny hopping.
     bhop_speed: Option<f32>,
 }
@@ -336,6 +338,7 @@ impl Default for Presets {
             scope_settle: [0.0, 0.0],
             throw_rate: 1.0,
             tricks,
+            gauss_walls: false,
             bhop_speed,
         };
         use AimModel::*;
@@ -452,6 +455,8 @@ impl Default for Presets {
             params.scope_settle = settle;
             params.throw_rate = throws;
         }
+        presets.hard.gauss_walls = true;
+        presets.expert.gauss_walls = true;
         presets
     }
 }

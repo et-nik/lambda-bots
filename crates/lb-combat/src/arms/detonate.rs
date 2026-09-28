@@ -1,9 +1,10 @@
 //! Setting off explosives the bot knows of when an enemy walks up to them.
 //!
 //! - **Satchels** (yapb's `DetonateSatchel`): draw the satchel (its radio while charges are out) and press the DLL's
-//!   detonate button once. Confirmed when the game reports the charges gone off; the button that did it is reported,
-//!   and the first bot to set its satchels off tells every bot on the server. If the press threw another satchel
-//!   instead, the buttons are the other way round on this server, and the other button is pressed.
+//!   detonate button once the game takes it. Confirmed when the game reports the charges gone off; the button that
+//!   did it is reported, and holds for every bot on the server. If the press threw another satchel instead, or did
+//!   nothing at all (the throw button with the pocket empty), the buttons are the other way round on this server,
+//!   and the other button is pressed.
 //! - **A satchel set off in flight** ([`Airburst`]): thrown at an enemy in sight, the radio stays in hand and the
 //!   charge goes off as it comes by the enemy, like a grenade that goes off when told.
 //! - **Tripmines** (yapb's `DetonateTripmine`): shooting a mine sets it off and credits the shooter, whoever placed
@@ -17,10 +18,14 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::PlayerKey;
 use lb_motor::{LookIntent, MoveIntent};
 
-use super::{Hands, Request, Status, hold, press, settled};
+use super::{Hands, Request, Status, hold, press, settled, takes};
 
 /// Drawing the satchel radio takes a second (`CSatchel::Deploy`).
 const DRAW_TIMEOUT: f64 = 2.0;
+/// The game takes a button again this long after a throw at most (a second for the primary in the classic SDK).
+const BUTTON_TIMEOUT: f64 = 1.5;
+/// A press that shows nothing by then did nothing.
+const NO_EFFECT: f64 = 0.3;
 /// The press is held until the game shows the charges gone off, for this long at most.
 const CONFIRM: f64 = 0.6;
 const SHOOT_FOR: f64 = 4.0;
@@ -28,12 +33,14 @@ const SHOOT_FOR: f64 = 4.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Draw,
-    /// Pressing `button` since `at`, with `before` satchels in the pocket.
-    Pressed {
-        at: SimTime,
+    /// Pressing `button`: since `at`, once the game takes it, with `before` satchels in the pocket then; `last`: the
+    /// other button did not do it.
+    Press {
+        button: Attack,
+        since: SimTime,
+        at: Option<SimTime>,
         before: i32,
-        button: lb_game::mechanics::Attack,
-        swapped: bool,
+        last: bool,
     },
 }
 
@@ -54,64 +61,88 @@ impl SatchelTrigger {
         }
     }
 
-    pub fn update(&mut self, h: &Hands<'_>) -> Status {
+    /// `go`: press once the radio is in hand; until then it is held up, waiting.
+    pub fn update(&mut self, h: &Hands<'_>, go: bool) -> Status {
         let now = h.now;
         let w = WeaponId::Satchel;
-        let state = h.predicted(w).map_or(0, |p| p.charge_ready);
+        let game = h.predicted(w);
+        let state = game.map_or(0, |p| p.charge_ready);
         let count = h.reserve(w);
+        if state == 2 {
+            if let Phase::Press {
+                button, at: Some(_), ..
+            } = self.phase
+            {
+                self.button = Some(button);
+            }
+            return Status::Done;
+        }
+        if state != 1 {
+            return Status::Failed("no satchel out");
+        }
+        let waiting = Status::Running(Request {
+            weapon: Some(hold(w)),
+            ..Request::default()
+        });
         match self.phase {
             Phase::Draw => {
-                if state != 1 {
-                    return if state == 2 {
-                        Status::Done
+                if !h.ready(w) {
+                    return if now.since(self.started) > DRAW_TIMEOUT {
+                        Status::Failed("the satchel radio was not drawn")
                     } else {
-                        Status::Failed("no satchel out")
+                        waiting
                     };
                 }
-                if now.since(self.started) > DRAW_TIMEOUT {
-                    return Status::Failed("the satchel radio was not drawn");
+                if !go {
+                    return waiting;
                 }
-                let mut weapon = hold(w);
-                if h.ready(w) {
-                    let button = h.dll.satchel_detonate();
-                    weapon = press(w, button, Trigger::Hold, 0.0);
-                    self.phase = Phase::Pressed {
-                        at: now,
-                        before: count,
-                        button,
-                        swapped: false,
-                    };
-                }
-                Status::Running(Request {
-                    weapon: Some(weapon),
-                    ..Request::default()
-                })
+                self.phase = Phase::Press {
+                    button: h.dll.satchel_detonate(),
+                    since: now,
+                    at: None,
+                    before: count,
+                    last: false,
+                };
+                self.update(h, go)
             }
-            Phase::Pressed {
+            Phase::Press {
+                button,
+                since,
                 at,
                 before,
-                button,
-                swapped,
+                last,
             } => {
-                if state == 2 {
-                    self.button = Some(button);
-                    return Status::Done;
-                }
-                if count < before && !swapped {
-                    // A satchel was thrown: the detonate button is the other one here. Let go first so the game
-                    // takes the other button as a new press.
-                    let mut dll = h.dll;
-                    dll.swap_satchel_buttons();
-                    self.phase = Phase::Pressed {
-                        at: now,
+                let Some(at) = at else {
+                    if !takes(game, button) {
+                        return if now.since(since) > BUTTON_TIMEOUT {
+                            Status::Failed("the satchel radio took no press")
+                        } else {
+                            waiting
+                        };
+                    }
+                    self.phase = Phase::Press {
+                        button,
+                        since,
+                        at: Some(now),
                         before: count,
-                        button: dll.satchel_detonate(),
-                        swapped: true,
+                        last,
                     };
                     return Status::Running(Request {
-                        weapon: Some(hold(w)),
+                        weapon: Some(press(w, button, Trigger::Hold, 0.0)),
                         ..Request::default()
                     });
+                };
+                if !last && (count < before || now.since(at) > NO_EFFECT) {
+                    // Another satchel thrown, or nothing done: the other button sets them off here. Let go first,
+                    // and press it once the game takes it (a throw holds the buttons back up to a second).
+                    self.phase = Phase::Press {
+                        button: button.other(),
+                        since: now,
+                        at: None,
+                        before: count,
+                        last: true,
+                    };
+                    return waiting;
                 }
                 if now.since(at) > CONFIRM {
                     return Status::Failed("the satchels did not go off");
@@ -177,7 +208,7 @@ impl Airburst {
     pub fn update(&mut self, h: &Hands<'_>, b: Burst) -> Status {
         let now = h.now;
         if let Some(t) = &mut self.trigger {
-            let status = t.update(h);
+            let status = t.update(h, true);
             self.button = t.button;
             return status;
         }
@@ -207,9 +238,15 @@ impl Airburst {
                 dir: (h.origin - e).truncate().normalize_or_zero(),
                 speed: BACK_OFF_SPEED,
             });
+        // Both kept in view: the satchel, and the enemy it flies at.
+        let watch = match (b.satchel, b.enemy) {
+            (Some(s), Some(e)) => Some((s + e) * 0.5),
+            (s, e) => s.or(e),
+        };
         Status::Running(Request {
             weapon: Some(hold(WeaponId::Satchel)),
             movement: back,
+            look: watch.map(|at| LookIntent::Point { at, engaged: false }),
             ..Request::default()
         })
     }
@@ -282,6 +319,11 @@ mod tests {
     }
 
     fn predicted(state: i32, count: i32) -> Prediction {
+        held_back(state, count, 0.0, 0.0)
+    }
+
+    /// The game's clocks for the two buttons: seconds until it takes each again.
+    fn held_back(state: i32, count: i32, primary: f32, secondary: f32) -> Prediction {
         let mut p = Prediction {
             current: Some(WeaponId::Satchel),
             primary_ammo: count,
@@ -289,36 +331,127 @@ mod tests {
         };
         p.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon {
             charge_ready: state,
+            next_primary: primary,
+            next_secondary: secondary,
             ..PredictedWeapon::default()
         });
         p
     }
 
+    fn fire(status: Status) -> Fire {
+        match status {
+            Status::Running(r) => r.weapon.unwrap().fire,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn a_wrong_detonate_button_is_learned() {
-        // The profile says BHL (secondary sets them off) but the server is classic: the secondary throws.
+    fn the_satchels_go_off_with_the_detonate_button() {
         let dll = DllProfile::default();
-        assert_eq!(dll.satchel_detonate(), Attack::Secondary);
+        assert_eq!(dll.satchel_detonate(), Attack::Primary);
+        let arsenal = [Armed::new(WeaponId::Satchel, None, Some(1))];
+        let mut trigger = SatchelTrigger::new(SimTime(0.0));
+        // Just thrown: the game takes the primary again only after a second.
+        let fresh = held_back(1, 1, 0.4, 0.0);
+        assert_eq!(
+            fire(trigger.update(&hands(0.0, &arsenal, &fresh, dll), true)),
+            Fire::None
+        );
+        let out = predicted(1, 1);
+        assert_eq!(
+            fire(trigger.update(&hands(0.6, &arsenal, &out, dll), true)),
+            Fire::Primary
+        );
+        let gone = predicted(2, 1);
+        assert_eq!(trigger.update(&hands(0.62, &arsenal, &gone, dll), true), Status::Done);
+        assert_eq!(trigger.button, Some(Attack::Primary));
+    }
+
+    #[test]
+    fn the_radio_waits_up_until_told() {
+        let dll = DllProfile::default();
+        let arsenal = [Armed::new(WeaponId::Satchel, None, Some(1))];
+        let out = predicted(1, 1);
+        let mut trigger = SatchelTrigger::new(SimTime(0.0));
+        for t in [0.0, 1.0, 5.0] {
+            let Status::Running(r) = trigger.update(&hands(t, &arsenal, &out, dll), false) else {
+                panic!()
+            };
+            let w = r.weapon.unwrap();
+            assert_eq!(
+                (w.select, w.fire),
+                (Some(WeaponId::Satchel), Fire::None),
+                "held up at {t} s"
+            );
+        }
+        assert_eq!(
+            fire(trigger.update(&hands(5.1, &arsenal, &out, dll), true)),
+            Fire::Primary
+        );
+    }
+
+    #[test]
+    fn a_detonate_press_that_throws_is_followed_by_the_other_button() {
+        // The primary throws on this server (BugfixedHL-Rebased, the 2023 update), not the classic SDK's way.
+        let dll = DllProfile::default();
         let mut trigger = SatchelTrigger::new(SimTime(0.0));
         let arsenal = [Armed::new(WeaponId::Satchel, None, Some(3))];
         let out = predicted(1, 3);
-        let Status::Running(r) = trigger.update(&hands(0.0, &arsenal, &out, dll)) else {
-            panic!()
-        };
-        assert_eq!(r.weapon.unwrap().fire, Fire::Secondary);
+        assert_eq!(
+            fire(trigger.update(&hands(0.0, &arsenal, &out, dll), true)),
+            Fire::Primary
+        );
+        // A satchel thrown: the game holds the secondary back for half a second.
         let fewer = [Armed::new(WeaponId::Satchel, None, Some(2))];
-        let thrown = predicted(1, 2);
-        let Status::Running(r) = trigger.update(&hands(0.1, &fewer, &thrown, dll)) else {
-            panic!()
-        };
-        assert_eq!(r.weapon.unwrap().fire, Fire::None, "let go before the other button");
-        let Status::Running(r) = trigger.update(&hands(0.11, &fewer, &thrown, dll)) else {
-            panic!()
-        };
-        assert_eq!(r.weapon.unwrap().fire, Fire::Primary, "the other button");
+        let thrown = held_back(1, 2, 1.0, 0.5);
+        assert_eq!(
+            fire(trigger.update(&hands(0.1, &fewer, &thrown, dll), true)),
+            Fire::None,
+            "let go before the other button"
+        );
+        let later = held_back(1, 2, 0.5, 0.0);
+        assert_eq!(
+            fire(trigger.update(&hands(0.6, &fewer, &later, dll), true)),
+            Fire::Secondary
+        );
         let gone = predicted(2, 2);
-        assert_eq!(trigger.update(&hands(0.2, &fewer, &gone, dll)), Status::Done);
-        assert_eq!(trigger.button, Some(Attack::Primary), "the button that set them off");
+        assert_eq!(trigger.update(&hands(0.62, &fewer, &gone, dll), true), Status::Done);
+        assert_eq!(trigger.button, Some(Attack::Secondary), "the button that set them off");
+    }
+
+    #[test]
+    fn a_detonate_press_that_does_nothing_is_followed_by_the_other_button() {
+        // Every satchel out and the pocket empty: the throw button does nothing at all.
+        let dll = DllProfile::default();
+        let mut trigger = SatchelTrigger::new(SimTime(0.0));
+        let empty = [Armed::new(WeaponId::Satchel, None, Some(0))];
+        let out = predicted(1, 0);
+        assert_eq!(
+            fire(trigger.update(&hands(0.0, &empty, &out, dll), true)),
+            Fire::Primary
+        );
+        assert_eq!(
+            fire(trigger.update(&hands(0.2, &empty, &out, dll), true)),
+            Fire::Primary
+        );
+        assert_eq!(fire(trigger.update(&hands(0.35, &empty, &out, dll), true)), Fire::None);
+        assert_eq!(
+            fire(trigger.update(&hands(0.36, &empty, &out, dll), true)),
+            Fire::Secondary
+        );
+        let gone = predicted(2, 0);
+        assert_eq!(trigger.update(&hands(0.4, &empty, &gone, dll), true), Status::Done);
+        assert_eq!(trigger.button, Some(Attack::Secondary));
+        // Neither button does it: given up.
+        let mut stuck = SatchelTrigger::new(SimTime(0.0));
+        for t in [0.0, 0.35, 0.36, 0.8] {
+            let _ = stuck.update(&hands(t, &empty, &out, dll), true);
+        }
+        assert_eq!(
+            stuck.update(&hands(1.0, &empty, &out, dll), true),
+            Status::Failed("the satchels did not go off")
+        );
+        assert_eq!(stuck.button, None);
     }
 
     #[test]
@@ -348,7 +481,7 @@ mod tests {
         let Status::Running(r) = a.update(&hands(0.62, &arsenal, &out, dll), flying(440.0, true)) else {
             panic!()
         };
-        assert_eq!(r.weapon.unwrap().fire, Fire::Secondary, "set off by the enemy");
+        assert_eq!(r.weapon.unwrap().fire, Fire::Primary, "set off by the enemy");
         let gone = predicted(2, 2);
         assert_eq!(
             a.update(&hands(0.7, &arsenal, &gone, dll), flying(450.0, true)),
