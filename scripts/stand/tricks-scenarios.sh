@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 if [[ ${#SETS[@]} -eq 0 ]]; then
-    SETS=(longjump gauss both)
+    SETS=(longjump gauss both plain)
 fi
 
 OUT="$ROOT/stand-runs/current/tricks"

@@ -27,12 +27,13 @@ use lb_game::weapons::WeaponId;
 use lb_nav_api::{NavService, Tricks};
 
 use crate::BotBrain;
+use crate::arms::Active;
 use crate::mind::{Body, Character};
 
 /// Long jumps along the way are rolled for this often, seconds.
 const RUNWAY_ROLL: [f32; 2] = [8.0, 12.0];
 /// Paths take gauss boost links with this much uranium (a full charge takes 16, the rest is for the fight after);
-/// a boost under way needs a full charge's.
+/// a boost starts on a full charge's, and goes on as its charge eats it.
 const BOOST_URANIUM: i32 = 40;
 const BOOST_CHARGE_CELLS: i32 = 16;
 const BOOST_HEALTH: f32 = 60.0;
@@ -125,9 +126,10 @@ impl BotBrain {
         let uranium = self.hands(body).reserve(WeaponId::Gauss);
         let calm = self.beliefs.visible_enemies().next().is_none()
             && (self.mind.last_enemy_seen() == SimTime::ZERO || now.since(self.mind.last_enemy_seen()) > BOOST_CALM);
+        let boosting = matches!(self.mind.arms.active, Some(Active::GaussBoost(_)));
         let boost_now = ch.skill.tricks
             && body.allows(WeaponId::Gauss)
-            && uranium >= BOOST_CHARGE_CELLS
+            && (boosting || uranium >= BOOST_CHARGE_CELLS)
             && body.health >= BOOST_HEALTH
             && body.waterlevel < 2
             && calm;
@@ -288,6 +290,7 @@ mod tests {
     use super::*;
     use crate::mind::WeaponLike;
     use lb_combat::Armed;
+    use lb_combat::arms::boost::GaussBoost;
     use lb_config::skill::Presets;
     use lb_core::input::{IN_ATTACK2, IN_DUCK, IN_JUMP};
     use lb_core::rng::Pcg32;
@@ -621,6 +624,22 @@ mod tests {
             "the gauss holds the charge"
         );
         assert!(spinning, "still charging");
+    }
+
+    #[test]
+    fn a_boost_under_way_goes_on_as_its_charge_eats_the_uranium() {
+        let ch = character(75, lb_styles::StyleId::Balanced.trick_likes());
+        let mut brain = new_brain();
+        let mut rng = BotRng::new(3, 3);
+        let mut b = body(1.0);
+        b.arsenal
+            .push(Armed::new(WeaponId::Gauss, None, Some(BOOST_CHARGE_CELLS - 4)));
+        assert!(
+            !brain.nav_tricks(&b, &ch, &mut rng).boost_now,
+            "none starts on less than a charge's"
+        );
+        brain.mind.arms.active = Some(Active::GaussBoost(GaussBoost::new(b.now, Vec3::ZERO, 1.6)));
+        assert!(brain.nav_tricks(&b, &ch, &mut rng).boost_now, "one under way goes on");
     }
 
     #[test]
