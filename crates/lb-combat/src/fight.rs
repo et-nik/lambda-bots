@@ -6,7 +6,8 @@
 //! - **Strafe side:** away from the side the enemy aims at, swapped 30% of the time, re-decided every 0.3–0.8 s.
 //!   Walls within 134 units on a side turn it around.
 //! - **Distance:** skilled bots drift in when they feel strong and far, back off when weak and close, and back off
-//!   when cornered. Everyone backs off under 96 units or while reloading; melee charges.
+//!   when cornered. Everyone backs off under 96 units or while reloading; melee charges. Nobody closes in while its
+//!   own rocket or launched grenade is on the way to the target.
 //! - **Extras:** crouch taps and dodge jumps by skill.
 //! - **Ledges:** a move that would drop more than 160 units is reversed.
 
@@ -43,6 +44,8 @@ pub struct FightInput {
     pub approach: f32,
     pub weapon: WeaponClass,
     pub reloading: bool,
+    /// The bot's own explosive is on its way to the target: closing in would take the bot into the blast.
+    pub hold_ground: bool,
     pub on_ground: bool,
     pub maxspeed: f32,
 }
@@ -161,6 +164,9 @@ impl Fight {
         } else if distance < 96.0 {
             ahead = -i.maxspeed;
         }
+        if i.hold_ground {
+            ahead = ahead.min(0.0);
+        }
         if i.reloading {
             ahead = -i.maxspeed;
             self.duck_until = i.now;
@@ -222,6 +228,7 @@ mod tests {
             approach: 50.0,
             weapon: WeaponClass::Smg,
             reloading: false,
+            hold_ground: false,
             on_ground: true,
             maxspeed: 300.0,
         }
@@ -271,6 +278,22 @@ mod tests {
         melee.weapon = WeaponClass::Melee;
         let m = f.update(&melee, &SKILL, &mut open, &mut rng);
         assert!(m.velocity.x > 250.0, "charge: {m:?}");
+    }
+
+    #[test]
+    fn keeps_out_of_its_own_rockets_way() {
+        let mut open = Floor { wall_y: None };
+        let strong = |hold_ground| FightInput {
+            approach: 90.0,
+            hold_ground,
+            ..input(0.0, 700.0)
+        };
+        let mut f = Fight::default();
+        let m = f.update(&strong(false), &SKILL, &mut open, &mut Pcg32::new(5, 5));
+        assert!(m.velocity.x > 100.0, "a strong bot drifts in: {m:?}");
+        let mut f = Fight::default();
+        let m = f.update(&strong(true), &SKILL, &mut open, &mut Pcg32::new(5, 5));
+        assert!(m.velocity.x <= 0.0, "not while its rocket flies: {m:?}");
     }
 
     #[test]

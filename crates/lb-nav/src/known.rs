@@ -19,6 +19,8 @@ pub enum FailReason {
     ControllerFailure,
     /// The map does not let the move through where the graph says it does.
     GeometryInvalid,
+    /// Something deadly lies across the link (a tripmine's beam), for as long as the bot knows of it.
+    Hazard,
 }
 
 impl FailReason {
@@ -29,6 +31,7 @@ impl FailReason {
             FailReason::MissingCapability => "capability",
             FailReason::ControllerFailure => "controller",
             FailReason::GeometryInvalid => "geometry",
+            FailReason::Hazard => "hazard",
         }
     }
 
@@ -40,6 +43,7 @@ impl FailReason {
             FailReason::MissingCapability => 30.0,
             FailReason::ControllerFailure => (10.0 * 2f64.powi(repeats.min(4) as i32)).min(120.0),
             FailReason::GeometryInvalid => 120.0,
+            FailReason::Hazard => 60.0,
         }
     }
 }
@@ -80,6 +84,17 @@ impl KnownChanges {
             },
         );
         ttl
+    }
+
+    /// Blocks the link until `until` for a hazard across it (a longer block already there stays).
+    pub fn avoid(&mut self, from: NodeId, to: NodeId, now: f64, until: f64) {
+        let e = self.links.entry((from, to)).or_insert(LinkFailure {
+            reason: FailReason::Hazard,
+            until,
+            repeats: 0,
+            at: now,
+        });
+        e.until = e.until.max(until);
     }
 
     pub fn blocked(&self, from: NodeId, to: NodeId, now: f64) -> bool {

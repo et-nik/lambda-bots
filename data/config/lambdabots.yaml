@@ -73,7 +73,8 @@ logging:
   max_files: 7
 
 # The game DLL, where its weapon rules differ (satchel buttons, hand grenade speed): auto = BugfixedHL when its
-# cvars are there, else the classic SDK; or name it: bugfixed | hl25 | classic. `lb selftest` checks it live.
+# cvars are there, else the rules of Valve's 2023 update (hlsdk-portable plays by them); or name it:
+# bugfixed | hl25 | classic (the SDK before 2023). `lb selftest` checks it live.
 game:
   dll: auto
 

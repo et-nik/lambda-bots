@@ -54,6 +54,8 @@ pub struct Mine {
     pub own: bool,
     pub armed_at: SimTime,
     pub seen: SimTime,
+    /// When navigation was last told to keep off the beam.
+    pub avoided_at: Option<SimTime>,
 }
 
 /// A predicted explosion: where, how far it reaches, and roughly when.
@@ -111,6 +113,7 @@ impl Explosives {
             own: true,
             armed_at: now + f64::from(TRIPMINE_ARM),
             seen: now,
+            avoided_at: None,
         });
     }
 
@@ -144,6 +147,7 @@ impl Explosives {
                         own: s.own,
                         armed_at: s.t,
                         seen: s.t,
+                        avoided_at: None,
                     }),
                 }
             }
@@ -189,11 +193,12 @@ impl Explosives {
         });
     }
 
-    /// Explosions others' projectiles the bot has seen are about to set off, `sv_gravity` for their fall.
+    /// Explosions the projectiles the bot has seen are about to set off, `sv_gravity` for their fall: others', and its
+    /// own grenades (a grenade does not care who threw it). Its own satchels go off only when it sets them off.
     pub fn blasts(&self, now: SimTime, sv_gravity: f32, floor: f32) -> impl Iterator<Item = Blast> + '_ {
         self.flying
             .iter()
-            .filter(|f| !f.own)
+            .filter(|f| !f.own || f.kind == ProjectileKind::Grenade)
             .filter_map(move |f| predict(f, now, sv_gravity * PROJECTILE_GRAVITY, floor))
     }
 

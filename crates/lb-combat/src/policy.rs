@@ -3,14 +3,17 @@
 //! Every gun is scored by the damage per second it is expected to deal to a standing player there: the server's
 //! damage, the weapon's spread and the shooter's own aim error; for projectiles also the flight time a moving target
 //! has to step aside, and the blast that makes up for part of it. Outside a weapon's band only a third counts. A
-//! weapon whose blast would reach the shooter scores nothing (a rocket under 350 units, a bolt under 160, the egon's
-//! beam end under 128). The current weapon gets a margin against flip-flopping, and yapb's order breaks ties.
+//! weapon whose blast would reach the shooter scores nothing (a rocket under 450 units, a bolt under 160, the egon's
+//! beam end under 128). The crossbow is fired zoomed from 250 units on, a shot per two seconds of the scope's toggle. The current weapon gets a margin against flip-flopping, and yapb's order breaks ties.
 //! Throwables are not guns: the weapon protocols throw them.
 
 use lb_game::mechanics::{
-    BODY, BOLT_BLAST_RADIUS, BOLT_HIT, BOLT_SPEED, Damages, ROCKET_SPEED, WeaponClass, WeaponSpec, blast_radius, spec,
+    AltFire, BODY, BOLT_BLAST_RADIUS, BOLT_HIT, BOLT_SPEED, Damages, ROCKET_SPEED, WeaponClass, WeaponSpec,
+    blast_radius, spec,
 };
 use lb_game::weapons::WeaponId;
+
+use crate::aim::SCOPE_STEADY;
 
 /// A weapon the bot owns, with what it knows about its ammo.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,10 +92,13 @@ pub struct Target {
 
 const OUT_OF_BAND: f32 = 0.35;
 const KEEP_MARGIN: f32 = 1.2;
-/// A zoomed crossbow is worth it from here on; closer it fires bolts.
-pub const XBOW_ZOOM_FROM: f32 = 600.0;
+/// The crossbow is fired zoomed from here on (a hitscan bolt: an unzoomed one is slow enough to step away from);
+/// closer, where a target crosses the zoomed view too fast, it fires bolts.
+pub const XBOW_ZOOM_FROM: f32 = 250.0;
+/// Seconds per zoomed shot: the scope is put on for the shot and taken off, and the game toggles it once a second.
+const XBOW_SCOPE_CYCLE: f32 = 2.0;
 /// Rockets are never fired closer than this: the blast would reach the shooter.
-pub const ROCKET_MIN: f32 = 350.0;
+pub const ROCKET_MIN: f32 = 450.0;
 /// Unzoomed bolts and the egon's beam end blow up this close to the shooter.
 const BOLT_MIN: f32 = 160.0;
 const EGON_MIN: f32 = 128.0;
@@ -118,7 +124,9 @@ pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
     let dmg = damages.primary(a.id);
     match a.id {
         _ if s.class == WeaponClass::Throwable => 0.0,
-        WeaponId::Crossbow if d >= XBOW_ZOOM_FROM => s.dps(dmg, d, t.aim_sigma),
+        WeaponId::Crossbow if d >= XBOW_ZOOM_FROM => {
+            dmg * s.hit_chance(d, BODY, t.aim_sigma * SCOPE_STEADY) / XBOW_SCOPE_CYCLE
+        }
         WeaponId::Crossbow if d < BOLT_MIN => 0.0,
         WeaponId::Crossbow => {
             let bolt = BOLT_HIT + damages.xbow_bolt;
@@ -127,6 +135,16 @@ pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
         WeaponId::Rpg if d < ROCKET_MIN => 0.0,
         WeaponId::Rpg => dmg * projectile_hit(s, t, ROCKET_SPEED, blast_radius(dmg)) / ROCKET_CYCLE,
         WeaponId::Egon if d < EGON_MIN => 0.0,
+        // Up close the rapid fire lands more.
+        WeaponId::Glock => {
+            let rapid = match s.alt {
+                AltFire::Rapid { cycle, spread } => {
+                    dmg * s.hit_chance_with([spread, spread], d, BODY, t.aim_sigma) / cycle
+                }
+                _ => 0.0,
+            };
+            s.dps(dmg, d, t.aim_sigma).max(rapid)
+        }
         WeaponId::Hornetgun => {
             let seek = if d <= HORNET_SEEK {
                 HORNET_HIT

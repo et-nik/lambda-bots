@@ -1,12 +1,13 @@
 //! Fire control: pull the trigger when the view is on the target closely enough (yapb `focusEnemy`), the target is
 //! within the weapon's reach, and no blast would reach the shooter; semi-automatic weapons are clicked at a human
-//! cadence. The secondary attack is used where it pays: the glock's rapid fire and the hornet gun's darts up close,
-//! both shotgun barrels at a few steps (half the time, as yapb), the crossbow's scope far away and the 357's very far.
+//! cadence. The secondary attack is used where it pays: the glock's rapid fire when it lands more bullets a second
+//! than aimed single shots (up close), the hornet gun's darts up close, both shotgun barrels at a few steps (half the
+//! time, as yapb); the crossbow's scope is snapped on for single far shots (`arms::scope`).
 
 use lb_core::Vec3;
 use lb_core::math::view_angle_vectors;
 use lb_core::rng::Pcg32;
-use lb_game::mechanics::{AltFire, Attack, Trigger, WeaponClass, spec};
+use lb_game::mechanics::{AltFire, Attack, BODY, Trigger, WeaponClass, spec};
 use lb_game::weapons::WeaponId;
 
 use crate::policy::{Armed, ROCKET_MIN, XBOW_ZOOM_FROM};
@@ -66,16 +67,16 @@ pub struct Mode {
     pub cycle: f32,
 }
 
-/// Glock rapid fire only this close: its cone is ten times wider.
-const RAPID_UNDER: f32 = 150.0;
 /// Hornet darts this close, with at least `DARTS_HORNETS` hornets.
 const DARTS_UNDER: f32 = 250.0;
 const DARTS_HORNETS: i32 = 4;
 /// Both barrels between these distances.
 const DOUBLE_BAND: [f32; 2] = [32.0, 300.0];
 
-/// How to fire `a` at `distance`; `double` allows both shotgun barrels for this shot.
-pub fn mode(a: &Armed, distance: f32, double: bool) -> Mode {
+/// How to fire `a` at `distance`; `double` allows both shotgun barrels for this shot. `aim_sigma` is the bot's aim
+/// error there (units) and `click` its pause between single shots: the glock's rapid fire, held down at five shots a
+/// second in a cone ten times wider, is taken where it lands more bullets a second than the clicked aimed shots.
+pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32, click: f32) -> Mode {
     let s = spec(a.id);
     let primary = Mode {
         attack: Attack::Primary,
@@ -83,11 +84,18 @@ pub fn mode(a: &Armed, distance: f32, double: bool) -> Mode {
         cycle: s.cycle,
     };
     match s.alt {
-        AltFire::Rapid { cycle, .. } if distance < RAPID_UNDER => Mode {
-            attack: Attack::Secondary,
-            trigger: Trigger::Hold,
-            cycle,
-        },
+        AltFire::Rapid { cycle, spread } => {
+            let hits = |cone: f32, every: f32| s.hit_chance_with([cone, cone], distance, BODY, aim_sigma) / every;
+            if hits(spread, cycle) > hits(s.spread[0], click.max(s.cycle)) {
+                Mode {
+                    attack: Attack::Secondary,
+                    trigger: Trigger::Hold,
+                    cycle,
+                }
+            } else {
+                primary
+            }
+        }
         AltFire::Darts { cycle } if distance <= DARTS_UNDER && a.reserve.is_some_and(|r| r >= DARTS_HORNETS) => Mode {
             attack: Attack::Secondary,
             trigger: Trigger::Hold,
@@ -111,26 +119,16 @@ pub fn roll_double(rng: &mut Pcg32) -> bool {
     rng.next_f32() < 0.5
 }
 
-/// The 357's scope only very far away: it narrows the view and does not steady the shot.
-const PYTHON_ZOOM: [f32; 2] = [700.0, 1000.0];
-/// The crossbow unzooms under this, zooms from `XBOW_ZOOM_FROM`.
-const XBOW_UNZOOM: f32 = 400.0;
+/// The crossbow's scope is taken off under this.
+const XBOW_UNZOOM: f32 = 200.0;
 
-/// Whether the view should be zoomed with `w` against a target `distance` away (`None`: no target); `zoomed` is the
-/// state now, kept between the two thresholds.
+/// Whether the view should be zoomed with `w` against a target `distance` away (`None`: no target), given the state
+/// now. The crossbow's scope is put on for single shots (`arms::scope`) and only taken off here, with no target or a
+/// close one; the 357's never helps (it narrows the view and does not steady the shot).
 pub fn zoom_wanted(w: WeaponId, distance: Option<f32>, zoomed: bool) -> bool {
-    let Some(d) = distance else { return false };
-    let [off, on] = match w {
-        WeaponId::Crossbow => [XBOW_UNZOOM, XBOW_ZOOM_FROM],
-        WeaponId::Python => PYTHON_ZOOM,
-        _ => return false,
-    };
-    if d >= on {
-        true
-    } else if d < off {
-        false
-    } else {
-        zoomed
+    match (w, distance) {
+        (WeaponId::Crossbow, Some(d)) => zoomed && d >= XBOW_UNZOOM,
+        _ => false,
     }
 }
 
@@ -177,23 +175,35 @@ mod tests {
     #[test]
     fn secondary_modes_where_they_pay() {
         let glock = Armed::new(WeaponId::Glock, Some(17), Some(50));
-        assert_eq!(mode(&glock, 100.0, false).attack, Attack::Secondary);
-        assert_eq!(mode(&glock, 400.0, false).attack, Attack::Primary);
+        // A normal bot: aim error about 10 units up close, clicks every 0.55 s.
+        assert_eq!(mode(&glock, 100.0, false, 11.0, 0.55).attack, Attack::Secondary);
+        assert_eq!(mode(&glock, 200.0, false, 12.0, 0.55).attack, Attack::Secondary);
+        assert_eq!(mode(&glock, 450.0, false, 14.0, 0.55).attack, Attack::Primary);
+        // An expert clicks at the weapon's own rate: the rapid fire pays only closer.
+        assert_eq!(mode(&glock, 120.0, false, 1.6, 0.3).attack, Attack::Secondary);
+        assert_eq!(mode(&glock, 300.0, false, 1.8, 0.3).attack, Attack::Primary);
         let hornets = |n| Armed::new(WeaponId::Hornetgun, None, Some(n));
-        assert_eq!(mode(&hornets(8), 200.0, false).attack, Attack::Secondary);
-        assert_eq!(mode(&hornets(2), 200.0, false).attack, Attack::Primary);
+        assert_eq!(mode(&hornets(8), 200.0, false, 10.0, 0.3).attack, Attack::Secondary);
+        assert_eq!(mode(&hornets(2), 200.0, false, 10.0, 0.3).attack, Attack::Primary);
         let shotgun = |clip| Armed::new(WeaponId::Shotgun, Some(clip), Some(20));
-        assert_eq!(mode(&shotgun(8), 150.0, true).attack, Attack::Secondary);
-        assert_eq!(mode(&shotgun(1), 150.0, true).attack, Attack::Primary, "one shell left");
-        assert_eq!(mode(&shotgun(8), 150.0, false).attack, Attack::Primary);
-        assert_eq!(mode(&shotgun(8), 500.0, true).attack, Attack::Primary);
-        assert!(zoom_wanted(WeaponId::Crossbow, Some(900.0), false));
-        assert!(
-            zoom_wanted(WeaponId::Crossbow, Some(500.0), true),
-            "kept between the thresholds"
+        assert_eq!(mode(&shotgun(8), 150.0, true, 10.0, 0.75).attack, Attack::Secondary);
+        assert_eq!(
+            mode(&shotgun(1), 150.0, true, 10.0, 0.75).attack,
+            Attack::Primary,
+            "one shell left"
         );
-        assert!(!zoom_wanted(WeaponId::Crossbow, Some(500.0), false));
+        assert_eq!(mode(&shotgun(8), 150.0, false, 10.0, 0.75).attack, Attack::Primary);
+        assert_eq!(mode(&shotgun(8), 500.0, true, 10.0, 0.75).attack, Attack::Primary);
+        assert!(
+            !zoom_wanted(WeaponId::Crossbow, Some(900.0), false),
+            "the scope protocol puts it on"
+        );
+        assert!(zoom_wanted(WeaponId::Crossbow, Some(900.0), true));
+        assert!(
+            !zoom_wanted(WeaponId::Crossbow, Some(150.0), true),
+            "off for a close target"
+        );
         assert!(!zoom_wanted(WeaponId::Crossbow, None, true));
-        assert!(!zoom_wanted(WeaponId::Mp5, Some(2000.0), false));
+        assert!(!zoom_wanted(WeaponId::Python, Some(2000.0), true));
     }
 }

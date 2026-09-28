@@ -31,9 +31,13 @@ Each message is one JSON object in one datagram:
 | `event`      | on event                         | `kind` + event fields                             |
 | `cmd_result` | after a command from the channel | `args`, `out[]` (response lines)                  |
 
-**`frame.bots[]`** — our bots: `slot`, `n` (name), `st` (state: `connecting`, `spawned`, `alive`,
-`dead`, `respawning`, `leaving`, `faulted`), `o` ([x, y, z]), `ya` (view yaw), `hp`, `ap`, `w` (weapon
-classname or `null`).
+**`frame.bots[]`** — our bots: `slot`, `n` (name), `sty` (style), `sk` (skill), `st` (state: `connecting`,
+`spawned`, `alive`, `dead`, `respawning`, `leaving`, `faulted`), `o` ([x, y, z]), `ya` (view yaw), `hp`, `ap`, `w`
+(weapon classname or `null`), `tr[]` (tracks: `slot`, `st`, `o`, `sig`, `age`), `at` (what the eyes are drawn to),
+`goal`, `gw` (its weight), `cand[]` (`[goal, rank, weight]`), `tg` (target slot or -1), `see` (target in sight),
+`fire` (trigger pulled), `arm` (the weapon protocol running: `grenade`, `satchel`, `snark`, `tripmine`, `m203`,
+`detonate`, `shoot a mine`, or `null`), `gauss` (`charging`, `charged`, `dumping`, `releasing` or `null`), `nv`
+(navigation phase), `agr`, `fear`.
 
 **`frame.players[]`** — other players from engine snapshots: `slot`, `n`, `o`, `ya`, `al` (alive). Human HP and
 weapons are not in the telemetry: the core does not receive them.

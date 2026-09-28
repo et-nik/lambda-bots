@@ -164,6 +164,16 @@ pub fn spec(id: WeaponId) -> &'static WeaponSpec {
     SPECS.iter().find(|s| s.id == id).expect("every weapon has a spec")
 }
 
+/// Most of a throwable a player carries (the game's `*_MAX_CARRY`); zero for other weapons.
+pub fn carry_max(w: WeaponId) -> i32 {
+    match w {
+        WeaponId::HandGrenade => 10,
+        WeaponId::Satchel | WeaponId::Tripmine => 5,
+        WeaponId::Snark => 15,
+        _ => 0,
+    }
+}
+
 /// Radius of an explosion of `damage`: `RadiusDamage` reaches 2.5 times the damage, falling off linearly.
 pub fn blast_radius(damage: f32) -> f32 {
     damage * 2.5

@@ -115,6 +115,39 @@ pub struct Stats {
     pub max_frame_ms: f64,
 }
 
+/// A projectile as last seen, to credit its hits in `lb stats`.
+#[derive(Clone, Copy, Debug)]
+struct Launched {
+    row: arms_stats::Row,
+    /// Slot of the player who threw or fired it; the game clears some owners in flight, the first one seen is kept.
+    owner: u16,
+    origin: Vec3,
+    velocity: Vec3,
+    seen: SimTime,
+    /// Where and when it was first seen: about where it was thrown or fired from.
+    first: (SimTime, Vec3),
+}
+
+impl Launched {
+    /// How far from `source` it could be now; `None` when it was seen too long ago to tell.
+    fn miss(&self, source: Vec3, now: SimTime) -> Option<f32> {
+        let dt = now.since(self.seen) as f32;
+        if !(0.0..=LAUNCHED_MEMORY).contains(&dt) {
+            return None;
+        }
+        let at = self.origin + self.velocity * dt.min(PROJECTILE_PERIOD);
+        let slack = LAUNCHED_REACH + self.velocity.length() * PROJECTILE_PERIOD;
+        Some(at.distance(source)).filter(|d| *d <= slack)
+    }
+}
+
+/// A projectile's hit is reported this close to where it was last seen (or would be now), beyond its travel since.
+const LAUNCHED_REACH: f32 = 72.0;
+/// Seconds between projectile snapshots.
+const PROJECTILE_PERIOD: f32 = 0.05;
+/// A projectile gone from the snapshots is remembered this long: its blast and hits are reported after it went.
+const LAUNCHED_MEMORY: f32 = 0.5;
+
 pub struct Runtime {
     pub init: InitData,
     pub config: MainConfig,
@@ -214,6 +247,8 @@ pub struct Runtime {
     projectile_entities: Vec<ProjectileEntity>,
     projectile_kinds: FxHashMap<u16, Option<ProjectileKind>>,
     next_projectiles_at: SimTime,
+    /// Projectiles by entity index as last seen, to credit their hits in `lb stats`.
+    launched: FxHashMap<u16, Launched>,
     /// Explosions of this frame (`TE_EXPLOSION`).
     explosions_now: Vec<Vec3>,
     /// Where players spawn on this map; `None` until the map is loaded.
@@ -348,6 +383,7 @@ impl Runtime {
             projectile_entities: Vec::new(),
             projectile_kinds: FxHashMap::default(),
             next_projectiles_at: SimTime::ZERO,
+            launched: FxHashMap::default(),
             explosions_now: Vec::new(),
             spawns: None,
             chargers: None,
@@ -585,6 +621,7 @@ impl Runtime {
         self.projectile_entities.clear();
         self.projectile_kinds.clear();
         self.next_projectiles_at = SimTime::ZERO;
+        self.launched.clear();
         self.explosions_now.clear();
         self.spawns = None;
         self.chargers = None;
@@ -994,10 +1031,11 @@ impl Runtime {
                 .entry(e.classname_id)
                 .or_insert_with(|| ProjectileKind::from_classname(&self.strings.string_lossy(e.classname_id)));
             let Some(kind) = kind else { continue };
+            let v = |x: LbVec3| Vec3::new(x.x, x.y, x.z);
+            self.launch_seen(e.ent.index, kind, e.model_id, e.owner.index, v(e.origin), v(e.velocity));
             if e.effects & EF_NODRAW != 0 {
                 continue;
             }
-            let v = |x: LbVec3| Vec3::new(x.x, x.y, x.z);
             self.projectile_entities.push(ProjectileEntity {
                 index: e.ent.index,
                 kind,
@@ -1009,49 +1047,177 @@ impl Runtime {
         }
     }
 
-    /// Damage a bot took from a bullet is credited to the bot that fired it (standing at the reported source).
+    /// A projectile in this frame's snapshot, for `lb stats`: an exploded grenade stays a moment where it burst, out
+    /// of sight, and is remembered with the rest.
+    fn launch_seen(
+        &mut self,
+        index: u16,
+        kind: ProjectileKind,
+        model_id: u16,
+        owner: u16,
+        origin: Vec3,
+        velocity: Vec3,
+    ) {
+        use arms_stats::Row;
+        let row = match kind {
+            ProjectileKind::Bolt => Row::plain(WeaponId::Crossbow),
+            ProjectileKind::Rocket => Row::plain(WeaponId::Rpg),
+            // The hand grenade's model; the MP5's grenade has its own.
+            ProjectileKind::Grenade if self.strings.string_lossy(model_id).ends_with("w_grenade.mdl") => {
+                Row::plain(WeaponId::HandGrenade)
+            }
+            ProjectileKind::Grenade => Row::alt(WeaponId::Mp5),
+            ProjectileKind::Hornet => Row::plain(WeaponId::Hornetgun),
+            ProjectileKind::Snark => Row::plain(WeaponId::Snark),
+            ProjectileKind::Satchel => Row::plain(WeaponId::Satchel),
+            ProjectileKind::Tripmine => Row::plain(WeaponId::Tripmine),
+        };
+        let now = self.now;
+        let known = self
+            .launched
+            .get(&index)
+            .filter(|l| l.row == row && now.since(l.seen) <= f64::from(LAUNCHED_MEMORY))
+            .map(|l| (l.owner, l.first));
+        self.launched.insert(
+            index,
+            Launched {
+                row,
+                owner: known.map(|k| k.0).filter(|o| *o != 0).unwrap_or(owner),
+                origin,
+                velocity,
+                seen: now,
+                first: known.map_or((now, origin), |k| k.1),
+            },
+        );
+    }
+
+    /// Damage a bot took is credited to the bot that fired a bullet (standing at the reported source) or to the owner
+    /// of a projectile seen there; with neither it came from an explosion of no bot's (or from a human).
     fn credit_damage(&mut self, victim: (u8, Vec3), source: Vec3, damage: f32) {
-        let shooter = self.bots.iter().find(|b| {
-            b.id.slot != victim.0
-                && b.state == BotState::Alive
-                && b.self_state.body.origin.distance(source) <= arms_stats::SOURCE_MATCH
-        });
-        if let Some(b) = shooter
-            && let Some(w) = b.self_state.current_weapon.get()
+        use arms_stats::Row;
+        let now = self.now;
+        self.launched
+            .retain(|_, l| now.since(l.seen) <= f64::from(LAUNCHED_MEMORY));
+        let shooter = self
+            .bots
+            .iter()
+            .filter(|b| b.id.slot != victim.0 && b.state == BotState::Alive)
+            .filter_map(|b| {
+                let miss = b.self_state.body.origin.distance(source);
+                let w = b.self_state.current_weapon.get()?;
+                // A hitscan crossbow bolt is a zoomed shot.
+                let row = if w == WeaponId::Crossbow {
+                    Row::alt(w)
+                } else {
+                    Row::plain(w)
+                };
+                (miss <= arms_stats::SOURCE_MATCH).then_some((miss, u16::from(b.id.slot), row))
+            });
+        // The game never lets a hornet sting the one who fired it.
+        let own_hornet = |l: &Launched| l.row.weapon == WeaponId::Hornetgun && l.owner == u16::from(victim.0);
+        let thrown = self
+            .launched
+            .values()
+            .filter(|l| !own_hornet(l))
+            .filter_map(|l| l.miss(source, now).map(|miss| (miss, l.owner, l.row)));
+        let best = shooter.chain(thrown).min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, owner, row)) = best
+            && owner == u16::from(victim.0)
         {
-            let distance = b.self_state.body.origin.distance(victim.1);
-            self.arms_stats.hit(w, damage, distance);
+            let first = self
+                .launched
+                .values()
+                .filter(|l| l.owner == owner && l.row == row)
+                .min_by(|a, b| a.origin.distance(source).total_cmp(&b.origin.distance(source)))
+                .map(|l| l.first);
+            if let Some((at, from)) = first {
+                tracing::info!(
+                    "own blast: slot {owner} took {damage:.0} from its {row:?} {:.0} u away; fired {:.1} s before from \
+                     {:.0} u off the blast, {:.0} u from where the bot is now",
+                    victim.1.distance(source),
+                    now.since(at),
+                    from.distance(source),
+                    from.distance(victim.1),
+                );
+            }
+        }
+        let owner = best.and_then(|(_, owner, row)| {
+            let bot = self
+                .bots
+                .iter()
+                .find(|b| u16::from(b.id.slot) == owner && b.is_active())?;
+            Some((bot.id.slot, bot.self_state.body.origin, row))
+        });
+        match owner {
+            Some((slot, _, _)) if slot == victim.0 => self.arms_stats.hurt_self(damage),
+            Some((_, at, row)) => self.arms_stats.hit(row, damage, at.distance(victim.1)),
+            None if best.is_none() && victim.1.distance(source) > arms_stats::SOURCE_MATCH => {
+                self.arms_stats.blasted(damage)
+            }
+            None => {}
         }
     }
 
     /// Rounds each live bot fired since the last frame from the weapon in its hands, for `lb stats` (weapons share
     /// ammo, so only the one in hand counts; a switch starts its count afresh).
     fn count_rounds(&mut self) {
+        use arms_stats::Row;
+        // A shot seen this soon after the scope came off was fired through it (a reload takes it off at once).
+        const SCOPE_LINGER: f64 = 0.3;
+        // Each its own ammo: counted whatever is in hand (the bot switches back right after a throw).
+        const THROWABLES: [WeaponId; 4] = [
+            WeaponId::HandGrenade,
+            WeaponId::Satchel,
+            WeaponId::Snark,
+            WeaponId::Tripmine,
+        ];
+        let now = self.now;
         for bot in &mut self.bots {
+            let fov = bot.self_state.body.fov;
+            if fov > 0.0 && fov < 89.0 {
+                bot.zoomed_at = Some(now);
+            }
+            let alive = bot.state == BotState::Alive;
+            let arsenal = arsenal(&bot.self_state, &self.game.weapons);
+            let distance = bot
+                .brain
+                .mind
+                .target
+                .and_then(|k| bot.brain.beliefs.track(k))
+                .map_or(600.0, |t| t.pos.distance(bot.self_state.body.origin));
+            let carried = THROWABLES.map(|w| arsenal.iter().find(|a| a.id == w).and_then(|a| a.reserve).unwrap_or(0));
+            if alive && let Some(last) = bot.carried {
+                for ((w, before), now_carried) in THROWABLES.iter().zip(last).zip(carried) {
+                    if before > now_carried {
+                        self.arms_stats
+                            .fired(Row::plain(*w), (before - now_carried) as u32, distance);
+                    }
+                }
+            }
+            bot.carried = alive.then_some(carried);
             let weapon = bot
                 .self_state
                 .current_weapon
                 .get()
-                .filter(|_| bot.state == BotState::Alive);
+                .filter(|w| alive && !THROWABLES.contains(w));
             let rounds = weapon.and_then(|w| {
-                arsenal(&bot.self_state, &self.game.weapons)
-                    .iter()
-                    .find(|a| a.id == w)
-                    .and_then(|a| a.rounds())
+                let a = arsenal.iter().find(|a| a.id == w)?;
+                Some((w, a.rounds()?, a.reserve2.unwrap_or(0)))
             });
-            if let (Some(w), Some(now_rounds), Some((last_w, last))) = (weapon, rounds, bot.rounds)
+            if let (Some((w, primary, secondary)), Some((last_w, last_primary, last_secondary))) = (rounds, bot.rounds)
                 && last_w == w
-                && last > now_rounds
             {
-                let distance = bot
-                    .brain
-                    .mind
-                    .target
-                    .and_then(|k| bot.brain.beliefs.track(k))
-                    .map_or(600.0, |t| t.pos.distance(bot.self_state.body.origin));
-                self.arms_stats.fired(w, (last - now_rounds) as u32, distance);
+                if last_primary > primary {
+                    let scoped = w == WeaponId::Crossbow && bot.zoomed_at.is_some_and(|t| now.since(t) < SCOPE_LINGER);
+                    let row = if scoped { Row::alt(w) } else { Row::plain(w) };
+                    self.arms_stats.fired(row, (last_primary - primary) as u32, distance);
+                }
+                if w == WeaponId::Mp5 && last_secondary > secondary {
+                    self.arms_stats
+                        .fired(Row::alt(w), (last_secondary - secondary) as u32, distance);
+                }
             }
-            bot.rounds = weapon.zip(rounds);
+            bot.rounds = rounds;
         }
     }
 
@@ -2119,6 +2285,8 @@ impl Runtime {
                         "tg": target.map_or(-1, |t| i32::from(t.who.slot)),
                         "see": target.is_some_and(|t| t.state == lb_knowledge::TrackState::Visible),
                         "fire": m.firing,
+                        "arm": m.arms.active.as_ref().map(|a| a.name()),
+                        "gauss": m.arms.gauss.active().then(|| m.arms.gauss.phase()),
                         "nv": b.nav.phase(),
                         "agr": b.persona.aggression,
                         "fear": b.persona.fear,

@@ -12,7 +12,7 @@ use lb_core::dmath;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_game::items::{Ammo, ItemKind};
-use lb_game::mechanics::{WeaponClass, spec};
+use lb_game::mechanics::{WeaponClass, carry_max, spec};
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{Beliefs, Chargers, Items, PlayerKey, Relation, TrackState};
 use lb_styles::GoalAffinity;
@@ -134,14 +134,17 @@ fn item_benefit(s: &Situation<'_>, kind: ItemKind) -> f32 {
         ItemKind::Health if s.health < 85.0 => 0.8 * (1.0 - s.health / 100.0),
         ItemKind::Battery if s.armor < 90.0 => 0.6 * (1.0 - s.armor / 100.0),
         ItemKind::LongJump if !s.has_longjump => 0.8,
-        ItemKind::Weapon(w) if !owns(w) => {
-            let rank = f32::from(spec(w).rank);
-            if spec(w).class == WeaponClass::Throwable {
-                0.3
-            } else {
-                0.4 + 0.03 * rank
-            }
+        // Grenades, satchels, snarks and mines are their own ammo: worth topping up.
+        ItemKind::Weapon(w) if spec(w).class == WeaponClass::Throwable => {
+            let carried = s
+                .weapons
+                .iter()
+                .find(|a| a.id == w)
+                .and_then(|a| a.reserve)
+                .unwrap_or(0);
+            0.3 * (1.0 - carried as f32 / carry_max(w).max(1) as f32).max(0.0)
         }
+        ItemKind::Weapon(w) if !owns(w) => 0.4 + 0.03 * f32::from(spec(w).rank),
         ItemKind::Weapon(w) => {
             // Owned: only its ammo is worth something.
             let ammo = match w {

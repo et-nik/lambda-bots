@@ -21,7 +21,9 @@ pub const TRACK_RULES: &[(&str, bool, u8)] = &[
     ("weaponbox", false, KIND_WEAPONBOX),
     ("grenade", false, KIND_PROJECTILE),
     ("rpg_rocket", false, KIND_PROJECTILE),
+    // The SDK names a flying bolt `bolt`, hlsdk-portable by its entity class.
     ("bolt", false, KIND_PROJECTILE),
+    ("crossbow_bolt", false, KIND_PROJECTILE),
     ("hornet", false, KIND_PROJECTILE),
     ("monster_snark", false, KIND_PROJECTILE),
     ("monster_satchel", false, KIND_PROJECTILE),
@@ -68,7 +70,7 @@ impl ProjectileKind {
         Some(match name {
             "grenade" => ProjectileKind::Grenade,
             "rpg_rocket" => ProjectileKind::Rocket,
-            "bolt" => ProjectileKind::Bolt,
+            "bolt" | "crossbow_bolt" => ProjectileKind::Bolt,
             "hornet" => ProjectileKind::Hornet,
             "monster_snark" => ProjectileKind::Snark,
             "monster_satchel" => ProjectileKind::Satchel,

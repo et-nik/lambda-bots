@@ -36,6 +36,20 @@ A bot looks 20 times a second; bots take turns so they do not all look on the sa
 
    Health, armor and ammo are never visible.
 
+### Projectiles, mines and chargers
+
+On the same looks the bot sees projectiles and placed explosives (a few traces per look, nearest first) within a range
+by kind: a rocket's glow 3000 units, a crossbow bolt 1500, a grenade 1200, a tripmine 1000, a snark 900, a satchel or
+a hornet 800. They must be in the PVS and the view frustum with a clear line to them. What it sees is where they are
+and how they move; a grenade coming down, an MP5 grenade and a rocket are followed to where they will blow up, and
+forgotten 0.4 s after they leave the view (a satchel or a snark lying about after 10 s). A tripmine in view shows its
+beam: the line it faces, traced once to the first wall. Mines are remembered until an explosion goes off at them.
+
+The bot knows its own satchels and mines as its own: it threw or placed them and remembers where; seeing them moves
+them to where they are. The game removes a dead player's satchels, and so does the bot's memory.
+
+Every second look also checks one wall charger in view: a spent charger's display is dark.
+
 ## Hearing
 
 A sound reaches a bot when the engine would deliver it to that client (the PAS of the source, or everyone for
@@ -46,7 +60,8 @@ The bot's own shot masks quieter sounds for 0.3 s (the threshold triples); runni
 fifth.
 
 What is heard is anonymous: a kind (step, jump, pain, shot, reload, pickup, item respawn, explosion), sometimes a
-weapon, and a guessed position. The bearing error grows from `sound_bearing_sigma` for loud sounds up to 35° for
+weapon, and a guessed position. Explosions reach the bots as the engine sends them to clients (`TE_EXPLOSION`, to the
+PAS of the blast): heard like a loud shot, and a mine or satchel the bot knew of at the spot is gone. The bearing error grows from `sound_bearing_sigma` for loud sounds up to 35° for
 faint ones, and faint sounds are sometimes placed behind instead of in front. The range is off by about 30%, the
 height by about 10°.
 

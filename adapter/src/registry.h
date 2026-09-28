@@ -11,6 +11,8 @@ int32_t registry_set_rules(const LbTrackRule *rules, uint32_t count);
 void registry_on_spawn(edict_t *ent);
 void registry_on_free(edict_t *ent);
 void registry_rescan();
+// Classifies entities the game created without the Spawn hook seeing them (a few times a second).
+void registry_scan_new();
 void registry_clear();
 uint32_t registry_snapshot(uint32_t kind_mask, LbEntitySnapshot *out, uint32_t cap);
 int32_t registry_get(LbEntRef ref, LbEntitySnapshot *out);

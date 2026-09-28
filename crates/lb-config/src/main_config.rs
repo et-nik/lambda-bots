@@ -362,7 +362,7 @@ impl Default for LoggingConfig {
 }
 
 /// Game DLLs whose weapon rules differ (see `lb_game::dll`); `auto` tells BugfixedHL-Rebased by its cvars and takes
-/// anything else for the classic SDK.
+/// anything else for the 2023 update.
 pub const DLL_NAMES: [&str; 4] = ["auto", "bugfixed", "hl25", "classic"];
 
 /// The server's game DLL, where its weapon rules differ.

@@ -2,6 +2,7 @@
 
 use lb_config::main_config::QuotaMode;
 use lb_core::math::normalize_angle;
+use lb_game::weapons::WeaponId;
 use lb_host::{Host, TraceKind, TraceRequest};
 
 use crate::cvars::Cv;
@@ -715,8 +716,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         let st = &arms.stats;
         out.push(format!(
             "  arms: {}; thrown {} grenades, {} satchels, {} snarks; {} m203, {} mines laid, {} detonations, {} mines \
-             shot, gauss {} fired {} dumped, {} dodges, {} failed{}; explosives known: {} own satchels, {} mines, {} \
-             in flight",
+             shot, {} scoped, gauss {} fired {} dumped {} plain rolls {:.1} s cramped, {} dodges, {} failed{}; \
+             explosives known: {} own satchels, {} mines, {} in flight",
             arms.describe(now),
             st.grenades,
             st.satchels,
@@ -725,14 +726,31 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             st.mines,
             st.detonations,
             st.mine_shots,
+            st.scoped,
             arms.gauss.fired,
             arms.gauss.dumped,
+            arms.gauss.plain_rolls,
+            f64::from(arms.gauss.cramped) * 0.1,
             st.dodges,
             st.failed,
             arms.last_failure.map(|f| format!(" (last: {f})")).unwrap_or_default(),
             b.brain.explosives.charges.len(),
             b.brain.explosives.mines.len(),
             b.brain.explosives.flying.len(),
+        ));
+        let carried = crate::arsenal(&b.self_state, &rt.game.weapons);
+        let count = |w: WeaponId| carried.iter().find(|a| a.id == w).and_then(|a| a.reserve).unwrap_or(0);
+        out.push(format!(
+            "  explosives carried: {} grenades, {} satchels, {} snarks, {} mines, {} m203",
+            count(WeaponId::HandGrenade),
+            count(WeaponId::Satchel),
+            count(WeaponId::Snark),
+            count(WeaponId::Tripmine),
+            carried
+                .iter()
+                .find(|a| a.id == WeaponId::Mp5)
+                .and_then(|a| a.reserve2)
+                .unwrap_or(0),
         ));
         if !st.failures.is_empty() {
             let f: Vec<String> = st.failures.iter().map(|(p, w, n)| format!("{p}: {w} ×{n}")).collect();

@@ -45,6 +45,13 @@ const UNZOOM_AFTER: f64 = 1.5;
 const CALM_DISTANCE: f32 = 600.0;
 /// A rocket flies about this fast on average over its way.
 const ROCKET_AVERAGE: f32 = 1500.0;
+/// The crossbow's scope goes on only with the target this close to the view's center (the zoomed view is 20° wide).
+const SCOPE_START_DOT: f32 = 0.9945;
+/// A bolt's and the egon beam's end blast reach this far: the line of fire must be clear beyond it.
+const BOLT_CLEAR: f32 = 160.0;
+const EGON_CLEAR: f32 = 128.0;
+/// Seconds a look along an explosive's line holds.
+const BLAST_CHECK_PERIOD: f64 = 0.03;
 /// At a charger's spot within this, across.
 const CHARGER_SPOT: f32 = 24.0;
 /// A charger that gave nothing for this long is spent; nobody stays at one longer than the timeout.
@@ -134,7 +141,7 @@ impl Body {
         self.fov > 0.0 && self.fov < 89.0
     }
 
-    fn armed(&self, w: WeaponId) -> Option<&Armed> {
+    pub(crate) fn armed(&self, w: WeaponId) -> Option<&Armed> {
         self.arsenal.iter().find(|a| a.id == w)
     }
 }
@@ -199,6 +206,9 @@ pub struct Mind {
     pub last_aim: Option<Vec3>,
     /// When the bot last had a target to shoot at.
     target_at: SimTime,
+    /// The last look along the line an explosive would take (a wall or someone close in front): when, for which
+    /// weapon, and whether it was clear.
+    blast_check: Option<(SimTime, WeaponId, bool)>,
     /// Using a charger: which, since when, when it last gave something and what the bot had then.
     charging: Option<(usize, SimTime, SimTime, f32)>,
 }
@@ -278,9 +288,10 @@ impl BotBrain {
         self.pursue(body, ch, nav, rng);
         self.dodge(body, nav);
         self.run_protocols(body, ch, nav, rng);
-        self.aim_and_fire(body, ch, rng);
+        self.aim_and_fire(body, ch, nav, rng);
         self.snark_defense(body);
         self.vigilance(body);
+        self.beam_guard(body);
         let input = lb_motor::MotorInput {
             now,
             dt: body.dt,
@@ -421,6 +432,7 @@ impl BotBrain {
                     approach: body.health.clamp(0.0, 100.0) * ch.aggression,
                     weapon: class,
                     reloading: m.reloading(now),
+                    hold_ground: now < m.arms.hold_until,
                     on_ground: body.on_ground,
                     maxspeed: body.maxspeed,
                 };
@@ -580,7 +592,7 @@ impl BotBrain {
         m.path_look = None;
     }
 
-    fn aim_and_fire(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) {
+    fn aim_and_fire(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
         let m = &mut self.mind;
         let track = m.target.and_then(|k| self.beliefs.track(k));
@@ -598,7 +610,13 @@ impl BotBrain {
                 let distance = t.pos.distance(body.eye);
                 let w = choice.weapon();
                 let armed = body.armed(w).copied().unwrap_or_else(|| Armed::new(w, None, None));
-                let mode = fire::mode(&armed, distance, m.arms.double);
+                let mode = fire::mode(
+                    &armed,
+                    distance,
+                    m.arms.double,
+                    ch.aim_sigma(distance),
+                    m.click_interval,
+                );
                 let shot = shot_of(w, mode.attack, body.zoomed());
                 let Some(aim) = m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat) else {
                     return;
@@ -609,9 +627,23 @@ impl BotBrain {
                 let intent = match choice {
                     Choice::Use(w) => {
                         let in_hand = body.weapon == Some(w) && !m.reloading(now);
+                        if in_hand && w == WeaponId::Crossbow && distance >= XBOW_ZOOM_FROM {
+                            start_scope(m, self.motor.view, aim, body, ch, rng);
+                        }
                         match zoom_toggle(w, Some(distance), body, &mut m.arms.zoom_ready).filter(|_| in_hand) {
                             Some(toggle) => toggle,
-                            None => shoot(m, self.motor.view, t, w, mode, aim, distance, in_hand, body, rng),
+                            None => {
+                                let shot = Aimed {
+                                    view: self.motor.view,
+                                    target: t,
+                                    weapon: w,
+                                    mode,
+                                    aim,
+                                    distance,
+                                    in_hand,
+                                };
+                                shoot(m, &shot, &self.beliefs, nav, body, rng)
+                            }
                         }
                     }
                     Choice::Reload(w) => {
@@ -701,47 +733,99 @@ impl BotBrain {
     }
 }
 
-/// Fires `w` at a target in sight when the view is on it; a fired rocket is guided from then on.
-#[allow(clippy::too_many_arguments)]
-fn shoot(
-    m: &mut Mind,
+/// A shot the aim is on: the view, the target and the weapon worked in `mode` at `aim`, `distance` away.
+struct Aimed<'a> {
     view: Vec3,
-    t: &EnemyTrack,
-    w: WeaponId,
+    target: &'a EnemyTrack,
+    weapon: WeaponId,
     mode: fire::Mode,
     aim: Vec3,
     distance: f32,
     in_hand: bool,
+}
+
+/// Where the game launches `w`'s projectile from when looking along `view`, and how far along the view it must fly
+/// clear for its blast to spare the shooter; `None` for weapons without a blast.
+fn launch(w: WeaponId, eye: Vec3, view: Vec3, zoomed: bool) -> Option<(Vec3, f32)> {
+    let (forward, right, up) = lb_core::math::view_angle_vectors(view);
+    match w {
+        // The rocket leaves below and to the right of the eye: past a ledge the eye clears it may not.
+        WeaponId::Rpg => Some((eye + forward * 16.0 + right * 8.0 - up * 8.0, policy::ROCKET_MIN)),
+        WeaponId::Crossbow if !zoomed => Some((eye - up * 2.0, BOLT_CLEAR)),
+        WeaponId::Egon => Some((eye, EGON_CLEAR)),
+        _ => None,
+    }
+}
+
+/// The line an explosive would take from where it is launched is clear of walls and of other players near the
+/// shooter's end: looked at while the shot is about to go, again every 30 ms at most.
+fn blast_clear(
+    m: &mut Mind,
+    a: &Aimed<'_>,
+    beliefs: &lb_knowledge::Beliefs,
+    tracer: &mut dyn lb_worldq::Tracer,
+    body: &Body,
+) -> bool {
+    let Some((from, need)) = launch(a.weapon, body.eye, a.view, body.zoomed()) else {
+        return true;
+    };
+    if let Some((at, w, clear)) = m.blast_check
+        && w == a.weapon
+        && body.now.since(at) < BLAST_CHECK_PERIOD
+    {
+        return clear;
+    }
+    let (forward, _, _) = lb_core::math::view_angle_vectors(a.view);
+    let reach = a.aim.distance(body.eye);
+    let to = from + forward * reach;
+    let walls = tracer.trace(&lb_worldq::TraceQuery::line(from, to)).fraction * reach;
+    let people = a.weapon != WeaponId::Egon && crate::arms::crowded(beliefs, from, to, Some(a.target.who));
+    let clear = walls >= need && !people;
+    m.blast_check = Some((body.now, a.weapon, clear));
+    clear
+}
+
+/// Fires at a target in sight when the view is on it; a fired rocket is guided from then on.
+fn shoot(
+    m: &mut Mind,
+    a: &Aimed<'_>,
+    beliefs: &lb_knowledge::Beliefs,
+    tracer: &mut dyn lb_worldq::Tracer,
     body: &Body,
     rng: &mut BotRng,
 ) -> WeaponIntent {
     let now = body.now;
+    let (t, w, mode, aim, distance) = (a.target, a.weapon, a.mode, a.aim, a.distance);
     // A crossbow is only worth this far zoomed in: wait for the scope rather than send a bolt.
     let scoped = w != WeaponId::Crossbow || distance < XBOW_ZOOM_FROM || body.zoomed();
     let shot = fire::Shot {
         eye: body.eye,
-        view,
+        view: a.view,
         aim,
         distance,
         enemy_faces_me: target::faces(t, body.origin),
         weapon: w,
     };
-    let shoot = in_hand && scoped && fire::on_target(&shot);
-    if shoot {
+    // An explosive bursting on a wall or on someone close in front would hit the bot.
+    let engaged = a.in_hand && scoped && fire::on_target(&shot) && blast_clear(m, a, beliefs, tracer, body);
+    // The gauss protocol charges; plain shots only when it rolled for them or no charge can start.
+    let shoot = engaged && (w != WeaponId::Gauss || m.arms.gauss.plain_allowed(now));
+    if engaged {
         if m.answered != Some((t.who, t.recognized_at)) {
             m.answered = Some((t.who, t.recognized_at));
             m.reactions.record(now.since(t.noticed_at), now.since(t.recognized_at));
         }
         let loaded = body.armed(w).is_some_and(|a| a.clip.is_none_or(|c| c > 0));
-        if w == WeaponId::Rpg && loaded && m.arms.guide.is_none_or(|(until, _)| now >= until) {
+        if w == WeaponId::Rpg && loaded && m.arms.guide.is_none_or(|(until, _, _)| now >= until) {
             let flight = (distance / ROCKET_AVERAGE + 0.3).min(ROCKET_GUIDE);
-            m.arms.guide = Some((now + f64::from(flight), aim));
+            m.arms.guide = Some((now + f64::from(flight), aim, t.who));
+            m.arms.hold_until = m.arms.hold_until.max(now + f64::from(flight));
         }
         if w == WeaponId::Shotgun {
             m.arms.double = fire::roll_double(&mut rng.combat);
         }
     }
-    m.firing = shoot;
+    m.firing = engaged;
     WeaponIntent {
         select: Some(w),
         fire: if shoot {
@@ -787,8 +871,35 @@ impl BotBrain {
     }
 }
 
+/// The crossbow's scope is snapped on for a shot when the target is far and the view close enough for it to be in the
+/// zoomed view; the protocol takes it off again.
+fn start_scope(m: &mut Mind, view: Vec3, aim: Vec3, body: &Body, ch: &Character, rng: &mut BotRng) {
+    let (forward, _, _) = lb_core::math::view_angle_vectors(view);
+    let near = forward.dot((aim - body.eye).normalize_or_zero()) >= SCOPE_START_DOT;
+    // Loaded, not reloading, and the scope's toggle ready again: otherwise the game would not put it on. The weapon
+    // data may be a frame behind a toggle, the view's zoom is not.
+    let toggle = match spec(WeaponId::Crossbow).alt {
+        AltFire::Zoom { toggle, .. } => f64::from(toggle),
+        _ => 0.0,
+    };
+    let loaded = body.now.since(m.arms.zoom_flip) >= toggle
+        && body.prediction.is_some_and(|p| {
+            p.current == Some(WeaponId::Crossbow)
+                && p.next_attack <= 0.0
+                && p.weapons[WeaponId::Crossbow as usize]
+                    .is_some_and(|w| w.clip > 0 && !w.reloading && w.next_secondary <= 0.0)
+        });
+    if near && loaded && !m.arms.busy() && !body.zoomed() {
+        let [lo, hi] = ch.skill.scope_settle;
+        let settle = rng.combat.range_f32(lo, hi.max(lo));
+        m.arms.active = Some(crate::arms::Active::Scope(lb_combat::arms::scope::Scope::new(
+            body.now, settle,
+        )));
+    }
+}
+
 /// How the shot flies, for the aim: projectiles lead the target, rockets go for the feet. A zoomed crossbow shoots a
-/// hitscan bolt in multiplayer.
+/// hitscan bolt in multiplayer, and a scope steadies the aim.
 fn shot_of(w: WeaponId, attack: Attack, zoomed: bool) -> Shot {
     let (speed, feet) = match (w, attack) {
         (WeaponId::Rpg, _) => (Some(ROCKET_SPEED), true),
@@ -800,6 +911,7 @@ fn shot_of(w: WeaponId, attack: Attack, zoomed: bool) -> Shot {
         weapon: Some(w),
         speed,
         feet,
+        steady: zoomed,
     }
 }
 

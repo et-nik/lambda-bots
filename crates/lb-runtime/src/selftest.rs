@@ -25,7 +25,9 @@ enum Step {
     SatchelWait,
     /// A second satchel was thrown close by: backing off the way the bot came before trying the other button.
     SatchelBackOff,
-    SatchelDetonate { tried_other: bool },
+    SatchelDetonate {
+        tried_other: bool,
+    },
     CrossbowDraw,
     CrossbowZoom,
     CrossbowUnzoom,
@@ -337,12 +339,8 @@ impl SelfTest {
         let classic_grenade = self.grenade_speed.map(|v| (v - 400.0).abs() < (v - 650.0).abs());
         let kind = match (classic_satchel, classic_grenade) {
             (Some(true), _) | (None, Some(true)) => Some(DllKind::Classic),
-            (Some(false), Some(false)) | (None, Some(false)) => Some(match self.dll.kind {
-                DllKind::Classic => DllKind::Bugfixed,
-                k => k,
-            }),
-            (Some(false), None) => Some(match self.dll.kind {
-                DllKind::Classic => DllKind::Bugfixed,
+            (Some(false), Some(false)) | (None, Some(false)) | (Some(false), None) => Some(match self.dll.kind {
+                DllKind::Classic => DllKind::Valve25,
                 k => k,
             }),
             (Some(false), Some(true)) | (None, None) => None,

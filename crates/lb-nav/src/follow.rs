@@ -82,6 +82,14 @@ pub struct PathFollower {
 }
 
 impl PathFollower {
+    /// The rest of the path runs through the link `from → to`.
+    pub fn uses(&self, from: NodeId, to: NodeId) -> bool {
+        let start = self.next.saturating_sub(1);
+        self.path[start.min(self.path.len())..]
+            .windows(2)
+            .any(|w| w[0] == from && w[1] == to)
+    }
+
     /// `path[0]` is the node the bot starts at.
     pub fn new(path: Vec<NodeId>, now: f64) -> PathFollower {
         PathFollower {

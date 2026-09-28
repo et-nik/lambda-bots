@@ -35,7 +35,7 @@ for set in "${SETS[@]}"; do
         "$CMD" --wait 2 "lb stats"
         "$CMD" --wait 2 "lb brain"
     } | sed -e 's/\x1b\[[0-9;]*m//g' >"$OUT/$set.txt"
-    grep -E "kills by bots|weapon_" "$OUT/$set.txt" | sed 's/^/   /' || true
+    grep -E "kills by bots|damage from explosions|\]   weapon_|failures" "$OUT/$set.txt" | sed 's/^/   /' || true
 done
 "$CMD" "lb weapons all" >/dev/null
 echo "reports in $OUT"

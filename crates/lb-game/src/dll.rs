@@ -7,8 +7,9 @@
 //! - **Hand grenade speed.** `(90 − pitch′) × 4`, at most 500, in the classic SDK; `× 6.5`, at most 1000, since
 //!   the 2023 update and in BugfixedHL-Rebased.
 //!
-//! BugfixedHL-Rebased is told by its own cvars. The 2023 update has no such mark, so anything else is taken for the
-//! classic SDK unless the config names the DLL (`game.dll`); `lb selftest` checks the guess on a live server.
+//! BugfixedHL-Rebased is told by its own cvars. Anything else is taken to play by the 2023 update, as current mods do
+//! (hlsdk-portable among them), unless the config names the DLL (`game.dll`); `lb selftest` checks the guess on a
+//! live server.
 
 use crate::mechanics::Attack;
 
@@ -73,7 +74,7 @@ impl DllProfile {
                 kind: if bugfixed_cvars {
                     DllKind::Bugfixed
                 } else {
-                    DllKind::Classic
+                    DllKind::Valve25
                 },
                 detected: true,
                 satchel_swapped: false,
@@ -129,12 +130,13 @@ mod tests {
         assert_eq!(bhl.satchel_detonate(), Attack::Secondary);
         assert_eq!(bhl.satchel_throw_more(), Attack::Primary);
         let other = DllProfile::resolve("auto", false);
-        assert_eq!(other.kind, DllKind::Classic);
-        assert_eq!(other.satchel_detonate(), Attack::Primary);
-        assert_eq!(other.grenade_speed(), (4.0, 500.0));
-        let named = DllProfile::resolve("HL25", false);
-        assert_eq!((named.kind, named.detected), (DllKind::Valve25, false));
-        let mut p = other;
+        assert_eq!(other.kind, DllKind::Valve25);
+        assert_eq!(other.satchel_detonate(), Attack::Secondary);
+        let classic = DllProfile::resolve("classic", false);
+        assert_eq!((classic.kind, classic.detected), (DllKind::Classic, false));
+        assert_eq!(classic.satchel_detonate(), Attack::Primary);
+        assert_eq!(classic.grenade_speed(), (4.0, 500.0));
+        let mut p = classic;
         p.swap_satchel_buttons();
         assert_eq!(p.satchel_detonate(), Attack::Secondary);
         assert_eq!(p.satchel_throw_more(), Attack::Primary);

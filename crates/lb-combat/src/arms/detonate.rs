@@ -145,7 +145,7 @@ impl MineShot {
         }
         let angles = dir_to_view_angles(self.mine - h.eye);
         let s = spec(self.weapon);
-        let weapon = if h.ready(self.weapon) && settled(h.view, angles, 0.8) {
+        let weapon = if h.ready(self.weapon) && settled(h.view, angles, 0.4) {
             press(self.weapon, lb_game::mechanics::Attack::Primary, s.trigger, interval)
         } else {
             hold(self.weapon)
@@ -177,6 +177,7 @@ mod tests {
             on_ground: true,
             on_ladder: false,
             waterlevel: 0,
+            fov: 0.0,
             weapon: Some(WeaponId::Satchel),
             arsenal,
             prediction: Some(prediction),

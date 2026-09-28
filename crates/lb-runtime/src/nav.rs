@@ -623,4 +623,11 @@ impl NavService for BotNavService<'_, '_> {
     fn available(&self) -> bool {
         self.graph.is_some()
     }
+
+    fn avoid_line(&mut self, a: Vec3, b: Vec3, seconds: f32) {
+        if let Some(graph) = self.graph {
+            let now = self.input.now;
+            self.nav.avoid_line(graph, a, b, now, now + f64::from(seconds));
+        }
+    }
 }

@@ -87,6 +87,8 @@ pub struct Thrower {
     started: SimTime,
     resolved_at: SimTime,
     steady_since: Option<SimTime>,
+    /// Let go as soon as the game allows: the target is in sight and will not wait for a cooked grenade.
+    quick: bool,
 }
 
 impl Thrower {
@@ -100,7 +102,14 @@ impl Thrower {
             started: now,
             resolved_at: now,
             steady_since: None,
+            quick: false,
         }
+    }
+
+    /// Thrown as soon as the game allows, without cooking.
+    pub fn quick(mut self) -> Thrower {
+        self.quick = true;
+        self
     }
 
     /// Where the thrown grenade or satchel should come down.
@@ -158,7 +167,11 @@ impl Thrower {
             }
             Phase::Cook { pin } => {
                 let held = (now.secs() - pin) as f32;
-                let cook = (GRENADE_FUSE - self.throw.flight - LAND_BEFORE_FUSE).clamp(GRENADE_MIN_COOK, MAX_COOK);
+                let cook = if self.quick {
+                    GRENADE_MIN_COOK
+                } else {
+                    (GRENADE_FUSE - self.throw.flight - LAND_BEFORE_FUSE).clamp(GRENADE_MIN_COOK, MAX_COOK)
+                };
                 let deadline = GRENADE_FUSE - FUSE_MARGIN;
                 if now.since(self.resolved_at) >= RESOLVE {
                     self.resolved_at = now;
@@ -335,6 +348,7 @@ mod tests {
                 on_ground: true,
                 on_ladder: false,
                 waterlevel: 0,
+                fov: 0.0,
                 weapon: Some(weapon),
                 arsenal: &self.arsenal,
                 prediction: Some(&self.prediction),

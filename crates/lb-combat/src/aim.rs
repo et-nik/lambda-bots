@@ -18,6 +18,8 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, Stance};
 
 const SPRAY_DISTANCE: f32 = 272.0;
+/// A scope's share of the aim error.
+pub const SCOPE_STEADY: f32 = 0.5;
 /// Below the origin of a standing (and a crouched) player, a little above the floor.
 const FEET: f32 = 28.0;
 const FEET_CROUCHED: f32 = 12.0;
@@ -41,6 +43,8 @@ pub struct Shot {
     pub speed: Option<f32>,
     /// Aim at the feet of a target on the ground.
     pub feet: bool,
+    /// Through a scope: the aim error is halved.
+    pub steady: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,7 +139,12 @@ impl Aim {
             (false, true) => 0.0,
         };
         self.drift(now, distance, skill, rng);
-        Some(origin + Vec3::Z * z + self.error)
+        let error = if shot.steady {
+            self.error * SCOPE_STEADY
+        } else {
+            self.error
+        };
+        Some(origin + Vec3::Z * z + error)
     }
 
     fn drift(&mut self, now: SimTime, distance: f32, skill: &AimSkill, rng: &mut Pcg32) {
@@ -215,6 +224,7 @@ mod tests {
             weapon: Some(WeaponId::Rpg),
             speed: Some(1000.0),
             feet: true,
+            steady: false,
         };
         let p = aim.point(SimTime(1.3), Vec3::ZERO, &rocket, &quick, &mut rng).unwrap();
         assert!(p.x < 380.0 - 50.0, "leads the target it runs back: {p}");

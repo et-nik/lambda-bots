@@ -7,7 +7,7 @@ architecture with fair perception, utility-based decisions and verifiable naviga
 Status: **M3 — graphs made from the map.** Bots see, hear, decide, fight and get around any map: the navigation
 graph is made from the BSP (jumps, drops, ladders, lifts, doors, teleports, breakables, water, push fields), kept
 in a cache, and corrected with per-map overlays and an in-game editor; every session can be recorded and replayed.
-Acceptance results and known limitations: `docs/m0-acceptance.md` … `docs/m3-acceptance.md`. The ReHLDS and Windows
+Acceptance results and known limitations: `docs/m0-acceptance.md` … `docs/m4-acceptance.md`. The ReHLDS and Windows
 test stands are in `docs/stands/`, design notes in `docs/design/`.
 
 ## Platforms
@@ -51,9 +51,12 @@ How vision, hearing and memory work, and the skill parameters behind them: `docs
 
 ## Behavior
 
-Bots pick a goal (fight, chase, back off, collect an item, roam) by weighted utility with commitment, fight with
-yapb's movement and aim model, and choose weapons by expected damage at the distance. Details and the `lb brain`
-decision trace: `docs/behavior.md`.
+Bots pick a goal (fight, chase, back off, collect an item, use a wall charger, roam) by weighted utility with
+commitment, fight with yapb's movement and aim model, and choose weapons by expected damage at the distance. They use
+the whole arsenal the way the game works it: the gauss charged and let go on target, zoomed crossbows, guided
+rockets, the MP5's grenades, cooked hand grenades, satchels set off when an enemy walks up to them, tripmines across
+corridors, snarks; and they run from grenades and rockets they see coming. Details and the `lb brain` decision
+trace: `docs/behavior.md`.
 
 ## Navigation
 
@@ -95,6 +98,9 @@ run them from their own console.
 | `lb compat`                            | server compatibility profile                                    |
 | `lb config show\|reload`               | show the config, or reload config and profiles                  |
 | `lb test motor …`                      | motor measurements (requires `lb_dev 1`)                        |
+| `lb weapons [all\|<weapon>…] [give]`   | weapons bots may use; `give` hands them out on spawn (cheats)   |
+| `lb stats [reset]`                     | weapon statistics: rounds, hit rate by distance, kills          |
+| `lb selftest [name]`                   | check the game DLL's weapon rules live (needs `sv_cheats 1`)    |
 
 | cvar            | Default   | Purpose                                             |
 |-----------------|-----------|-----------------------------------------------------|
@@ -142,6 +148,7 @@ scripts/stand/lbcmd.sh "lb list" "lb status"                  # commands to the 
 scripts/stand/check-respawn.sh 100                            # 100 kill → respawn cycles
 scripts/stand/check-changelevel.sh 20                         # 20 map changes, names preserved
 scripts/stand/msec-matrix.sh                                  # msec measurement: fps × lb_cmd_rate
+scripts/stand/weapon-scenarios.sh                             # every weapon on its own (server with sv_cheats 1)
 scripts/stand/lbcmd.sh --stop
 ```
 

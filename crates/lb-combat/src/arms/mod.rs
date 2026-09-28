@@ -5,6 +5,7 @@
 //! - [`throw`]: hand grenades (pin, cook, aim, release), satchels and snarks.
 //! - [`mine`]: placing a tripmine on a wall.
 //! - [`launcher`]: the MP5's grenade on a lobbed arc.
+//! - [`scope`]: the crossbow's scope snapped on for a shot and off again.
 //! - [`detonate`]: setting off the bot's satchels, or shooting a tripmine, when an enemy walks up to it.
 //!
 //! A protocol reads the bot's own state ([`Hands`]) every frame and asks for a weapon, a look and a movement
@@ -16,6 +17,7 @@ pub mod detonate;
 pub mod gauss;
 pub mod launcher;
 pub mod mine;
+pub mod scope;
 pub mod throw;
 
 use lb_core::Vec3;
@@ -41,6 +43,8 @@ pub struct Hands<'a> {
     pub on_ground: bool,
     pub on_ladder: bool,
     pub waterlevel: u8,
+    /// Field of view the game set: 0 is the default, less a zoomed scope.
+    pub fov: f32,
     /// Weapon `CurWeapon` confirmed.
     pub weapon: Option<WeaponId>,
     pub arsenal: &'a [Armed],
@@ -122,7 +126,7 @@ pub fn settled(view: Vec3, want: Vec3, degrees: f32) -> bool {
 }
 
 /// Standing still.
-pub(crate) fn stop() -> MoveIntent {
+pub fn stop() -> MoveIntent {
     MoveIntent {
         dir: lb_core::Vec2::ZERO,
         speed: 0.0,

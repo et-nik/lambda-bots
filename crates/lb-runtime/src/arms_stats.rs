@@ -2,13 +2,17 @@
 //! kills and suicides from the kill feed. This is measurement, not behavior: it may read what the bots do not know
 //! (who hit whom), and nothing here feeds back into them.
 //!
-//! - **Rounds** are what a weapon's clip and reserve lost (a reload moves ammo, it loses none); the distance band is
-//!   that of the bot's target at the time.
+//! - **Rounds** are what a weapon's clip and reserve lost (a reload moves ammo, it loses none) while in hand (weapons
+//!   share ammo), and what a bot carries less of grenades, satchels, snarks and mines whatever is in hand; the
+//!   distance band is that of the bot's target at the time. The crossbow's zoomed shots and the MP5's grenades have rows
+//!   of their own.
 //! - **Damage** a bot takes is credited to the bot standing where the `Damage` message says it came from (bullets
-//!   report the shooter); explosions report the blast, so their damage is not credited.
+//!   and the zoomed crossbow report the shooter), or else to whoever threw or fired the projectile seen there moments
+//!   before (a bolt, a rocket, a grenade, a satchel, a mine, a snark, a hornet). What neither explains is counted
+//!   apart, and so is what a bot's own explosives did to it.
 //! - **Hit rate** is damage over rounds times the damage a round does when it hits.
 
-use lb_game::mechanics::Damages;
+use lb_game::mechanics::{BOLT_HIT, Damages};
 use lb_game::weapons::WeaponId;
 use rustc_hash::FxHashMap;
 
@@ -22,6 +26,32 @@ pub fn band(distance: f32) -> usize {
     BANDS.iter().position(|b| distance < *b).unwrap_or(BANDS.len() - 1)
 }
 
+/// A weapon, or its secondary fire where that is another weapon in all but name: the crossbow's zoomed hitscan shot,
+/// the MP5's grenade launcher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Row {
+    pub weapon: WeaponId,
+    pub alt: bool,
+}
+
+impl Row {
+    pub fn plain(weapon: WeaponId) -> Row {
+        Row { weapon, alt: false }
+    }
+
+    pub fn alt(weapon: WeaponId) -> Row {
+        Row { weapon, alt: true }
+    }
+
+    fn name(self) -> String {
+        match (self.weapon, self.alt) {
+            (WeaponId::Crossbow, true) => "weapon_crossbow+scope".to_string(),
+            (WeaponId::Mp5, true) => "weapon_9mmAR+m203".to_string(),
+            (w, _) => w.classname().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WeaponRow {
     pub rounds: [u32; 4],
@@ -31,19 +61,26 @@ pub struct WeaponRow {
 #[derive(Clone, Debug, Default)]
 pub struct ArmsStats {
     pub since: f64,
-    pub weapons: FxHashMap<WeaponId, WeaponRow>,
+    pub weapons: FxHashMap<Row, WeaponRow>,
     /// Kill feed weapon name → (kills by bots, bot suicides).
     pub kills: FxHashMap<String, (u32, u32)>,
     /// Deaths of bots to the world (falls) and to other players.
     pub deaths: u32,
+    /// Damage bots took from explosions no bot's projectile explains.
+    pub blast: f32,
+    /// Damage bots took from their own explosives.
+    pub own_blast: f32,
 }
 
-/// Damage one round does when it hits: a shotgun shell's pellets, a gauss cell's share of a shot.
-fn round_damage(w: WeaponId, d: &Damages) -> f32 {
-    match w {
-        WeaponId::Shotgun => 4.0 * d.buckshot,
-        WeaponId::Gauss => d.gauss / 2.0,
-        _ => d.primary(w),
+/// Damage one round does when it hits: a shotgun shell's pellets, a gauss cell's share of a shot, a bolt's hit and
+/// blast.
+fn round_damage(row: Row, d: &Damages) -> f32 {
+    match (row.weapon, row.alt) {
+        (WeaponId::Shotgun, _) => 4.0 * d.buckshot,
+        (WeaponId::Gauss, _) => d.gauss / 2.0,
+        (WeaponId::Crossbow, false) => BOLT_HIT + d.xbow_bolt,
+        (WeaponId::Mp5, true) => d.m203,
+        (w, _) => d.primary(w),
     }
 }
 
@@ -55,12 +92,20 @@ impl ArmsStats {
         };
     }
 
-    pub fn fired(&mut self, w: WeaponId, rounds: u32, distance: f32) {
-        self.weapons.entry(w).or_default().rounds[band(distance)] += rounds;
+    pub fn fired(&mut self, row: Row, rounds: u32, distance: f32) {
+        self.weapons.entry(row).or_default().rounds[band(distance)] += rounds;
     }
 
-    pub fn hit(&mut self, w: WeaponId, damage: f32, distance: f32) {
-        self.weapons.entry(w).or_default().damage[band(distance)] += damage;
+    pub fn blasted(&mut self, damage: f32) {
+        self.blast += damage;
+    }
+
+    pub fn hurt_self(&mut self, damage: f32) {
+        self.own_blast += damage;
+    }
+
+    pub fn hit(&mut self, row: Row, damage: f32, distance: f32) {
+        self.weapons.entry(row).or_default().damage[band(distance)] += damage;
     }
 
     /// A kill feed line: `bot_killer` a bot killed someone, `suicide` a bot killed itself.
@@ -79,11 +124,11 @@ impl ArmsStats {
     pub fn report(&self, now: f64, damages: &Damages) -> Vec<String> {
         let minutes = ((now - self.since) / 60.0).max(1e-6);
         let mut out = vec![format!("weapon statistics over {minutes:.1} min")];
-        let mut ids: Vec<&WeaponId> = self.weapons.keys().collect();
+        let mut ids: Vec<&Row> = self.weapons.keys().collect();
         ids.sort();
         if !ids.is_empty() {
             out.push(format!(
-                "  {:<18} {:>8} {:>9}  hit rate by distance {:?}",
+                "  {:<22} {:>8} {:>9}  hit rate by distance {:?}",
                 "weapon", "rounds", "damage", BAND_NAMES
             ));
         }
@@ -106,14 +151,18 @@ impl ArmsStats {
                 })
                 .collect();
             out.push(format!(
-                "  {:<18} {rounds:>8} {damage:>9.0}  {}",
-                w.classname(),
+                "  {:<22} {rounds:>8} {damage:>9.0}  {}",
+                w.name(),
                 rates.join(", ")
             ));
         }
         let mut names: Vec<(&String, &(u32, u32))> = self.kills.iter().collect();
         names.sort_by(|a, b| (b.1.0 + b.1.1).cmp(&(a.1.0 + a.1.1)).then(a.0.cmp(b.0)));
         let (kills, suicides) = self.kills.values().fold((0, 0), |(k, s), (a, b)| (k + a, s + b));
+        out.push(format!(
+            "  damage from explosions of no bot's {:.0}, from a bot's own {:.0}",
+            self.blast, self.own_blast
+        ));
         out.push(format!(
             "  kills by bots {kills} ({:.1}/min), bot suicides {suicides} ({:.1}/h), bot deaths {}",
             f64::from(kills) / minutes,
@@ -134,14 +183,21 @@ mod tests {
     #[test]
     fn rates_per_band() {
         let mut s = ArmsStats::default();
-        s.fired(WeaponId::Glock, 10, 500.0);
-        s.hit(WeaponId::Glock, 60.0, 500.0);
+        s.fired(Row::plain(WeaponId::Glock), 10, 500.0);
+        s.hit(Row::plain(WeaponId::Glock), 60.0, 500.0);
+        s.fired(Row::alt(WeaponId::Crossbow), 4, 900.0);
+        s.hit(Row::alt(WeaponId::Crossbow), 120.0, 900.0);
         s.death("9mmhandgun", true, false, true);
         s.death("rpg_rocket", false, true, true);
         let r = s.report(60.0, &Damages::default());
         assert!(
             r.iter()
                 .any(|l| l.contains("weapon_9mmhandgun") && l.contains("50% of 10")),
+            "{r:?}"
+        );
+        assert!(
+            r.iter()
+                .any(|l| l.contains("weapon_crossbow+scope") && l.contains("25% of 4")),
             "{r:?}"
         );
         assert!(r.iter().any(|l| l.contains("bot suicides 1")), "{r:?}");

@@ -71,8 +71,13 @@ pub struct Bot {
     pub character: lb_brain::Character,
     /// What the bot looked at on its last frame, when not along its path.
     pub attention: Option<lb_brain::Attention>,
-    /// The weapon in hand on the last frame and its rounds left, for `lb stats`.
-    pub rounds: Option<(lb_game::weapons::WeaponId, i32)>,
+    /// The weapon in hand on the last frame, its rounds left and its second ammo (the MP5's grenades), for
+    /// `lb stats`.
+    pub rounds: Option<(lb_game::weapons::WeaponId, i32, i32)>,
+    /// Last frame the bot looked through a scope, for `lb stats`.
+    pub zoomed_at: Option<SimTime>,
+    /// Grenades, satchels, snarks and tripmines carried on the last frame of this life, for `lb stats`.
+    pub carried: Option<[i32; 4]>,
 }
 
 impl Bot {
@@ -118,6 +123,8 @@ impl Bot {
             character,
             attention: None,
             rounds: None,
+            zoomed_at: None,
+            carried: None,
         }
     }
 
