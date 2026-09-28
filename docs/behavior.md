@@ -12,7 +12,7 @@ scored:
 |---------------|------|------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
 | `engage`      | 2    | an enemy is in sight (or was, half a second ago)                             | 0.9 × (0.6 + 0.4 × aggression)                                                    |
 | `retreat`     | 2    | the bot is hurt and scared, and was in a fight in the last 10 s              | (100 − health) × fear, fading with time since the fight; counts only above 0.4    |
-| `hunt`        | 1    | an enemy was lost moments ago and its position is still certain              | higher for close enemies and aggressive bots; counts only above 0.6               |
+| `hunt`        | 1    | an enemy was lost moments ago and its position is still certain              | higher for close enemies and aggressive bots; counts only above 0.5               |
 | `investigate` | 1    | a shot, steps, pain, a pickup or a glimpse heard or seen 200–2500 units away | 0.6 × (0.3 + loudness) × freshness × (0.5 + aggression); counts only above 0.25   |
 | `collect`     | 1    | an item is worth taking (rank 2 for health when badly hurt)                  | the item's value × the chance it is there on arrival × a travel penalty           |
 | `charger`     | 1    | health under 60 or armor under 40 and a charger believed to give             | like `collect`, with 4 s of charging added to the travel (rank 2 as for health)   |
@@ -85,7 +85,9 @@ places the bot has looked at since are ruled out while in sight and come back sl
 again). A sound tied to the enemy starts it all over from where it was heard.
 
 - **Hunting**, the bot first runs to where it lost the enemy; after a second it goes to the place that sees most of
-  where the enemy may be now (a short run away counts more), and picks again every 1.5 s and on arriving.
+  where the enemy may be now (a short run away counts more), and picks again every 1.5 s, and half a second after
+  arriving. The hunt goes on while the enemy's place is known to within some 3000 units (about 6 s for a bot of
+  middling aggression, longer for bolder ones), until the enemy is forgotten.
 - **Watching:** on the way, and wherever it stands, the bot looks where the enemy would come into view: the places in
   its sight next to where the enemy most likely is.
 - **Through a wall:** hard and expert bots (`gauss_walls`) with the gauss in hand shoot a charged beam through a thin
@@ -95,7 +97,7 @@ again). A sound tied to the enemy starts it all over from where it was heard.
 ## Seeing about sounds
 
 A sound nobody tracked makes a sound worth going to see about (the bot turns its head at it as before): the bot goes
-to a place in sight of where it came from, the one it gets to soonest, and looks there for 1.5 s. A new sound near the
+to a place in sight of where it came from, the one it gets to soonest, and looks there for 0.8 s. A new sound near the
 one being seen about adds to it rather than starting over; a sound seen about is not gone to again.
 
 ## Backing off
@@ -107,7 +109,7 @@ sight, until the retreat no longer wins.
 ## Holding spots
 
 A calm, healthy bot with a gun for the spot (the crossbow, the 357, the gauss or the RPG for overwatch; the shotgun,
-the MP5, the egon or the gauss for an ambush) may hold one of the map's spots: 8–15 s at an overwatch spot, 10–20 s
+the MP5, the egon or the gauss for an ambush) may hold one of the map's spots: 6–10 s at an overwatch spot, 8–14 s
 crouched at an ambush, half as long again for a style fond of it. It looks one way and the other every 1.5–4 s, or
 where a lost enemy would come into view, and holds its weapons for the distance it watches. Rushers never hold a spot;
 snipers hold overwatch spots most, trappers ambush spots.
@@ -124,7 +126,8 @@ When calm, a bot with tripmines puts one on a wall of the map's mine spots near 
 reach, looks at the spot and lays the mine, then steps along the wall out of where the beam will be (it arms in
 2.5 s). With two satchels or more it goes up to the chokepoint an ambush spot 350 units or more
 away watches (a satchel flies some 200 units), throws two to four at it, and watches them crouched from the spot for
-20–30 s, out of their blast: they go off when an enemy comes by them, and after 60–90 s with nobody by them. Trappers lay traps every 10–18 s; others at most every 20–30 s and rarely.
+12–20 s, out of their blast, with the satchel radio in hand: they go off the moment an enemy is in their blast, and
+after 60–90 s with nobody by them. Trappers lay traps every 10–18 s; others at most every 20–30 s and rarely.
 
 ## Moods
 
@@ -233,13 +236,27 @@ arc that lands on the target's feet (800 units per second, half gravity, checked
 grenade bursts on the first thing it touches and the bot moves on while it flies: it must land 400 units or more
 away (550 for a bot under 40 health), with nobody near the first stretch of the arc.
 
-**Movement** (yapb's `attackMovement`):
+**Movement** (yapb's `attackMovement`, and closing in):
+- **Closing in.** Further off than the weapon in hand does well at, a bot with the will to (health × aggression 30
+  or more) runs at the enemy, along the navigation path when there is one (round walls and drops), strafing a
+  little as it goes, and never stands:
+
+  | Weapon in hand                       | Closes in beyond |
+  |--------------------------------------|------------------|
+  | shotgun                              | 350              |
+  | hornetgun, egon                      | 600              |
+  | glock, MP5                           | 700              |
+  | gauss                                | 1200             |
+  | 357, crossbow, RPG                   | never            |
+
+  A hurt or timid bot (health × aggression under 30) keeps its distance, as yapb's did; nobody closes in while
+  reloading or while its own rocket, grenade or satchels are on the way to the target.
 - **Style.** Every 1–3 s the bot decides between strafing and standing still. Closer than 768 units it strafes.
-  Further away it stands with the skill's `stay_mid` / `stay_far` chance.
+  Further away it stands with the skill's `stay_mid` / `stay_far` chance (not while closing in).
 - **Strafe side.** It strafes away from the side the enemy aims at, swaps sides now and then, and turns around at
   walls.
-- **Distance.** Skilled bots move in when strong and back off when weak. All bots back off under 96 units and while
-  reloading. With the crowbar they charge.
+- **Distance.** Otherwise skilled bots drift in when strong and back off when weak. All bots back off under 96 units
+  and while reloading. With the crowbar they charge.
 - **Extras.** Crouch taps and dodge jumps come with skill.
 - **Ledges.** A move that would drop off a ledge is reversed.
 
@@ -250,10 +267,11 @@ is in sight for 2 s, a low clip is reloaded, of the gun the bot would like in ha
 
 **Throws.** Three times a second a bot with grenades, satchels or snarks weighs a throw at the nearest enemy: one in
 sight, or one lost up to 3 s ago whose position is still known to within 400 units. Each kind that fits the distance
-has its chance per weighing: 0.5 for a grenade, 0.35 for satchels or a snark at an enemy out of sight, and 0.12, 0.15
-and 0.25 at one in sight. The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for experts),
-a little more for bold bots and a little less for careful ones, is the chance to throw at all; which kind goes is
-drawn as likely as its own chance. After a throw the next is weighed 3–6 s later. With no gun left but the crowbar,
+has its chance per weighing: 0.5 for a grenade, 0.35 for satchels and 0.6 for snarks at an enemy out of sight, and
+0.12, 0.15 and 0.6 at one in sight. The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for
+experts) and the style's liking for throws, a little more for bold bots and a little less for careful ones, is the
+chance to throw at all (0.9 at most); which kind goes is drawn as likely as its own chance. After a throw the next is
+weighed 3–6 s later, after snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the crowbar,
 throws are the weapon: twice as likely, and grenades from 220 units (yapb's grenade war).
 - **Hand grenade**, 300–800 units away: the throw is solved for the target with the game's own rule (the view's pitch
   sets the throw's angle and speed, the bot's own velocity is added) and checked for walls along the arc; its blast
@@ -271,18 +289,36 @@ throws are the weapon: twice as likely, and grenades from 220 units (yapb's gren
   more takes up to a quarter of its blast itself; a hurt one waits until it is out of the blast. A satchel that does
   not come by within 2.5 s is left lying. For a second after the throw the bot backs off from the enemy (the run-up
   carried it after the satchel), and it does not close in while its satchels are fresh.
-- **The satchels go off** once the bot is out of their blast (300 units for the multiplayer satchel's 120 damage; it
-  backs off first):
-  - with an enemy within 200 units of one of them;
-  - once the enemy they were thrown at has been out of sight for 1–2.5 s after it was last seen near them (it may
-    well still be there), up to 6 s after;
+- **The satchels go off**, all of them wherever they lie (the radio reaches 4096 units), once the bot is out of their
+  blast (300 units for the multiplayer satchel's 120 damage; it backs off first). What they would do to someone is
+  their blasts together: a satchel does 120 damage, less the further off, so two lying close reach further than one.
+  The bot sets them off:
+  - with an enemy in their blast for 40 damage or more (one satchel 200 units away), where it will be by the time
+    they go off: the radio takes a second to draw, and is pressed only while the enemy is still in the blast (for up
+    to 2.5 s); a bot with 70 health or more takes up to a quarter of a satchel's blast itself rather than let the
+    enemy go;
+  - with an enemy seen coming into their blast within 1.5 s: the radio comes up and waits for it;
+  - when it is about to die (30 health or less, hurt just now) with an enemy by them: they go with it when it dies;
+  - with a step, a jump, pain, a shot, a weapon or a pickup heard within 200 units of one of them in the last second
+    (in team games, only a sound tied to an enemy);
+  - once an enemy seen in their blast has been out of sight for 1–2.5 s (it may well still be there, closer), up to
+    6 s after;
   - after they have lain 8–15 s with nobody in sight, whatever else.
-  The bot draws the satchel radio (a second) and presses the detonate button.
-- **Snark**, 150–800 units away with a clear line, not in water nor at an enemy far above: thrown at the enemy when
-  there is room in front, as the game requires.
+
+  After a pile thrown at an enemy the radio stays up for 4 s, and a trap is watched with it in hand, so the charges
+  go off the moment the enemy is in their blast. An enemy in sight away from the satchels within 700 units puts the
+  radio away for a gun.
+- **Satchel buttons.** In the classic SDK (and as yapb played) the secondary attack throws, charges out or not, and the
+  primary sets them off; in Valve's 2023 update and BugfixedHL-Rebased it is the other way round. The bots take
+  BugfixedHL-Rebased's buttons when its cvars are there, and the classic ones on any other DLL, and check them as they
+  use them (see *Game DLLs differ*).
+- **Snarks**, 200–1000 units away, not in water nor at an enemy far above: at an enemy in sight, a stream of one to
+  three (as many as the bot carries), the attack held down at the enemy as the game lets one go every 0.3 s; at one
+  out of sight, one thrown at where it is (with a clear line there) when there is room in front, as the game
+  requires.
 - **All the snarks** at an enemy in sight 60–200 units away, when the bot carries two or more and has 50 health or more:
   the bot holds the attack down at the enemy and the game lets one go every 0.3 s while there is room in front (not with
-  the enemy right against it). They swarm the enemy and bite it where it stands. The chance is 0.35 per weighing, times
+  the enemy right against it). They swarm the enemy and bite it where it stands. The chance is 0.5 per weighing, times
   the skill's `throw_rate`. Then the bot runs from the swarm for 2 s before it turns: a snark bites its owner too.
 
 **Tripmines.** When quiet (no enemy for 5 s) and walking along a corridor at most 300 units wide, now and then (at
@@ -303,15 +339,21 @@ when no player in sight is closer than 300 units.
 **Tripmine beams** the bot knows of (its own and those it has seen) keep its paths off them, and any move that would
 take it into one (strafing and dodging included) is stopped.
 
-**Game DLLs differ** in how satchels and grenades are worked: in the classic SDK the primary attack sets off the
-satchels that are out and a grenade thrown level leaves at 400 units per second; since Valve's 2023 update and in
-BugfixedHL-Rebased the secondary attack sets them off and the grenade leaves at 650. BugfixedHL is told by its cvars,
-any other DLL is taken to play by the 2023 update (hlsdk-portable does), and `game.dll` in
+**Game DLLs differ** in how satchels and grenades are worked: in the classic SDK the secondary attack always throws a
+satchel and the primary sets off the ones out, and a grenade thrown level leaves at 400 units per second; since
+Valve's 2023 update and in BugfixedHL-Rebased the primary throws, the secondary sets them off (in the 2023 update it
+does nothing with none out), and the grenade leaves at 650. BugfixedHL-Rebased is told by its cvars; any other DLL is
+taken to throw grenades by the 2023 update (hlsdk-portable does) and to work satchels the classic way; `game.dll` in
 `config/lambdabots.yaml` can name it. `lb selftest` checks it on a live server with one bot (satchel buttons,
-crossbow zoom, grenade speed; it needs `sv_cheats 1` to hand out the weapons) and corrects the session. In a game,
-the first bot to set its satchels off checks their buttons for every bot: when the detonate button throws another
-satchel instead, it presses the other one, and the server's satchel buttons are that way from then on. What was
-found is kept over map changes; `lb compat` shows the buttons and who checked them.
+crossbow zoom, grenade speed; it needs `sv_cheats 1` to hand out the weapons) and corrects the session.
+
+In a game, the bots check the satchel buttons as they use them, and what one bot finds holds for every bot:
+- a detonation press that throws another satchel, or does nothing at all (the throw button with the pocket empty),
+  is followed by the other button once the game takes it (a throw holds the buttons back up to a second);
+- a throw press that does nothing is followed by the other button;
+- a throw with charges out, and a throw press that sets them off instead, show which button is which.
+
+What was found is kept over map changes; `lb compat` shows the buttons, where they come from and who checked them.
 
 ## Priorities
 

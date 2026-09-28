@@ -72,9 +72,10 @@ logging:
   file: true
   max_files: 7
 
-# The game DLL, where its weapon rules differ (satchel buttons, hand grenade speed): auto = BugfixedHL when its
-# cvars are there, else the rules of Valve's 2023 update (hlsdk-portable plays by them); or name it:
-# bugfixed | hl25 | classic (the SDK before 2023). `lb selftest` checks it live.
+# The game DLL, where its weapon rules differ (satchel buttons, hand grenade speed): auto = BugfixedHL-Rebased when
+# its cvars are there; else grenades by Valve's 2023 update (hlsdk-portable plays by them) and satchels the classic
+# way (the secondary attack throws, the primary sets them off); or name it: bugfixed | hl25 | classic (the SDK before
+# 2023). `lb selftest` checks it live, and the bots check the satchel buttons as they use them.
 game:
   dll: auto
 

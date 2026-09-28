@@ -46,7 +46,7 @@ use crate::mind::{Body, Character};
 /// Throw windows (horizontal distance).
 const GRENADE_BAND: [f32; 2] = [300.0, 800.0];
 const SATCHEL_BAND: [f32; 2] = [150.0, 400.0];
-const SNARK_BAND: [f32; 2] = [100.0, 1000.0];
+const SNARK_BAND: [f32; 2] = [200.0, 1000.0];
 const LOB_BAND: [f32; 2] = [300.0, 700.0];
 /// A throw's blast must land at least this far from the thrower.
 const SELF_CLEAR: f32 = 300.0;
@@ -113,12 +113,12 @@ const SATCHEL_PILE: [u32; 2] = [2, 4];
 const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
-const BARRAGE_BAND: [f32; 2] = [60.0, 300.0];
+const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
 const BARRAGE_CHANCE: f32 = 0.5;
 const BARRAGE_SNARKS: i32 = 2;
 /// After a barrage the bot runs from the swarm this long; with less health it does not start one.
 const BARRAGE_RUN: f64 = 2.0;
-const BARRAGE_HEALTH: f32 = 40.0;
+const BARRAGE_HEALTH: f32 = 50.0;
 /// A satchel flying at the enemy is watched while seen this recently; the enemy while lost this recently.
 const AIRBURST_SEEN: f64 = 0.25;
 /// A satchel in flight by the enemy is set off with the bot taking this share of its damage at most, with this much
@@ -569,6 +569,18 @@ impl BotBrain {
             .collect()
     }
 
+    /// An enemy in sight close to the bot and away from its satchels (neither in their blast nor coming into it): it
+    /// needs a gun rather than the radio.
+    fn radio_threat(&self, body: &Body, charges: &[Vec3]) -> bool {
+        let now = body.now;
+        let damage = body.damages.satchel;
+        self.beliefs.visible_enemies().any(|t| {
+            let by_them = satchel_damage(charges, t.pos, damage)
+                .max(satchel_damage(charges, ahead(t, now, SATCHEL_COMING), damage));
+            t.pos.distance(body.origin) < SATCHEL_THREAT && by_them < SATCHEL_WORTH / 2.0
+        })
+    }
+
     /// The self-damage from its own satchels a bot takes to set them off at an enemy: a little when healthy.
     fn satchel_spare(body: &Body) -> f32 {
         if body.health >= AIRBURST_HEALTH {
@@ -649,7 +661,9 @@ impl BotBrain {
             t.state != TrackState::Visible && gone >= plan.lost_wait && gone <= SATCHEL_LOST_NEAR && hurts(t.pos) > 0.0
         });
         let calm = self.beliefs.visible_enemies().next().is_none();
-        let (why, wait) = if victim {
+        // The radio does not wait up with an enemy away from them at the bot.
+        let free = !self.radio_threat(body, &charges);
+        let (why, wait) = if victim && free {
             ("an enemy in their blast", Some(now + SATCHEL_WAIT))
         } else if dying {
             ("dying by them", None)
@@ -657,9 +671,9 @@ impl BotBrain {
             ("someone heard by them", None)
         } else if lost {
             ("an enemy seen by them a moment ago", None)
-        } else if coming {
+        } else if coming && free {
             ("an enemy coming at them", Some(now + SATCHEL_WAIT))
-        } else if now < self.mind.arms.radio_until {
+        } else if now < self.mind.arms.radio_until && free {
             ("an enemy expected by them", Some(self.mind.arms.radio_until))
         } else if calm && now >= plan.lie_until {
             ("lying long enough", None)
@@ -715,10 +729,7 @@ impl BotBrain {
             }
             self.back_off_charges(&charges, body);
         }
-        let threat = self.beliefs.visible_enemies().any(|t| {
-            t.pos.distance(body.origin) < SATCHEL_THREAT && hurts(ahead(t, now, SATCHEL_COMING)) < SATCHEL_WORTH
-        });
-        if threat {
+        if self.radio_threat(body, &charges) {
             self.mind.arms.radio_until = now;
             return Err("an enemy away from them");
         }
