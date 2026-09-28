@@ -164,11 +164,11 @@ impl StyleId {
             engage, hunt, retreat, collect, roam: 1.0, investigate, camp, ambush, control, trap,
         };
         match self {
-            StyleId::Balanced =>   a(1.0, 1.0, 1.0, 1.0, 1.0, 0.4, 0.5, 0.6, 0.5),
+            StyleId::Balanced =>   a(1.0, 1.0, 1.0, 1.0, 1.0, 0.25, 0.3, 0.4, 0.4),
             StyleId::Rusher =>     a(1.2, 1.4, 0.6, 1.0, 1.3, 0.0, 0.2, 0.4, 0.3),
             StyleId::Sniper =>     a(1.0, 0.3, 1.4, 1.0, 0.6, 2.0, 1.2, 0.6, 0.5),
-            StyleId::Controller => a(1.0, 1.0, 1.0, 1.3, 0.9, 0.5, 0.6, 2.0, 0.4),
-            StyleId::Trapper =>    a(1.0, 0.8, 1.2, 1.0, 0.8, 0.6, 1.2, 0.6, 2.0),
+            StyleId::Controller => a(1.0, 1.0, 1.0, 1.3, 0.9, 0.3, 0.4, 2.0, 0.4),
+            StyleId::Trapper =>    a(1.0, 0.8, 1.2, 1.0, 0.8, 0.4, 1.2, 0.6, 2.0),
         }
     }
 }
