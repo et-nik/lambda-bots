@@ -21,12 +21,12 @@ use lb_combat::arms::detonate::{MineShot, SatchelTrigger};
 use lb_combat::arms::gauss::{Gauss, GaussInput};
 use lb_combat::arms::launcher::Lob;
 use lb_combat::arms::mine::Planter;
-use lb_combat::arms::scope::Scope;
+use lb_combat::arms::scope::{LOST_HOLD as SCOPE_LOST_HOLD, Scope, Sight};
 use lb_combat::arms::throw::{Kind, Thrower};
 use lb_combat::arms::{Hands, Request, Status};
 use lb_combat::ballistics;
 use lb_combat::fight::drops;
-use lb_combat::policy::ROCKET_MIN;
+use lb_combat::policy::{ROCKET_MIN, XBOW_UNZOOM};
 use lb_core::math::view_angle_vectors;
 use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
@@ -146,8 +146,10 @@ pub struct ArmsStats {
     pub detonations: u32,
     pub mine_shots: u32,
     pub dodges: u32,
-    /// Zoomed crossbow shots.
+    /// Zoomed crossbow shots, the times the scope went on, and why it came off.
     pub scoped: u32,
+    pub zooms: u32,
+    pub scope_ends: Vec<(&'static str, u32)>,
     pub failed: u32,
     /// Failures by protocol and reason.
     pub failures: Vec<(&'static str, &'static str, u32)>,
@@ -734,11 +736,24 @@ impl BotBrain {
                 }
                 Active::Detonate(d) => d.update(&hands),
                 Active::Scope(sc) => {
-                    let on = self
-                        .mind
-                        .last_aim
-                        .is_some_and(|aim| on_target(self.motor.view, body.eye, aim));
-                    sc.update(&hands, on)
+                    let current = self.mind.target == Some(sc.target);
+                    let track = self.beliefs.track(sc.target);
+                    let seen = current && track.is_some_and(|t| t.state == TrackState::Visible);
+                    // The kill feed takes a dead player's track away. The target is kept through the scope until it
+                    // is out of sight for a moment: another one is picked only then.
+                    let done = match track {
+                        None => Some("the target died"),
+                        Some(t) if now.since(t.last_seen) > SCOPE_LOST_HOLD => Some("out of sight"),
+                        Some(_) if !current => Some("another target"),
+                        Some(t) if t.pos.distance(body.eye) < XBOW_UNZOOM => Some("the target came close"),
+                        Some(_) => None,
+                    };
+                    let on_target = seen
+                        && self
+                            .mind
+                            .last_aim
+                            .is_some_and(|aim| on_target(self.motor.view, body.eye, aim));
+                    sc.update(&hands, Sight { on_target, seen, done })
                 }
                 Active::Shoot(s) => {
                     if self.explosives.mines.iter().any(|m| m.pos.distance(s.mine) < 24.0) {
@@ -845,7 +860,15 @@ impl BotBrain {
                 }
             }
             Active::Shoot(_) => stats.mine_shots += 1,
-            Active::Scope(sc) => stats.scoped += u32::from(sc.fired),
+            Active::Scope(sc) => {
+                stats.scoped += sc.shots;
+                stats.zooms += 1;
+                let why = sc.ended.unwrap_or("-");
+                match stats.scope_ends.iter_mut().find(|(w, _)| *w == why) {
+                    Some(e) => e.1 += 1,
+                    None => stats.scope_ends.push((why, 1)),
+                }
+            }
         }
     }
 

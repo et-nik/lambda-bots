@@ -10,7 +10,7 @@ use lb_core::rng::Pcg32;
 use lb_game::mechanics::{AltFire, Attack, BODY, Trigger, WeaponClass, spec};
 use lb_game::weapons::WeaponId;
 
-use crate::policy::{Armed, ROCKET_MIN, XBOW_ZOOM_FROM};
+use crate::policy::{Armed, ROCKET_MIN, XBOW_UNZOOM, XBOW_ZOOM_FROM};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
@@ -119,12 +119,9 @@ pub fn roll_double(rng: &mut Pcg32) -> bool {
     rng.next_f32() < 0.5
 }
 
-/// The crossbow's scope is taken off under this.
-const XBOW_UNZOOM: f32 = 200.0;
-
 /// Whether the view should be zoomed with `w` against a target `distance` away (`None`: no target), given the state
-/// now. The crossbow's scope is put on for single shots (`arms::scope`) and only taken off here, with no target or a
-/// close one; the 357's never helps (it narrows the view and does not steady the shot).
+/// now. The crossbow's scope is put on and taken off by its protocol (`arms::scope`) and only taken off here, when it
+/// is left on with no target or a close one; the 357's never helps (it narrows the view and does not steady the shot).
 pub fn zoom_wanted(w: WeaponId, distance: Option<f32>, zoomed: bool) -> bool {
     match (w, distance) {
         (WeaponId::Crossbow, Some(d)) => zoomed && d >= XBOW_UNZOOM,

@@ -323,14 +323,25 @@ impl BotBrain {
         }
         m.next_combat = now + COMBAT_PERIOD;
         let previous = m.target;
-        let seen = target::select(self.beliefs.enemies(), body.origin, now, previous);
+        // Through the scope the bot keeps to its target until the kill, or until it is out of sight for a moment.
+        let scoped = match &m.arms.active {
+            Some(crate::arms::Active::Scope(sc)) => Some(sc.target),
+            _ => None,
+        }
+        .and_then(|k| self.beliefs.track(k))
+        .filter(|t| now.since(t.last_seen) <= lb_combat::arms::scope::LOST_HOLD);
+        let seen = match scoped {
+            Some(t) => (t.state == TrackState::Visible).then_some(t.who),
+            None => target::select(self.beliefs.enemies(), body.origin, now, previous),
+        };
         if seen.is_some() {
             m.last_enemy_seen = now;
         }
-        m.target = match seen {
-            Some(t) => Some(t),
+        m.target = match (scoped, seen) {
+            (Some(t), _) => Some(t.who),
+            (None, Some(t)) => Some(t),
             // Keep the one just lost in mind for a moment.
-            None => previous.filter(|k| {
+            (None, None) => previous.filter(|k| {
                 self.beliefs
                     .track(*k)
                     .is_some_and(|t| now.since(t.last_seen) <= LOST_STARE)
@@ -628,7 +639,7 @@ impl BotBrain {
                     Choice::Use(w) => {
                         let in_hand = body.weapon == Some(w) && !m.reloading(now);
                         if in_hand && w == WeaponId::Crossbow && distance >= XBOW_ZOOM_FROM {
-                            start_scope(m, self.motor.view, aim, body, ch, rng);
+                            start_scope(m, self.motor.view, aim, t.who, body, ch, rng);
                         }
                         match zoom_toggle(w, Some(distance), body, &mut m.arms.zoom_ready).filter(|_| in_hand) {
                             Some(toggle) => toggle,
@@ -873,7 +884,7 @@ impl BotBrain {
 
 /// The crossbow's scope is snapped on for a shot when the target is far and the view close enough for it to be in the
 /// zoomed view; the protocol takes it off again.
-fn start_scope(m: &mut Mind, view: Vec3, aim: Vec3, body: &Body, ch: &Character, rng: &mut BotRng) {
+fn start_scope(m: &mut Mind, view: Vec3, aim: Vec3, target: PlayerKey, body: &Body, ch: &Character, rng: &mut BotRng) {
     let (forward, _, _) = lb_core::math::view_angle_vectors(view);
     let near = forward.dot((aim - body.eye).normalize_or_zero()) >= SCOPE_START_DOT;
     // Loaded, not reloading, and the scope's toggle ready again: otherwise the game would not put it on. The weapon
@@ -893,7 +904,7 @@ fn start_scope(m: &mut Mind, view: Vec3, aim: Vec3, body: &Body, ch: &Character,
         let [lo, hi] = ch.skill.scope_settle;
         let settle = rng.combat.range_f32(lo, hi.max(lo));
         m.arms.active = Some(crate::arms::Active::Scope(lb_combat::arms::scope::Scope::new(
-            body.now, settle,
+            body.now, settle, target,
         )));
     }
 }

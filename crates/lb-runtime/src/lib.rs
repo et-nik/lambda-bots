@@ -147,6 +147,9 @@ const LAUNCHED_REACH: f32 = 72.0;
 const PROJECTILE_PERIOD: f32 = 0.05;
 /// A projectile gone from the snapshots is remembered this long: its blast and hits are reported after it went.
 const LAUNCHED_MEMORY: f32 = 0.5;
+/// A bot at the source of a bullet's damage is its shooter only with its trigger pulled this recently: damage from the
+/// world (falls, hurt triggers) or from a human can be reported from where a bot stands too.
+const TRIGGER_MEMORY: f64 = 0.3;
 
 pub struct Runtime {
     pub init: InitData,
@@ -1102,6 +1105,13 @@ impl Runtime {
             .bots
             .iter()
             .filter(|b| b.id.slot != victim.0 && b.state == BotState::Alive)
+            .filter(|b| {
+                b.brain
+                    .motor
+                    .weapon
+                    .fired_at
+                    .is_some_and(|t| now.since(t) <= TRIGGER_MEMORY)
+            })
             .filter_map(|b| {
                 let miss = b.self_state.body.origin.distance(source);
                 let w = b.self_state.current_weapon.get()?;
@@ -1154,7 +1164,21 @@ impl Runtime {
             None if best.is_none() && victim.1.distance(source) > arms_stats::SOURCE_MATCH => {
                 self.arms_stats.blasted(damage)
             }
-            None => {}
+            None => {
+                // A charged gauss's bursts on walls report their shooter as the source: logged to tell what hurt it.
+                if let Some(b) = self.bots.iter().find(|b| b.id.slot == victim.0)
+                    && b.self_state.current_weapon.get() == Some(WeaponId::Gauss)
+                    && damage > 0.0
+                {
+                    let g = &b.brain.mind.arms.gauss;
+                    tracing::info!(
+                        "unattributed damage with the gauss in hand: slot {} took {damage:.0} ({}, {:.1} s of charge)",
+                        victim.0,
+                        g.phase(),
+                        g.charge(now)
+                    );
+                }
+            }
         }
     }
 

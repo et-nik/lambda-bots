@@ -6,7 +6,7 @@
 //!   share ammo), and what a bot carries less of grenades, satchels, snarks and mines whatever is in hand; the
 //!   distance band is that of the bot's target at the time. The crossbow's zoomed shots and the MP5's grenades have rows
 //!   of their own.
-//! - **Damage** a bot takes is credited to the bot standing where the `Damage` message says it came from (bullets
+//! - **Damage** a bot takes is credited to the bot firing where the `Damage` message says it came from (bullets
 //!   and the zoomed crossbow report the shooter), or else to whoever threw or fired the projectile seen there moments
 //!   before (a bolt, a rocket, a grenade, a satchel, a mine, a snark, a hornet). What neither explains is counted
 //!   apart, and so is what a bot's own explosives did to it.
@@ -110,11 +110,13 @@ impl ArmsStats {
 
     /// A kill feed line: `bot_killer` a bot killed someone, `suicide` a bot killed itself.
     pub fn death(&mut self, weapon: &str, bot_killer: bool, suicide: bool, bot_victim: bool) {
-        let e = self.kills.entry(weapon.to_string()).or_default();
-        if suicide {
-            e.1 += 1;
-        } else if bot_killer {
-            e.0 += 1;
+        if suicide || bot_killer {
+            let e = self.kills.entry(weapon.to_string()).or_default();
+            if suicide {
+                e.1 += 1;
+            } else {
+                e.0 += 1;
+            }
         }
         if bot_victim {
             self.deaths += 1;
@@ -189,7 +191,11 @@ mod tests {
         s.hit(Row::alt(WeaponId::Crossbow), 120.0, 900.0);
         s.death("9mmhandgun", true, false, true);
         s.death("rpg_rocket", false, true, true);
+        s.death("crowbar", false, false, false);
+        s.death("357", false, false, true);
         let r = s.report(60.0, &Damages::default());
+        assert!(!r.iter().any(|l| l.contains("crowbar") || l.contains("357")), "{r:?}");
+        assert!(r.iter().any(|l| l.contains("bot deaths 3")), "{r:?}");
         assert!(
             r.iter()
                 .any(|l| l.contains("weapon_9mmhandgun") && l.contains("50% of 10")),

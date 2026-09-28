@@ -716,8 +716,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         let st = &arms.stats;
         out.push(format!(
             "  arms: {}; thrown {} grenades, {} satchels, {} snarks; {} m203, {} mines laid, {} detonations, {} mines \
-             shot, {} scoped, gauss {} fired {} dumped {} plain rolls {:.1} s cramped, {} dodges, {} failed{}; \
-             explosives known: {} own satchels, {} mines, {} in flight",
+             shot, {} scoped in {} zooms, gauss {} fired {} dumped {} plain rolls {:.1} s cramped, {} dodges, {} \
+             failed{}; explosives known: {} own satchels, {} mines, {} in flight",
             arms.describe(now),
             st.grenades,
             st.satchels,
@@ -727,6 +727,7 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             st.detonations,
             st.mine_shots,
             st.scoped,
+            st.zooms,
             arms.gauss.fired,
             arms.gauss.dumped,
             arms.gauss.plain_rolls,
@@ -752,6 +753,10 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
                 .and_then(|a| a.reserve2)
                 .unwrap_or(0),
         ));
+        if !st.scope_ends.is_empty() {
+            let e: Vec<String> = st.scope_ends.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
+            out.push(format!("  scope off: {}", e.join("; ")));
+        }
         if !st.failures.is_empty() {
             let f: Vec<String> = st.failures.iter().map(|(p, w, n)| format!("{p}: {w} ×{n}")).collect();
             out.push(format!("  failures: {}", f.join("; ")));
@@ -1272,11 +1277,11 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
     match first {
         "all" | "standard" => {
             rt.weapons_allowed = u32::MAX;
-            rt.weapons_give.clear();
+            rt.weapons_give = if give { WeaponId::ALL.to_vec() } else { Vec::new() };
         }
         "melee" => {
             rt.weapons_allowed = WeaponId::Crowbar.bit();
-            rt.weapons_give.clear();
+            rt.weapons_give = if give { vec![WeaponId::Crowbar] } else { Vec::new() };
         }
         _ => {
             let mut list = Vec::new();

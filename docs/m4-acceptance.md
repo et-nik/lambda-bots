@@ -10,12 +10,13 @@ run M4.1 yet.
 | Criterion                                  | Status | How it was checked                                                           |
 |--------------------------------------------|--------|------------------------------------------------------------------------------|
 | A scenario for every weapon                | yes    | `scripts/stand/weapon-scenarios.sh`: each weapon on its own, table below     |
-| Deaths by own hand an hour below a limit   | yes    | mixed game: 1 in 10 min of 8 bots, 0.75 a bot-hour; per weapon below         |
+| Deaths by own hand an hour below a limit   | partly | two mixed games: 3 in 20 min of 8 bots, 1.1 a bot-hour; per weapon below     |
 | Accuracy tables                            | yes    | `lb stats`: hit rate by distance for every weapon and fire mode              |
 | The game DLL's weapon rules                | partly | `lb selftest` on hlsdk-portable; BugfixedHL and the classic SDK not run live |
 | Target switches, tricks, the 60-minute run | later  | M4.2, M4.3 and the M4 acceptance runs                                        |
 
-The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game.
+The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game; the last two
+games came to 0.75 and 1.5 (two grenades and one charged gauss shot).
 
 ## The weapons
 
@@ -72,7 +73,7 @@ where the game reports it came from (bullets). For a projectile it goes to whoev
 | python         | 34 (34)                   | 13.6     | 0           | 0                | 525: 27% / 14% / 10%                                |
 | mp5            | 50 (50)                   | 20.0     | 0           | 0                | 2785: 19% / 10% / 11%; grenades 61: — / 27% / —     |
 | shotgun        | 45 (45)                   | 18.0     | 0           | 0                | 559: 38% / 11% / 8%                                 |
-| crossbow       | 33 (39)                   | 13.2     | 0           | 0                | scoped 117: 75% / 28% / 16%; bolts 11: 33% / — / —  |
+| crossbow       | 42 (50)                   | 16.8     | 0           | 0                | scoped 130: 0% / 27% / 100%; bolts 15: 25% / — / —  |
 | rpg            | 24 (51)                   | 9.6      | 1           | 61               | 49: — / 47% / 100%                                  |
 | gauss          | 51 (54)                   | 20.4     | 0           | 0                | 2262 cells: 72% / 39% / 40%                         |
 | egon           | 64 (78)                   | 25.6     | 0           | 0                | 840: 61% / 40% / 38%                                |
@@ -84,8 +85,9 @@ where the game reports it came from (bullets). For a projectile it goes to whoev
 
 - **Gauss:** each bot fired 13–26 charged shots against 4–13 rolls for plain fire, 70% of its choices (the normal
   preset's `gauss_charge` is 0.75). No bot died by its own shot.
-- **Crossbow:** 117 of 128 shots went through the scope. It is snapped on, the shot fired and taken off again: about a
-  second in all, as the game lets the scope toggle only once a second.
+- **Crossbow:** 130 of 145 shots went through the scope. After a miss the bot stays zoomed and fires again. Of the 105
+  times the scope went on, it came off after the kill 56 times, with the target out of sight for a second 33 times,
+  with the view not on the target in time 9 times, the target too close 5 times and the clip empty twice.
 - **Throws:** in their sets each bot threw 5–10 grenades, 1–6 satchels and 7–15 snarks in 2.5 minutes.
 - **Tripmines:** laid only when quiet and walking a corridor, 3 in the set. Most kills are the glock's.
 
@@ -93,34 +95,35 @@ where the game reports it came from (bullets). For a projectile it goes to whoev
 
 10 minutes, 8 bots, crossfire, every weapon allowed, the final build.
 
-| Measure                       | Value                                         |
-|-------------------------------|-----------------------------------------------|
-| Kills by bots                 | 142, 14.2 a minute                            |
-| Deaths by own hand            | 1 (a grenade): 0.75 a bot-hour                |
-| Damage from own explosives    | 120                                           |
-| Core time a frame at 1000 fps | p50 56 µs, p95 109 µs, p99 167 µs, max 395 µs |
+| Measure                       | Value                                               |
+|-------------------------------|-----------------------------------------------------|
+| Kills by bots                 | 141, 14.1 a minute                                  |
+| Deaths by own hand            | 2 (a grenade, a charged gauss shot): 1.5 a bot-hour |
+| Damage from own explosives    | 40 (snark bites)                                    |
+| Core time a frame at 1000 fps | average 70 µs; the last 4 s: p50 86 µs, p99 234 µs  |
 
-Kills by weapon: egon 35, gauss 26, glock 22, crossbow 21, MP5 15, RPG 9, grenades 7 (thrown and launched), snark 2,
-the rest 1–2 each.
+Kills by weapon: crossbow 33, glock 28, gauss 22, MP5 20, egon 9, grenades 8 (thrown and launched), hornet gun 6,
+shotgun 5, RPG 4, the rest 1–3 each.
 
 | Weapon       | Rounds     | <300 | 300–800 | 800–1500 |
 |--------------|------------|------|---------|----------|
-| glock        | 2069       | 18%  | 13%     | 14%      |
-| 357          | 59         | 10%  | 9%      | 0%       |
-| MP5          | 1203       | 18%  | 10%     | 4%       |
-| MP5 grenades | 20         | —    | 36%     | —        |
-| crossbow     | 84 scoped  | —    | 29%     | 21%      |
-| shotgun      | 31         | 11%  | 8%      | —        |
-| RPG          | 21         | —    | 30%     | 43%      |
-| gauss        | 1342 cells | 100% | 35%     | 40%      |
-| egon         | 403        | 64%  | 36%     | 63%      |
-| hornet gun   | 37         | 100% | 50%     | 93%      |
+| glock        | 2049       | 19%  | 15%     | 13%      |
+| 357          | 100        | 12%  | 12%     | 9%       |
+| MP5          | 1301       | 19%  | 13%     | 7%       |
+| MP5 grenades | 19         | —    | 42%     | —        |
+| crossbow     | 154 scoped | 100% | 20%     | 24%      |
+| shotgun      | 35         | 31%  | 8%      | —        |
+| RPG          | 19         | —    | 25%     | 34%      |
+| gauss        | 980 cells  | 35%  | 48%     | 32%      |
+| egon         | 121        | 36%  | 40%     | 73%      |
+| hornet gun   | 148        | 36%  | 59%     | 100%     |
 
-The gauss's rate counts a cell as 10 damage; charged shots deal more a cell, so up close it caps at 100%.
+The gauss's rate counts a cell as 10 damage; charged shots deal more a cell.
 
-Throwing depends on what the bots pick up. This run: 7 grenades, 1 satchel and 16 snarks. The run before on the same
-build, without the last gauss fix: 148 kills, 1 death by own hand, and 36 grenades, 4 satchels and 23 snarks.
-Before explosives were topped up, a 12.7-minute game saw 8 grenades, 8 satchels and 26 snarks.
+The game before, on the build without the crossbow's follow-up shots: 142 kills, 1 death by own hand (a grenade), core
+time p50 56 µs and p99 167 µs. Throwing depends on what the bots pick up: 7 grenades, 1 satchel and 16 snarks in that
+game, 36 grenades, 4 satchels and 23 snarks in the one before it; a 12.7-minute game before explosives were topped up
+saw 8 grenades, 8 satchels and 26 snarks.
 
 ## After the stand feedback
 
@@ -134,7 +137,8 @@ The first per-weapon run (earlier the same day) led to these changes:
 | Glock                 | rapid fire only under 150 units                                | rapid fire where it lands more bullets a second than aimed clicks, given the bot's aim and clicking speed               |
 | MP5 grenades          | 2–7 deaths by own hand a set                                   | none in the last two runs: the arc is looked along again at the moment of firing                                        |
 | Rockets               | 2 deaths by own hand a set, 237 own blast damage               | 1 death and 61: launch line checked from where the rocket leaves, guided on its own target, no closing in               |
-| Gauss self-kills      | 2 in a 10-minute mixed game                                    | none in the gauss set and the mixed game: the charge is kept small for the nearest wall along the line                  |
+| Gauss self-kills      | 2 in a 10-minute mixed game                                    | none in the gauss set, one in the last mixed game: the charge is kept small for the nearest wall along the line         |
+| Crossbow after a miss | the scope came off after every shot, hit or miss               | stays zoomed and fires again until the kill, keeping to its target; 37–46 crossbow kills a set (was 30–33)              |
 
 ## Found on the stand and fixed
 
@@ -147,6 +151,9 @@ The first per-weapon run (earlier the same day) led to these changes:
   charge is now kept small enough for the nearest wall along the line of fire, or not started.
 - **The crossbow's scope toggle was pressed too early.** The weapon data comes 50 times a second and may miss a
   toggle; the bot now also waits a second from the zoom it saw change.
+- **The bot gave up zoomed shots too soon.** The view follows a strafing target a few degrees behind and catches it
+  mostly as it turns; a scoped shot waited only 0.4 s for that. It waits a second now, and the bot keeps to the target
+  it is zoomed on.
 - **Rockets burst next to the shooter.**
   - A rocket leaves 16 units ahead, 8 to the right and 8 below the eye, and goes for the target's feet. The line of
     fire was checked from the eye to the chest.
@@ -174,7 +181,7 @@ The first per-weapon run (earlier the same day) led to these changes:
 - `lb stats [reset]`: rounds, hit rate by distance, damage and kills per weapon and fire mode; own blast damage.
 - `lb selftest [name]`: the DLL's satchel buttons, crossbow zoom and grenade speed, with one bot.
 - `lb brain` shows each bot's weapon protocol and counts:
-  - throws, scoped shots, charged and plain gauss rolls;
+  - throws, scoped shots and zooms with why each zoom ended, charged and plain gauss rolls;
   - time no charge could start for a drop behind or a wall ahead;
   - dodges and failures;
   - the explosives it carries.
@@ -190,4 +197,6 @@ The first per-weapon run (earlier the same day) led to these changes:
   set the bots have only the crowbar to fend them off.
 - **A tripmine's planter** may still be near when an enemy trips it (two deaths in four runs of its set).
 - **Satchel traps and mines at chokepoints** (the `PlantTrap` goal) are M4.2.
+- **A charged gauss shot** still kills its shooter now and then (one in the last mixed game). What it hit is not known
+  yet: damage a bot takes from its own gauss is logged since (`unattributed damage with the gauss in hand`).
 - **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live.

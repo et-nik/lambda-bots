@@ -46,7 +46,8 @@ health, 30 s for the suit), as it is when the bot sees its display dark.
 ## Fighting
 
 Ten times a second the bot picks the enemy to fight: the nearest counts most. An enemy aiming at the bot or firing
-counts more, and the current target keeps a bonus.
+counts more, and the current target keeps a bonus. Through the crossbow's scope the bot keeps to its target until the
+kill, or until the target has been out of sight for a second.
 
 **Weapon.** Every gun is scored by the damage per second it is expected to deal at the target's distance: the
 server's damage (BugfixedHL's `mp_dmg_*` cvars, their defaults elsewhere), the weapon's spread and the bot's own aim
@@ -64,15 +65,17 @@ satchels, snarks and tripmines are not guns: see *Explosives*.
 - the hornet gun's darts under 250 units with at least four hornets;
 - both shotgun barrels at 32–300 units, half of the shots (as yapb).
 
-**The crossbow's scope** is snapped on for a shot and off again, as good players do. Zoomed in multiplayer the
-crossbow fires a hitscan bolt (120 damage); unzoomed a slow bolt that a moving target steps away from, so from 250
-units on every shot is a scoped one: with the target near the view's center (the zoomed view is 20° wide) the bot puts
-the scope on, settles the aim for its skill's `scope_settle` (0.1–0.15 s for experts, 0.2–0.3 s hard, 0.35–0.55 s
-normal, up to 1.4 s for beginners) and fires once the view is on the target's body; a target it cannot settle on in
-time gets no shot. Through the scope the aim error is halved. Then the scope comes off: at once with a reload when
-two bolts or fewer are left (a reload takes the scope off), otherwise as soon as the game lets the secondary attack
-toggle it again, a second after it went on. The bot sees through a 20° view only for that second. The 357's scope is
-never used: it narrows the view without steadying the shot.
+**The crossbow's scope** is snapped on for the target and taken off after the kill, as good players do. Zoomed in
+multiplayer the crossbow fires a hitscan bolt (120 damage); unzoomed a slow bolt that a moving target steps away from,
+so from 250 units on every shot is a scoped one: with the target near the view's center (the zoomed view is 20° wide)
+the bot puts the scope on, settles the aim for its skill's `scope_settle` (0.1–0.15 s for experts, 0.2–0.3 s hard,
+0.35–0.55 s normal, up to 1.4 s for beginners) and fires once the view is on the target's body. Through the scope the
+aim error is halved. After a miss the bot stays zoomed and fires again as soon as the crossbow is ready (0.75 s) and the
+aim has settled again. The scope comes off after the kill, and when the target stays out of sight for a second or comes
+closer than 200 units, when the view does not get onto it within a second, or when the clip is empty: at once with a
+reload when two bolts or fewer are left (a reload takes the scope off), otherwise as soon as the game lets the secondary
+attack toggle it again, a second after it went on. The 357's scope is never used: it narrows the view without steadying
+the shot.
 
 **Aim.**
 - Head or body is decided once per contact, from the skill's `headshot` chance. The shotgun aims at the body beyond

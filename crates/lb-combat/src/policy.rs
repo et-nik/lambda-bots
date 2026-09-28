@@ -1,10 +1,11 @@
 //! Weapon policy: which gun to fight with at a distance.
 //!
-//! Every gun is scored by the damage per second it is expected to deal to a standing player there: the server's
-//! damage, the weapon's spread and the shooter's own aim error; for projectiles also the flight time a moving target
-//! has to step aside, and the blast that makes up for part of it. Outside a weapon's band only a third counts. A
-//! weapon whose blast would reach the shooter scores nothing (a rocket under 450 units, a bolt under 160, the egon's
-//! beam end under 128). The crossbow is fired zoomed from 250 units on, a shot per two seconds of the scope's toggle. The current weapon gets a margin against flip-flopping, and yapb's order breaks ties.
+//! Every gun is scored by the damage per second it is expected to deal to a standing player there: the server's damage,
+//! the weapon's spread and the shooter's own aim error; for projectiles also the flight time a moving target has to
+//! step aside, and the blast that makes up for part of it. Outside a weapon's band only a third counts. A weapon whose
+//! blast would reach the shooter scores nothing (a rocket under 450 units, a bolt under 160, the egon's beam end under
+//! 128). The crossbow is fired zoomed from 250 units on; the scope's toggling is counted in its rate. The current
+//! weapon gets a margin against flip-flopping, and yapb's order breaks ties.
 //! Throwables are not guns: the weapon protocols throw them.
 
 use lb_game::mechanics::{
@@ -95,8 +96,11 @@ const KEEP_MARGIN: f32 = 1.2;
 /// The crossbow is fired zoomed from here on (a hitscan bolt: an unzoomed one is slow enough to step away from);
 /// closer, where a target crosses the zoomed view too fast, it fires bolts.
 pub const XBOW_ZOOM_FROM: f32 = 250.0;
-/// Seconds per zoomed shot: the scope is put on for the shot and taken off, and the game toggles it once a second.
+/// Seconds per zoomed shot, the scope's toggling counted in: it goes on for a target and comes off after the kill,
+/// and the game toggles it once a second at most.
 const XBOW_SCOPE_CYCLE: f32 = 2.0;
+/// The crossbow's scope comes off with the target closer than this.
+pub const XBOW_UNZOOM: f32 = 200.0;
 /// Rockets are never fired closer than this: the blast would reach the shooter.
 pub const ROCKET_MIN: f32 = 450.0;
 /// Unzoomed bolts and the egon's beam end blow up this close to the shooter.
@@ -145,6 +149,7 @@ pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
             };
             s.dps(dmg, d, t.aim_sigma).max(rapid)
         }
+        WeaponId::Hornetgun if d > s.reach => 0.0,
         WeaponId::Hornetgun => {
             let seek = if d <= HORNET_SEEK {
                 HORNET_HIT
@@ -317,6 +322,16 @@ mod tests {
             pick(&dry_gauss, None, at(400.0, 10.0), false),
             Choice::Use(WeaponId::Glock)
         );
+    }
+
+    #[test]
+    fn hornets_score_nothing_beyond_their_reach() {
+        let hornets = armed(WeaponId::Hornetgun, -1, 8);
+        let d = Damages::default();
+        assert!(score(&hornets, &at(2000.0, 20.0), &d) > 0.0);
+        assert_eq!(score(&hornets, &at(3000.0, 20.0), &d), 0.0);
+        let kit = [armed(WeaponId::Glock, 17, 68), hornets];
+        assert_eq!(pick(&kit, None, at(3000.0, 20.0), false), Choice::Use(WeaponId::Glock));
     }
 
     #[test]
