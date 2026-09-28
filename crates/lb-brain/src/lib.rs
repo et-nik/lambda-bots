@@ -2,15 +2,19 @@
 
 #![forbid(unsafe_code)]
 
+pub mod arms;
 pub mod attention;
 pub mod mind;
 
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
-use lb_knowledge::{BeliefParams, Beliefs, DamageStimulus, ItemSpot, Items, PublicEvent};
+use lb_knowledge::{
+    BeliefParams, Beliefs, ChargerSpot, Chargers, DamageStimulus, Explosives, ItemSpot, Items, PublicEvent,
+};
 use lb_motor::{Intents, Motor};
-use lb_perception::items::ItemEntity;
+use lb_perception::items::{ChargerEntity, ItemEntity};
+use lb_perception::projectiles::ProjectileEntity;
 use lb_perception::vision::{PERIOD, VisionOutput};
 use lb_perception::{Listener, Perception, PerceptionParams, SoundEvent, Subject, Viewer};
 use lb_worldq::{Tracer, VisSets};
@@ -28,6 +32,12 @@ pub struct BotBrain {
     pub beliefs: Beliefs,
     /// The map's items and what the bot believes about them; `None` until the map's spots are known.
     pub items: Option<Items>,
+    /// The map's wall chargers and whether the bot believes they have anything left.
+    pub chargers: Option<Chargers>,
+    /// Its own satchels and mines, mines it has seen, projectiles it sees coming.
+    pub explosives: Explosives,
+    /// Where players spawn on this map (static map knowledge): no mines there.
+    pub spawns: Vec<Vec3>,
     pub params: PerceptionParams,
     /// Output of the latest vision tick.
     pub last_vision: VisionOutput,
@@ -37,6 +47,7 @@ pub struct BotBrain {
     /// What vigilance looked at on the last frame.
     pub last_attention: Option<Attention>,
     item_cursor: usize,
+    charger_cursor: usize,
     looks: u64,
     /// Offset of this bot's vision ticks within the period, so bots do not all look on the same frame.
     phase: f64,
@@ -50,6 +61,9 @@ impl BotBrain {
             perception: Perception::default(),
             beliefs: Beliefs::default(),
             items: None,
+            chargers: None,
+            explosives: Explosives::default(),
+            spawns: Vec::new(),
             params,
             last_vision: VisionOutput::default(),
             mind: Mind::default(),
@@ -57,6 +71,7 @@ impl BotBrain {
             intents: Intents::default(),
             last_attention: None,
             item_cursor: 0,
+            charger_cursor: 0,
             looks: 0,
             phase: f64::from(slot % 32) / 32.0 * PERIOD,
             next_vision: None,
@@ -75,6 +90,7 @@ impl BotBrain {
     pub fn on_death(&mut self) {
         self.perception.reset();
         self.beliefs.on_own_death();
+        self.explosives.on_own_death();
         self.last_vision.clear();
         self.mind.reset();
     }
@@ -83,6 +99,12 @@ impl BotBrain {
     pub fn set_items(&mut self, spots: &[ItemSpot], now: SimTime) {
         self.items = Some(Items::new(spots, now));
         self.item_cursor = 0;
+    }
+
+    /// The map's wall chargers became known.
+    pub fn set_chargers(&mut self, spots: &[ChargerSpot]) {
+        self.chargers = Some(Chargers::new(spots));
+        self.charger_cursor = 0;
     }
 
     pub fn on_public(&mut self, e: &PublicEvent) {
@@ -143,12 +165,15 @@ impl BotBrain {
         true
     }
 
-    /// Looks at item spots on some of the vision ticks; call right after [`BotBrain::see`] returned true.
+    /// Looks at item spots and chargers on some of the vision ticks; call right after [`BotBrain::see`] returned
+    /// true.
+    #[allow(clippy::too_many_arguments)]
     pub fn see_items(
         &mut self,
         now: SimTime,
         viewer: &Viewer,
         entities: &[ItemEntity],
+        chargers: &[ChargerEntity],
         range: f32,
         vis: &dyn VisSets,
         tracer: &mut dyn Tracer,
@@ -159,6 +184,31 @@ impl BotBrain {
         if let Some(items) = self.items.as_mut() {
             lb_perception::items::look(now, viewer, items, entities, range, vis, tracer, &mut self.item_cursor);
         }
+        if let Some(c) = self.chargers.as_mut() {
+            let cursor = &mut self.charger_cursor;
+            lb_perception::items::look_chargers(now, viewer, c, chargers, range, vis, tracer, cursor);
+        }
+    }
+
+    /// Looks at projectiles and mines on the vision tick; call right after [`BotBrain::see`] returned true.
+    pub fn see_projectiles(
+        &mut self,
+        now: SimTime,
+        viewer: &Viewer,
+        entities: &[ProjectileEntity],
+        vis: &dyn VisSets,
+        tracer: &mut dyn Tracer,
+    ) {
+        let mut seen = Vec::new();
+        lb_perception::projectiles::look(now, viewer, entities, &self.explosives, vis, tracer, &mut seen);
+        for s in &seen {
+            self.explosives.on_sighting(s);
+        }
+    }
+
+    /// An explosion was seen or heard at `pos`.
+    pub fn on_explosion(&mut self, pos: Vec3) {
+        self.explosives.on_explosion(pos);
     }
 
     pub fn update(&mut self, now: SimTime, params: &BeliefParams) {

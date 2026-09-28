@@ -188,23 +188,32 @@ fn body(now: SimTime, weapon: Option<WeaponId>) -> Body {
         on_ground: true,
         on_ladder: false,
         underwater: false,
+        waterlevel: 0,
+        fov: 0.0,
         weapon,
         arsenal: [
             Armed {
                 id: WeaponId::Crowbar,
                 clip: None,
                 reserve: None,
+                reserve2: None,
             },
             Armed {
                 id: WeaponId::Glock,
                 clip: Some(17),
                 reserve: Some(68),
+                reserve2: None,
             },
         ]
         .into_iter()
         .collect(),
+        prediction: None,
         ammo_need: [0.0; 7],
         opponents: 2,
+        damages: lb_game::mechanics::Damages::default(),
+        dll: lb_game::dll::DllProfile::default(),
+        gravity: 800.0,
+        allowed: u32::MAX,
     }
 }
 

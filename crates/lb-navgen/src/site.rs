@@ -310,6 +310,45 @@ fn use_spot(v: &mut WorldView<'_>, model: usize, mins: Vec3, maxs: Vec3) -> Opti
     best.map(|(_, o)| o)
 }
 
+/// A wall charger (health or suit) and where a player stands to use it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChargerSite {
+    pub model: usize,
+    /// A suit charger (`func_recharge`) rather than a health one (`func_healthcharger`).
+    pub suit: bool,
+    pub mins: Vec3,
+    pub maxs: Vec3,
+    /// A standing origin in reach and sight of it.
+    pub spot: Vec3,
+}
+
+/// The map's wall chargers that have a spot to use them from.
+pub fn chargers(world: &BspWorld) -> Vec<ChargerSite> {
+    let mut v = WorldView::new(world);
+    world
+        .entities
+        .iter()
+        .filter_map(|e| {
+            let suit = match e.classname() {
+                "func_recharge" => true,
+                "func_healthcharger" => false,
+                _ => return None,
+            };
+            let model = e.brush_model()?;
+            let b = world.brush(model)?;
+            let (mins, maxs) = (b.abs_mins(), b.abs_maxs());
+            let spot = use_spot(&mut v, model, mins, maxs)?;
+            Some(ChargerSite {
+                model,
+                suit,
+                mins,
+                maxs,
+                spot,
+            })
+        })
+        .collect()
+}
+
 /// The climbable face of every ladder: the side of its thin axis where a player fits, found at the lowest height
 /// one does (a ladder may start below the floor in front of it, or end at a ledge behind it).
 fn ladder_sites(world: &BspWorld, v: &mut WorldView<'_>) -> Vec<LadderSite> {

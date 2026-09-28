@@ -25,6 +25,7 @@ pub struct MainConfig {
     pub access: AccessConfig,
     pub logging: LoggingConfig,
     pub gungame: GunGameDetect,
+    pub game: GameConfig,
     pub disguise: DisguiseConfig,
 }
 
@@ -41,6 +42,7 @@ impl Default for MainConfig {
             access: AccessConfig::default(),
             logging: LoggingConfig::default(),
             gungame: GunGameDetect::default(),
+            game: GameConfig::default(),
             disguise: DisguiseConfig::default(),
         }
     }
@@ -359,6 +361,24 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Game DLLs whose weapon rules differ (see `lb_game::dll`); `auto` tells BugfixedHL-Rebased by its cvars and takes
+/// anything else for the 2023 update.
+pub const DLL_NAMES: [&str; 4] = ["auto", "bugfixed", "hl25", "classic"];
+
+/// The server's game DLL, where its weapon rules differ.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct GameConfig {
+    /// One of [`DLL_NAMES`].
+    pub dll: String,
+}
+
+impl Default for GameConfig {
+    fn default() -> Self {
+        GameConfig { dll: "auto".into() }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct GunGameDetect {
@@ -449,6 +469,9 @@ impl MainConfig {
         }
         if !(1.0..=1000.0).contains(&self.gungame.frags_per_level) {
             return err("gungame.frags_per_level", "must be in 1..=1000");
+        }
+        if !DLL_NAMES.iter().any(|n| n.eq_ignore_ascii_case(self.game.dll.trim())) {
+            return err("game.dll", "expected auto, bugfixed, hl25 or classic");
         }
         Ok(())
     }

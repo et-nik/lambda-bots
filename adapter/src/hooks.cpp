@@ -342,6 +342,7 @@ LB_ENTRY void h_ServerDeactivate() {
 }
 
 LB_ENTRY void h_StartFrame() {
+    if (state().map_active) registry_scan_new();
     call_frame_pre();
     LB_RETURN_META(mm::MRES_IGNORED);
 }

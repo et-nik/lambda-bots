@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod arms_stats;
 pub mod capture;
 pub mod clients;
 pub mod commands;
@@ -16,6 +17,7 @@ pub mod nav_test;
 pub mod perf;
 pub mod record;
 pub mod roster;
+pub mod selftest;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -31,10 +33,12 @@ use lb_core::rng::{Pcg32, splitmix64};
 use lb_core::time::SimTime;
 use lb_ffi::{LB_CMD_SET_SEED, LbBotCommand, LbMoveFeedback, LbVec3};
 use lb_game::compat::CompatibilityProfile;
+use lb_game::dll::DllProfile;
+use lb_game::entities::ProjectileKind;
 use lb_game::items::{Ammo, ItemKind};
 use lb_game::messages::{self, GameMsg};
 use lb_game::mode::{GameModeKind, ModeInputs};
-use lb_game::rules::{PublicRules, RULE_CVARS};
+use lb_game::rules::{PublicRules, rule_cvars};
 use lb_game::scoreboard::Scoreboard;
 use lb_game::self_state::SelfState;
 use lb_game::self_state::WeaponRegistry;
@@ -44,7 +48,8 @@ use lb_host::strings::StringTable;
 use lb_host::{CreateBotOutcome, CreateBotRequest, Host, TrackRule};
 use lb_knowledge::{BeliefParams, ItemSpot, PlayerKey, PublicEvent};
 use lb_nav::known::LinkHealth;
-use lb_perception::items::ItemEntity;
+use lb_perception::items::{ChargerEntity, ItemEntity};
+use lb_perception::projectiles::ProjectileEntity;
 use lb_perception::vision::DEFAULT_ASPECT;
 use lb_perception::{Listener, SoundEvent, StepSynth, Subject, Viewer};
 use lb_raw::{ClientEventKind, RawClient, RawEvent, RawFrame};
@@ -63,6 +68,8 @@ use lb_game::input::*;
 use lb_styles::{Persona, StyleId, StyleTable};
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Engine message of temporary entities (explosions among them).
+const SVC_TEMPENTITY: i32 = 23;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InitData {
@@ -92,6 +99,12 @@ pub struct GameState {
     pub teamplay_message: bool,
     pub gg_bridge_state: Option<bool>,
     pub resolved_msgs: Vec<(String, i32)>,
+    /// How the game DLL works the weapons that differ.
+    pub dll: DllProfile,
+    /// The rules `lb selftest` found, kept over map changes.
+    pub rules_verdict: Option<DllProfile>,
+    /// The button a bot was seen to set its satchels off with in the game, and which bot; kept over map changes.
+    pub satchel_checked: Option<(lb_game::mechanics::Attack, String)>,
 }
 
 #[derive(Default, Debug, Clone, Serialize)]
@@ -105,6 +118,42 @@ pub struct Stats {
     pub stale_moves: u64,
     pub max_frame_ms: f64,
 }
+
+/// A projectile as last seen, to credit its hits in `lb stats`.
+#[derive(Clone, Copy, Debug)]
+struct Launched {
+    row: arms_stats::Row,
+    /// Slot of the player who threw or fired it; the game clears some owners in flight, the first one seen is kept.
+    owner: u16,
+    origin: Vec3,
+    velocity: Vec3,
+    seen: SimTime,
+    /// Where and when it was first seen: about where it was thrown or fired from.
+    first: (SimTime, Vec3),
+}
+
+impl Launched {
+    /// How far from `source` it could be now; `None` when it was seen too long ago to tell.
+    fn miss(&self, source: Vec3, now: SimTime) -> Option<f32> {
+        let dt = now.since(self.seen) as f32;
+        if !(0.0..=LAUNCHED_MEMORY).contains(&dt) {
+            return None;
+        }
+        let at = self.origin + self.velocity * dt.min(PROJECTILE_PERIOD);
+        let slack = LAUNCHED_REACH + self.velocity.length() * PROJECTILE_PERIOD;
+        Some(at.distance(source)).filter(|d| *d <= slack)
+    }
+}
+
+/// A projectile's hit is reported this close to where it was last seen (or would be now), beyond its travel since.
+const LAUNCHED_REACH: f32 = 72.0;
+/// Seconds between projectile snapshots.
+const PROJECTILE_PERIOD: f32 = 0.05;
+/// A projectile gone from the snapshots is remembered this long: its blast and hits are reported after it went.
+const LAUNCHED_MEMORY: f32 = 0.5;
+/// A bot at the source of a bullet's damage is its shooter only with its trigger pulled this recently: damage from the
+/// world (falls, hurt triggers) or from a human can be reported from where a bot stands too.
+const TRIGGER_MEMORY: f64 = 0.3;
 
 pub struct Runtime {
     pub init: InitData,
@@ -150,6 +199,8 @@ pub struct Runtime {
     pub compat: CompatibilityProfile,
     pub dev: bool,
     pub freeze: bool,
+    /// `lb selftest` froze the other bots; the freeze to go back to when it ends.
+    pub freeze_before_selftest: Option<bool>,
     pub game_mode_forced: i32,
     feedback: Vec<LbMoveFeedback>,
     cmds: Vec<LbBotCommand>,
@@ -199,6 +250,26 @@ pub struct Runtime {
     item_entities: Vec<ItemEntity>,
     item_kinds: FxHashMap<u16, Option<ItemKind>>,
     next_items_at: SimTime,
+    /// Projectiles and mines as the server has them, refreshed at the vision rate.
+    projectile_entities: Vec<ProjectileEntity>,
+    projectile_kinds: FxHashMap<u16, Option<ProjectileKind>>,
+    next_projectiles_at: SimTime,
+    /// Projectiles by entity index as last seen, to credit their hits in `lb stats`.
+    launched: FxHashMap<u16, Launched>,
+    /// Explosions of this frame (`TE_EXPLOSION`).
+    explosions_now: Vec<Vec3>,
+    /// Where players spawn on this map; `None` until the map is loaded.
+    pub spawns: Option<Arc<Vec<Vec3>>>,
+    /// The map's wall chargers; `None` until the map is loaded.
+    pub chargers: Option<Arc<Vec<lb_knowledge::ChargerSpot>>>,
+    /// Charger faces as the server draws them, refreshed with the items.
+    charger_entities: Vec<ChargerEntity>,
+    /// Weapons bots may use, as a mask of weapon bits (`lb weapons`, for stand tests).
+    pub weapons_allowed: u32,
+    /// Weapons every bot is given when it spawns (`lb weapons ... give`; needs `sv_cheats 1`).
+    pub weapons_give: Vec<WeaponId>,
+    /// Rounds, damage, kills and suicides per weapon (`lb stats`).
+    pub arms_stats: arms_stats::ArmsStats,
     /// Inputs from outside the engine (the navigation loader, the command channel), kept while recording and fed
     /// from the recording in a replay.
     pub outside: record::OutsideMode,
@@ -285,6 +356,7 @@ impl Runtime {
             compat: CompatibilityProfile::default(),
             dev: false,
             freeze: false,
+            freeze_before_selftest: None,
             game_mode_forced: -1,
             feedback: Vec::new(),
             cmds: Vec::new(),
@@ -315,6 +387,17 @@ impl Runtime {
             item_entities: Vec::new(),
             item_kinds: FxHashMap::default(),
             next_items_at: SimTime::ZERO,
+            projectile_entities: Vec::new(),
+            projectile_kinds: FxHashMap::default(),
+            next_projectiles_at: SimTime::ZERO,
+            launched: FxHashMap::default(),
+            explosions_now: Vec::new(),
+            spawns: None,
+            chargers: None,
+            charger_entities: Vec::new(),
+            weapons_allowed: u32::MAX,
+            weapons_give: Vec::new(),
+            arms_stats: arms_stats::ArmsStats::default(),
             outside: record::OutsideMode::Live,
             record_request: None,
             record_status: "not recording".into(),
@@ -542,6 +625,14 @@ impl Runtime {
         self.item_entities.clear();
         self.item_kinds.clear();
         self.next_items_at = SimTime::ZERO;
+        self.projectile_entities.clear();
+        self.projectile_kinds.clear();
+        self.next_projectiles_at = SimTime::ZERO;
+        self.launched.clear();
+        self.explosions_now.clear();
+        self.spawns = None;
+        self.chargers = None;
+        self.charger_entities.clear();
         self.nav_status = format!("loading the graph for {name}");
         self.editor = None;
         self.mechs.set_map(None, max_clients);
@@ -627,10 +718,9 @@ impl Runtime {
                 self.game.resolved_msgs.push((name.to_string(), id));
             }
         }
-        const SVC_TEMPENTITY: usize = 23;
-        const SVC_INTERMISSION: usize = 30;
+        const SVC_INTERMISSION: i32 = 30;
         for id in [SVC_TEMPENTITY, SVC_INTERMISSION] {
-            mask[id / 8] |= 1 << (id % 8);
+            mask[id as usize / 8] |= 1 << (id % 8);
         }
         if !host.set_capture_mask(&mask) {
             tracing::warn!("message capture mask was not accepted by the adapter");
@@ -639,7 +729,7 @@ impl Runtime {
 
     fn read_rules(&mut self, host: &mut dyn Host) {
         let mut rules = PublicRules::default();
-        for name in RULE_CVARS {
+        for name in rule_cvars() {
             if let Some(value) = self.cvars.game_value(host, name) {
                 rules.apply_cvar(name, &value);
             }
@@ -678,6 +768,21 @@ impl Runtime {
         }
         let ch = |bit: u32| f.channels & bit != 0;
         self.sound_hook = ch(lb_ffi::LB_CH_SV_STARTSOUND);
+        let mut dll = self
+            .game
+            .rules_verdict
+            .unwrap_or_else(|| DllProfile::resolve(&self.config.game.dll, bhl));
+        if let Some((detonate, _)) = &self.game.satchel_checked {
+            dll.set_satchel_detonate(*detonate);
+        }
+        if self.game.dll.kind != dll.kind || self.game.dll.detected != dll.detected {
+            tracing::info!(
+                "weapon rules: {} ({})",
+                dll.kind.as_str(),
+                if dll.detected { "detected" } else { "from the config" }
+            );
+        }
+        self.game.dll = dll;
         self.compat = CompatibilityProfile {
             core_version: CORE_VERSION.to_string(),
             adapter_version: self.init.adapter_version.clone(),
@@ -701,6 +806,11 @@ impl Runtime {
             gamedll: f.gamedll_desc.clone(),
             gamedll_path: f.gamedll_path.clone(),
             bugfixedhl: bhl,
+            weapon_rules: format!(
+                "{} ({})",
+                dll.kind.as_str(),
+                if dll.detected { "detected" } else { "config" }
+            ),
             channels: vec![
                 ("rehlds_sv_startsound", ch(lb_ffi::LB_CH_SV_STARTSOUND)),
                 ("rehlds_message_manager", ch(lb_ffi::LB_CH_MSGMGR)),
@@ -806,8 +916,13 @@ impl Runtime {
         let delay = self.config.bots.respawn_delay;
         let now = self.now;
         for bot in &mut self.bots {
+            let was_alive = bot.state == BotState::Alive;
             bot.update_lifecycle(now, force_respawn, delay);
+            if bot.state == BotState::Alive && !was_alive {
+                give_weapons(bot, &self.weapons_give);
+            }
         }
+        self.count_rounds();
         self.check_departures(host);
         if let Some(result) = self.poll_nav_loader() {
             let map = self.nav_loader.take().map(|l| l.map).unwrap_or_default();
@@ -824,6 +939,13 @@ impl Runtime {
                         bot.brain.set_items(&loaded.items, self.now);
                     }
                     self.item_spots = Some(loaded.items);
+                    for bot in &mut self.bots {
+                        bot.brain.spawns = loaded.spawns.to_vec();
+                        bot.brain.set_chargers(&loaded.chargers);
+                    }
+                    tracing::info!("{map}: {} wall chargers", loaded.chargers.len());
+                    self.spawns = Some(loaded.spawns);
+                    self.chargers = Some(loaded.chargers);
                     let max_clients = self.map.as_ref().map_or(32, |m| m.max_clients);
                     tracing::info!(
                         "{map}: {} movers, {} breakables",
@@ -903,6 +1025,281 @@ impl Runtime {
             self.next_items_at = self.now + 0.2;
             self.refresh_items(host);
         }
+        if self.now >= self.next_projectiles_at || self.now + 1.0 < self.next_projectiles_at {
+            self.next_projectiles_at = self.now + lb_perception::vision::PERIOD;
+            self.refresh_projectiles(host);
+        }
+    }
+
+    /// Projectiles and mines for perception: kind, where each is, how it moves and whose it is.
+    fn refresh_projectiles(&mut self, host: &mut dyn Host) {
+        use lb_game::entities::{KIND_MINE, KIND_PROJECTILE, kind_mask};
+        const EF_NODRAW: u32 = 128;
+        let mut snapshots = Vec::new();
+        host.snapshot_entities(kind_mask(&[KIND_PROJECTILE, KIND_MINE]), &mut snapshots);
+        self.projectile_entities.clear();
+        for e in &snapshots {
+            let kind = *self
+                .projectile_kinds
+                .entry(e.classname_id)
+                .or_insert_with(|| ProjectileKind::from_classname(&self.strings.string_lossy(e.classname_id)));
+            let Some(kind) = kind else { continue };
+            let v = |x: LbVec3| Vec3::new(x.x, x.y, x.z);
+            self.launch_seen(e.ent.index, kind, e.model_id, e.owner.index, v(e.origin), v(e.velocity));
+            if e.effects & EF_NODRAW != 0 {
+                continue;
+            }
+            self.projectile_entities.push(ProjectileEntity {
+                index: e.ent.index,
+                kind,
+                origin: v(e.origin),
+                velocity: v(e.velocity),
+                angles: v(e.angles),
+                owner: e.owner.index,
+            });
+        }
+    }
+
+    /// A projectile in this frame's snapshot, for `lb stats`: an exploded grenade stays a moment where it burst, out
+    /// of sight, and is remembered with the rest.
+    fn launch_seen(
+        &mut self,
+        index: u16,
+        kind: ProjectileKind,
+        model_id: u16,
+        owner: u16,
+        origin: Vec3,
+        velocity: Vec3,
+    ) {
+        use arms_stats::Row;
+        let row = match kind {
+            ProjectileKind::Bolt => Row::plain(WeaponId::Crossbow),
+            ProjectileKind::Rocket => Row::plain(WeaponId::Rpg),
+            // The hand grenade's model; the MP5's grenade has its own.
+            ProjectileKind::Grenade if self.strings.string_lossy(model_id).ends_with("w_grenade.mdl") => {
+                Row::plain(WeaponId::HandGrenade)
+            }
+            ProjectileKind::Grenade => Row::alt(WeaponId::Mp5),
+            ProjectileKind::Hornet => Row::plain(WeaponId::Hornetgun),
+            ProjectileKind::Snark => Row::plain(WeaponId::Snark),
+            ProjectileKind::Satchel => Row::plain(WeaponId::Satchel),
+            ProjectileKind::Tripmine => Row::plain(WeaponId::Tripmine),
+        };
+        let now = self.now;
+        let known = self
+            .launched
+            .get(&index)
+            .filter(|l| l.row == row && now.since(l.seen) <= f64::from(LAUNCHED_MEMORY))
+            .map(|l| (l.owner, l.first));
+        self.launched.insert(
+            index,
+            Launched {
+                row,
+                owner: known.map(|k| k.0).filter(|o| *o != 0).unwrap_or(owner),
+                origin,
+                velocity,
+                seen: now,
+                first: known.map_or((now, origin), |k| k.1),
+            },
+        );
+    }
+
+    /// Damage a bot took is credited to the bot that fired a bullet (standing at the reported source) or to the owner
+    /// of a projectile seen there; with neither it came from an explosion of no bot's (or from a human).
+    fn credit_damage(&mut self, victim: (u8, Vec3), source: Vec3, damage: f32) {
+        use arms_stats::Row;
+        let now = self.now;
+        self.launched
+            .retain(|_, l| now.since(l.seen) <= f64::from(LAUNCHED_MEMORY));
+        let shooter = self
+            .bots
+            .iter()
+            .filter(|b| b.id.slot != victim.0 && b.state == BotState::Alive)
+            .filter(|b| {
+                b.brain
+                    .motor
+                    .weapon
+                    .fired_at
+                    .is_some_and(|t| now.since(t) <= TRIGGER_MEMORY)
+            })
+            .filter_map(|b| {
+                let miss = b.self_state.body.origin.distance(source);
+                let w = b.self_state.current_weapon.get()?;
+                // A hitscan crossbow bolt is a zoomed shot.
+                let row = if w == WeaponId::Crossbow {
+                    Row::alt(w)
+                } else {
+                    Row::plain(w)
+                };
+                (miss <= arms_stats::SOURCE_MATCH).then_some((miss, u16::from(b.id.slot), row))
+            });
+        // The game never lets a hornet sting the one who fired it.
+        let own_hornet = |l: &Launched| l.row.weapon == WeaponId::Hornetgun && l.owner == u16::from(victim.0);
+        let thrown = self
+            .launched
+            .values()
+            .filter(|l| !own_hornet(l))
+            .filter_map(|l| l.miss(source, now).map(|miss| (miss, l.owner, l.row)));
+        let best = shooter.chain(thrown).min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, owner, row)) = best
+            && owner == u16::from(victim.0)
+        {
+            let first = self
+                .launched
+                .values()
+                .filter(|l| l.owner == owner && l.row == row)
+                .min_by(|a, b| a.origin.distance(source).total_cmp(&b.origin.distance(source)))
+                .map(|l| l.first);
+            if let Some((at, from)) = first {
+                tracing::info!(
+                    "own blast: slot {owner} took {damage:.0} from its {row:?} {:.0} u away; fired {:.1} s before from \
+                     {:.0} u off the blast, {:.0} u from where the bot is now",
+                    victim.1.distance(source),
+                    now.since(at),
+                    from.distance(source),
+                    from.distance(victim.1),
+                );
+            }
+        }
+        let owner = best.and_then(|(_, owner, row)| {
+            let bot = self
+                .bots
+                .iter()
+                .find(|b| u16::from(b.id.slot) == owner && b.is_active())?;
+            Some((bot.id.slot, bot.self_state.body.origin, row))
+        });
+        match owner {
+            Some((slot, _, _)) if slot == victim.0 => self.arms_stats.hurt_self(damage),
+            Some((_, at, row)) => self.arms_stats.hit(row, damage, at.distance(victim.1)),
+            None if best.is_none() && victim.1.distance(source) > arms_stats::SOURCE_MATCH => {
+                self.arms_stats.blasted(damage)
+            }
+            None => {
+                // A charged gauss's bursts on walls report their shooter as the source: logged to tell what hurt it.
+                if let Some(b) = self.bots.iter().find(|b| b.id.slot == victim.0)
+                    && b.self_state.current_weapon.get() == Some(WeaponId::Gauss)
+                    && damage > 0.0
+                {
+                    let g = &b.brain.mind.arms.gauss;
+                    tracing::info!(
+                        "unattributed damage with the gauss in hand: slot {} took {damage:.0} ({}, {:.1} s of charge)",
+                        victim.0,
+                        g.phase(),
+                        g.charge(now)
+                    );
+                }
+            }
+        }
+    }
+
+    /// A bot set its satchels off with a button: the server's satchel buttons are that way for every bot, for the rest
+    /// of the session. The first bot to do it checks them for all.
+    fn learn_satchel_buttons(&mut self) {
+        use lb_game::mechanics::Attack;
+        let name = |a: Attack| match a {
+            Attack::Primary => "primary",
+            Attack::Secondary => "secondary",
+        };
+        for bot in &mut self.bots {
+            let Some(detonate) = bot.brain.mind.arms.satchel_fact.take() else {
+                continue;
+            };
+            let news = self.game.satchel_checked.is_none() || self.game.dll.satchel_detonate() != detonate;
+            self.game.dll.set_satchel_detonate(detonate);
+            if news {
+                tracing::info!(
+                    "satchel buttons checked by {} in the game: the {} attack sets the charges off, the {} throws another",
+                    bot.persona.name,
+                    name(detonate),
+                    name(self.game.dll.satchel_throw_more())
+                );
+            }
+            self.game.satchel_checked = Some((detonate, bot.persona.name.clone()));
+        }
+    }
+
+    /// The satchel buttons the bots use, and where they come from, for `lb compat`.
+    pub fn satchel_buttons(&self) -> String {
+        use lb_game::mechanics::Attack;
+        let name = |a: Attack| match a {
+            Attack::Primary => "primary",
+            Attack::Secondary => "secondary",
+        };
+        let how = format!(
+            "the {} attack sets the charges off, the {} throws another",
+            name(self.game.dll.satchel_detonate()),
+            name(self.game.dll.satchel_throw_more())
+        );
+        match &self.game.satchel_checked {
+            Some((_, by)) => format!("{how} (checked by {by} in the game)"),
+            None => format!(
+                "{how} (the {} rules; not checked in the game yet)",
+                self.game.dll.kind.as_str()
+            ),
+        }
+    }
+
+    /// Rounds each live bot fired since the last frame from the weapon in its hands, for `lb stats` (weapons share
+    /// ammo, so only the one in hand counts; a switch starts its count afresh).
+    fn count_rounds(&mut self) {
+        use arms_stats::Row;
+        // A shot seen this soon after the scope came off was fired through it (a reload takes it off at once).
+        const SCOPE_LINGER: f64 = 0.3;
+        // Each its own ammo: counted whatever is in hand (the bot switches back right after a throw).
+        const THROWABLES: [WeaponId; 4] = [
+            WeaponId::HandGrenade,
+            WeaponId::Satchel,
+            WeaponId::Snark,
+            WeaponId::Tripmine,
+        ];
+        let now = self.now;
+        for bot in &mut self.bots {
+            let fov = bot.self_state.body.fov;
+            if fov > 0.0 && fov < 89.0 {
+                bot.zoomed_at = Some(now);
+            }
+            let alive = bot.state == BotState::Alive;
+            let arsenal = arsenal(&bot.self_state, &self.game.weapons);
+            let distance = bot
+                .brain
+                .mind
+                .target
+                .and_then(|k| bot.brain.beliefs.track(k))
+                .map_or(600.0, |t| t.pos.distance(bot.self_state.body.origin));
+            let carried = THROWABLES.map(|w| arsenal.iter().find(|a| a.id == w).and_then(|a| a.reserve).unwrap_or(0));
+            if alive && let Some(last) = bot.carried {
+                for ((w, before), now_carried) in THROWABLES.iter().zip(last).zip(carried) {
+                    if before > now_carried {
+                        self.arms_stats
+                            .fired(Row::plain(*w), (before - now_carried) as u32, distance);
+                    }
+                }
+            }
+            bot.carried = alive.then_some(carried);
+            let weapon = bot
+                .self_state
+                .current_weapon
+                .get()
+                .filter(|w| alive && !THROWABLES.contains(w));
+            let rounds = weapon.and_then(|w| {
+                let a = arsenal.iter().find(|a| a.id == w)?;
+                Some((w, a.rounds()?, a.reserve2.unwrap_or(0)))
+            });
+            if let (Some((w, primary, secondary)), Some((last_w, last_primary, last_secondary))) = (rounds, bot.rounds)
+                && last_w == w
+            {
+                if last_primary > primary {
+                    let scoped = w == WeaponId::Crossbow && bot.zoomed_at.is_some_and(|t| now.since(t) < SCOPE_LINGER);
+                    let row = if scoped { Row::alt(w) } else { Row::plain(w) };
+                    self.arms_stats.fired(row, (last_primary - primary) as u32, distance);
+                }
+                if w == WeaponId::Mp5 && last_secondary > secondary {
+                    self.arms_stats
+                        .fired(Row::alt(w), (last_secondary - secondary) as u32, distance);
+                }
+            }
+            bot.rounds = rounds;
+        }
     }
 
     /// Weapon prediction data of live bots, 50 times a second.
@@ -930,7 +1327,10 @@ impl Runtime {
                         next_primary: w.next_primary,
                         next_secondary: w.next_secondary,
                         reloading: w.in_reload != 0 || w.in_special_reload != 0,
+                        charge_ready: w.iuser1,
                         in_attack: w.iuser2,
+                        fire_state: w.iuser3,
+                        start_throw: w.fuser2,
                     });
                 }
             }
@@ -938,15 +1338,29 @@ impl Runtime {
                 at: now,
                 current: WeaponId::from_id(ws.current),
                 next_attack: ws.next_attack,
+                primary_ammo: ws.primary_ammo,
                 weapons,
             });
         }
     }
 
-    /// Item entities for perception: where each one is and whether it is there to take.
+    /// Item entities for perception: where each one is and whether it is there to take; charger faces.
     fn refresh_items(&mut self, host: &mut dyn Host) {
         const EF_NODRAW: u32 = 128;
         let mut snapshots = Vec::new();
+        host.snapshot_entities(1 << lb_game::entities::KIND_CHARGER, &mut snapshots);
+        self.charger_entities.clear();
+        for e in &snapshots {
+            let model = self
+                .strings
+                .string_lossy(e.model_id)
+                .strip_prefix('*')
+                .and_then(|m| m.parse::<u16>().ok());
+            if let Some(model) = model {
+                self.charger_entities.push(ChargerEntity { model, frame: e.frame });
+            }
+        }
+        snapshots.clear();
         host.snapshot_entities(1 << lb_game::entities::KIND_ITEM, &mut snapshots);
         self.item_entities.clear();
         for e in &snapshots {
@@ -970,6 +1384,7 @@ impl Runtime {
         self.draw_editor(host);
         self.sounds_now.clear();
         self.public_now.clear();
+        self.explosions_now.clear();
         self.poll_command_channel(host);
         self.emit_telemetry();
         let (lines, dropped) = logging::drain_console(20);
@@ -1022,6 +1437,7 @@ impl Runtime {
                     }),
                 );
             }
+            RawEvent::UserMsg(m) if m.msg_id == SVC_TEMPENTITY => self.on_temp_entity(&m),
             RawEvent::UserMsg(m) => {
                 let Some(name) = self.strings.msg_name(m.msg_id).map(|n| n.to_vec()) else {
                     return;
@@ -1062,6 +1478,8 @@ impl Runtime {
                                 if let Some(d) = felt {
                                     bot.brain.on_damage(&d);
                                 }
+                                let victim = (bot.id.slot, bot.self_state.body.origin);
+                                self.credit_damage(victim, *source, (*health + *armor) as f32);
                             }
                             _ => bot.self_state.apply(&msg, self.now),
                         }
@@ -1072,6 +1490,13 @@ impl Runtime {
                         GameMsg::GameMode { teamplay } => self.game.teamplay_message = *teamplay,
                         GameMsg::DeathMsg { killer, victim, weapon } => {
                             tracing::debug!("kill: {killer} -> {victim} ({weapon})");
+                            let ours = |slot: u8| self.bots.iter().any(|b| b.id.slot == slot && b.is_active());
+                            self.arms_stats.death(
+                                weapon,
+                                *killer != 0 && killer != victim && ours(*killer),
+                                killer == victim && ours(*victim),
+                                ours(*victim),
+                            );
                             self.public_now.push(PublicEvent::Death {
                                 t: self.now,
                                 killer: (*killer != 0 && killer != victim).then_some(*killer),
@@ -1145,6 +1570,31 @@ impl Runtime {
             RawEvent::RegisterMsg { .. } | RawEvent::PrecacheEvent { .. } => {}
             RawEvent::Entity(_) => {}
         }
+    }
+
+    /// Temporary entities: an explosion is seen (its flash) and heard (the client plays its sound) like other sounds.
+    fn on_temp_entity(&mut self, m: &lb_core::msg::UserMsg) {
+        const TE_EXPLOSION: i32 = 3;
+        if m.int(0) != Some(TE_EXPLOSION) {
+            return;
+        }
+        let (Some(x), Some(y), Some(z)) = (m.float(1), m.float(2), m.float(3)) else {
+            return;
+        };
+        let at = Vec3::new(x, y, z);
+        self.explosions_now.push(at);
+        self.sounds_now.push(SoundEvent {
+            t: self.now,
+            source: None,
+            origin: at,
+            class: lb_game::sounds::SoundClass {
+                kind: lb_game::sounds::SoundKind::Explosion,
+                weapon: None,
+            },
+            volume: 1.0,
+            attenuation: lb_game::sounds::ATTN_NORM,
+            global: false,
+        });
     }
 
     fn player_slot(&self, index: u16) -> Option<u8> {
@@ -1421,6 +1871,12 @@ impl Runtime {
                 if let Some(spots) = &self.item_spots {
                     bot.brain.set_items(spots, self.now);
                 }
+                if let Some(spawns) = &self.spawns {
+                    bot.brain.spawns = spawns.to_vec();
+                }
+                if let Some(chargers) = &self.chargers {
+                    bot.brain.set_chargers(chargers);
+                }
                 self.bots.push(bot);
                 self.roster_warned = false;
                 Some(persona.name.clone())
@@ -1671,10 +2127,16 @@ impl Runtime {
             maxspeed: self.game.rules.maxspeed,
             teams: &teams,
             items: &self.item_entities,
+            chargers: &self.charger_entities,
+            projectiles: &self.projectile_entities,
+            explosions: &self.explosions_now,
         };
         let opponents = subjects.len().saturating_sub(1);
         let registry = &self.game.weapons;
         let gravity = self.game.rules.gravity;
+        let damages = self.game.rules.damages;
+        let dll = self.game.dll;
+        let allowed = self.weapons_allowed;
         let mut recognized = Vec::new();
         let mechs = &self.mechs;
         let link_health = &mut self.link_health;
@@ -1699,6 +2161,10 @@ impl Runtime {
                     opponents,
                     mechs,
                     gravity,
+                    damages,
+                    dll,
+                    allowed,
+                    projectiles: &self.projectile_entities,
                 };
                 drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
             }));
@@ -1731,6 +2197,7 @@ impl Runtime {
                 }),
             );
         }
+        self.learn_satchel_buttons();
         for i in faulted.into_iter().rev() {
             self.stats.bot_faults += 1;
             self.bots[i].set_state(BotState::Faulted, now);
@@ -1758,6 +2225,25 @@ impl Runtime {
             if fb.status != lb_ffi::LB_MOVE_OK {
                 self.stats.stale_moves += 1;
             }
+        }
+        let mut verdict = None;
+        let testing = self.bots.iter().any(|b| b.selftest.is_some());
+        if !testing && let Some(freeze) = self.freeze_before_selftest.take() {
+            self.freeze = freeze;
+        }
+        for bot in &mut self.bots {
+            if bot.selftest.as_ref().is_some_and(|t| t.finished)
+                && let Some(t) = bot.selftest.take()
+            {
+                verdict = t.verdict.or(verdict);
+            }
+        }
+        if let Some(dll) = verdict {
+            if dll.kind != self.game.dll.kind {
+                tracing::warn!("weapon rules switched to {} for this session", dll.kind.as_str());
+            }
+            self.game.dll = dll;
+            self.game.rules_verdict = Some(dll);
         }
         let reports: Vec<String> = self
             .bots
@@ -1882,6 +2368,8 @@ impl Runtime {
                         "tg": target.map_or(-1, |t| i32::from(t.who.slot)),
                         "see": target.is_some_and(|t| t.state == lb_knowledge::TrackState::Visible),
                         "fire": m.firing,
+                        "arm": m.arms.active.as_ref().map(|a| a.name()),
+                        "gauss": m.arms.gauss.active().then(|| m.arms.gauss.phase()),
                         "nv": b.nav.phase(),
                         "agr": b.persona.aggression,
                         "fear": b.persona.fear,
@@ -1948,8 +2436,19 @@ fn drive_one(
                 buttons |= IN_JUMP;
             }
         }
-        BotState::Alive if !ctx.freeze => {
-            if let Some(test) = bot.test.as_mut() {
+        BotState::Alive if !ctx.freeze || bot.selftest.is_some() => {
+            if let Some(test) = bot.selftest.as_mut() {
+                let frame = test.step(now, &bot.self_state, ctx.projectiles, bot.id.slot);
+                for line in &frame.lines {
+                    tracing::info!("{line}");
+                    logging::console_line(format!("[lambdabots] {line}"));
+                }
+                bot.view = frame.view;
+                bot.brain.motor.set_view(frame.view);
+                forward = frame.forward;
+                buttons |= frame.buttons;
+                bot.pending_client_cmds.extend(frame.commands);
+            } else if let Some(test) = bot.test.as_mut() {
                 let body = &bot.self_state.body;
                 let on_ground = body.flags & lb_game::self_state::FL_ONGROUND != 0;
                 let out = test.step(
@@ -2036,10 +2535,17 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
         on_ground: b.flags & lb_game::self_state::FL_ONGROUND != 0,
         on_ladder: b.movetype == lb_game::self_state::MOVETYPE_FLY,
         underwater: b.waterlevel >= 3,
+        waterlevel: b.waterlevel,
+        fov: b.fov,
         weapon: state.current_weapon.get(),
         arsenal,
+        prediction: state.prediction,
         ammo_need,
         opponents: ctx.opponents,
+        damages: ctx.damages,
+        dll: ctx.dll,
+        gravity: ctx.gravity,
+        allowed: ctx.allowed,
     }
 }
 
@@ -2047,18 +2553,46 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
 fn arsenal(state: &SelfState, registry: &WeaponRegistry) -> smallvec::SmallVec<[Armed; 16]> {
     weapons_in_mask(state.body.weapons_mask)
         .map(|w| {
-            let reserve = registry
-                .get(w)
-                .filter(|i| i.ammo1 >= 0)
-                .and_then(|i| state.ammo.get(i.ammo1 as usize))
-                .and_then(|a| a.get());
+            let info = registry.get(w);
+            let ammo = |index: Option<i32>| {
+                index
+                    .filter(|i| *i >= 0)
+                    .and_then(|i| state.ammo.get(i as usize))
+                    .and_then(|a| a.get())
+            };
             Armed {
                 id: w,
                 clip: state.clip[w as usize].get(),
-                reserve,
+                reserve: ammo(info.map(|i| i.ammo1)),
+                reserve2: ammo(info.map(|i| i.ammo2)),
             }
         })
         .collect()
+}
+
+/// `give` client commands for `weapons` and some of their ammo (the game honors them with `sv_cheats 1`).
+fn give_weapons(bot: &mut Bot, weapons: &[WeaponId]) {
+    for &w in weapons {
+        let times = if w.is_throwable() { 3 } else { 1 };
+        for _ in 0..times {
+            bot.pending_client_cmds.push(vec!["give".into(), w.classname().into()]);
+        }
+        let ammo: &[&str] = match w {
+            WeaponId::Glock => &["ammo_9mmclip"],
+            WeaponId::Mp5 => &["ammo_9mmAR", "ammo_ARgrenades"],
+            WeaponId::Python => &["ammo_357"],
+            WeaponId::Crossbow => &["ammo_crossbow"],
+            WeaponId::Shotgun => &["ammo_buckshot"],
+            WeaponId::Rpg => &["ammo_rpgclip"],
+            WeaponId::Gauss | WeaponId::Egon => &["ammo_gaussclip"],
+            _ => &[],
+        };
+        for a in ammo {
+            for _ in 0..3 {
+                bot.pending_client_cmds.push(vec!["give".into(), (*a).into()]);
+            }
+        }
+    }
 }
 
 /// 0..1: how short the bot is of an ammo type it has a weapon for.
@@ -2247,6 +2781,10 @@ struct Senses<'a> {
     maxspeed: f32,
     teams: &'a [u8],
     items: &'a [ItemEntity],
+    chargers: &'a [ChargerEntity],
+    projectiles: &'a [ProjectileEntity],
+    /// Explosions of this frame.
+    explosions: &'a [Vec3],
 }
 
 /// What driving a bot needs besides the bot itself.
@@ -2261,6 +2799,11 @@ struct DriveCtx<'a> {
     mechs: &'a nav::LiveMechs,
     /// `sv_gravity`.
     gravity: f32,
+    damages: lb_game::mechanics::Damages,
+    dll: DllProfile,
+    /// Weapons bots may use (`lb weapons`).
+    allowed: u32,
+    projectiles: &'a [ProjectileEntity],
 }
 
 /// Players as vision gets them: the snapshot plus the weapon they show and their last shot.
@@ -2331,7 +2874,14 @@ fn sense(
                 recognized.push((bot.persona.name.clone(), *r));
             }
             let range = 900.0 + 11.0 * f32::from(bot.persona.skill);
-            bot.brain.see_items(w.now, &viewer, w.items, range, w.vis, tracer);
+            bot.brain
+                .see_items(w.now, &viewer, w.items, w.chargers, range, w.vis, tracer);
+            bot.brain.see_projectiles(w.now, &viewer, w.projectiles, w.vis, tracer);
+        }
+        for &at in w.explosions {
+            if w.vis.in_pas(body.origin, at) {
+                bot.brain.on_explosion(at);
+            }
         }
     }
     let params = BeliefParams {

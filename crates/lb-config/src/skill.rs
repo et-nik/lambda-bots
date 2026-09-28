@@ -218,6 +218,12 @@ skill_params! {
     track_forget: f32,
     /// Share of gauss charge held before an expected fight, 0..1.
     gauss_precharge: f32,
+    /// Share of gauss shots fired charged rather than with the plain primary attack, 0..1.
+    gauss_charge: f32,
+    /// Seconds from putting the crossbow's scope on to the shot, [min, max].
+    scope_settle: [f32; 2],
+    /// How readily grenades, satchels and snarks are thrown, 1 = as the normal preset.
+    throw_rate: f32,
     /// Gauss jump, satchel jump and attacking long jumps are allowed.
     tricks: bool,
     /// Bunny hop speed limit as a multiple of maxspeed; none = no bunny hopping.
@@ -326,11 +332,14 @@ impl Default for Presets {
             sound_bearing_sigma: hearing[1],
             track_forget,
             gauss_precharge,
+            gauss_charge: 0.0,
+            scope_settle: [0.0, 0.0],
+            throw_rate: 1.0,
             tricks,
             bhop_speed,
         };
         use AimModel::*;
-        Presets {
+        let mut presets = Presets {
             noob: p(
                 [1.5, 2.0],
                 [0.35, 0.35, 1.0],
@@ -421,7 +430,29 @@ impl Default for Presets {
                 true,
                 Some(1.7),
             ),
+        };
+        // (gauss_charge, scope_settle, throw_rate): skilled players fight the gauss charged and snap the crossbow's
+        // scope on only for the shot.
+        let extra = [
+            (0.2, [1.0, 1.4], 0.5),
+            (0.45, [0.6, 0.9], 0.75),
+            (0.75, [0.35, 0.55], 1.0),
+            (0.85, [0.2, 0.3], 1.2),
+            (0.9, [0.1, 0.15], 1.4),
+        ];
+        let all = [
+            &mut presets.noob,
+            &mut presets.easy,
+            &mut presets.normal,
+            &mut presets.hard,
+            &mut presets.expert,
+        ];
+        for (params, (charge, settle, throws)) in all.into_iter().zip(extra) {
+            params.gauss_charge = charge;
+            params.scope_settle = settle;
+            params.throw_rate = throws;
         }
+        presets
     }
 }
 
@@ -450,6 +481,12 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
     if !range(p.semi_auto_delay) {
         return Err(bad("semi_auto_delay", "must be [min, max] with 0 <= min <= max"));
     }
+    if !range(p.scope_settle) {
+        return Err(bad("scope_settle", "must be [min, max] with 0 <= min <= max"));
+    }
+    if !(0.0..=10.0).contains(&p.throw_rate) {
+        return Err(bad("throw_rate", "must be in 0..=10"));
+    }
     for (name, v) in [
         ("headshot", p.headshot),
         ("stay_mid", p.stay_mid),
@@ -458,6 +495,7 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
         ("hearing_threshold", p.hearing_threshold),
         ("peripheral_gain", p.peripheral_gain),
         ("gauss_precharge", p.gauss_precharge),
+        ("gauss_charge", p.gauss_charge),
     ] {
         if !unit(v) {
             return Err(bad(name, "must be in 0..=1"));

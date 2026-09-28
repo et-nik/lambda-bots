@@ -55,6 +55,8 @@ pub struct Bot {
     pub respawn_at: Option<SimTime>,
     pub respawn_presses: u32,
     pub test: Option<MotorTest>,
+    /// `lb selftest`: the weapon rules checked by this bot.
+    pub selftest: Option<crate::selftest::SelfTest>,
     /// `lb nav test`: the obstacle course instead of behavior.
     pub nav_test: Option<crate::nav_test::NavTest>,
     pub fault_on_next_frame: bool,
@@ -69,6 +71,13 @@ pub struct Bot {
     pub character: lb_brain::Character,
     /// What the bot looked at on its last frame, when not along its path.
     pub attention: Option<lb_brain::Attention>,
+    /// The weapon in hand on the last frame, its rounds left and its second ammo (the MP5's grenades), for
+    /// `lb stats`.
+    pub rounds: Option<(lb_game::weapons::WeaponId, i32, i32)>,
+    /// Last frame the bot looked through a scope, for `lb stats`.
+    pub zoomed_at: Option<SimTime>,
+    /// Grenades, satchels, snarks and tripmines carried on the last frame of this life, for `lb stats`.
+    pub carried: Option<[i32; 4]>,
 }
 
 impl Bot {
@@ -102,6 +111,7 @@ impl Bot {
             respawn_at: None,
             respawn_presses: 0,
             test: None,
+            selftest: None,
             fault_on_next_frame: false,
             seen_reset_hud: false,
             pending_client_cmds: Vec::new(),
@@ -112,6 +122,9 @@ impl Bot {
             brain,
             character,
             attention: None,
+            rounds: None,
+            zoomed_at: None,
+            carried: None,
         }
     }
 
@@ -166,6 +179,9 @@ impl Bot {
                     self.respawn_at = None;
                     self.respawn_presses = 0;
                     self.test = None;
+                    if self.selftest.take().is_some() {
+                        tracing::warn!("self-test stopped: {} died", self.persona.name);
+                    }
                     self.nav.reset();
                     self.brain.on_death();
                 }

@@ -2,6 +2,7 @@
 
 use lb_config::main_config::QuotaMode;
 use lb_core::math::normalize_angle;
+use lb_game::weapons::WeaponId;
 use lb_host::{Host, TraceKind, TraceRequest};
 
 use crate::cvars::Cv;
@@ -46,6 +47,18 @@ const HELP: &[(&str, &str)] = &[
         "one personality: style, skill, look and resolved skill parameters",
     ),
     ("status", "runtime status and counters"),
+    (
+        "weapons [all|melee|<weapon>...] [give]",
+        "weapons bots may use; with give every bot gets them on spawn (needs sv_cheats 1)",
+    ),
+    (
+        "stats [reset]",
+        "weapon statistics: rounds, hit rate by distance, kills, suicides",
+    ),
+    (
+        "selftest [name|#userid]",
+        "check the game DLL's weapon rules with one bot while the others stand still (needs sv_cheats 1)",
+    ),
     (
         "perf [reset|bots]",
         "core time per frame (p50/p95/p99/max) or command timing per bot",
@@ -94,8 +107,21 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "brain" => brain(rt, rest),
         "profile" => profile(rt, rest),
         "status" => status(rt),
+        "weapons" => weapons(rt, rest),
+        "selftest" => selftest(rt, host, rest),
+        "stats" => match rest.first().copied() {
+            Some("reset") => {
+                rt.arms_stats.reset(rt.now.secs());
+                vec!["weapon statistics reset".into()]
+            }
+            _ => rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages),
+        },
         "perf" => perf(rt, rest),
-        "compat" => rt.compat.to_yaml().lines().map(String::from).collect(),
+        "compat" => {
+            let mut out: Vec<String> = rt.compat.to_yaml().lines().map(String::from).collect();
+            out.push(format!("satchel_buttons: {}", rt.satchel_buttons()));
+            out
+        }
         "add" => add(rt, host, rest),
         "kick" => kick(rt, host, rest),
         "kill" => kill(rt, rest),
@@ -605,6 +631,10 @@ fn goal_text(rt: &Runtime, b: &crate::manager::Bot, kind: lb_decision::GoalKind)
                 .map(|s| s.kind.as_str())
                 .unwrap_or_default()
         ),
+        lb_decision::GoalKind::UseCharger(i) => {
+            let suit = b.brain.chargers.as_ref().and_then(|c| c.spots.get(i)).map(|c| c.suit);
+            format!("charger ({})", if suit == Some(true) { "suit" } else { "health" })
+        }
         k => k.as_str().to_string(),
     }
 }
@@ -685,6 +715,62 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
                     .map(|s| format!(", attack state {}", s.in_attack))
                     .unwrap_or_default()
             ));
+        }
+        let arms = &m.arms;
+        let st = &arms.stats;
+        out.push(format!(
+            "  arms: {}; thrown {} grenades, {} satchels, {} snarks ({} barrages); {} m203, {} mines laid, {} \
+             detonations, {} mines shot, {} scoped in {} zooms, gauss {} fired {} dumped {} plain rolls {:.1} s \
+             cramped, {} dodges, {} runs from snarks, {} failed{}; explosives known: {} own satchels, {} mines, {} in \
+             flight",
+            arms.describe(now),
+            st.grenades,
+            st.satchels,
+            st.snarks,
+            st.barrages,
+            st.lobs,
+            st.mines,
+            st.detonations,
+            st.mine_shots,
+            st.scoped,
+            st.zooms,
+            arms.gauss.fired,
+            arms.gauss.dumped,
+            arms.gauss.plain_rolls,
+            f64::from(arms.gauss.cramped) * 0.1,
+            st.dodges,
+            st.snark_runs,
+            st.failed,
+            arms.last_failure.map(|f| format!(" (last: {f})")).unwrap_or_default(),
+            b.brain.explosives.charges.len(),
+            b.brain.explosives.mines.len(),
+            b.brain.explosives.flying.len(),
+        ));
+        let carried = crate::arsenal(&b.self_state, &rt.game.weapons);
+        let count = |w: WeaponId| carried.iter().find(|a| a.id == w).and_then(|a| a.reserve).unwrap_or(0);
+        out.push(format!(
+            "  explosives carried: {} grenades, {} satchels, {} snarks, {} mines, {} m203",
+            count(WeaponId::HandGrenade),
+            count(WeaponId::Satchel),
+            count(WeaponId::Snark),
+            count(WeaponId::Tripmine),
+            carried
+                .iter()
+                .find(|a| a.id == WeaponId::Mp5)
+                .and_then(|a| a.reserve2)
+                .unwrap_or(0),
+        ));
+        if !st.satchel_offs.is_empty() {
+            let e: Vec<String> = st.satchel_offs.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
+            out.push(format!("  satchels set off: {}", e.join("; ")));
+        }
+        if !st.scope_ends.is_empty() {
+            let e: Vec<String> = st.scope_ends.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
+            out.push(format!("  scope off: {}", e.join("; ")));
+        }
+        if !st.failures.is_empty() {
+            let f: Vec<String> = st.failures.iter().map(|(p, w, n)| format!("{p}: {w} ×{n}")).collect();
+            out.push(format!("  failures: {}", f.join("; ")));
         }
         let i = &b.brain.intents;
         let owner = |p: Option<lb_motor::Prio>| p.map(|p| format!("{p:?}")).unwrap_or_else(|| "-".into());
@@ -1148,4 +1234,100 @@ fn trace_dump(rt: &mut Runtime, host: &mut dyn Host, n: usize) -> std::io::Resul
     }
     out.flush()?;
     Ok((path, n))
+}
+
+/// Weapon names for `lb weapons`: classnames without `weapon_` and the usual aliases.
+fn weapon_by_name(name: &str) -> Option<lb_game::weapons::WeaponId> {
+    use lb_game::weapons::WeaponId;
+    match name.to_ascii_lowercase().as_str() {
+        "357" | "python" => Some(WeaponId::Python),
+        "mp5" | "9mmar" => Some(WeaponId::Mp5),
+        "glock" | "9mmhandgun" => Some(WeaponId::Glock),
+        "hornet" | "hornetgun" => Some(WeaponId::Hornetgun),
+        "grenade" | "handgrenade" => Some(WeaponId::HandGrenade),
+        other => WeaponId::from_classname(other),
+    }
+}
+
+fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    use lb_game::weapons::WeaponId;
+    let describe = |rt: &Runtime| {
+        let allowed: Vec<&str> = WeaponId::ALL
+            .into_iter()
+            .filter(|w| rt.weapons_allowed & w.bit() != 0)
+            .map(|w| &w.classname()["weapon_".len()..])
+            .collect();
+        let given: Vec<&str> = rt
+            .weapons_give
+            .iter()
+            .map(|w| &w.classname()["weapon_".len()..])
+            .collect();
+        let allowed = if rt.weapons_allowed == u32::MAX {
+            "all".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        format!(
+            "bots may use: {allowed}; given on spawn: {}",
+            if given.is_empty() {
+                "nothing".into()
+            } else {
+                given.join(", ")
+            }
+        )
+    };
+    let Some(first) = args.first().copied() else {
+        return vec![describe(rt)];
+    };
+    let give = args.last().is_some_and(|a| a.eq_ignore_ascii_case("give"));
+    let names: Vec<&str> = args
+        .iter()
+        .copied()
+        .filter(|a| !a.eq_ignore_ascii_case("give"))
+        .collect();
+    match first {
+        "all" | "standard" => {
+            rt.weapons_allowed = u32::MAX;
+            rt.weapons_give = if give { WeaponId::ALL.to_vec() } else { Vec::new() };
+        }
+        "melee" => {
+            rt.weapons_allowed = WeaponId::Crowbar.bit();
+            rt.weapons_give = if give { vec![WeaponId::Crowbar] } else { Vec::new() };
+        }
+        _ => {
+            let mut list = Vec::new();
+            for n in &names {
+                match weapon_by_name(n) {
+                    Some(w) => list.push(w),
+                    None => return vec![format!("unknown weapon `{n}`")],
+                }
+            }
+            rt.weapons_allowed = list.iter().fold(WeaponId::Crowbar.bit(), |m, w| m | w.bit());
+            rt.weapons_give = if give { list } else { Vec::new() };
+        }
+    }
+    vec![describe(rt)]
+}
+
+fn selftest(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
+    let target = (!args.is_empty()).then(|| args.join(" "));
+    let Some(i) = find_bots(rt, target.as_deref())
+        .into_iter()
+        .find(|&i| rt.bots[i].state == BotState::Alive)
+    else {
+        return vec!["no live bot to run the self-test".into()];
+    };
+    let yaw = open_yaw(host, rt.bots[i].self_state.body.origin);
+    let (now, dll) = (rt.now, rt.game.dll);
+    if rt.freeze_before_selftest.is_none() {
+        rt.freeze_before_selftest = Some(rt.freeze);
+    }
+    rt.freeze = true;
+    let b = &mut rt.bots[i];
+    b.selftest = Some(crate::selftest::SelfTest::new(now, yaw, dll));
+    vec![format!(
+        "self-test started on {} (profile {}); results go to the console and the log",
+        b.persona.name,
+        dll.kind.as_str()
+    )]
 }

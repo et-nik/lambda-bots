@@ -5,7 +5,7 @@
 use lb_core::Vec3;
 use lb_core::time::SimTime;
 use lb_game::items::ItemKind;
-use lb_knowledge::Items;
+use lb_knowledge::{Chargers, Items};
 use lb_worldq::{TraceQuery, Tracer, VisSets};
 
 use crate::vision::{Frustum, Viewer};
@@ -74,4 +74,54 @@ pub fn look(
         items.observe(i, present, now);
     }
     traces
+}
+
+/// A wall charger as the server has it: its brush model and the frame of its face (1 when spent).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChargerEntity {
+    pub model: u16,
+    pub frame: f32,
+}
+
+/// Looks at one charger in view, taking turns after the one checked last: whether its face is lit.
+#[allow(clippy::too_many_arguments)]
+pub fn look_chargers(
+    now: SimTime,
+    viewer: &Viewer,
+    chargers: &mut Chargers,
+    entities: &[ChargerEntity],
+    range: f32,
+    vis: &dyn VisSets,
+    tracer: &mut dyn Tracer,
+    cursor: &mut usize,
+) -> u32 {
+    let n = chargers.spots.len();
+    if n == 0 {
+        return 0;
+    }
+    let frustum = Frustum::new(viewer.eye, viewer.angles, viewer.fov, viewer.aspect);
+    for k in 0..n {
+        let i = (*cursor + 1 + k) % n;
+        let spot = chargers.spots[i];
+        if spot.center.distance(viewer.eye) > range
+            || !frustum.contains(spot.center)
+            || !vis.box_in_pvs(
+                viewer.eye,
+                spot.center - Vec3::splat(8.0),
+                spot.center + Vec3::splat(8.0),
+            )
+        {
+            continue;
+        }
+        *cursor = i;
+        let tr = tracer.trace(&TraceQuery::sight(viewer.eye, spot.center, viewer.index));
+        if tr.fraction < 1.0 && tr.end.distance(spot.center) > 24.0 {
+            return 1;
+        }
+        if let Some(e) = entities.iter().find(|e| e.model == spot.model) {
+            chargers.observe(i, e.frame >= 0.5, now);
+        }
+        return 1;
+    }
+    0
 }

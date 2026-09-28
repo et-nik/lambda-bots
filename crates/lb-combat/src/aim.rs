@@ -6,6 +6,8 @@
 //!   estimated then; a target that changes direction is missed for that long (jk_botti's ping emulation).
 //! - **Error:** an Ornstein–Uhlenbeck drift per axis that grows with distance and shrinks with skill, replacing
 //!   yapb's error re-rolls every 0.4–0.8 s.
+//! - **Projectiles** lead the target by their flight time along the velocity seen; explosives go for the feet of a
+//!   target on the ground, where a near miss still catches it in the blast.
 
 use std::collections::VecDeque;
 
@@ -16,6 +18,11 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, Stance};
 
 const SPRAY_DISTANCE: f32 = 272.0;
+/// A scope's share of the aim error.
+pub const SCOPE_STEADY: f32 = 0.5;
+/// Below the origin of a standing (and a crouched) player, a little above the floor.
+const FEET: f32 = 28.0;
+const FEET_CROUCHED: f32 = 12.0;
 const HISTORY: f64 = 1.0;
 const ERROR_TAU: f32 = 0.45;
 
@@ -25,6 +32,19 @@ struct Sample {
     pos: Vec3,
     vel: Vec3,
     crouched: bool,
+    on_ground: bool,
+}
+
+/// How the shot flies.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Shot {
+    pub weapon: Option<WeaponId>,
+    /// Speed of the projectile to lead the target by; `None` for hitscan.
+    pub speed: Option<f32>,
+    /// Aim at the feet of a target on the ground.
+    pub feet: bool,
+    /// Through a scope: the aim error is halved.
+    pub steady: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +92,7 @@ impl Aim {
                     Vec3::ZERO
                 },
                 crouched: track.traits.stance == Stance::Crouched,
+                on_ground: track.traits.on_ground,
             });
         }
         while self.history.len() > 2 && track.last_seen.since(self.history[1].t) > HISTORY {
@@ -84,15 +105,8 @@ impl Aim {
         self.history.clear();
     }
 
-    /// The point to aim at now, from `eye`, for `weapon`.
-    pub fn point(
-        &mut self,
-        now: SimTime,
-        eye: Vec3,
-        weapon: Option<WeaponId>,
-        skill: &AimSkill,
-        rng: &mut Pcg32,
-    ) -> Option<Vec3> {
+    /// The point to aim at now, from `eye`, for `shot`.
+    pub fn point(&mut self, now: SimTime, eye: Vec3, shot: &Shot, skill: &AimSkill, rng: &mut Pcg32) -> Option<Vec3> {
         let seen_until = now + -f64::from(skill.latency);
         let s = self
             .history
@@ -102,19 +116,35 @@ impl Aim {
             .or(self.history.front())
             .copied()?;
         let ahead = (now.since(s.t) as f32).clamp(0.0, 0.5);
-        let origin = s.pos + s.vel * ahead;
+        let mut origin = s.pos + s.vel * ahead;
         let distance = origin.distance(eye);
+        if let Some(speed) = shot.speed {
+            origin += s.vel * (distance / speed.max(1.0)).min(1.0);
+        }
+        let weapon = shot.weapon;
         let head = self.head
             && !(weapon == Some(WeaponId::Shotgun) && distance > SPRAY_DISTANCE)
             && !(weapon == Some(WeaponId::Mp5) && distance > 2.0 * SPRAY_DISTANCE);
         let z = match (head, s.crouched) {
+            _ if shot.feet && s.on_ground => {
+                if s.crouched {
+                    -FEET_CROUCHED
+                } else {
+                    -FEET
+                }
+            }
             (true, false) => 22.0,
             (true, true) => 10.0,
             (false, false) => 8.0,
             (false, true) => 0.0,
         };
         self.drift(now, distance, skill, rng);
-        Some(origin + Vec3::Z * z + self.error)
+        let error = if shot.steady {
+            self.error * SCOPE_STEADY
+        } else {
+            self.error
+        };
+        Some(origin + Vec3::Z * z + error)
     }
 
     fn drift(&mut self, now: SimTime, distance: f32, skill: &AimSkill, rng: &mut Pcg32) {
@@ -183,12 +213,22 @@ mod tests {
         // Ran along +X up to x = 440 at t = 1.0, then turned back and is at x = 380 at t = 1.3.
         aim.follow(&track(1.0, 440.0, 200.0), &skill, &mut rng);
         aim.follow(&track(1.3, 380.0, -200.0), &skill, &mut rng);
-        let p = aim.point(SimTime(1.3), Vec3::ZERO, None, &skill, &mut rng).unwrap();
+        let hitscan = Shot::default();
+        let p = aim.point(SimTime(1.3), Vec3::ZERO, &hitscan, &skill, &mut rng).unwrap();
         assert!(p.x > 450.0, "0.3 s behind, it still sees the target running on: {p}");
         assert!((p.z - 8.0).abs() < 1e-3, "body height");
         let quick = AimSkill { latency: 0.0, ..skill };
-        let p = aim.point(SimTime(1.3), Vec3::ZERO, None, &quick, &mut rng).unwrap();
+        let p = aim.point(SimTime(1.3), Vec3::ZERO, &hitscan, &quick, &mut rng).unwrap();
         assert!(p.x < 400.0, "without latency it aims at the turned target: {p}");
+        let rocket = Shot {
+            weapon: Some(WeaponId::Rpg),
+            speed: Some(1000.0),
+            feet: true,
+            steady: false,
+        };
+        let p = aim.point(SimTime(1.3), Vec3::ZERO, &rocket, &quick, &mut rng).unwrap();
+        assert!(p.x < 380.0 - 50.0, "leads the target it runs back: {p}");
+        assert!((p.z + FEET).abs() < 1e-3, "at the feet: {p}");
     }
 
     #[test]
@@ -208,9 +248,11 @@ mod tests {
             aim.follow(&t, &skill, &mut rng);
             assert_eq!(aim.aims_at_head(), first);
         }
-        let p = aim
-            .point(SimTime(1.0), Vec3::ZERO, Some(WeaponId::Shotgun), &skill, &mut rng)
-            .unwrap();
+        let shotgun = Shot {
+            weapon: Some(WeaponId::Shotgun),
+            ..Shot::default()
+        };
+        let p = aim.point(SimTime(1.0), Vec3::ZERO, &shotgun, &skill, &mut rng).unwrap();
         assert!((p.z - 8.0).abs() < 1e-3, "shotguns aim at the body beyond 272 units");
     }
 
@@ -229,7 +271,13 @@ mod tests {
             let mut sum = 0.0;
             for i in 0..2000 {
                 let p = aim
-                    .point(SimTime(1.0 + f64::from(i) * 0.01), Vec3::ZERO, None, &skill, &mut rng)
+                    .point(
+                        SimTime(1.0 + f64::from(i) * 0.01),
+                        Vec3::ZERO,
+                        &Shot::default(),
+                        &skill,
+                        &mut rng,
+                    )
                     .unwrap();
                 sum += (p.y).powi(2);
             }

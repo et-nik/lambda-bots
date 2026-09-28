@@ -59,18 +59,26 @@ pub struct PredictedWeapon {
     pub next_primary: f32,
     pub next_secondary: f32,
     pub reloading: bool,
-    /// Weapon-specific attack state (`m_fInAttack`: gauss charge stage, grenade pin).
+    /// `m_chargeReady`: satchels out (0 none, 1 out, 2 just set off).
+    pub charge_ready: i32,
+    /// `m_fInAttack`: gauss charge stage (0 idle, 1 spinning up, 2 charging).
     pub in_attack: i32,
+    /// `m_fireState`: the egon beam.
+    pub fire_state: i32,
+    /// `m_flStartThrow`: server time the grenade pin was pulled, 0 when it is not.
+    pub start_throw: f32,
 }
 
 /// What the bot's own client would be sent for weapon prediction (`GetWeaponData`, `UpdateClientData`): the
 /// honest source of weapon readiness a human's client has too.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Prediction {
     pub at: SimTime,
     pub current: Option<WeaponId>,
     /// Seconds until any attack is allowed (weapon switch and deploy).
     pub next_attack: f32,
+    /// Ammo of the active weapon's first type the player carries.
+    pub primary_ammo: i32,
     pub weapons: [Option<PredictedWeapon>; 32],
 }
 
@@ -132,6 +140,11 @@ impl SelfState {
         let p = self.prediction.as_ref()?;
         let weapon = p.weapons.get(w as usize).copied().flatten()?;
         Some(p.next_attack <= 0.0 && weapon.next_primary <= 0.0 && !weapon.reloading)
+    }
+
+    /// What the prediction data says of weapon `w`.
+    pub fn predicted(&self, w: WeaponId) -> Option<PredictedWeapon> {
+        self.prediction.as_ref()?.weapons.get(w as usize).copied().flatten()
     }
 
     /// Resets per-life state on spawn (weapons, clips and ammo come fresh from the game).

@@ -70,4 +70,6 @@ pub trait NavService: Tracer {
     fn away_from(&mut self, threat: Vec3) -> Option<Vec3>;
     /// A navigation graph is loaded.
     fn available(&self) -> bool;
+    /// Keeps paths off the line `a → b` at body height for `seconds` (a tripmine's beam the bot knows of).
+    fn avoid_line(&mut self, _a: Vec3, _b: Vec3, _seconds: f32) {}
 }

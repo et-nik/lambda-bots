@@ -291,6 +291,32 @@ impl Navigator {
         }
     }
 
+    /// Blocks until `until` every link whose walk crosses the line `a → b` at body height (a tripmine's beam); a path
+    /// through one of them is dropped to be planned again. Returns how many links were blocked.
+    pub fn avoid_line(&mut self, graph: &NavGraph, a: Vec3, b: Vec3, now: f64, until: f64) -> usize {
+        let mut blocked = Vec::new();
+        for (i, n) in graph.nodes.iter().enumerate() {
+            for l in graph.links(i as NodeId) {
+                let m = graph.node(l.to);
+                if crosses(n.origin, m.origin, a, b) {
+                    blocked.push((i as NodeId, l.to));
+                }
+            }
+        }
+        for &(from, to) in &blocked {
+            self.known.avoid(from, to, now, until);
+        }
+        if self
+            .follower
+            .as_ref()
+            .is_some_and(|f| blocked.iter().any(|&(from, to)| f.uses(from, to)))
+        {
+            self.follower = None;
+            self.next_plan_at = now;
+        }
+        blocked.len()
+    }
+
     /// A node to fall back to: well away from `threat`, not too far from the bot.
     pub fn away_from(ctx: &NavCtx<'_>, origin: Vec3, threat: Vec3) -> Option<Vec3> {
         let here = origin.distance(threat);
@@ -385,4 +411,73 @@ fn straight(input: &NavInput, dest: Vec3) -> NavStep {
         input.velocity,
     );
     step
+}
+
+/// Half the height of a standing player's box: a line this close to the origin's height goes through the body.
+const BODY_HALF_HEIGHT: f32 = 36.0;
+/// A player standing this close to the line across touches it.
+const BODY_RADIUS: f32 = 16.0;
+
+/// A player walking from `p` to `q` (origins) touches the line `a → b`.
+fn crosses(p: Vec3, q: Vec3, a: Vec3, b: Vec3) -> bool {
+    let (p2, q2, a2, b2) = (p.truncate(), q.truncate(), a.truncate(), b.truncate());
+    let r = q2 - p2;
+    let s = b2 - a2;
+    let denom = r.perp_dot(s);
+    let at_height = |t: f32, u: f32| {
+        let body = p.z + (q.z - p.z) * t;
+        let line = a.z + (b.z - a.z) * u;
+        (line - body).abs() <= BODY_HALF_HEIGHT
+    };
+    if denom.abs() > 1e-6 {
+        let t = (a2 - p2).perp_dot(s) / denom;
+        let u = (a2 - p2).perp_dot(r) / denom;
+        if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) && at_height(t, u) {
+            return true;
+        }
+    }
+    // Ends standing on the line.
+    [(p, 0.0f32), (q, 1.0f32)].into_iter().any(|(e, t)| {
+        let len = s.length_squared().max(1e-6);
+        let u = ((e.truncate() - a2).dot(s) / len).clamp(0.0, 1.0);
+        (a2 + s * u).distance(e.truncate()) <= BODY_RADIUS && at_height(t, u)
+    })
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+
+    #[test]
+    fn walks_across_a_beam_at_body_height() {
+        let beam = (Vec3::new(0.0, -100.0, 10.0), Vec3::new(0.0, 100.0, 10.0));
+        assert!(crosses(
+            Vec3::new(-50.0, 0.0, 0.0),
+            Vec3::new(50.0, 0.0, 0.0),
+            beam.0,
+            beam.1
+        ));
+        assert!(
+            !crosses(
+                Vec3::new(-50.0, 0.0, 100.0),
+                Vec3::new(50.0, 0.0, 100.0),
+                beam.0,
+                beam.1
+            ),
+            "a floor above"
+        );
+        assert!(
+            !crosses(
+                Vec3::new(-50.0, 300.0, 0.0),
+                Vec3::new(50.0, 300.0, 0.0),
+                beam.0,
+                beam.1
+            ),
+            "past its end"
+        );
+        assert!(
+            crosses(Vec3::new(-50.0, 0.0, 0.0), Vec3::new(-10.0, 0.0, 0.0), beam.0, beam.1),
+            "stops on it"
+        );
+    }
 }

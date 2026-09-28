@@ -12,9 +12,9 @@ use lb_core::dmath;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_game::items::{Ammo, ItemKind};
-use lb_game::mechanics::{WeaponClass, spec};
+use lb_game::mechanics::{WeaponClass, carry_max, spec};
 use lb_game::weapons::WeaponId;
-use lb_knowledge::{Beliefs, Items, PlayerKey, Relation, TrackState};
+use lb_knowledge::{Beliefs, Chargers, Items, PlayerKey, Relation, TrackState};
 use lb_styles::GoalAffinity;
 use smallvec::SmallVec;
 
@@ -24,6 +24,8 @@ pub enum GoalKind {
     Hunt(PlayerKey),
     Retreat,
     CollectItem(usize),
+    /// Charge health or armor at a wall charger.
+    UseCharger(usize),
     Roam,
 }
 
@@ -34,6 +36,7 @@ impl GoalKind {
             GoalKind::Hunt(_) => "hunt",
             GoalKind::Retreat => "retreat",
             GoalKind::CollectItem(_) => "collect",
+            GoalKind::UseCharger(_) => "charger",
             GoalKind::Roam => "roam",
         }
     }
@@ -61,6 +64,7 @@ pub struct Situation<'a> {
     pub affinity: GoalAffinity,
     pub beliefs: &'a Beliefs,
     pub items: Option<&'a Items>,
+    pub chargers: Option<&'a Chargers>,
     pub weapons: &'a [Armed],
     /// How much each ammo type is needed, 0..1 (0 when no owned weapon uses it).
     pub ammo_need: &'a dyn Fn(Ammo) -> f32,
@@ -90,6 +94,11 @@ const ROAM_HOLD: f32 = 5.0;
 const RETREAT_THRESHOLD: f32 = 0.4;
 const HUNT_THRESHOLD: f32 = 0.6;
 const COLLECT_THRESHOLD: f32 = 0.1;
+/// A charger is worth it only this low on health (armor).
+const CHARGER_HEALTH: f32 = 60.0;
+const CHARGER_ARMOR: f32 = 40.0;
+/// Seconds of standing at a charger.
+const CHARGE_TIME: f32 = 4.0;
 
 /// Weight of the retreat goal, also subtracted from hunting.
 fn retreat_weight(s: &Situation<'_>) -> f32 {
@@ -125,14 +134,17 @@ fn item_benefit(s: &Situation<'_>, kind: ItemKind) -> f32 {
         ItemKind::Health if s.health < 85.0 => 0.8 * (1.0 - s.health / 100.0),
         ItemKind::Battery if s.armor < 90.0 => 0.6 * (1.0 - s.armor / 100.0),
         ItemKind::LongJump if !s.has_longjump => 0.8,
-        ItemKind::Weapon(w) if !owns(w) => {
-            let rank = f32::from(spec(w).rank);
-            if spec(w).class == WeaponClass::Throwable {
-                0.3
-            } else {
-                0.4 + 0.03 * rank
-            }
+        // Grenades, satchels, snarks and mines are their own ammo: worth topping up.
+        ItemKind::Weapon(w) if spec(w).class == WeaponClass::Throwable => {
+            let carried = s
+                .weapons
+                .iter()
+                .find(|a| a.id == w)
+                .and_then(|a| a.reserve)
+                .unwrap_or(0);
+            0.3 * (1.0 - carried as f32 / carry_max(w).max(1) as f32).max(0.0)
         }
+        ItemKind::Weapon(w) if !owns(w) => 0.4 + 0.03 * f32::from(spec(w).rank),
         ItemKind::Weapon(w) => {
             // Owned: only its ammo is worth something.
             let ammo = match w {
@@ -225,6 +237,43 @@ pub fn candidates(s: &Situation<'_>, out: &mut Vec<Goal>) {
                 rank: if urgent { 2 } else { 1 },
                 weight: w.min(1.0),
                 hold: 1.5 * eta + 3.0,
+            });
+        }
+    }
+    if let Some(chargers) = s.chargers {
+        let threat_near = s
+            .beliefs
+            .enemies()
+            .any(|t| t.state != TrackState::Stale && t.pos.distance(s.origin) < 800.0);
+        for (i, c) in chargers.spots.iter().enumerate() {
+            let benefit = if c.suit {
+                if s.armor < CHARGER_ARMOR {
+                    0.6 * (1.0 - s.armor / 100.0)
+                } else {
+                    0.0
+                }
+            } else if s.health < CHARGER_HEALTH {
+                0.8 * (1.0 - s.health / 100.0)
+            } else {
+                0.0
+            };
+            if benefit <= 0.0 {
+                continue;
+            }
+            let eta = s.eta(c.spot);
+            if !chargers.available(i, s.now + f64::from(eta)) {
+                continue;
+            }
+            let w = (benefit * s.affinity.collect).min(1.0) * dmath::exp(-(eta + CHARGE_TIME) / 10.0);
+            if w < COLLECT_THRESHOLD {
+                continue;
+            }
+            let urgent = !c.suit && s.effective_health() < 30.0 && !threat_near;
+            out.push(Goal {
+                kind: GoalKind::UseCharger(i),
+                rank: if urgent { 2 } else { 1 },
+                weight: w,
+                hold: 1.5 * eta + 3.0 + 2.0 * CHARGE_TIME,
             });
         }
     }
@@ -380,6 +429,7 @@ mod tests {
             affinity: BALANCED,
             beliefs,
             items,
+            chargers: None,
             weapons,
             ammo_need: need,
             reloading: false,
@@ -394,11 +444,13 @@ mod tests {
             id: WeaponId::Crowbar,
             clip: None,
             reserve: None,
+            reserve2: None,
         },
         Armed {
             id: WeaponId::Glock,
             clip: Some(17),
             reserve: Some(68),
+            reserve2: None,
         },
     ];
 

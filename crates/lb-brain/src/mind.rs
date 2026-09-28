@@ -7,25 +7,30 @@
 //!   goal, so a retreating or hunting bot still shoots back.
 //! - **Vigilance (priority 20):** looks along the path and glances at sounds.
 
-use lb_combat::aim::{Aim, AimSkill};
+use lb_combat::aim::{Aim, AimSkill, Shot};
 use lb_combat::fight::{Fight, FightInput, FightSkill};
-use lb_combat::policy::{self, Armed, Choice};
+use lb_combat::policy::{self, Armed, Choice, Target, XBOW_ZOOM_FROM};
 use lb_combat::{fire, target};
 use lb_config::skill::SkillParams;
 use lb_core::Vec3;
 use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
 use lb_decision::{Decider, Goal, GoalKind, Situation};
+use lb_game::dll::DllProfile;
 use lb_game::items::Ammo;
-use lb_game::mechanics::{WeaponClass, spec};
+use lb_game::mechanics::{
+    AltFire, Attack, BOLT_SPEED, DART_SPEED, Damages, ROCKET_GUIDE, ROCKET_SPEED, WeaponClass, spec,
+};
+use lb_game::self_state::Prediction;
 use lb_game::weapons::WeaponId;
-use lb_knowledge::{PlayerKey, TrackState};
+use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{Fire, Intents, LookIntent, LookParams, MoveIntent, Prio, StanceIntent, WeaponIntent};
 use lb_nav_api::{NavService, NavStatus, NavStep};
 use lb_styles::GoalAffinity;
 use smallvec::SmallVec;
 
 use crate::BotBrain;
+use crate::arms::Arms;
 use crate::attention::LookReason;
 
 const COMBAT_PERIOD: f64 = 0.1;
@@ -34,6 +39,24 @@ const DECISION_PERIOD: f64 = 0.2;
 const LOST_STARE: f64 = 1.0;
 /// Reload only after this long without an enemy in sight.
 const CALM_BEFORE_RELOAD: f64 = 2.0;
+/// A scope comes off after this long without a target.
+const UNZOOM_AFTER: f64 = 1.5;
+/// Distance weapons are chosen for when no enemy is about.
+const CALM_DISTANCE: f32 = 600.0;
+/// A rocket flies about this fast on average over its way.
+const ROCKET_AVERAGE: f32 = 1500.0;
+/// The crossbow's scope goes on only with the target this close to the view's center (the zoomed view is 20° wide).
+const SCOPE_START_DOT: f32 = 0.9945;
+/// A bolt's and the egon beam's end blast reach this far: the line of fire must be clear beyond it.
+const BOLT_CLEAR: f32 = 160.0;
+const EGON_CLEAR: f32 = 128.0;
+/// Seconds a look along an explosive's line holds.
+const BLAST_CHECK_PERIOD: f64 = 0.03;
+/// At a charger's spot within this, across.
+const CHARGER_SPOT: f32 = 24.0;
+/// A charger that gave nothing for this long is spent; nobody stays at one longer than the timeout.
+const CHARGER_DRY: f64 = 1.5;
+const CHARGER_TIMEOUT: f64 = 15.0;
 const RETREAT_REPLAN: f64 = 2.0;
 /// A melee fighter walks a path to enemies further than this, and charges straight at closer ones.
 const MELEE_CHARGE: f32 = 200.0;
@@ -85,13 +108,42 @@ pub struct Body {
     pub on_ground: bool,
     pub on_ladder: bool,
     pub underwater: bool,
+    /// 0 dry, 1 feet, 2 waist, 3 head under water.
+    pub waterlevel: u8,
+    /// Field of view the game set (`pev->fov`): 0 is the default, less is a zoomed scope.
+    pub fov: f32,
     /// Weapon confirmed by `CurWeapon`.
     pub weapon: Option<WeaponId>,
     pub arsenal: SmallVec<[Armed; 16]>,
+    /// What the bot's own client would be told for weapon prediction.
+    pub prediction: Option<Prediction>,
     /// How much each ammo type is needed, 0..1, by [`Ammo::index`].
     pub ammo_need: [f32; 7],
     /// Other players on the server.
     pub opponents: usize,
+    /// Weapon damage the server deals.
+    pub damages: Damages,
+    /// How the server's game DLL works the weapons that differ.
+    pub dll: DllProfile,
+    /// `sv_gravity`.
+    pub gravity: f32,
+    /// Weapons the bot may use, as a mask of weapon bits (`lb weapons` on the stand); all by default.
+    pub allowed: u32,
+}
+
+impl Body {
+    pub fn allows(&self, w: WeaponId) -> bool {
+        self.allowed & w.bit() != 0
+    }
+
+    /// The scope is on (a crossbow or a 357 zoomed in).
+    pub fn zoomed(&self) -> bool {
+        self.fov > 0.0 && self.fov < 89.0
+    }
+
+    pub(crate) fn armed(&self, w: WeaponId) -> Option<&Armed> {
+        self.arsenal.iter().find(|a| a.id == w)
+    }
 }
 
 /// Who the bot is.
@@ -131,7 +183,7 @@ pub struct Mind {
     pub aim: Aim,
     pub fight: Fight,
     pub choice: Option<Choice>,
-    click_interval: f32,
+    pub(crate) click_interval: f32,
     next_combat: SimTime,
     next_decision: SimTime,
     urgent: bool,
@@ -148,16 +200,30 @@ pub struct Mind {
     pub reactions: Reactions,
     /// The trigger was pulled on the last frame.
     pub firing: bool,
+    /// Throws, mines, detonations, the gauss charge and dodging.
+    pub arms: Arms,
+    /// Where the aim was on the last frame an enemy was in sight.
+    pub last_aim: Option<Vec3>,
+    /// When the bot last had a target to shoot at.
+    target_at: SimTime,
+    /// The last look along the line an explosive would take (a wall or someone close in front): when, for which
+    /// weapon, and whether it was clear.
+    blast_check: Option<(SimTime, WeaponId, bool)>,
+    /// Using a charger: which, since when, when it last gave something and what the bot had then.
+    charging: Option<(usize, SimTime, SimTime, f32)>,
 }
 
 impl Mind {
     pub fn reset(&mut self) {
         let decider = std::mem::take(&mut self.decider);
         let reactions = std::mem::take(&mut self.reactions);
+        let mut arms = std::mem::take(&mut self.arms);
+        arms.reset();
         *self = Mind::default();
         self.decider = decider;
         self.decider.reset();
         self.reactions = reactions;
+        self.arms = arms;
     }
 
     pub fn reloading(&self, now: SimTime) -> bool {
@@ -216,11 +282,16 @@ impl BotBrain {
     ) -> lb_motor::MotorOut {
         let now = body.now;
         self.intents.clear();
-        self.combat_tick(body, ch, rng);
+        self.explosives.update(now);
+        self.combat_tick(body, ch, nav, rng);
         self.decide(body, ch, rng);
         self.pursue(body, ch, nav, rng);
-        self.aim_and_fire(body, ch, rng);
+        self.dodge(body, nav);
+        self.run_protocols(body, ch, nav, rng);
+        self.aim_and_fire(body, ch, nav, rng);
+        self.snark_defense(body, nav);
         self.vigilance(body);
+        self.beam_guard(body);
         let input = lb_motor::MotorInput {
             now,
             dt: body.dt,
@@ -238,7 +309,7 @@ impl BotBrain {
         self.motor.run(&self.intents, &input, &look, &mut rng.motor)
     }
 
-    fn combat_tick(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) {
+    fn combat_tick(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
         let m = &mut self.mind;
         if let Some(d) = self.beliefs.last_damage
@@ -252,14 +323,25 @@ impl BotBrain {
         }
         m.next_combat = now + COMBAT_PERIOD;
         let previous = m.target;
-        let seen = target::select(self.beliefs.enemies(), body.origin, now, previous);
+        // Through the scope the bot keeps to its target until the kill, or until it is out of sight for a moment.
+        let scoped = match &m.arms.active {
+            Some(crate::arms::Active::Scope(sc)) => Some(sc.target),
+            _ => None,
+        }
+        .and_then(|k| self.beliefs.track(k))
+        .filter(|t| now.since(t.last_seen) <= lb_combat::arms::scope::LOST_HOLD);
+        let seen = match scoped {
+            Some(t) => (t.state == TrackState::Visible).then_some(t.who),
+            None => target::select(self.beliefs.enemies(), body.origin, now, previous),
+        };
         if seen.is_some() {
             m.last_enemy_seen = now;
         }
-        m.target = match seen {
-            Some(t) => Some(t),
+        m.target = match (scoped, seen) {
+            (Some(t), _) => Some(t.who),
+            (None, Some(t)) => Some(t),
             // Keep the one just lost in mind for a moment.
-            None => previous.filter(|k| {
+            (None, None) => previous.filter(|k| {
                 self.beliefs
                     .track(*k)
                     .is_some_and(|t| now.since(t.last_seen) <= LOST_STARE)
@@ -268,23 +350,25 @@ impl BotBrain {
         if seen.is_some() && seen != previous {
             m.urgent = true;
         }
-        let distance = m
-            .target
-            .and_then(|k| self.beliefs.track(k))
-            .map_or(600.0, |t| t.pos.distance(body.eye));
-        let choice = policy::choose(
-            &body.arsenal,
-            body.weapon,
+        let track = m.target.and_then(|k| self.beliefs.track(k));
+        let distance = track.map_or(CALM_DISTANCE, |t| t.pos.distance(body.eye));
+        let speed = track
+            .filter(|t| t.velocity_known(now))
+            .map_or(250.0, |t| t.vel.truncate().length());
+        let t = Target {
             distance,
-            body.underwater,
-            ch.aim_sigma(distance),
-        );
+            speed,
+            aim_sigma: ch.aim_sigma(distance),
+        };
+        let allowed = |w: WeaponId| body.allows(w);
+        let choice = policy::choose(&body.arsenal, body.weapon, &t, body.underwater, &body.damages, &allowed);
         if m.choice != Some(choice) {
             if let Choice::Use(w) = choice {
                 m.click_interval = fire::click_interval(w, ch.skill.semi_auto_delay, &mut rng.combat);
             }
             m.choice = Some(choice);
         }
+        self.weapon_options(body, ch, nav, rng);
     }
 
     fn decide(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) {
@@ -307,6 +391,7 @@ impl BotBrain {
             affinity: ch.affinity,
             beliefs: &self.beliefs,
             items: self.items.as_ref(),
+            chargers: self.chargers.as_ref(),
             weapons: &body.arsenal,
             ammo_need: &need,
             reloading: now < m.reload_until,
@@ -358,6 +443,7 @@ impl BotBrain {
                     approach: body.health.clamp(0.0, 100.0) * ch.aggression,
                     weapon: class,
                     reloading: m.reloading(now),
+                    hold_ground: now < m.arms.hold_until,
                     on_ground: body.on_ground,
                     maxspeed: body.maxspeed,
                 };
@@ -441,15 +527,85 @@ impl BotBrain {
                 }
                 arrive(status, m);
             }
+            GoalKind::UseCharger(i) => self.use_charger(i, body, nav, rng),
             GoalKind::Roam => {
                 if let Some(step) = nav.roam(&mut rng.decision) {
                     apply_step(&mut self.intents, &step, body.eye, m);
                 }
             }
         }
+        if !matches!(goal.kind, GoalKind::UseCharger(_)) {
+            self.mind.charging = None;
+        }
     }
 
-    fn aim_and_fire(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) {
+    /// Walks to the charger's spot, then faces it holding the use key while it gives; spent when it stops giving.
+    fn use_charger(&mut self, i: usize, body: &Body, nav: &mut dyn NavService, rng: &mut BotRng) {
+        let now = body.now;
+        let Some(c) = self.chargers.as_ref().and_then(|c| c.spots.get(i)).copied() else {
+            self.mind.decider.complete();
+            return;
+        };
+        if !self.chargers.as_ref().is_some_and(|ch| ch.available(i, now)) {
+            self.mind.decider.complete();
+            self.mind.urgent = true;
+            return;
+        }
+        let there =
+            (body.origin - c.spot).truncate().length() < CHARGER_SPOT && (body.origin.z - c.spot.z).abs() < 40.0;
+        let m = &mut self.mind;
+        // The goal may go straight from another charger to this one.
+        m.charging = m.charging.filter(|&(at, ..)| at == i);
+        if !there && m.charging.is_none() {
+            let (status, step) = nav.go_to(c.spot);
+            if let Some(step) = step {
+                apply_step(&mut self.intents, &step, body.eye, m);
+            }
+            if status == NavStatus::NoPath {
+                m.decider.fail(now, &mut rng.decision);
+                m.urgent = true;
+            }
+            return;
+        }
+        let value = if c.suit { body.armor } else { body.health };
+        let (_, since, last_gain, last_value) = *m.charging.get_or_insert((i, now, now, value));
+        let last_gain = if value > last_value { now } else { last_gain };
+        m.charging = Some((i, since, last_gain, value));
+        let full = value >= 99.0;
+        if full || now.since(since) > CHARGER_TIMEOUT {
+            m.decider.complete();
+            m.urgent = true;
+            m.charging = None;
+            return;
+        }
+        if now.since(last_gain) > CHARGER_DRY {
+            if let Some(ch) = self.chargers.as_mut() {
+                ch.drained(i, now);
+            }
+            m.decider.complete();
+            m.urgent = true;
+            m.charging = None;
+            return;
+        }
+        self.intents.movement(
+            Prio::Goal,
+            MoveIntent {
+                dir: lb_core::Vec2::ZERO,
+                speed: 0.0,
+            },
+        );
+        self.intents.look(
+            Prio::Goal,
+            LookIntent::Point {
+                at: c.center,
+                engaged: false,
+            },
+        );
+        self.intents.use_hold(Prio::Goal);
+        m.path_look = None;
+    }
+
+    fn aim_and_fire(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
         let m = &mut self.mind;
         let track = m.target.and_then(|k| self.beliefs.track(k));
@@ -463,34 +619,44 @@ impl BotBrain {
         m.firing = false;
         match (track, m.choice) {
             (Some(t), Some(choice)) if t.state == TrackState::Visible => {
-                let Some(aim) = m.aim.point(now, body.eye, body.weapon, &aim_skill, &mut rng.combat) else {
+                m.target_at = now;
+                let distance = t.pos.distance(body.eye);
+                let w = choice.weapon();
+                let armed = body.armed(w).copied().unwrap_or_else(|| Armed::new(w, None, None));
+                let mode = fire::mode(
+                    &armed,
+                    distance,
+                    m.arms.double,
+                    ch.aim_sigma(distance),
+                    m.click_interval,
+                );
+                let shot = shot_of(w, mode.attack, body.zoomed());
+                let Some(aim) = m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat) else {
                     return;
                 };
+                m.last_aim = Some(aim);
                 self.intents
                     .look(Prio::Threat, LookIntent::Point { at: aim, engaged: true });
                 let intent = match choice {
                     Choice::Use(w) => {
-                        let shot = fire::Shot {
-                            eye: body.eye,
-                            view: self.motor.view,
-                            aim,
-                            distance: t.pos.distance(body.eye),
-                            enemy_faces_me: target::faces(t, body.origin),
-                            weapon: w,
-                        };
-                        let ready = body.weapon == Some(w) && !m.reloading(now);
-                        let shoot = ready && fire::on_target(&shot);
-                        if shoot && m.answered != Some((t.who, t.recognized_at)) {
-                            m.answered = Some((t.who, t.recognized_at));
-                            m.reactions.record(now.since(t.noticed_at), now.since(t.recognized_at));
+                        let in_hand = body.weapon == Some(w) && !m.reloading(now);
+                        if in_hand && w == WeaponId::Crossbow && distance >= XBOW_ZOOM_FROM {
+                            start_scope(m, self.motor.view, aim, t.who, body, ch, rng);
                         }
-                        m.firing = shoot;
-                        WeaponIntent {
-                            select: Some(w),
-                            fire: if shoot { Fire::Primary } else { Fire::None },
-                            trigger: spec(w).trigger,
-                            interval: m.click_interval,
-                            reload: false,
+                        match zoom_toggle(w, Some(distance), body, &mut m.arms.zoom_ready).filter(|_| in_hand) {
+                            Some(toggle) => toggle,
+                            None => {
+                                let shot = Aimed {
+                                    view: self.motor.view,
+                                    target: t,
+                                    weapon: w,
+                                    mode,
+                                    aim,
+                                    distance,
+                                    in_hand,
+                                };
+                                shoot(m, &shot, &self.beliefs, nav, body, rng)
+                            }
                         }
                     }
                     Choice::Reload(w) => {
@@ -540,17 +706,29 @@ impl BotBrain {
                 );
             }
             _ => {
-                // Calm: reload what is low, otherwise hold the best weapon.
+                // Calm: take the scope off, reload the gun worth having loaded, otherwise hold the best weapon.
                 let calm = now.since(m.last_enemy_seen) >= CALM_BEFORE_RELOAD;
-                let low = body
-                    .weapon
-                    .and_then(|w| body.arsenal.iter().find(|a| a.id == w))
+                if now.since(m.target_at) >= UNZOOM_AFTER
+                    && let Some(w) = body.weapon
+                    && let Some(toggle) = zoom_toggle(w, None, body, &mut m.arms.zoom_ready)
+                {
+                    self.intents.weapon(Prio::Goal, toggle);
+                    return;
+                }
+                let t = Target {
+                    distance: CALM_DISTANCE,
+                    speed: 250.0,
+                    aim_sigma: ch.aim_sigma(CALM_DISTANCE),
+                };
+                let allowed = |w: WeaponId| body.allows(w);
+                let low = policy::preferred(&body.arsenal, &t, &body.damages, &allowed)
+                    .and_then(|w| body.armed(w))
                     .filter(|a| {
                         let clip = spec(a.id).clip;
                         a.can_reload() && a.clip.is_some_and(|c| c * 4 < clip || c < 5)
                     });
                 if calm && let Some(a) = low {
-                    if !m.reloading(now) {
+                    if body.weapon == Some(a.id) && !m.reloading(now) {
                         m.reload_until = now + f64::from(spec(a.id).reload);
                     }
                     self.intents.weapon(
@@ -566,7 +744,118 @@ impl BotBrain {
             }
         }
     }
+}
 
+/// A shot the aim is on: the view, the target and the weapon worked in `mode` at `aim`, `distance` away.
+struct Aimed<'a> {
+    view: Vec3,
+    target: &'a EnemyTrack,
+    weapon: WeaponId,
+    mode: fire::Mode,
+    aim: Vec3,
+    distance: f32,
+    in_hand: bool,
+}
+
+/// Where the game launches `w`'s projectile from when looking along `view`, and how far along the view it must fly
+/// clear for its blast to spare the shooter; `None` for weapons without a blast.
+fn launch(w: WeaponId, eye: Vec3, view: Vec3, zoomed: bool) -> Option<(Vec3, f32)> {
+    let (forward, right, up) = lb_core::math::view_angle_vectors(view);
+    match w {
+        // The rocket leaves below and to the right of the eye: past a ledge the eye clears it may not.
+        WeaponId::Rpg => Some((eye + forward * 16.0 + right * 8.0 - up * 8.0, policy::ROCKET_MIN)),
+        WeaponId::Crossbow if !zoomed => Some((eye - up * 2.0, BOLT_CLEAR)),
+        WeaponId::Egon => Some((eye, EGON_CLEAR)),
+        _ => None,
+    }
+}
+
+/// The line an explosive would take from where it is launched is clear of walls and of other players near the
+/// shooter's end: looked at while the shot is about to go, again every 30 ms at most.
+fn blast_clear(
+    m: &mut Mind,
+    a: &Aimed<'_>,
+    beliefs: &lb_knowledge::Beliefs,
+    tracer: &mut dyn lb_worldq::Tracer,
+    body: &Body,
+) -> bool {
+    let Some((from, need)) = launch(a.weapon, body.eye, a.view, body.zoomed()) else {
+        return true;
+    };
+    if let Some((at, w, clear)) = m.blast_check
+        && w == a.weapon
+        && body.now.since(at) < BLAST_CHECK_PERIOD
+    {
+        return clear;
+    }
+    let (forward, _, _) = lb_core::math::view_angle_vectors(a.view);
+    let reach = a.aim.distance(body.eye);
+    let to = from + forward * reach;
+    let walls = tracer.trace(&lb_worldq::TraceQuery::line(from, to)).fraction * reach;
+    let people = a.weapon != WeaponId::Egon && crate::arms::crowded(beliefs, from, to, Some(a.target.who));
+    let clear = walls >= need && !people;
+    m.blast_check = Some((body.now, a.weapon, clear));
+    clear
+}
+
+/// Fires at a target in sight when the view is on it; a fired rocket is guided from then on.
+fn shoot(
+    m: &mut Mind,
+    a: &Aimed<'_>,
+    beliefs: &lb_knowledge::Beliefs,
+    tracer: &mut dyn lb_worldq::Tracer,
+    body: &Body,
+    rng: &mut BotRng,
+) -> WeaponIntent {
+    let now = body.now;
+    let (t, w, mode, aim, distance) = (a.target, a.weapon, a.mode, a.aim, a.distance);
+    // A crossbow is only worth this far zoomed in: wait for the scope rather than send a bolt.
+    let scoped = w != WeaponId::Crossbow || distance < XBOW_ZOOM_FROM || body.zoomed();
+    let shot = fire::Shot {
+        eye: body.eye,
+        view: a.view,
+        aim,
+        distance,
+        enemy_faces_me: target::faces(t, body.origin),
+        weapon: w,
+    };
+    // An explosive bursting on a wall or on someone close in front would hit the bot.
+    let engaged = a.in_hand && scoped && fire::on_target(&shot) && blast_clear(m, a, beliefs, tracer, body);
+    // The gauss protocol charges; plain shots only when it rolled for them or no charge can start.
+    let shoot = engaged && (w != WeaponId::Gauss || m.arms.gauss.plain_allowed(now));
+    if engaged {
+        if m.answered != Some((t.who, t.recognized_at)) {
+            m.answered = Some((t.who, t.recognized_at));
+            m.reactions.record(now.since(t.noticed_at), now.since(t.recognized_at));
+        }
+        let loaded = body.armed(w).is_some_and(|a| a.clip.is_none_or(|c| c > 0));
+        if w == WeaponId::Rpg && loaded && m.arms.guide.is_none_or(|(until, _, _)| now >= until) {
+            let flight = (distance / ROCKET_AVERAGE + 0.3).min(ROCKET_GUIDE);
+            m.arms.guide = Some((now + f64::from(flight), aim, t.who));
+            m.arms.hold_until = m.arms.hold_until.max(now + f64::from(flight));
+        }
+        if w == WeaponId::Shotgun {
+            m.arms.double = fire::roll_double(&mut rng.combat);
+        }
+    }
+    m.firing = engaged;
+    WeaponIntent {
+        select: Some(w),
+        fire: if shoot {
+            match mode.attack {
+                Attack::Primary => Fire::Primary,
+                Attack::Secondary => Fire::Secondary,
+            }
+        } else {
+            Fire::None
+        },
+        trigger: mode.trigger,
+        interval: m.click_interval.max(mode.cycle),
+        reload: false,
+    }
+}
+
+impl BotBrain {
     fn vigilance(&mut self, body: &Body) {
         if let Some(a) = self.attention(body.now, body.eye) {
             let prio = match a.reason {
@@ -593,4 +882,68 @@ impl BotBrain {
                 .look(Prio::Optional, LookIntent::Point { at: p, engaged: false });
         }
     }
+}
+
+/// The crossbow's scope is snapped on for a shot when the target is far and the view close enough for it to be in the
+/// zoomed view; the protocol takes it off again.
+fn start_scope(m: &mut Mind, view: Vec3, aim: Vec3, target: PlayerKey, body: &Body, ch: &Character, rng: &mut BotRng) {
+    let (forward, _, _) = lb_core::math::view_angle_vectors(view);
+    let near = forward.dot((aim - body.eye).normalize_or_zero()) >= SCOPE_START_DOT;
+    // Loaded, not reloading, and the scope's toggle ready again: otherwise the game would not put it on. The weapon
+    // data may be a frame behind a toggle, the view's zoom is not.
+    let toggle = match spec(WeaponId::Crossbow).alt {
+        AltFire::Zoom { toggle, .. } => f64::from(toggle),
+        _ => 0.0,
+    };
+    let loaded = body.now.since(m.arms.zoom_flip) >= toggle
+        && body.prediction.is_some_and(|p| {
+            p.current == Some(WeaponId::Crossbow)
+                && p.next_attack <= 0.0
+                && p.weapons[WeaponId::Crossbow as usize]
+                    .is_some_and(|w| w.clip > 0 && !w.reloading && w.next_secondary <= 0.0)
+        });
+    if near && loaded && !m.arms.busy() && !body.zoomed() {
+        let [lo, hi] = ch.skill.scope_settle;
+        let settle = rng.combat.range_f32(lo, hi.max(lo));
+        m.arms.active = Some(crate::arms::Active::Scope(lb_combat::arms::scope::Scope::new(
+            body.now, settle, target,
+        )));
+    }
+}
+
+/// How the shot flies, for the aim: projectiles lead the target, rockets go for the feet. A zoomed crossbow shoots a
+/// hitscan bolt in multiplayer, and a scope steadies the aim.
+fn shot_of(w: WeaponId, attack: Attack, zoomed: bool) -> Shot {
+    let (speed, feet) = match (w, attack) {
+        (WeaponId::Rpg, _) => (Some(ROCKET_SPEED), true),
+        (WeaponId::Crossbow, _) if !zoomed => (Some(BOLT_SPEED), false),
+        (WeaponId::Hornetgun, Attack::Secondary) => (Some(DART_SPEED), false),
+        _ => (None, false),
+    };
+    Shot {
+        weapon: Some(w),
+        speed,
+        feet,
+        steady: zoomed,
+    }
+}
+
+/// A press of the scope toggle when the zoom of `w` in hand should change for a target `distance` away (`None`: no
+/// target), and the toggle is ready again.
+fn zoom_toggle(w: WeaponId, distance: Option<f32>, body: &Body, ready: &mut SimTime) -> Option<WeaponIntent> {
+    let AltFire::Zoom { toggle, .. } = spec(w).alt else {
+        return None;
+    };
+    let zoomed = body.zoomed();
+    if body.weapon != Some(w) || fire::zoom_wanted(w, distance, zoomed) == zoomed || body.now < *ready {
+        return None;
+    }
+    *ready = body.now + f64::from(toggle) + 0.3;
+    Some(WeaponIntent {
+        select: Some(w),
+        fire: Fire::Secondary,
+        trigger: lb_game::mechanics::Trigger::Tap,
+        interval: 0.0,
+        reload: false,
+    })
 }
