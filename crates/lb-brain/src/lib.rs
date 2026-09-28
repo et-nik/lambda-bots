@@ -147,6 +147,12 @@ impl BotBrain {
         self.charger_cursor = 0;
     }
 
+    /// The navigation graph was replaced: where lost enemies may be and the places watched were over its nodes.
+    pub fn on_new_graph(&mut self) {
+        self.beliefs.on_new_graph();
+        self.watch = Watch::default();
+    }
+
     pub fn on_public(&mut self, e: &PublicEvent) {
         self.beliefs.on_public(e);
         match e {

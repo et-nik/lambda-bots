@@ -95,6 +95,8 @@ pub struct GaussInput {
     /// fails to punch through a wall met square starts over from the gun, the shooter no longer left out. Zero where
     /// it never does (BugfixedHL by default) or the wall along the view is punched through or glanced off.
     pub backfire: f32,
+    /// The shot at the target needs this much damage at least: one through a wall, to come out with enough left.
+    pub min_damage: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -249,6 +251,7 @@ impl Gauss {
                     && throw <= i.recoil_room
                     && i.wall_ahead >= wall_blast(damage)
                     && damage > i.backfire
+                    && damage >= i.min_damage
                 {
                     self.state = State::Releasing {
                         since: now,
@@ -481,6 +484,7 @@ mod tests {
             charge_share: 1.0,
             dump: None,
             backfire: 0.0,
+            min_damage: 0.0,
         }
     }
 
@@ -599,6 +603,22 @@ mod tests {
         assert!(game.shots.is_empty() && g.cramped > 0);
         assert!(plain.iter().all(|p| *p), "plain shots against the wall");
         assert!(wall_blast(200.0) > 350.0 && wall_blast(70.0) < 160.0);
+    }
+
+    #[test]
+    fn a_shot_through_a_wall_waits_for_the_damage_it_needs() {
+        // Up close a charge is let go after 0.5–0.75 s (70–110 damage); through a wall it needs 150 (1.125 s).
+        let close = |_: f64| Some((300.0, true));
+        let (_, game, _, _) = run_with(input(), close, 3.0);
+        assert!(!game.shots.is_empty());
+        assert!(game.shots.iter().all(|(_, c)| *c < 0.8), "{:?}", game.shots);
+        let through = GaussInput {
+            min_damage: 150.0,
+            ..input()
+        };
+        let (_, game, _, _) = run_with(through, close, 3.0);
+        assert!(!game.shots.is_empty());
+        assert!(game.shots.iter().all(|(_, c)| *c >= 1.05), "{:?}", game.shots);
     }
 
     #[test]

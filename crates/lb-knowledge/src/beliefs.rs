@@ -407,6 +407,13 @@ impl Beliefs {
         });
     }
 
+    /// The navigation graph was replaced: spreads are over the old one's nodes, whatever their number.
+    pub fn on_new_graph(&mut self) {
+        for t in &mut self.tracks {
+            t.spread = None;
+        }
+    }
+
     /// Spreads every enemy out of sight over the places it may be at by now, starting over from each new fix (a
     /// sighting or a sound tied to it); `horizon`: how many seconds' run from the fix it is looked for.
     pub fn spread(&mut self, now: SimTime, map: &dyn MapView, watch: Option<&Watch>, horizon: f32) {
@@ -463,6 +470,7 @@ impl Beliefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::places::testmap::Corridor;
 
     const P: BeliefParams = BeliefParams {
         track_forget: 8.0,
@@ -571,5 +579,19 @@ mod tests {
             weapon: "9mmhandgun".into(),
         });
         assert!(b.tracks.is_empty());
+    }
+
+    #[test]
+    fn a_new_graph_drops_the_spreads_over_the_old_one() {
+        let mut b = Beliefs::default();
+        b.on_sighting(&sighting(3, 0.0, Vec3::new(500.0, 0.0, 0.0), true));
+        b.update(SimTime(2.0), &P);
+        b.spread(SimTime(2.0), &Corridor { n: 12 }, None, 8.0);
+        assert_eq!(b.track_by_slot(3).unwrap().spread.as_ref().unwrap().from, 5);
+        b.on_new_graph();
+        // Node 5 is no more: the spread starts over on the new graph.
+        b.update(SimTime(2.6), &P);
+        b.spread(SimTime(2.6), &Corridor { n: 4 }, None, 8.0);
+        assert_eq!(b.track_by_slot(3).unwrap().spread.as_ref().unwrap().from, 3);
     }
 }

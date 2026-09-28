@@ -726,6 +726,8 @@ impl Runtime {
     /// The tactics of a newly loaded graph, and what was learned on the map put on its nodes: from the old
     /// graph's nodes when the graph changed during the map, else from the file kept.
     fn set_tactics(&mut self, map: &str, tactics: Option<Arc<lb_mapknow::MapTactics>>) {
+        // Saved on the old nodes first: dropped with no new tactics, and no longer marked unsaved once carried over.
+        self.save_experience();
         let before = match (self.experience.take(), self.tactics.as_deref()) {
             (Some(x), Some(old)) => Some(x.to_file(map, old)),
             _ => None,
@@ -1028,10 +1030,12 @@ impl Runtime {
                                 self.nav_status = format!("{}; {}", self.nav_status, loaded.patches);
                             }
                             tracing::info!("navigation graph {}", self.nav_status);
-                            // Node numbers belong to one graph: paths and what was learned about links go with it.
+                            // Node numbers belong to one graph: paths, places in the bots' minds and what was learned
+                            // about links go with it.
                             if self.graph.is_some() {
                                 for bot in &mut self.bots {
                                     bot.nav.clear();
+                                    bot.brain.on_new_graph();
                                 }
                                 self.link_health.clear();
                                 self.live_check = lb_nav::probe::LiveCheck::default();

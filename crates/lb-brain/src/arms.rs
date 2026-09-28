@@ -251,8 +251,9 @@ pub struct Arms {
     /// When the gauss's line of fire was last looked along, how far its first wall was, and the most damage a missed
     /// charged shot along it would come back at the bot with.
     gauss_wall: Option<(SimTime, f32, f32)>,
-    /// When a shot through a wall was last looked for, and the point to shoot at if there was one.
-    wallbang: Option<(SimTime, Option<Vec3>)>,
+    /// When a shot through a wall was last looked for, and the point to shoot at and the damage the shot needs if
+    /// there was one.
+    wallbang: Option<(SimTime, Option<(Vec3, f32)>)>,
     /// When a way to dump a charge was last looked for, and the view angles found.
     dump_way: Option<(SimTime, Option<Vec3>)>,
     /// Running from a blast until then, along this direction.
@@ -935,7 +936,7 @@ impl BotBrain {
                 None
             };
             let target =
-                seen.or_else(|| through.map(|p| (p.distance(body.eye), on_target(self.motor.view, body.eye, p))));
+                seen.or_else(|| through.map(|(p, _)| (p.distance(body.eye), on_target(self.motor.view, body.eye, p))));
             let expected = matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::Hunt(_))) || through.is_some();
             let fired = self.mind.arms.gauss.fired;
             let input = GaussInput {
@@ -950,6 +951,7 @@ impl BotBrain {
                 charge_share: ch.skill.gauss_charge,
                 dump: self.safe_dump(body, nav),
                 backfire: self.mind.arms.gauss_wall.map_or(0.0, |w| w.2),
+                min_damage: through.map_or(0.0, |(_, need)| need),
             };
             if let Some(r) = self.mind.arms.gauss.update(&hands, &input, &mut rng.combat) {
                 requests.push(r);
@@ -1150,9 +1152,9 @@ impl BotBrain {
 
     /// A point to shoot a charged gauss beam at through a wall: the enemy just lost behind a thin wall, the beam
     /// meeting the wall square enough not to glance off, enough of its damage left beyond, and its burst where it
-    /// comes out of the wall far enough from the bot. Only for skills that do it (`gauss_walls`), looked for again
-    /// every 50 ms.
-    fn wallbang(&mut self, body: &Body, ch: &Character, tracer: &mut dyn Tracer) -> Option<Vec3> {
+    /// comes out of the wall far enough from the bot; and the damage the beam needs for that, which the charge is let
+    /// go with at least. Only for skills that do it (`gauss_walls`), looked for again every 50 ms.
+    fn wallbang(&mut self, body: &Body, ch: &Character, tracer: &mut dyn Tracer) -> Option<(Vec3, f32)> {
         let now = body.now;
         if !ch.skill.gauss_walls || body.weapon != Some(WeaponId::Gauss) {
             return None;
@@ -1170,25 +1172,27 @@ impl BotBrain {
                 t.state != TrackState::Visible && now.since(t.last_seen) <= WALLBANG_AGE && t.sigma <= WALLBANG_SIGMA
             })
             .map(|t| t.pos + Vec3::Z * 8.0)
-            .filter(|&p| {
+            .and_then(|p| {
                 let dir = (p - body.eye).normalize_or_zero();
                 let hit = tracer.trace(&TraceQuery::line(body.eye, p));
                 if hit.fraction >= 1.0 || hit.start_solid || -hit.normal.dot(dir) < 0.5 {
-                    return false;
+                    return None;
                 }
                 // Out of the wall: on from inside it, then back to where the beam comes out.
                 let through = tracer.trace(&TraceQuery::line(hit.end + dir * 8.0, p + dir * 32.0));
                 if through.all_solid {
-                    return false;
+                    return None;
                 }
                 let exit = tracer.trace(&TraceQuery::line(through.end, hit.end)).end;
                 let thick = exit.distance(hit.end);
+                // What a full charge leaves: the most the burst beyond the wall may carry.
                 let left = body.damages.gauss_charged - thick;
                 let out = exit.distance(body.eye);
-                thick <= WALLBANG_THICK
+                (thick <= WALLBANG_THICK
                     && left >= WALLBANG_LEFT
                     && out >= lb_combat::arms::gauss::wall_blast(left)
-                    && out + 16.0 < p.distance(body.eye)
+                    && out + 16.0 < p.distance(body.eye))
+                .then_some((p, thick + WALLBANG_LEFT))
             });
         self.mind.arms.wallbang = Some((now, point));
         point
