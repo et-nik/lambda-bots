@@ -29,8 +29,10 @@ The highest rank present wins. Among its candidates within 90% of the best weigh
 goal is held for a while: 1 s for `engage`, 3 s for `hunt`, 2 s for `retreat`, until arrival for `collect` and
 `investigate`, the time to get there and hold for `camp` and `trap`, the time until the item is back for `control`,
 and 5 s for `roam`. A higher rank takes over at once. The same rank takes over only when its weight beats the
-current one by 15% plus 0.05. Going from `retreat` back to `engage` needs a 25% margin. A goal that fails (no path,
-stuck) is not picked again for 8–15 s; a spot held is not held again for 50–70 s (15–25 s for a style fond of it).
+current one by 15% plus 0.05. Going from `retreat` back to `engage` needs a 25% margin. A trap under way (a mine
+being laid, satchels thrown and watched) goes on until it is over: only a higher rank takes over. A goal that fails
+(no path, stuck) is not picked again for 8–15 s; a spot held is not held again for 50–70 s (15–25 s for a style fond
+of it).
 
 Item values:
 - **Health** below 85 and **armor** below 90: the less the bot has, the more it wants them.

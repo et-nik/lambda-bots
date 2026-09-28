@@ -110,6 +110,8 @@ pub struct Situation<'a> {
     /// Holding a spot and laying a trap are allowed again (their rests are over).
     pub camp_ready: bool,
     pub trap_ready: bool,
+    /// The trap followed now is under way: its mine being laid, or its satchels thrown and watched.
+    pub trap_under_way: bool,
     /// Mines the bot knows of, its own and seen ones: no trap next to one.
     pub mines: &'a [Vec3],
     /// Its own satchels lie somewhere.
@@ -435,8 +437,21 @@ fn controls(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     out.extend(best);
 }
 
-fn traps(s: &Situation<'_>, out: &mut Vec<Goal>) {
+fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     let Some(map) = s.map else { return };
+    // Under way, the trap goes on until it is over, its satchels out and its rest begun: only a higher rank takes
+    // over.
+    if let Some(GoalKind::PlantTrap(trap)) = current
+        && s.trap_under_way
+    {
+        out.push(Goal {
+            kind: GoalKind::PlantTrap(trap),
+            rank: 1,
+            weight: 1.0,
+            hold: 0.0,
+        });
+        return;
+    }
     if !s.trap_ready || !s.calm(TRAP_CALM) || s.affinity.trap <= 0.0 {
         return;
     }
@@ -611,7 +626,7 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
     }
     controls(s, current, out);
     camps(s, out);
-    traps(s, out);
+    traps(s, current, out);
     out.push(Goal {
         kind: GoalKind::Roam,
         rank: 0,
@@ -824,6 +839,7 @@ mod tests {
             calm_for: f64::INFINITY,
             camp_ready: true,
             trap_ready: true,
+            trap_under_way: false,
             mines: &[],
             charges_out: false,
         }
@@ -1071,5 +1087,73 @@ mod tests {
         s.now = SimTime(12.0);
         let mut d = Decider::default();
         assert_eq!(d.decide(&s, &mut rng).kind, GoalKind::Roam, "28 s is too long to wait");
+    }
+
+    #[test]
+    fn a_trap_under_way_goes_on_until_a_higher_rank_takes_over() {
+        let map = OneSpot([lb_nav_api::CampSpot {
+            node: 0,
+            pos: Vec3::new(600.0, 0.0, 0.0),
+            kind: CampKind::Ambush,
+            watch: [0.0, 90.0],
+            pitch: 0.0,
+            range: 400.0,
+            score: 1.0,
+            guards: Some(0),
+        }]);
+        let kit = [
+            KIT[0],
+            KIT[1],
+            Armed {
+                id: WeaponId::Satchel,
+                clip: None,
+                reserve: Some(3),
+                reserve2: None,
+            },
+        ];
+        let calm = Beliefs::default();
+        let none = |_| 0.0;
+        let mut rng = Pcg32::new(13, 13);
+        let mut s = situation(30.0, &calm, None, &kit, 100.0, None, &none);
+        s.map = Some(&map);
+        s.affinity.trap = 2.0;
+        let mut d = Decider::default();
+        let trap = GoalKind::PlantTrap(Trap::Satchels(0));
+        assert_eq!(d.decide(&s, &mut rng).kind, trap);
+        // Thrown and watched past its hold: the satchels out, the rest begun, a shot heard.
+        let mut heard = Beliefs::default();
+        heard.on_sound(&SoundStimulus {
+            t: SimTime(59.5),
+            kind: SoundKind::Shot,
+            weapon: Some(WeaponId::Mp5),
+            pos: Vec3::new(900.0, 0.0, 0.0),
+            bearing: 0.0,
+            bearing_sigma: 20.0,
+            range: 900.0,
+            gain: 0.3,
+        });
+        let mut s = situation(60.0, &heard, None, &KIT, 100.0, None, &none);
+        s.map = Some(&map);
+        s.calm_for = 0.5;
+        s.trap_ready = false;
+        s.charges_out = true;
+        s.trap_under_way = true;
+        assert_eq!(d.decide(&s, &mut rng).kind, trap, "{:?}", d.last);
+        assert!(d.current.is_some_and(|c| c.hold_until < s.now));
+        assert!(d.last.iter().any(|g| matches!(g.kind, GoalKind::Investigate(_))));
+        let key = PlayerKey { slot: 3, userid: 30 };
+        let mut seen = Beliefs::default();
+        seen.on_sighting(&sighting(60.2, Vec3::new(800.0, 0.0, 0.0)));
+        let p = BeliefParams {
+            track_forget: 8.0,
+            maxspeed: 300.0,
+        };
+        seen.update(SimTime(60.2), &p);
+        let mut s = situation(60.2, &seen, None, &KIT, 100.0, Some(key), &none);
+        s.map = Some(&map);
+        s.trap_ready = false;
+        s.charges_out = true;
+        s.trap_under_way = true;
+        assert_eq!(d.decide(&s, &mut rng).kind, GoalKind::Engage(key));
     }
 }

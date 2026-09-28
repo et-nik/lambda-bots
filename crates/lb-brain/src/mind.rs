@@ -524,6 +524,10 @@ impl BotBrain {
             calm_for,
             camp_ready: now >= m.camp_rest_until,
             trap_ready: now >= m.trap_rest_until,
+            trap_under_way: matches!(
+                m.task,
+                Some(Task::Trap { started: Some(_), until, .. }) if until.is_none_or(|u| now < u)
+            ),
             mines: &mines,
             charges_out: !self.explosives.charges.is_empty(),
         };
