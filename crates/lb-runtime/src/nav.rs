@@ -697,4 +697,44 @@ impl NavService for BotNavService<'_, '_> {
             self.nav.avoid_line(graph, a, b, now, now + f64::from(seconds));
         }
     }
+
+    fn set_tricks(&mut self, tricks: lb_nav_api::Tricks) {
+        self.input.tricks = tricks;
+    }
+
+    fn leap_lands(&mut self, view: Vec3) -> Option<Vec3> {
+        lb_nav::tricks::leap_lands(&mut *self.tracer, &self.input, view)
+    }
+
+    fn gauss_leap(&mut self) -> bool {
+        let Some(graph) = self.graph else {
+            return false;
+        };
+        let mut ctx = NavCtx {
+            graph,
+            tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: None,
+            bot: self.bot,
+            budget: None,
+        };
+        self.nav.gauss_leap(&mut ctx, &self.input)
+    }
+
+    fn way_left(&self) -> Option<(f32, usize)> {
+        self.nav.way_left(self.graph?, self.input.origin)
+    }
+
+    fn flight(&mut self) -> Option<NavStep> {
+        let graph = self.graph?;
+        let mut ctx = NavCtx {
+            graph,
+            tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: Some(&mut *self.health),
+            bot: self.bot,
+            budget: None,
+        };
+        self.nav.fly_on(&mut ctx, &self.input)
+    }
 }

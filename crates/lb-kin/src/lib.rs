@@ -5,6 +5,7 @@
 pub mod boxworld;
 pub mod physics;
 pub mod pmove;
+pub mod tricks;
 pub mod validate;
 
 pub use physics::Physics;

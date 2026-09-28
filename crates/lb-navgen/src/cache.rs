@@ -11,7 +11,7 @@ use lb_nav::store::{GraphKey, read, read_key_from, write};
 use crate::GenOptions;
 
 /// Version of the generator. Bump it whenever the same map and settings would give another graph.
-pub const GENERATOR: u32 = 5;
+pub const GENERATOR: u32 = 6;
 /// Graphs kept per map.
 pub const KEEP: usize = 4;
 

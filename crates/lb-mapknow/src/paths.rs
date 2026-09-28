@@ -72,7 +72,7 @@ pub fn tree(graph: &NavGraph, start: NodeId, max: f32) -> Tree {
         if cost > t.cost[node as usize] {
             continue;
         }
-        for l in graph.links(node).iter().filter(|l| l.valid()) {
+        for l in graph.links(node).iter().filter(|l| l.plain()) {
             let next = cost + l.cost;
             if next <= max && next < t.cost[l.to as usize] {
                 t.cost[l.to as usize] = next;

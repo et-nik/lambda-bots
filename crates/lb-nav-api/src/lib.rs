@@ -123,6 +123,37 @@ pub struct NavStep {
     /// A traversal that must not be disturbed (a jump in flight, a ladder, aiming at a button): its look and
     /// stance win over combat.
     pub mandatory: bool,
+    /// A long jump: duck and jump pressed together, both afresh.
+    pub longjump: bool,
+    /// A gauss boost the traversal waits for, the bot standing at its takeoff.
+    pub boost: Option<BoostCall>,
+}
+
+/// A gauss boost a traversal needs now: the weapons are to charge the gauss fully, turn the view to `view`, jump and
+/// let the charge go as the bot leaves the ground. The recoil throws it the way it looks away from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoostCall {
+    /// View angles to let the charge go along: back the way and down.
+    pub view: Vec3,
+    /// Seconds the charge builds at least.
+    pub charge: f32,
+}
+
+/// Tricks a bot may use on the way, as its brain allows them now.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tricks {
+    /// It has the long jump module: the links only a long jump makes are open to it.
+    pub longjump: bool,
+    /// Long jumps along straight stretches of the way, for speed.
+    pub runway: bool,
+    /// Paths may take the links a gauss boost makes.
+    pub gauss_boost: bool,
+    /// A gauss boost can be made now: a gauss, a full charge's uranium, the health, no enemy about.
+    pub boost_now: bool,
+    /// Damage of the gauss's full charge (the recoil is five times it).
+    pub gauss_damage: f32,
+    /// A charged gauss beam that fails to punch through a wall comes back at its shooter (vanilla `selfgauss`).
+    pub selfgauss: bool,
 }
 
 impl NavStep {
@@ -139,6 +170,8 @@ impl NavStep {
             fire_at: None,
             melee: false,
             mandatory: false,
+            longjump: false,
+            boost: None,
         }
     }
 }
@@ -168,4 +201,25 @@ pub trait NavService: Tracer {
     fn available(&self) -> bool;
     /// Keeps paths off the line `a → b` at body height for `seconds` (a tripmine's beam the bot knows of).
     fn avoid_line(&mut self, _a: Vec3, _b: Vec3, _seconds: f32) {}
+    /// What the bot may do on the way from now on.
+    fn set_tricks(&mut self, _tricks: Tricks) {}
+    /// Where a long jump taken now looking along `view` comes down, if it comes down safely: on a floor or in
+    /// water, without fall damage, out of lava and slime.
+    fn leap_lands(&mut self, _view: Vec3) -> Option<Vec3> {
+        None
+    }
+    /// A gauss boost from where the bot stands along its way, landing safely further along it: the path takes it
+    /// next. False when there is none (or no way followed).
+    fn gauss_leap(&mut self) -> bool {
+        false
+    }
+    /// How far the destination of the way followed is: in a straight line, and in nodes left on the path.
+    fn way_left(&self) -> Option<(f32, usize)> {
+        None
+    }
+    /// In the air on a long jump or a gauss boost of the way: the step that steers the flight onto its landing,
+    /// whatever behavior does now. `None` when not flying.
+    fn flight(&mut self) -> Option<NavStep> {
+        None
+    }
 }

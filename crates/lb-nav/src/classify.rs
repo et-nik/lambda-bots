@@ -16,6 +16,7 @@ use lb_bsp::mech::{Activation, Mechanisms, Mover, MoverKind, TriggerKind};
 use lb_bsp::world::BrushKind;
 use lb_core::Vec3;
 use lb_kin::Physics;
+use lb_kin::tricks::TrickPlan;
 use lb_kin::validate::{JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_walk};
 use lb_worldq::{HullKind, TraceQuery, Tracer, contents};
 
@@ -30,6 +31,15 @@ pub const USE_REACH: f32 = 56.0;
 pub const DROP_RESERVE: f32 = 10.0;
 /// Speed a bot walks off an edge at.
 pub const DROP_SPEED: f32 = 200.0;
+/// Seconds a long jump takes besides its flight: lining up the view on the landing.
+pub const LONGJUMP_SETUP: f32 = 0.3;
+/// Seconds a gauss boost takes besides its flight: drawing the gauss, charging it fully, turning round.
+pub const BOOST_SETUP: f32 = 3.0;
+/// Seconds a gauss boost is worth less than its time: the uranium and the health it costs.
+pub const BOOST_PRICE: f32 = 3.0;
+/// Health a gauss boost is started with at least, and left after it at least.
+pub const BOOST_HEALTH: f32 = 60.0;
+pub const BOOST_HEALTH_AFTER: f32 = 40.0;
 /// `sv_stepsize`.
 const STEP: f32 = 18.0;
 
@@ -207,6 +217,7 @@ impl Classifier<'_> {
             needs: Needs {
                 health: damage + DROP_RESERVE,
                 longjump: false,
+                gauss: false,
             },
             deadline: 3.0 + v.flight,
             cost: Cost {
@@ -243,6 +254,7 @@ impl Classifier<'_> {
             needs: Needs {
                 health: damage + if damage > 0.0 { DROP_RESERVE } else { 0.0 },
                 longjump: false,
+                gauss: false,
             },
             deadline: 5.0 + plan.flight,
             cost: Cost {
@@ -256,6 +268,66 @@ impl Classifier<'_> {
             valid: true,
             spec: self.spec(spec),
             dynamic: a.flags.contains(NodeFlags::ON_MOVER) || b.flags.contains(NodeFlags::ON_MOVER),
+        }
+    }
+
+    /// The contract of a long jump planned elsewhere from `a` onto `b`.
+    pub fn longjump_from_plan(&mut self, a: &NavNode, b: &NavNode, plan: &TrickPlan) -> Classified {
+        let damage = self.phys.fall_damage(plan.impact);
+        let spec = TraversalSpec {
+            entry: anchor(a, 24.0),
+            exit: anchor(b, 32.0),
+            action: Action::LongJump {
+                robustness: plan.robustness,
+            },
+            needs: Needs {
+                health: damage + if damage > 0.0 { DROP_RESERVE } else { 0.0 },
+                longjump: true,
+                gauss: false,
+            },
+            deadline: 5.0 + plan.flight,
+            cost: Cost {
+                time: LONGJUMP_SETUP + plan.flight + (1.0 - plan.robustness),
+                wait: 0.0,
+                damage,
+            },
+        };
+        Classified {
+            kind: LinkKind::LongJump,
+            valid: true,
+            spec: self.spec(spec),
+            dynamic: a.flags.contains(NodeFlags::ON_MOVER) || b.flags.contains(NodeFlags::ON_MOVER),
+        }
+    }
+
+    /// The contract of a gauss boost planned elsewhere from `a` onto `b`. The bot comes down with at least
+    /// `BOOST_HEALTH_AFTER` health left, and starts it with `BOOST_HEALTH` at least.
+    pub fn boost_from_plan(&mut self, a: &NavNode, b: &NavNode, plan: &TrickPlan) -> Classified {
+        let damage = self.phys.fall_damage(plan.impact);
+        let spec = TraversalSpec {
+            entry: anchor(a, 12.0),
+            exit: anchor(b, 32.0),
+            action: Action::GaussBoost {
+                pitch: plan.pitch,
+                robustness: plan.robustness,
+            },
+            needs: Needs {
+                health: BOOST_HEALTH.max(damage + BOOST_HEALTH_AFTER),
+                longjump: false,
+                gauss: true,
+            },
+            deadline: BOOST_SETUP + 6.0 + plan.flight,
+            cost: Cost {
+                time: BOOST_SETUP + plan.flight + 2.0 * (1.0 - plan.robustness) + BOOST_PRICE,
+                wait: 0.0,
+                damage,
+            },
+        };
+        Classified {
+            kind: LinkKind::GaussBoost,
+            valid: true,
+            spec: self.spec(spec),
+            dynamic: false,
         }
     }
 
@@ -293,6 +365,7 @@ impl Classifier<'_> {
             needs: Needs {
                 health: damage + if damage > 0.0 { DROP_RESERVE } else { 0.0 },
                 longjump: false,
+                gauss: false,
             },
             deadline: 12.0 + v.flight,
             cost: Cost {
@@ -946,12 +1019,18 @@ impl Classifier<'_> {
             }
             None => (length / (RUN_SPEED * c.kind.speed_factor()), NO_SPEC),
         };
+        // Nothing but a long jump beats running.
+        let floor = if c.kind == LinkKind::LongJump {
+            0.0
+        } else {
+            length / RUN_SPEED
+        };
         NavLink {
             to: to as NodeId,
             kind: c.kind,
             length,
             flags,
-            cost: cost.max(length / RUN_SPEED),
+            cost: cost.max(floor),
             spec,
         }
     }

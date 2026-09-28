@@ -26,6 +26,7 @@ pub struct MainConfig {
     pub logging: LoggingConfig,
     pub gungame: GunGameDetect,
     pub game: GameConfig,
+    pub tricks: TricksConfig,
     pub disguise: DisguiseConfig,
 }
 
@@ -43,6 +44,7 @@ impl Default for MainConfig {
             logging: LoggingConfig::default(),
             gungame: GunGameDetect::default(),
             game: GameConfig::default(),
+            tricks: TricksConfig::default(),
             disguise: DisguiseConfig::default(),
         }
     }
@@ -376,6 +378,31 @@ pub struct GameConfig {
 impl Default for GameConfig {
     fn default() -> Self {
         GameConfig { dll: "auto".into() }
+    }
+}
+
+/// Tricks the bots may use; how often is up to each bot's style and skill.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct TricksConfig {
+    /// Long jumps (with the module): across gaps, along straight stretches of the way, at enemies.
+    pub longjump: bool,
+    /// Gauss jumps on the way to somewhere far, the gauss in hand.
+    pub gauss_jump: bool,
+    /// The gauss boost links of the navigation graph, onto ledges and across.
+    pub gauss_boost: bool,
+    /// Satchels thrown from a jump and set off in flight.
+    pub satchel_jump: bool,
+}
+
+impl Default for TricksConfig {
+    fn default() -> Self {
+        TricksConfig {
+            longjump: true,
+            gauss_jump: true,
+            gauss_boost: true,
+            satchel_jump: true,
+        }
     }
 }
 

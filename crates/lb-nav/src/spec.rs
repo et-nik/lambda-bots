@@ -116,6 +116,17 @@ pub enum Action {
         jump_at: Option<f32>,
         hold: Option<Vec2>,
     },
+    /// Run through the entry and long jump from it looking at the exit, holding duck and steering onto the exit
+    /// in the air.
+    LongJump {
+        robustness: f32,
+    },
+    /// Stop at the entry with the gauss fully charged, look back from the exit `pitch` degrees down, jump and let
+    /// the charge go; its recoil throws the bot toward the exit, steering onto it in the air.
+    GaussBoost {
+        pitch: f32,
+        robustness: f32,
+    },
 }
 
 impl Action {
@@ -130,6 +141,8 @@ impl Action {
             Action::Teleport { .. } => "teleport",
             Action::Breakable { .. } => "breakable",
             Action::Push { .. } => "push",
+            Action::LongJump { .. } => "longjump",
+            Action::GaussBoost { .. } => "gauss_boost",
         }
     }
 
@@ -152,6 +165,8 @@ pub struct Needs {
     /// Health above this (falls).
     pub health: f32,
     pub longjump: bool,
+    /// A gauss and a full charge's uranium.
+    pub gauss: bool,
 }
 
 /// Expected cost, seconds and points.
@@ -189,8 +204,8 @@ impl TraversalSpec {
             Action::Jump { speed, .. } => Some(speed.max(120.0)),
             Action::Drop { speed, .. } => Some(speed),
             Action::Ladder { .. } => Some(150.0),
-            // The run into the field starts from rest.
-            Action::Push { .. } => Some(100.0),
+            // The run into the field starts from rest; a boost stands still at its takeoff.
+            Action::Push { .. } | Action::GaussBoost { .. } => Some(100.0),
             _ => None,
         }
     }

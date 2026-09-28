@@ -6,6 +6,7 @@ pub mod arms;
 pub mod attention;
 pub mod goals;
 pub mod mind;
+pub mod tricks;
 
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;

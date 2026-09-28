@@ -26,7 +26,7 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{Fire, Intents, LookIntent, LookParams, MoveIntent, Prio, StanceIntent, WeaponIntent};
 use lb_nav_api::{MapView, NavService, NavStatus, NavStep};
-use lb_styles::{Emotions, GoalAffinity};
+use lb_styles::{Emotions, GoalAffinity, TrickLikes};
 use smallvec::SmallVec;
 
 use crate::BotBrain;
@@ -137,6 +137,8 @@ pub struct Body {
     pub allowed: u32,
     /// BugfixedHL's `mp_selfgauss` (1 elsewhere): whether a charged gauss beam may come back at its shooter.
     pub selfgauss: u8,
+    /// Tricks the server lets the bots use.
+    pub tricks: lb_config::main_config::TricksConfig,
 }
 
 impl Body {
@@ -149,7 +151,7 @@ impl Body {
         self.fov > 0.0 && self.fov < 89.0
     }
 
-    pub(crate) fn armed(&self, w: WeaponId) -> Option<&Armed> {
+    pub fn armed(&self, w: WeaponId) -> Option<&Armed> {
         self.arsenal.iter().find(|a| a.id == w)
     }
 }
@@ -187,6 +189,7 @@ pub struct Character {
     pub fear: f32,
     pub affinity: GoalAffinity,
     pub weapons: WeaponLike,
+    pub tricks: TrickLikes,
 }
 
 impl Character {
@@ -283,6 +286,10 @@ pub struct Mind {
     /// The distance weapons are chosen for when no enemy is about: the range a spot held watches.
     pub calm_distance: Option<f32>,
     pub stats: MindStats,
+    /// Long jumps and gauss jumps: timers and statistics.
+    pub tricks: crate::tricks::TrickState,
+    /// Navigation stands at a gauss boost's takeoff and asks for it this frame.
+    pub(crate) nav_boost: Option<lb_nav_api::BoostCall>,
 }
 
 impl Mind {
@@ -294,7 +301,10 @@ impl Mind {
         mood.settle();
         let mut arms = std::mem::take(&mut self.arms);
         arms.reset();
+        let mut tricks = std::mem::take(&mut self.tricks);
+        tricks.reset();
         *self = Mind::default();
+        self.tricks = tricks;
         self.decider = decider;
         self.decider.reset();
         self.reactions = reactions;
@@ -323,6 +333,7 @@ pub(crate) fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &m
     let stance = StanceIntent {
         jump: step.jump,
         duck: step.duck,
+        longjump: step.longjump,
     };
     if step.mandatory {
         intents.stance(Prio::Traversal, stance);
@@ -345,6 +356,7 @@ pub(crate) fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &m
         intents.use_key(Prio::Traversal);
     }
     m.nav_fire = step.fire_at.map(|at| (at, step.melee));
+    m.nav_boost = step.boost;
     m.path_look = Some(step.look_at);
 }
 
@@ -387,7 +399,10 @@ impl BotBrain {
             self.mind.stats.still[fighting] += f64::from(body.dt);
         }
         self.decide(body, ch, map, rng);
+        let tricks = self.nav_tricks(body, ch, rng);
+        nav.set_tricks(tricks);
         self.pursue(body, ch, nav, map, rng);
+        self.gauss_leap(body, ch, nav, rng);
         self.dodge(body, nav);
         self.run_protocols(body, ch, nav, rng);
         self.aim_and_fire(body, ch, nav, rng);
@@ -550,6 +565,25 @@ impl BotBrain {
     ) {
         let now = body.now;
         self.mind.nav_fire = None;
+        self.mind.nav_boost = None;
+        // A long jump or a boost of the way in the air: steered onto its landing whatever the goal is now.
+        if let Some(step) = nav.flight() {
+            self.intents.movement(
+                Prio::Traversal,
+                MoveIntent {
+                    dir: step.move_dir,
+                    speed: step.speed,
+                },
+            );
+            self.intents.stance(
+                Prio::Traversal,
+                StanceIntent {
+                    jump: false,
+                    duck: step.duck,
+                    longjump: false,
+                },
+            );
+        }
         let Some(goal) = self.mind.goal else { return };
         if !matches!(goal.kind, GoalKind::ControlItem(_)) {
             self.item_focus = None;
@@ -646,9 +680,21 @@ impl BotBrain {
                     StanceIntent {
                         jump: mv.jump,
                         duck: mv.duck,
+                        longjump: false,
                     },
                 );
                 m.path_look = None;
+                let (enemy, visible) = (t.pos, t.state == TrackState::Visible);
+                if self.attack_leap(body, ch, enemy, visible, nav, rng) {
+                    self.intents.stance(
+                        Prio::Threat,
+                        StanceIntent {
+                            jump: false,
+                            duck: false,
+                            longjump: true,
+                        },
+                    );
+                }
             }
             GoalKind::CollectItem(i) => {
                 let Some(spot) = self.items.as_ref().and_then(|items| items.spots.get(i)).copied() else {

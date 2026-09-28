@@ -88,7 +88,7 @@ impl Bot {
         userid: i32,
         persona: Arc<lb_styles::Persona>,
         skill: SkillParams,
-        style: (lb_styles::GoalAffinity, &lb_styles::WeaponLikes),
+        style: (lb_styles::GoalAffinity, &lb_styles::WeaponLikes, lb_styles::TrickLikes),
         now: SimTime,
         master_seed: u64,
         cmd_rate: f64,
@@ -134,7 +134,7 @@ impl Bot {
         &mut self,
         persona: Arc<lb_styles::Persona>,
         skill: SkillParams,
-        style: (lb_styles::GoalAffinity, &lb_styles::WeaponLikes),
+        style: (lb_styles::GoalAffinity, &lb_styles::WeaponLikes, lb_styles::TrickLikes),
     ) {
         self.brain.params = lb_perception::PerceptionParams::from_skill(&skill);
         self.character = character(&persona, &skill, style);
@@ -214,7 +214,7 @@ const FAVOURITE: f32 = 1.2;
 fn character(
     persona: &lb_styles::Persona,
     skill: &SkillParams,
-    (affinity, likes): (lb_styles::GoalAffinity, &lb_styles::WeaponLikes),
+    (affinity, likes, tricks): (lb_styles::GoalAffinity, &lb_styles::WeaponLikes, lb_styles::TrickLikes),
 ) -> lb_brain::Character {
     let mut weapons = lb_brain::WeaponLike {
         throwables: likes.throwables,
@@ -245,6 +245,7 @@ fn character(
         fear: persona.fear,
         affinity,
         weapons,
+        tricks,
     }
 }
 

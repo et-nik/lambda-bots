@@ -76,6 +76,8 @@ fn kind_color(kind: LinkKind, valid: bool) -> [u8; 3] {
         LinkKind::Teleport => [255, 255, 255],
         LinkKind::Breakable => [150, 75, 0],
         LinkKind::Push => [255, 0, 150],
+        LinkKind::LongJump => [128, 255, 0],
+        LinkKind::GaussBoost => [255, 128, 128],
     }
 }
 

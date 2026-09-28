@@ -17,6 +17,7 @@
 //!   run away from the blast (yapb ran toward it), checking for ledges.
 //! - **Gauss:** its charge runs whenever the gauss is in hand; nothing else starts while it charges.
 
+use lb_combat::arms::boost::GaussBoost;
 use lb_combat::arms::detonate::{Airburst, Burst, MineShot, SatchelTrigger};
 use lb_combat::arms::gauss::{Gauss, GaussInput};
 use lb_combat::arms::launcher::Lob;
@@ -111,6 +112,8 @@ const SATCHEL_LIE: [f32; 2] = [8.0, 15.0];
 const SATCHEL_PILE: [u32; 2] = [2, 4];
 /// At an enemy in sight this far away, a satchel is thrown from a jump and set off as it comes by.
 const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
+/// The balanced style's liking for satchels thrown from a jump, which the base chance is for.
+const BALANCED_SATCHEL_JUMP: f32 = 0.4;
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
 const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
@@ -178,6 +181,7 @@ pub enum Active {
     Barrage(Barrage),
     Shoot(MineShot),
     Scope(Scope),
+    GaussBoost(GaussBoost),
 }
 
 impl Active {
@@ -192,6 +196,7 @@ impl Active {
             Active::Barrage(_) => "snark barrage",
             Active::Shoot(_) => "shoot a mine",
             Active::Scope(_) => "scope",
+            Active::GaussBoost(_) => "gauss boost",
         }
     }
 }
@@ -958,8 +963,13 @@ impl BotBrain {
         if satchels > 0 && free && in_band(SATCHEL_BAND) && (!seen || coming || war) {
             ways.push((Way::Pile, if seen { SEEN_SATCHEL } else { UNSEEN_SATCHEL }));
         }
-        if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) {
-            ways.push((Way::Airburst, SEEN_SATCHEL));
+        // From a jump: a trick, for skills that do tricks, as often as the style likes (the balanced style's the base).
+        let jump_throw = ch.skill.tricks && body.tricks.satchel_jump;
+        if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) && jump_throw {
+            ways.push((
+                Way::Airburst,
+                SEEN_SATCHEL * ch.tricks.satchel_jump / BALANCED_SATCHEL_JUMP,
+            ));
         }
         if count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND) {
             ways.push((Way::Snark, if seen { SEEN_SNARK } else { UNSEEN_SNARK }));
@@ -1140,7 +1150,15 @@ impl BotBrain {
         self.mind.arms.watch_zoom(body.zoomed(), now);
         let hands = self.hands(body);
         let mut requests: smallvec::SmallVec<[Request; 2]> = smallvec::SmallVec::new();
-        if body.weapon == Some(WeaponId::Gauss) || self.mind.arms.gauss.active() {
+        // Navigation stands at a boost's takeoff and asks for it: the boost starts when nothing else runs.
+        if let Some(call) = self.mind.nav_boost
+            && !self.mind.arms.busy()
+        {
+            self.mind.arms.active = Some(Active::GaussBoost(GaussBoost::new(now, call.view, call.charge)));
+            self.mind.tricks.stats.boosts += 1;
+        }
+        let boosting = matches!(self.mind.arms.active, Some(Active::GaussBoost(_)));
+        if !boosting && (body.weapon == Some(WeaponId::Gauss) || self.mind.arms.gauss.active()) {
             let seen = self
                 .mind
                 .target
@@ -1260,6 +1278,10 @@ impl BotBrain {
                             .is_some_and(|aim| on_target(self.motor.view, body.eye, aim));
                     sc.update(&hands, Sight { on_target, seen, done })
                 }
+                Active::GaussBoost(b) => {
+                    let call = self.mind.nav_boost;
+                    b.update(&hands, call.is_some(), call.map(|c| c.view))
+                }
                 Active::Shoot(s) => {
                     if self.explosives.mines.iter().any(|m| m.pos.distance(s.mine) < 24.0) {
                         s.update(&hands, self.mind.click_interval.max(spec(s.weapon).cycle))
@@ -1277,6 +1299,18 @@ impl BotBrain {
                 Status::Failed(why) => {
                     self.mind.arms.throw_aim = None;
                     self.mind.arms.trap_throw = false;
+                    if let Active::GaussBoost(b) = &active {
+                        // A charge already building is the gauss protocol's now: fired at a target or dumped.
+                        if let Some(started) = b.held {
+                            self.mind.arms.gauss.adopt(started, now);
+                        }
+                        self.mind.tricks.stats.boost_failed(why);
+                        tracing::info!(
+                            "gauss boost given up in its {} phase: {why}{}",
+                            b.phase(),
+                            if b.held.is_some() { "; the charge is held on" } else { "" }
+                        );
+                    }
                     if let Active::Airburst(a) = &active {
                         tracing::info!(
                             "satchel in flight not set off: {why}; it came within {:?} of the enemy",
@@ -1325,6 +1359,7 @@ impl BotBrain {
                     StanceIntent {
                         jump: true,
                         duck: false,
+                        longjump: false,
                     },
                 );
             }
@@ -1432,8 +1467,9 @@ impl BotBrain {
     }
 
     /// Where to dump a gauss charge the bot must let go of with no target: level, along the one of eight ways whose
-    /// first wall is farthest (its burst must spare the bot) with no drop behind within the throw of the recoil.
-    /// Looked for four times a second while charging.
+    /// first wall is farthest (its burst must spare the bot) with no drop behind within the throw of the recoil; or
+    /// straight up (the recoil presses the bot to the floor) when the sky or a high ceiling is farther than every
+    /// wall around. Looked for four times a second while charging.
     fn safe_dump(&mut self, body: &Body, tracer: &mut dyn Tracer) -> Option<Vec3> {
         const PERIOD: f64 = 0.25;
         // Looked for only once a dump draws near: some eighty traces each time.
@@ -1475,7 +1511,21 @@ impl BotBrain {
                     .total_cmp(&clear(b.2))
                     .then(a.1.dot(back).total_cmp(&b.1.dot(back)))
             })
-            .map(|(yaw, ..)| Vec3::new(0.0, lb_core::math::normalize_angle(yaw), 0.0));
+            .map(|(yaw, _, wall, _)| (Vec3::new(0.0, lb_core::math::normalize_angle(yaw), 0.0), wall));
+        let way = match way {
+            Some((_, wall)) if wall >= reach => way.map(|w| w.0),
+            _ => {
+                let up = tracer.trace(&TraceQuery::line(body.eye, body.eye + Vec3::Z * BEAM_REACH));
+                let high = (up.fraction * BEAM_REACH).min(reach);
+                let backfires = body.selfgauss == 1 && backfire(tracer, body.eye, Vec3::Z, &up) >= full;
+                // In the air the push down would slam the bot into the floor.
+                if body.on_ground && !backfires && way.is_none_or(|(_, wall)| high > wall) {
+                    Some(Vec3::new(-89.0, self.motor.view.y, 0.0))
+                } else {
+                    way.map(|w| w.0)
+                }
+            }
+        };
         self.mind.arms.dump_way = Some((body.now, way));
         way
     }
@@ -1560,6 +1610,7 @@ impl BotBrain {
                 }
             }
             Active::Shoot(_) => stats.mine_shots += 1,
+            Active::GaussBoost(_) => self.mind.tricks.stats.boosts_fired += 1,
             Active::Scope(sc) => {
                 stats.scoped += sc.shots;
                 stats.zooms += 1;
@@ -1790,6 +1841,7 @@ mod tests {
             fear: 0.2,
             affinity: lb_styles::StyleId::Balanced.goal_affinity(),
             weapons: crate::WeaponLike::default(),
+            tricks: lb_styles::StyleId::Balanced.trick_likes(),
         }
     }
 
@@ -1824,6 +1876,7 @@ mod tests {
             gravity: 800.0,
             allowed: u32::MAX,
             selfgauss: 0,
+            tricks: lb_config::main_config::TricksConfig::default(),
         }
     }
 

@@ -79,7 +79,7 @@ pub fn probes_for(
     let (to, nb) = b;
     let mut probes = SmallVec::new();
     match (kind, spec.action) {
-        (LinkKind::Jump | LinkKind::Drop | LinkKind::Push, _) => {
+        (LinkKind::Jump | LinkKind::Drop | LinkKind::Push | LinkKind::LongJump, _) => {
             let floor = |p: Vec3| TraceQuery::hull(p + Vec3::Z * 2.0, p - Vec3::Z * 16.0, HullKind::Stand);
             let eye = |p: Vec3| p + Vec3::Z * 28.0;
             for q in [
@@ -87,6 +87,13 @@ pub fn probes_for(
                 TraceQuery::line(eye(na.origin), eye(nb.origin)),
                 floor(nb.origin),
             ] {
+                probes.extend(offline(world, mech, q));
+            }
+        }
+        // A boost flies high over whatever is between: the floors at both ends.
+        (LinkKind::GaussBoost, _) => {
+            let floor = |p: Vec3| TraceQuery::hull(p + Vec3::Z * 2.0, p - Vec3::Z * 16.0, HullKind::Stand);
+            for q in [floor(na.origin), floor(nb.origin)] {
                 probes.extend(offline(world, mech, q));
             }
         }

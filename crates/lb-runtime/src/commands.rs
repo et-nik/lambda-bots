@@ -56,6 +56,10 @@ const HELP: &[(&str, &str)] = &[
         "weapons bots may use; with give every bot gets them on spawn (needs sv_cheats 1)",
     ),
     (
+        "items [none|<item>...]",
+        "items every bot gets on spawn, e.g. longjump (needs sv_cheats 1)",
+    ),
+    (
         "stats [reset]",
         "weapon statistics: rounds, hit rate by distance, kills, suicides",
     ),
@@ -113,13 +117,19 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "profile" => profile(rt, rest),
         "status" => status(rt),
         "weapons" => weapons(rt, rest),
+        "items" => items(rt, rest),
         "selftest" => selftest(rt, host, rest),
         "stats" => match rest.first().copied() {
             Some("reset") => {
                 rt.arms_stats.reset(rt.now.secs());
+                rt.tricks_base = trick_totals(rt);
                 vec!["weapon statistics reset".into()]
             }
-            _ => rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages),
+            _ => {
+                let mut out = rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages);
+                out.push(trick_totals(rt).since(&rt.tricks_base).line());
+                out
+            }
         },
         "perf" => perf(rt, rest),
         "compat" => {
@@ -951,6 +961,46 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
                 .and_then(|a| a.reserve2)
                 .unwrap_or(0),
         ));
+        let ts = &m.tricks.stats;
+        let counts = &b.nav.tricks;
+        let went: Vec<String> = lb_nav::follow::TrickKind::ALL
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| counts.landed[*i] + counts.missed[*i] > 0)
+            .map(|(i, k)| {
+                format!(
+                    "{} {}/{}",
+                    k.as_str(),
+                    counts.landed[i],
+                    counts.landed[i] + counts.missed[i]
+                )
+            })
+            .collect();
+        let off: Vec<String> = ts.boost_failures.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
+        let told = &m.tricks.told;
+        let yes = |v: bool| if v { "yes" } else { "no" };
+        out.push(format!(
+            "  tricks: long jump module {}; the way may take long jumps {} (along it {}), gauss boosts {} (now {}), \
+             {} uranium; last look for a gauss jump: {}; landed/left the ground: {}; {} long jumps at enemies, {} \
+             gauss jumps on the way found, {} gauss boosts started, {} fired{}",
+            yes(b.self_state.body.has_longjump),
+            yes(told.longjump),
+            yes(told.runway),
+            yes(told.gauss_boost),
+            yes(told.boost_now),
+            m.tricks.uranium,
+            if m.tricks.gauss_why.is_empty() { "-" } else { m.tricks.gauss_why },
+            if went.is_empty() { "-".into() } else { went.join(", ") },
+            ts.leaps,
+            ts.gauss_jumps,
+            ts.boosts,
+            ts.boosts_fired,
+            if off.is_empty() {
+                String::new()
+            } else {
+                format!(" (given up: {})", off.join("; "))
+            }
+        ));
         if !st.satchel_offs.is_empty() {
             let e: Vec<String> = st.satchel_offs.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
             out.push(format!("  satchels set off: {}", e.join("; ")));
@@ -985,6 +1035,68 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Tricks of all the bots: how the ones that left the ground went, by kind, and those the brains took.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrickTotals {
+    counts: lb_nav::follow::TrickCounts,
+    leaps: u32,
+    gauss_jumps: u32,
+    boosts: u32,
+    boosts_fired: u32,
+}
+
+impl TrickTotals {
+    /// What happened since `base` (bots that left take theirs with them).
+    fn since(&self, base: &TrickTotals) -> TrickTotals {
+        let mut d = *self;
+        for i in 0..4 {
+            d.counts.landed[i] = d.counts.landed[i].saturating_sub(base.counts.landed[i]);
+            d.counts.missed[i] = d.counts.missed[i].saturating_sub(base.counts.missed[i]);
+        }
+        d.leaps = d.leaps.saturating_sub(base.leaps);
+        d.gauss_jumps = d.gauss_jumps.saturating_sub(base.gauss_jumps);
+        d.boosts = d.boosts.saturating_sub(base.boosts);
+        d.boosts_fired = d.boosts_fired.saturating_sub(base.boosts_fired);
+        d
+    }
+
+    fn line(&self) -> String {
+        let went: Vec<String> = lb_nav::follow::TrickKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let (landed, all) = (self.counts.landed[i], self.counts.landed[i] + self.counts.missed[i]);
+                format!("{} {landed}/{all}", k.as_str())
+            })
+            .collect();
+        format!(
+            "  tricks landed/left the ground: {}; {} long jumps at enemies, {} gauss jumps on the way found, {} gauss \
+             boosts started, {} fired",
+            went.join(", "),
+            self.leaps,
+            self.gauss_jumps,
+            self.boosts,
+            self.boosts_fired
+        )
+    }
+}
+
+pub fn trick_totals(rt: &Runtime) -> TrickTotals {
+    let mut t = TrickTotals::default();
+    for b in &rt.bots {
+        for i in 0..4 {
+            t.counts.landed[i] += b.nav.tricks.landed[i];
+            t.counts.missed[i] += b.nav.tricks.missed[i];
+        }
+        let s = &b.brain.mind.tricks.stats;
+        t.leaps += s.leaps;
+        t.gauss_jumps += s.gauss_jumps;
+        t.boosts += s.boosts;
+        t.boosts_fired += s.boosts_fired;
+    }
+    t
 }
 
 fn roster(rt: &Runtime, args: &[&str]) -> Vec<String> {
@@ -1521,6 +1633,35 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
         }
     }
     vec![describe(rt)]
+}
+
+/// `lb items`: items every bot is given on spawn (`give` works with `sv_cheats 1`), by classname with or without
+/// `item_`.
+fn items(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    match args {
+        [] => {}
+        ["none"] => rt.items_give.clear(),
+        names => {
+            rt.items_give = names
+                .iter()
+                .map(|n| {
+                    if n.starts_with("item_") {
+                        n.to_string()
+                    } else {
+                        format!("item_{n}")
+                    }
+                })
+                .collect();
+        }
+    }
+    vec![format!(
+        "given on spawn: {}",
+        if rt.items_give.is_empty() {
+            "nothing".into()
+        } else {
+            rt.items_give.join(", ")
+        }
+    )]
 }
 
 fn selftest(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {

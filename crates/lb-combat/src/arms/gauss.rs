@@ -158,6 +158,18 @@ impl Gauss {
         };
     }
 
+    /// Takes over a charge another protocol built (a gauss boost called off before its jump): held ready, it is
+    /// fired at a target that comes into sight or dumped safely.
+    pub fn adopt(&mut self, started: SimTime, now: SimTime) {
+        self.state = State::Charging {
+            pressed: started,
+            started: Some(started),
+            combat: false,
+            release_after: GAUSS_MIN_CHARGE,
+            target_seen: now,
+        };
+    }
+
     /// The gun may fire plain shots at the target now: a roll said so, or no charge can start.
     pub fn plain_allowed(&self, now: SimTime) -> bool {
         self.state == State::Idle && now < self.plain_until

@@ -260,6 +260,7 @@ away (550 for a bot under 40 health), with nobody near the first stretch of the 
 - **Distance.** Otherwise skilled bots drift in when strong and back off when weak. All bots back off under 96 units
   and while reloading. With the crowbar they charge.
 - **Extras.** Crouch taps and dodge jumps come with skill.
+- **Long jump at the enemy** (with the module; see *Tricks*).
 - **Ledges.** A move that would drop off a ledge is reversed.
 
 Whatever the goal, an enemy in sight is shot at: a bot running for health or backing off fires back. When nothing
@@ -284,7 +285,8 @@ throws are the weapon: twice as likely, and grenades from 220 units (yapb's gren
 - **A pile of satchels**, 150–400 units away with a clear line to the spot, at an enemy out of sight or one in sight
   coming this way: two to four of them (as many as the bot carries) thrown one after another at the spot, as fast as
   the game allows (a second apart); then the bot backs off out of their blast.
-- **A satchel from a jump**, at an enemy in sight 350–550 units away: the bot runs at the enemy, jumps and throws it a
+- **A satchel from a jump** (a trick: skills from normal up, as often as the style likes it; the balanced style's
+  0.4 is the base chance), at an enemy in sight 350–550 units away: the bot runs at the enemy, jumps and throws it a
   moment after its feet leave the ground, so the run and the jump's lift carry it on. The satchel radio stays in
   hand, and the satchel goes off as it comes within 150 units of the enemy (the game lets the radio work half a
   second after a throw), like a grenade that goes off when told. Rather than let it pass, a bot with 70 health or
@@ -357,13 +359,64 @@ In a game, the bots check the satchel buttons as they use them, and what one bot
 
 What was found is kept over map changes; `lb compat` shows the buttons, where they come from and who checked them.
 
+## Tricks
+
+How often a bot does each trick is up to its style (`tricks` in `config/styles/*.yaml`, chances 0..1), whether it
+does the fighting ones at all is up to its skill (the difficulty's `tricks` switch: from the normal preset, skill 50,
+up; between presets a switch keeps the lower one's value), and the server can turn each off (`tricks` in
+`config/lambdabots.yaml`).
+
+| Style      | Long jumps on the way | Long jump at the enemy | Gauss jump on the way | Satchel from a jump |
+|------------|-----------------------|------------------------|-----------------------|---------------------|
+| balanced   | 0.8                   | 0.6                    | 0.33                  | 0.4                 |
+| rusher     | 0.8                   | 1.0                    | 0.33                  | 0.6                 |
+| sniper     | 0.8                   | 0.6                    | 0.33                  | 0.2                 |
+| controller | 1.0                   | 0.6                    | 0.5                   | 0.4                 |
+| trapper    | 0.8                   | 0.6                    | 0.33                  | 0.7                 |
+
+- **What navigation may do** is told every frame (`NavService::set_tricks`):
+  - long jump links, with the module (any skill);
+  - long jumps along straight stretches of the way, as often as the style likes them: a roll every 8–12 s (see
+    `docs/navigation.md`);
+  - gauss boost links, for styles that gauss-jump, with 40 uranium, when a boost can be made now: the skill does
+    tricks, the gauss is allowed and there are 16 uranium for a full charge, 60 health, no enemy seen for 2 s, out of
+    the water.
+- **A long jump at the enemy** fought, with the module: at an enemy in sight 300–900 units away, no more than 64
+  below or 40 above, the will to close in (health × aggression) of 20 at least, the view on it (within 18° across, no
+  more than 15° up or down), moving, no weapon protocol running, not reloading and no rocket of its own on the way.
+  Every half second the style's chance is rolled; the flight, followed through the server's traces from where the
+  bot is, must come down on a floor (or in water) without fall damage, out of lava and slime, and nearer the enemy.
+  Then 0.9–1.4 s before the next. The keys are pressed for 0.15 s (the motor lets go of duck for a command first when
+  it is held); the aim and the shots go on in the air. yapb leaped at 400–750 units with a will of 30.
+- **A gauss jump on the way** somewhere more than 1400 units or 12 nodes off (any goal but a fight), with the gauss
+  in hand and ready, 30 uranium and 60 health, no enemy about, on the ground: every 10–18 s the style's chance is
+  rolled (4–6 s when the destination is near), and navigation looks for a boost that lands nearer the goal
+  (`docs/navigation.md`).
+- **The boost itself** (`GaussBoost` protocol, `Protocol` priority): when navigation stands at a boost's takeoff and
+  asks for it, and no other protocol runs, the bot draws the gauss, charges it 1.6 s (a full charge), turns back and
+  down to the boost's view (2° close, or on after 1.2 s more), jumps and lets the charge go as it leaves the ground
+  (at the latest 0.25 s after the jump), then holds the view for the 0.2 s the game takes to fire. The weapon, the
+  look, the movement and the jump are the protocol's all the while, so a fight that starts does not fire the charge
+  the wrong way: an enemy in sight ends the boost before the jump (navigation stops asking), and the charge already
+  building goes on in the gauss's own protocol, held ready for the enemy or dumped safely. The gauss's own charges
+  wait while a boost runs.
+- **Dumping a charge** (any, not only a boost's) goes straight up, the recoil pressing the bot to the floor, when no
+  level way is clear of the beam's burst on the nearest wall and the sky or a high ceiling is farther than every
+  wall around.
+
+`lb brain` shows each bot's tricks: whether it has the module, what navigation may do, its uranium, why the last look
+for a gauss jump came to nothing, how the tricks that left the ground went (landed where they should or not, by
+kind), the long jumps at enemies, the gauss jumps found and the boosts started and fired. `lb stats` sums them over
+the bots since the last reset. A missed trick is logged with where it left the ground, how fast, and where it came
+down.
+
 ## Priorities
 
 Behavior asks for what it wants on five channels (look, movement, stance, weapon, use key), and the highest
 priority on each wins:
-- **Traversal (90):** jumps and ladders on the path.
-- **Protocol (85):** a weapon's own sequence: a charging gauss, a pulled pin, a throw, a mine placed, satchels set
-  off, a rocket guided. A shot at an enemy never breaks it.
+- **Traversal (90):** jumps, long jumps, boost flights and ladders on the path.
+- **Protocol (85):** a weapon's own sequence: a charging gauss, a gauss boost, a pulled pin, a throw, a mine placed,
+  satchels set off, a rocket guided. A shot at an enemy never breaks it.
 - **Threat (70):** aiming and firing at an enemy in sight, turning toward damage, dodging a blast.
 - **Goal (50):** the goal's movement.
 - **Optional (20):** looking along the path and glancing at sounds.
@@ -404,6 +457,7 @@ priority on each wins:
 - the target and the weapon choice;
 - the weapon protocols: what runs now, throws, launched grenades, mines, detonations, gauss charges fired and dumped,
   dodges, and failures by reason;
+- the tricks (see *Tricks*);
 - which priority owns each channel;
 - reaction times: from the first glimpse of an enemy, and from recognizing it, to the first shot at it.
 
@@ -423,3 +477,6 @@ For weapon tests on a stand server started with `sv_cheats 1`:
   have rows of their own. It also counts what the bots' own explosives did to them, and kills and suicides from the
   kill feed.
 - `lb selftest` checks the game DLL's weapon rules with one bot while the others stand still.
+- `lb items <item>…` hands items out on every spawn (`lb items longjump`; `lb items none` stops it).
+  `scripts/stand/tricks-scenarios.sh` runs the tricks this way (the long jump module with the map's weapons, the
+  gauss alone, both, and the map's weapons alone as the control), with hard bots.

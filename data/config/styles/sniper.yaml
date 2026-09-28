@@ -11,6 +11,9 @@ schema: lambdabots/style@1
 #   weapons  guns: multipliers of how good the style finds a gun (its classname without weapon_, 1 = as good as
 #            its damage says; a list given replaces the built-in one), throwables: how readily it throws grenades,
 #            satchels and snarks
+#   tricks   chances 0..1: longjump (long jumps along straight stretches of the way, with the module), lj_attack
+#            (long jumps at an enemy), gauss_jump (gauss jumps on the way somewhere far), satchel_jump (satchels
+#            thrown from a jump); skills below normal do only the first
 #
 # Anything left out keeps its built-in value.
 
@@ -37,3 +40,8 @@ weapons:
     shotgun: 0.8
     egon: 0.9
   throwables: 0.8
+tricks:
+  longjump: 0.8
+  lj_attack: 0.6
+  gauss_jump: 0.33
+  satchel_jump: 0.2

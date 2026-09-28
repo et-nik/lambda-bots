@@ -183,7 +183,7 @@ impl MapTactics {
                     }
                 }
                 let mut sectors = 0u8;
-                for l in graph.links(i as NodeId).iter().filter(|l| l.valid()) {
+                for l in graph.links(i as NodeId).iter().filter(|l| l.plain()) {
                     let d = origins[l.to as usize] - origins[i];
                     let sector = (((yaw_of(d) + 382.5) / 45.0) as usize) % 8;
                     sectors |= 1 << sector;

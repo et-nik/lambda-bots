@@ -521,3 +521,162 @@ fn swimming_across_a_pool_and_climbing_out() {
     let o = run(&mut c, Vec3::new(-60.0, 0.0, 36.0), Vec3::new(460.0, 0.0, 36.0), 20.0);
     assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
 }
+
+/// A 260-unit gap, a bridge 500 units along it.
+fn gap_world() -> BoxWorld {
+    let mut w = BoxWorld::new();
+    w.solid(Vec3::new(-600.0, -600.0, -16.0), Vec3::new(0.0, 600.0, 0.0));
+    w.solid(Vec3::new(260.0, -600.0, -16.0), Vec3::new(900.0, 600.0, 0.0));
+    w.solid(Vec3::new(0.0, 400.0, -16.0), Vec3::new(260.0, 600.0, 0.0));
+    w.solid(Vec3::new(-2000.0, -2000.0, -144.0), Vec3::new(2000.0, 2000.0, -128.0));
+    w
+}
+
+#[test]
+fn a_long_jump_crosses_a_gap_with_the_module_and_the_bot_goes_around_without() {
+    let mut g = Builder::default();
+    let a = g.node(-20.0, 0.0, 36.0);
+    let b = g.node(300.0, 0.0, 36.0);
+    let c1 = g.node(-20.0, 500.0, 36.0);
+    let c2 = g.node(300.0, 500.0, 36.0);
+    g.link(a, b, LinkKind::LongJump, Some(Action::LongJump { robustness: 1.0 }));
+    g.walk(a, c1);
+    g.walk(c1, c2);
+    g.walk(c2, b);
+    let graph = g.build();
+    let from = Vec3::new(-20.0, 0.0, 36.0);
+    let to = Vec3::new(300.0, 0.0, 36.0);
+    for module in [true, false] {
+        let mut c = Course::new(gap_world(), Game::default(), graph.clone());
+        let mut bot = CourseBot::new(from, 100.0);
+        bot.tricks.longjump = module;
+        c.place(&mut bot);
+        let o = c.run(&mut bot, to, 20.0, 100.0, None);
+        assert!(o.arrived && o.failures.is_empty(), "module {module}: {}", describe(&o));
+        let leapt = phases(&o).contains(&"longjump:air");
+        assert_eq!(leapt, module, "module {module}: {}", describe(&o));
+        if module {
+            assert!(o.seconds < 3.0, "straight across: {}", describe(&o));
+        }
+    }
+}
+
+#[test]
+fn a_gauss_boost_gets_the_bot_onto_a_ledge() {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    w.solid(Vec3::new(400.0, -256.0, 0.0), Vec3::new(900.0, 256.0, 200.0));
+    let mut g = Builder::default();
+    let a = g.node(0.0, 0.0, 36.0);
+    let b = g.node(600.0, 0.0, 236.0);
+    g.link(
+        a,
+        b,
+        LinkKind::GaussBoost,
+        Some(Action::GaussBoost {
+            pitch: 34.0,
+            robustness: 1.0,
+        }),
+    );
+    let mut c = Course::new(w, Game::default(), g.build());
+    let from = Vec3::new(0.0, 0.0, 36.0);
+    let mut bot = CourseBot::new(from, 100.0);
+    bot.tricks.gauss_boost = true;
+    bot.tricks.boost_now = true;
+    bot.tricks.gauss_damage = 200.0;
+    c.place(&mut bot);
+    let o = c.run(&mut bot, Vec3::new(600.0, 0.0, 236.0), 15.0, 100.0, None);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(phases(&o).contains(&"boost:air"), "{}", describe(&o));
+    // Without the gun there is no way up.
+    let mut c = Course::new(
+        {
+            let mut w = BoxWorld::new();
+            w.floor(0.0, 4096.0);
+            w.solid(Vec3::new(400.0, -256.0, 0.0), Vec3::new(900.0, 256.0, 200.0));
+            w
+        },
+        Game::default(),
+        {
+            let mut g = Builder::default();
+            let a = g.node(0.0, 0.0, 36.0);
+            let b = g.node(600.0, 0.0, 236.0);
+            g.link(
+                a,
+                b,
+                LinkKind::GaussBoost,
+                Some(Action::GaussBoost {
+                    pitch: 34.0,
+                    robustness: 1.0,
+                }),
+            );
+            g.build()
+        },
+    );
+    let mut bot = CourseBot::new(from, 100.0);
+    c.place(&mut bot);
+    let o = c.run(&mut bot, Vec3::new(600.0, 0.0, 236.0), 3.0, 100.0, None);
+    assert!(!o.arrived && !phases(&o).contains(&"boost:charge"), "{}", describe(&o));
+}
+
+#[test]
+fn a_long_jump_speeds_the_bot_along_a_straight_run() {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    let mut g = Builder::default();
+    let nodes: Vec<NodeId> = (0..=12).map(|i| g.node(i as f32 * 150.0, 0.0, 36.0)).collect();
+    for p in nodes.windows(2) {
+        g.walk(p[0], p[1]);
+    }
+    let graph = g.build();
+    let from = Vec3::new(0.0, 0.0, 36.0);
+    let to = Vec3::new(1800.0, 0.0, 36.0);
+    let mut times = Vec::new();
+    for runway in [false, true] {
+        let mut c = Course::new(w.clone(), Game::default(), graph.clone());
+        let mut bot = CourseBot::new(from, 100.0);
+        bot.tricks.longjump = true;
+        bot.tricks.runway = runway;
+        c.place(&mut bot);
+        let o = c.run(&mut bot, to, 15.0, 100.0, None);
+        assert!(o.arrived && o.failures.is_empty(), "runway {runway}: {}", describe(&o));
+        assert_eq!(phases(&o).contains(&"longjump:air"), runway, "{}", describe(&o));
+        times.push(o.seconds);
+    }
+    assert!(times[1] < times[0] * 0.85, "long jumps save time: {times:?}");
+}
+
+#[test]
+fn a_gauss_jump_on_the_way_lands_nearer_the_goal_and_the_way_goes_on() {
+    // A long walk round a wall to a far goal: the boost clears the wall.
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    w.solid(Vec3::new(600.0, -200.0, 0.0), Vec3::new(640.0, 2000.0, 160.0));
+    let mut g = Builder::default();
+    let mut round = vec![g.node(0.0, 0.0, 36.0)];
+    for y in [-400.0f32] {
+        round.push(g.node(300.0, y, 36.0));
+        round.push(g.node(900.0, y, 36.0));
+    }
+    let goal = g.node(1500.0, 0.0, 36.0);
+    let beyond = g.node(1200.0, 0.0, 36.0);
+    for p in round.windows(2) {
+        g.walk(p[0], p[1]);
+    }
+    g.walk(round[round.len() - 1], beyond);
+    g.walk(beyond, goal);
+    let mut c = Course::new(w, Game::default(), g.build().with_landmarks());
+    let from = Vec3::new(0.0, 0.0, 36.0);
+    let to = Vec3::new(1500.0, 0.0, 36.0);
+    let mut bot = CourseBot::new(from, 100.0);
+    bot.tricks.boost_now = true;
+    bot.tricks.gauss_damage = 200.0;
+    c.place(&mut bot);
+    // A frame to plan the way, then the boost is asked for.
+    c.frame(&mut bot, to, 10.0);
+    assert!(c.gauss_leap(&mut bot), "a boost toward the goal");
+    let o = c.run(&mut bot, to, 15.0, 100.0, None);
+    assert!(o.arrived && o.failures.is_empty(), "{}", describe(&o));
+    assert!(phases(&o).contains(&"boost:air"), "{}", describe(&o));
+    assert_eq!(bot.nav.tricks.landed[3], 1, "{:?}", bot.nav.tricks);
+}

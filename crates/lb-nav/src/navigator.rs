@@ -8,7 +8,7 @@ use lb_worldq::{HullKind, TraceQuery, Tracer};
 
 use crate::exec::{EYE_HEIGHT, MechView, NavInput};
 use crate::follow::{FollowStatus, PathFollower, steer};
-use crate::graph::{NavGraph, NodeFlags, NodeId};
+use crate::graph::{LinkKind, NavGraph, NavLink, NodeFlags, NodeId};
 use crate::known::{FailReason, KnownChanges, LinkHealth};
 use crate::plan::{Search, SearchStep};
 
@@ -49,6 +49,8 @@ pub struct Navigator {
     pub last_failure: Option<Failure>,
     /// Links that failed since the bot spawned.
     pub failures_total: u32,
+    /// How the tricks that left the ground went.
+    pub tricks: crate::follow::TrickCounts,
     next_goal_at: f64,
     next_plan_at: f64,
     failures: u32,
@@ -64,6 +66,8 @@ pub struct Navigator {
     dest_node: Option<(Vec3, NodeId)>,
     /// A path search that ran out of this frame's budget.
     search: Option<Search>,
+    /// A trick's flight was steered on this frame already (`fly_on`): when, and the step.
+    flight: Option<(f64, NavStep)>,
 }
 
 impl Navigator {
@@ -71,9 +75,11 @@ impl Navigator {
     pub fn reset(&mut self) {
         let known = std::mem::take(&mut self.known);
         let failures_total = self.failures_total;
+        let tricks = self.tricks;
         *self = Navigator::default();
         self.known = known;
         self.failures_total = failures_total;
+        self.tricks = tricks;
     }
 
     /// Forgets everything, learned failures included (map change).
@@ -152,11 +158,23 @@ impl Navigator {
         self.known.expire(now);
         let known = &self.known;
         let health = ctx.health.as_deref();
-        let penalty = |a: NodeId, b: NodeId| {
-            if health.is_some_and(|h| h.disabled(a, b)) {
+        let graph = ctx.graph;
+        let tricks = input.tricks;
+        let penalty = |a: NodeId, l: &NavLink| {
+            if health.is_some_and(|h| h.disabled(a, l.to)) {
                 return f32::INFINITY;
             }
-            known.penalty(a, b, now)
+            // Tricks only for the bots that can do them now.
+            let open = match l.kind {
+                LinkKind::LongJump => tricks.longjump,
+                LinkKind::GaussBoost => tricks.gauss_boost && tricks.boost_now,
+                _ => true,
+            };
+            let hurts = l.kind.is_trick() && graph.spec(l).is_some_and(|s| s.needs.health > input.health);
+            if !open || hurts {
+                return f32::INFINITY;
+            }
+            known.penalty(a, l.to, now)
         };
         let mut unlimited = u32::MAX;
         let budget = match ctx.budget.as_deref_mut() {
@@ -205,11 +223,17 @@ impl Navigator {
     /// Walks toward `dest`: a path to the graph node nearest to it, the last stretch straight when it is clear.
     pub fn go_to(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput, dest: Vec3) -> (NavStatus, Option<NavStep>) {
         let now = input.now;
+        if let Some((at, step)) = self.flight
+            && at == now
+        {
+            return (NavStatus::Moving, Some(step));
+        }
         self.waiting = false;
         let to = dest - input.origin;
         let flat = to.truncate().length();
         let standing = input.on_ground || input.on_ladder || input.waterlevel >= 2;
-        if flat < 32.0 && to.z.abs() < 48.0 && standing {
+        let flying = self.follower.as_ref().is_some_and(|f| f.flying());
+        if flat < 32.0 && to.z.abs() < 48.0 && standing && !flying {
             self.follower = None;
             return (NavStatus::Arrived, None);
         }
@@ -238,8 +262,9 @@ impl Navigator {
         if cached.is_none() {
             self.dest_node = Some((dest, goal));
         }
-        // A search that ran out of budget goes on every frame; a new one at most every `REPLAN_EVERY`.
-        let want = self.follower.is_none() || self.goal != Some(goal);
+        // A search that ran out of budget goes on every frame; a new one at most every `REPLAN_EVERY`. A flight is
+        // flown to its end first.
+        let want = (self.follower.is_none() || self.goal != Some(goal)) && !flying;
         if want && (self.search.is_some() || now >= self.next_plan_at) {
             if self.search.is_none() {
                 self.next_plan_at = now + REPLAN_EVERY;
@@ -263,6 +288,9 @@ impl Navigator {
             return (NavStatus::Moving, None);
         };
         let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer);
+        if let Some((kind, landed)) = follower.take_event() {
+            self.tricks.record(kind, landed);
+        }
         match out.status {
             FollowStatus::Moving => (NavStatus::Moving, Some(out.step)),
             FollowStatus::Waiting => {
@@ -289,6 +317,62 @@ impl Navigator {
                 (NavStatus::Moving, Some(out.step))
             }
         }
+    }
+
+    /// A gauss boost from where the bot stands onto a node further along its path (`tricks::leap_along`): the
+    /// follower takes it next. False when there is none, or no path followed.
+    pub fn gauss_leap(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput) -> bool {
+        let Some(f) = self.follower.as_mut() else {
+            return false;
+        };
+        if f.busy() {
+            return false;
+        }
+        match crate::tricks::leap_along(ctx.graph, &mut *ctx.tracer, input, f.path(), f.next_index()) {
+            Some((spec, to, at)) => {
+                tracing::debug!(
+                    "bot {}: gauss boost on the way, onto node {to} ({} the path)",
+                    ctx.bot,
+                    if at.is_some() { "on" } else { "off" }
+                );
+                f.take_shortcut(spec, to, at, input.now, false);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Steers a long jump's or a boost's flight onto its landing when the bot is in one: the step, `None` when it is
+    /// not flying. Behavior that does not follow a path now (a fight) still lets the flight end where it should.
+    pub fn fly_on(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput) -> Option<NavStep> {
+        let now = input.now;
+        if let Some((at, step)) = self.flight
+            && at == now
+        {
+            return Some(step);
+        }
+        let follower = self.follower.as_mut().filter(|f| f.flying())?;
+        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer);
+        if let Some((kind, landed)) = follower.take_event() {
+            self.tricks.record(kind, landed);
+        }
+        match out.status {
+            FollowStatus::Moving | FollowStatus::Waiting => {}
+            FollowStatus::Arrived => self.follower = None,
+            FollowStatus::Replan => {
+                self.follower = None;
+                self.next_plan_at = now;
+            }
+            FollowStatus::Failed { from, to, reason } => self.failed(ctx, from, to, reason, now),
+        }
+        self.flight = Some((now, out.step));
+        Some(out.step)
+    }
+
+    /// How far the destination of the path followed is: in a straight line from `origin`, and in nodes left.
+    pub fn way_left(&self, graph: &NavGraph, origin: Vec3) -> Option<(f32, usize)> {
+        let f = self.follower.as_ref()?;
+        Some((graph.node(f.goal()).origin.distance(origin), f.remaining().len()))
     }
 
     /// Blocks until `until` every link whose walk crosses the line `a → b` at body height (a tripmine's beam); a path
@@ -357,6 +441,9 @@ impl Navigator {
         }
         let follower = self.follower.as_mut()?;
         let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer);
+        if let Some((kind, landed)) = follower.take_event() {
+            self.tricks.record(kind, landed);
+        }
         match out.status {
             FollowStatus::Moving => {}
             FollowStatus::Waiting => self.waiting = true,

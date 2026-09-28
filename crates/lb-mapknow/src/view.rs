@@ -29,7 +29,7 @@ impl MapView for MapKnowledge<'_> {
 
     fn for_each_link(&self, n: NodeId, f: &mut dyn FnMut(NodeId, f32)) {
         if (n as usize) < self.graph.len() {
-            for l in self.graph.links(n).iter().filter(|l| l.valid()) {
+            for l in self.graph.links(n).iter().filter(|l| l.plain()) {
                 f(l.to, l.cost);
             }
         }

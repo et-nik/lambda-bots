@@ -447,6 +447,7 @@ impl BotBrain {
                 StanceIntent {
                     jump: false,
                     duck: true,
+                    longjump: false,
                 },
             );
         }
@@ -625,6 +626,7 @@ impl BotBrain {
                         StanceIntent {
                             jump: false,
                             duck: true,
+                            longjump: false,
                         },
                     );
                     self.look_at(choke);

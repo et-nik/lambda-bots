@@ -28,7 +28,7 @@ pub fn cover(
     };
     let mut watchers: SmallVec<[NodeId; 16]> = SmallVec::new();
     watchers.push(th);
-    for l in graph.links(th).iter().filter(|l| l.valid()) {
+    for l in graph.links(th).iter().filter(|l| l.plain()) {
         watchers.push(l.to);
     }
     let mine = paths::tree(graph, me, reach);

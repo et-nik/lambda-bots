@@ -53,7 +53,7 @@ pub fn run_up_room(tracer: &mut dyn Tracer, from: Vec3, dir: Vec2, speed: f32) -
 }
 
 /// Command length of the simulation.
-const STEP_MS: u8 = 10;
+pub(crate) const STEP_MS: u8 = 10;
 /// Horizontal miss still counted as arriving.
 pub const ARRIVE_RADIUS: f32 = 32.0;
 /// Height difference of the feet still counted as arriving.
@@ -84,16 +84,16 @@ pub struct MoveVerdict {
     pub in_water: bool,
 }
 
-fn flat_dir(from: Vec3, to: Vec3) -> Vec2 {
+pub(crate) fn flat_dir(from: Vec3, to: Vec3) -> Vec2 {
     (to - from).truncate().normalize_or_zero()
 }
 
-fn arrived(p: &Player, to: Vec3, radius: f32) -> bool {
+pub(crate) fn arrived(p: &Player, to: Vec3, radius: f32) -> bool {
     let feet_to = to.z - 36.0;
     p.on_ground() && (p.origin - to).truncate().length() < radius && (p.feet() - feet_to).abs() <= ARRIVE_DZ
 }
 
-fn cmd_toward(p: &Player, to: Vec3, buttons: u16) -> Cmd {
+pub(crate) fn cmd_toward(p: &Player, to: Vec3, buttons: u16) -> Cmd {
     let d = (to - p.origin).truncate();
     let mut angles = dir_to_view_angles(d.extend(0.0));
     angles.x = 0.0;
@@ -113,7 +113,7 @@ fn cmd_toward(p: &Player, to: Vec3, buttons: u16) -> Cmd {
 }
 
 /// Places a standing player at `origin` and lets it settle onto the floor.
-fn settled(world: &mut dyn MoveWorld, phys: &Physics, origin: Vec3) -> Player {
+pub(crate) fn settled(world: &mut dyn MoveWorld, phys: &Physics, origin: Vec3) -> Player {
     let mut p = Player::standing(origin);
     let idle = Cmd {
         msec: STEP_MS,

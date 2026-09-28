@@ -276,8 +276,12 @@ pub struct Runtime {
     pub weapons_allowed: u32,
     /// Weapons every bot is given when it spawns (`lb weapons ... give`; needs `sv_cheats 1`).
     pub weapons_give: Vec<WeaponId>,
+    /// Items every bot is given on spawn (`lb items`), by classname.
+    pub items_give: Vec<String>,
     /// Rounds, damage, kills and suicides per weapon (`lb stats`).
     pub arms_stats: arms_stats::ArmsStats,
+    /// The bots' tricks when the statistics were last reset.
+    pub tricks_base: commands::TrickTotals,
     /// Inputs from outside the engine (the navigation loader, the command channel), kept while recording and fed
     /// from the recording in a replay.
     pub outside: record::OutsideMode,
@@ -408,7 +412,9 @@ impl Runtime {
             charger_entities: Vec::new(),
             weapons_allowed: u32::MAX,
             weapons_give: Vec::new(),
+            items_give: Vec::new(),
             arms_stats: arms_stats::ArmsStats::default(),
+            tricks_base: commands::TrickTotals::default(),
             outside: record::OutsideMode::Live,
             record_request: None,
             record_status: "not recording".into(),
@@ -500,7 +506,11 @@ impl Runtime {
         for bot in &mut self.bots {
             if let Some(p) = self.roster.get(&bot.persona.name) {
                 let skill = p.skill_params(&self.presets);
-                let style = (self.styles.goals(p.style), self.styles.weapons(p.style));
+                let style = (
+                    self.styles.goals(p.style),
+                    self.styles.weapons(p.style),
+                    self.styles.tricks(p.style),
+                );
                 bot.set_persona(p, skill, style);
             }
             bot.driver.set_rate(self.config.engine.cmd_rate as f64);
@@ -978,6 +988,9 @@ impl Runtime {
             bot.update_lifecycle(now, force_respawn, delay);
             if bot.state == BotState::Alive && !was_alive {
                 give_weapons(bot, &self.weapons_give);
+                for item in &self.items_give {
+                    bot.pending_client_cmds.push(vec!["give".into(), item.clone()]);
+                }
             }
         }
         self.count_rounds();
@@ -1983,7 +1996,11 @@ impl Runtime {
                     userid,
                     persona.clone(),
                     skill,
-                    (self.styles.goals(persona.style), self.styles.weapons(persona.style)),
+                    (
+                        self.styles.goals(persona.style),
+                        self.styles.weapons(persona.style),
+                        self.styles.tricks(persona.style),
+                    ),
                     self.now,
                     self.master_seed,
                     self.config.engine.cmd_rate as f64,
@@ -2296,6 +2313,7 @@ impl Runtime {
                     dll,
                     allowed,
                     selfgauss: self.game.rules.selfgauss,
+                    tricks: self.config.tricks,
                     projectiles: &self.projectile_entities,
                 };
                 drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
@@ -2679,6 +2697,7 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
         gravity: ctx.gravity,
         allowed: ctx.allowed,
         selfgauss: ctx.selfgauss,
+        tricks: ctx.tricks,
     }
 }
 
@@ -2777,6 +2796,11 @@ fn nav_input(bot: &Bot, ctx: &DriveCtx<'_>, body: &lb_brain::Body) -> lb_nav::ex
             Vec3::ZERO
         },
         gravity: ctx.gravity,
+        // The long jump links open with the module; the brain says what else the bot may do (`set_tricks`).
+        tricks: lb_nav_api::Tricks {
+            longjump: body.has_longjump,
+            ..Default::default()
+        },
     }
 }
 
@@ -2787,9 +2811,19 @@ fn drive_nav_test(
     tracer: &mut nav::LiveTracer<'_>,
     link_health: &mut LinkHealth,
 ) -> lb_motor::MotorOut {
+    use lb_combat::arms::Status;
     use lb_motor::{Intents, LookIntent, MoveIntent, Prio, StanceIntent};
     let body = body_of(bot, ctx);
-    let input = nav_input(bot, ctx, &body);
+    let mut input = nav_input(bot, ctx, &body);
+    // Gauss boosts with the gun and a full charge's uranium in hand or in the pack.
+    let uranium = match body.prediction {
+        Some(p) if p.current == Some(WeaponId::Gauss) && body.weapon == Some(WeaponId::Gauss) => p.primary_ammo,
+        _ => body.armed(WeaponId::Gauss).and_then(|a| a.reserve).unwrap_or(0),
+    };
+    input.tricks.boost_now = body.armed(WeaponId::Gauss).is_some() && uranium >= 16 && body.health >= 60.0;
+    input.tricks.gauss_boost = input.tricks.boost_now;
+    input.tricks.gauss_damage = body.damages.gauss_charged;
+    input.tricks.selfgauss = body.selfgauss == 1;
     let mut intents = Intents::default();
     if let Some(graph) = ctx.graph
         && let Some(test) = bot.nav_test.as_mut()
@@ -2802,7 +2836,13 @@ fn drive_nav_test(
             bot: u32::from(bot.id.slot),
             budget: None,
         };
-        if let Some(step) = test.step(&mut bot.nav, &mut nctx, &input) {
+        let step = test.step(&mut bot.nav, &mut nctx, &input);
+        if std::mem::take(&mut test.refill) {
+            for item in ["item_healthkit", "item_healthkit", "ammo_gaussclip", "ammo_gaussclip"] {
+                bot.pending_client_cmds.push(vec!["give".into(), item.into()]);
+            }
+        }
+        if let Some(step) = step {
             intents.movement(
                 Prio::Goal,
                 MoveIntent {
@@ -2815,6 +2855,7 @@ fn drive_nav_test(
                 StanceIntent {
                     jump: step.jump,
                     duck: step.duck,
+                    longjump: step.longjump,
                 },
             );
             if step.use_key {
@@ -2832,6 +2873,57 @@ fn drive_nav_test(
                 },
             };
             intents.look(Prio::Goal, look);
+            if let Some(call) = step.boost
+                && test.boost.is_none()
+            {
+                test.boost = Some(lb_combat::arms::boost::GaussBoost::new(ctx.now, call.view, call.charge));
+            }
+            if let Some(boost) = test.boost.as_mut() {
+                let hands = lb_combat::arms::Hands {
+                    now: ctx.now,
+                    eye: body.eye,
+                    origin: body.origin,
+                    velocity: body.velocity,
+                    view: bot.view,
+                    on_ground: body.on_ground,
+                    on_ladder: body.on_ladder,
+                    waterlevel: body.waterlevel,
+                    fov: body.fov,
+                    weapon: body.weapon,
+                    arsenal: &body.arsenal,
+                    prediction: body.prediction.as_ref(),
+                    dll: body.dll,
+                    gravity: body.gravity,
+                };
+                match boost.update(&hands, step.boost.is_some(), step.boost.map(|c| c.view)) {
+                    Status::Running(r) => {
+                        if let Some(w) = r.weapon {
+                            intents.weapon(Prio::Protocol, w);
+                        }
+                        if let Some(l) = r.look {
+                            intents.look(Prio::Protocol, l);
+                        }
+                        if let Some(m) = r.movement {
+                            intents.movement(Prio::Protocol, m);
+                        }
+                        if r.jump {
+                            intents.stance(
+                                Prio::Protocol,
+                                StanceIntent {
+                                    jump: true,
+                                    duck: false,
+                                    longjump: false,
+                                },
+                            );
+                        }
+                    }
+                    Status::Done => test.boost = None,
+                    Status::Failed(why) => {
+                        tracing::info!("nav test: gauss boost given up: {why}");
+                        test.boost = None;
+                    }
+                }
+            }
         }
         if test.finished {
             for line in test.report() {
@@ -2944,6 +3036,8 @@ struct DriveCtx<'a> {
     allowed: u32,
     /// `mp_selfgauss` (1 where the DLL has no such cvar).
     selfgauss: u8,
+    /// Tricks the config lets the bots use.
+    tricks: lb_config::main_config::TricksConfig,
     projectiles: &'a [ProjectileEntity],
 }
 
