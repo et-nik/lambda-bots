@@ -289,7 +289,7 @@ impl BotBrain {
         self.dodge(body, nav);
         self.run_protocols(body, ch, nav, rng);
         self.aim_and_fire(body, ch, nav, rng);
-        self.snark_defense(body);
+        self.snark_defense(body, nav);
         self.vigilance(body);
         self.beam_guard(body);
         let input = lb_motor::MotorInput {

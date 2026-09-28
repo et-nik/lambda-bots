@@ -101,6 +101,10 @@ pub struct GameState {
     pub resolved_msgs: Vec<(String, i32)>,
     /// How the game DLL works the weapons that differ.
     pub dll: DllProfile,
+    /// The rules `lb selftest` found, kept over map changes.
+    pub rules_verdict: Option<DllProfile>,
+    /// The button a bot was seen to set its satchels off with in the game, and which bot; kept over map changes.
+    pub satchel_checked: Option<(lb_game::mechanics::Attack, String)>,
 }
 
 #[derive(Default, Debug, Clone, Serialize)]
@@ -764,7 +768,13 @@ impl Runtime {
         }
         let ch = |bit: u32| f.channels & bit != 0;
         self.sound_hook = ch(lb_ffi::LB_CH_SV_STARTSOUND);
-        let dll = DllProfile::resolve(&self.config.game.dll, bhl);
+        let mut dll = self
+            .game
+            .rules_verdict
+            .unwrap_or_else(|| DllProfile::resolve(&self.config.game.dll, bhl));
+        if let Some((detonate, _)) = &self.game.satchel_checked {
+            dll.set_satchel_detonate(*detonate);
+        }
         if self.game.dll.kind != dll.kind || self.game.dll.detected != dll.detected {
             tracing::info!(
                 "weapon rules: {} ({})",
@@ -1179,6 +1189,53 @@ impl Runtime {
                     );
                 }
             }
+        }
+    }
+
+    /// A bot set its satchels off with a button: the server's satchel buttons are that way for every bot, for the rest
+    /// of the session. The first bot to do it checks them for all.
+    fn learn_satchel_buttons(&mut self) {
+        use lb_game::mechanics::Attack;
+        let name = |a: Attack| match a {
+            Attack::Primary => "primary",
+            Attack::Secondary => "secondary",
+        };
+        for bot in &mut self.bots {
+            let Some(detonate) = bot.brain.mind.arms.satchel_fact.take() else {
+                continue;
+            };
+            let news = self.game.satchel_checked.is_none() || self.game.dll.satchel_detonate() != detonate;
+            self.game.dll.set_satchel_detonate(detonate);
+            if news {
+                tracing::info!(
+                    "satchel buttons checked by {} in the game: the {} attack sets the charges off, the {} throws another",
+                    bot.persona.name,
+                    name(detonate),
+                    name(self.game.dll.satchel_throw_more())
+                );
+            }
+            self.game.satchel_checked = Some((detonate, bot.persona.name.clone()));
+        }
+    }
+
+    /// The satchel buttons the bots use, and where they come from, for `lb compat`.
+    pub fn satchel_buttons(&self) -> String {
+        use lb_game::mechanics::Attack;
+        let name = |a: Attack| match a {
+            Attack::Primary => "primary",
+            Attack::Secondary => "secondary",
+        };
+        let how = format!(
+            "the {} attack sets the charges off, the {} throws another",
+            name(self.game.dll.satchel_detonate()),
+            name(self.game.dll.satchel_throw_more())
+        );
+        match &self.game.satchel_checked {
+            Some((_, by)) => format!("{how} (checked by {by} in the game)"),
+            None => format!(
+                "{how} (the {} rules; not checked in the game yet)",
+                self.game.dll.kind.as_str()
+            ),
         }
     }
 
@@ -2140,6 +2197,7 @@ impl Runtime {
                 }),
             );
         }
+        self.learn_satchel_buttons();
         for i in faulted.into_iter().rev() {
             self.stats.bot_faults += 1;
             self.bots[i].set_state(BotState::Faulted, now);
@@ -2180,11 +2238,12 @@ impl Runtime {
                 verdict = t.verdict.or(verdict);
             }
         }
-        if let Some(dll) = verdict
-            && dll.kind != self.game.dll.kind
-        {
-            tracing::warn!("weapon rules switched to {} for this session", dll.kind.as_str());
+        if let Some(dll) = verdict {
+            if dll.kind != self.game.dll.kind {
+                tracing::warn!("weapon rules switched to {} for this session", dll.kind.as_str());
+            }
             self.game.dll = dll;
+            self.game.rules_verdict = Some(dll);
         }
         let reports: Vec<String> = self
             .bots

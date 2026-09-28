@@ -65,6 +65,7 @@ impl Lob {
                     weapon: Some(weapon),
                     look: Some(LookIntent::Angles(angles)),
                     movement: None,
+                    jump: false,
                 })
             }
             Phase::Pressed { at, before } => {
@@ -78,6 +79,7 @@ impl Lob {
                     weapon: Some(press(w, Attack::Secondary, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: None,
+                    jump: false,
                 })
             }
         }

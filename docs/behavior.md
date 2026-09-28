@@ -151,25 +151,41 @@ is in sight for 2 s, a low clip is reloaded, of the gun the bot would like in ha
 ## Explosives
 
 **Throws.** Three times a second a bot with grenades, satchels or snarks weighs a throw at the nearest enemy: one in
-sight, or one lost up to 3 s ago whose position is still known to within 400 units. The chance to take it is, per
-weighing, 0.5 for a grenade, 0.35 for a satchel or a snark at an enemy out of sight, and 0.12, 0.15 and 0.25 at one in
-sight; times the skill's `throw_rate` (0.5 for beginners up to 1.4 for experts), a little more for bold bots and a
-little less for careful ones. After a throw the next is weighed 3–6 s later. At an enemy out of sight a grenade comes
-first, a satchel when it is closer than 300 units, then a snark; at one in sight a snark, a grenade, a satchel when the
-enemy is coming this way. With no gun left but the crowbar, throws are the weapon: twice as likely, and grenades from
-220 units (yapb's grenade war).
+sight, or one lost up to 3 s ago whose position is still known to within 400 units. Each kind that fits the distance
+has its chance per weighing: 0.5 for a grenade, 0.35 for satchels or a snark at an enemy out of sight, and 0.12, 0.15
+and 0.25 at one in sight. The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for experts),
+a little more for bold bots and a little less for careful ones, is the chance to throw at all; which kind goes is
+drawn as likely as its own chance. After a throw the next is weighed 3–6 s later. With no gun left but the crowbar,
+throws are the weapon: twice as likely, and grenades from 220 units (yapb's grenade war).
 - **Hand grenade**, 300–800 units away: the throw is solved for the target with the game's own rule (the view's pitch
   sets the throw's angle and speed, the bot's own velocity is added) and checked for walls along the arc; its blast
   must land 300 units or more from the bot. The bot pulls the pin (holds the primary attack; the game's own clock
   tells when the pin came out), cooks it so it goes off soon after landing, turns to the throw, stops for the last
   moment and lets go. At an enemy in sight it throws as soon as the game allows, uncooked, where the enemy will be.
   **Once the pin is out the grenade is always thrown**, at the latest shortly before the fuse runs out.
-- **Satchel**, 150–400 units away with a clear line to the spot: thrown toward the enemy (it slides on after landing),
-  at one in sight only when it is coming this way. **It goes off** when an enemy is within 160 units of one of the bot's
-  satchels and closer to it than the bot: the bot draws the satchel radio and presses the detonate button; a bot within
-  the blast (300 units for the multiplayer satchel's 120 damage) backs off first.
+- **A pile of satchels**, 150–400 units away with a clear line to the spot, at an enemy out of sight or one in sight
+  coming this way: two to four of them (as many as the bot carries) thrown one after another at the spot, as fast as
+  the game allows (a second apart); then the bot backs off out of their blast.
+- **A satchel from a jump**, at an enemy in sight 350–550 units away: the bot runs at the enemy, jumps and throws it a
+  moment after its feet leave the ground, so the run and the jump's lift carry it on. The satchel radio stays in
+  hand, and the satchel goes off as it comes within 150 units of the enemy (the game lets the radio work half a
+  second after a throw), like a grenade that goes off when told. Rather than let it pass, a bot with 70 health or
+  more takes up to a quarter of its blast itself; a hurt one waits until it is out of the blast. A satchel that does
+  not come by within 2.5 s is left lying. For a second after the throw the bot backs off from the enemy (the run-up
+  carried it after the satchel), and it does not close in while its satchels are fresh.
+- **The satchels go off** once the bot is out of their blast (300 units for the multiplayer satchel's 120 damage; it
+  backs off first):
+  - with an enemy within 200 units of one of them;
+  - once the enemy they were thrown at has been out of sight for 1–2.5 s after it was last seen near them (it may
+    well still be there), up to 6 s after;
+  - after they have lain 8–15 s with nobody in sight, whatever else.
+  The bot draws the satchel radio (a second) and presses the detonate button.
 - **Snark**, 150–800 units away with a clear line, not in water nor at an enemy far above: thrown at the enemy when
   there is room in front, as the game requires.
+- **All the snarks** at an enemy in sight 60–200 units away, when the bot carries two or more and has 50 health or more:
+  the bot holds the attack down at the enemy and the game lets one go every 0.3 s while there is room in front (not with
+  the enemy right against it). They swarm the enemy and bite it where it stands. The chance is 0.35 per weighing, times
+  the skill's `throw_rate`. Then the bot runs from the swarm for 2 s before it turns: a snark bites its owner too.
 
 **Tripmines.** When quiet (no enemy for 5 s) and walking along a corridor at most 300 units wide, now and then (at
 most once in 20–30 s) the bot lays a mine on the nearer wall within 90 units, so its beam runs across the corridor;
@@ -179,9 +195,12 @@ enemy's mine ahead of a quiet bot is shot to clear the way. Shooting a mine cred
 
 **Dodging.** A grenade the bot sees coming down near it (its own too), an MP5 grenade about to land, a rocket passing
 within 160 units or an enemy satchel lying close make it run from the blast for half a second (away from it: yapb's
-sign was wrong), checking the ground for ledges and taking a side when straight away is a drop. Someone else's snark
-within 300 units, or the bot's own coming back at it within 150 (a snark bites its owner too), is shot when no player
-is in sight; with one in sight but 300 units away or more, a snark within 150 units is shot first.
+sign was wrong), checking the ground for ledges and taking a side when straight away is a drop.
+
+**Snarks.** Someone else's snark within 300 units, or the bot's own coming back at it within 250 (a snark bites its
+owner too), is run from: shooting at a small hopping snark wastes time, a bot on the run outpaces it, and its life is
+short. The run takes the legs only, so the bot keeps fighting. With the egon in hand the bot burns the snark instead,
+when no player in sight is closer than 300 units.
 
 **Tripmine beams** the bot knows of (its own and those it has seen) keep its paths off them, and any move that would
 take it into one (strafing and dodging included) is stopped.
@@ -191,8 +210,10 @@ satchels that are out and a grenade thrown level leaves at 400 units per second;
 BugfixedHL-Rebased the secondary attack sets them off and the grenade leaves at 650. BugfixedHL is told by its cvars,
 any other DLL is taken to play by the 2023 update (hlsdk-portable does), and `game.dll` in
 `config/lambdabots.yaml` can name it. `lb selftest` checks it on a live server with one bot (satchel buttons,
-crossbow zoom, grenade speed) and corrects the session. A bot that presses the detonate button and sees another
-satchel thrown learns the buttons are the other way round.
+crossbow zoom, grenade speed; it needs `sv_cheats 1` to hand out the weapons) and corrects the session. In a game,
+the first bot to set its satchels off checks their buttons for every bot: when the detonate button throws another
+satchel instead, it presses the other one, and the server's satchel buttons are that way from then on. What was
+found is kept over map changes; `lb compat` shows the buttons and who checked them.
 
 ## Priorities
 

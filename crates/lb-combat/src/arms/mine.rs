@@ -67,6 +67,7 @@ impl Planter {
                     weapon: Some(weapon),
                     look: Some(LookIntent::Angles(angles)),
                     movement: Some(stop()),
+                    jump: false,
                 })
             }
             Phase::Pressed { at, before } => {
@@ -80,6 +81,7 @@ impl Planter {
                     weapon: Some(press(w, Attack::Primary, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: Some(stop()),
+                    jump: false,
                 })
             }
         }

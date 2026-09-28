@@ -117,7 +117,11 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             _ => rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages),
         },
         "perf" => perf(rt, rest),
-        "compat" => rt.compat.to_yaml().lines().map(String::from).collect(),
+        "compat" => {
+            let mut out: Vec<String> = rt.compat.to_yaml().lines().map(String::from).collect();
+            out.push(format!("satchel_buttons: {}", rt.satchel_buttons()));
+            out
+        }
         "add" => add(rt, host, rest),
         "kick" => kick(rt, host, rest),
         "kill" => kill(rt, rest),
@@ -715,13 +719,15 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         let arms = &m.arms;
         let st = &arms.stats;
         out.push(format!(
-            "  arms: {}; thrown {} grenades, {} satchels, {} snarks; {} m203, {} mines laid, {} detonations, {} mines \
-             shot, {} scoped in {} zooms, gauss {} fired {} dumped {} plain rolls {:.1} s cramped, {} dodges, {} \
-             failed{}; explosives known: {} own satchels, {} mines, {} in flight",
+            "  arms: {}; thrown {} grenades, {} satchels, {} snarks ({} barrages); {} m203, {} mines laid, {} \
+             detonations, {} mines shot, {} scoped in {} zooms, gauss {} fired {} dumped {} plain rolls {:.1} s \
+             cramped, {} dodges, {} runs from snarks, {} failed{}; explosives known: {} own satchels, {} mines, {} in \
+             flight",
             arms.describe(now),
             st.grenades,
             st.satchels,
             st.snarks,
+            st.barrages,
             st.lobs,
             st.mines,
             st.detonations,
@@ -733,6 +739,7 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             arms.gauss.plain_rolls,
             f64::from(arms.gauss.cramped) * 0.1,
             st.dodges,
+            st.snark_runs,
             st.failed,
             arms.last_failure.map(|f| format!(" (last: {f})")).unwrap_or_default(),
             b.brain.explosives.charges.len(),
@@ -753,6 +760,10 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
                 .and_then(|a| a.reserve2)
                 .unwrap_or(0),
         ));
+        if !st.satchel_offs.is_empty() {
+            let e: Vec<String> = st.satchel_offs.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
+            out.push(format!("  satchels set off: {}", e.join("; ")));
+        }
         if !st.scope_ends.is_empty() {
             let e: Vec<String> = st.scope_ends.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
             out.push(format!("  scope off: {}", e.join("; ")));

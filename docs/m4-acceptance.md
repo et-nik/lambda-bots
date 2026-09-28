@@ -10,13 +10,14 @@ run M4.1 yet.
 | Criterion                                  | Status | How it was checked                                                           |
 |--------------------------------------------|--------|------------------------------------------------------------------------------|
 | A scenario for every weapon                | yes    | `scripts/stand/weapon-scenarios.sh`: each weapon on its own, table below     |
-| Deaths by own hand an hour below a limit   | partly | two mixed games: 3 in 20 min of 8 bots, 1.1 a bot-hour; per weapon below     |
+| Deaths by own hand an hour below a limit   | yes    | the last mixed game: none in 10 min of 8 bots; the games before, below       |
 | Accuracy tables                            | yes    | `lb stats`: hit rate by distance for every weapon and fire mode              |
 | The game DLL's weapon rules                | partly | `lb selftest` on hlsdk-portable; BugfixedHL and the classic SDK not run live |
 | Target switches, tricks, the 60-minute run | later  | M4.2, M4.3 and the M4 acceptance runs                                        |
 
-The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game; the last two
-games came to 0.75 and 1.5 (two grenades and one charged gauss shot).
+The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game. The mixed
+games of the day came to 0.75 and 1.5 a bot-hour (two grenades and one charged gauss shot), then 2.25 (three snarks,
+with the first snark barrages; since fixed) and none in the last.
 
 ## The weapons
 
@@ -79,9 +80,9 @@ where the game reports it came from (bullets). For a projectile it goes to whoev
 | egon           | 64 (78)                   | 25.6     | 0           | 0                | 840: 61% / 40% / 38%                                |
 | hornetgun      | 58 (61)                   | 23.2     | 0           | 20               | 1178: 37% / 59% / 63%                               |
 | handgrenade    | 4 (52)                    | 1.6      | 0           | 124              | 56: 20% / 10% / 8%                                  |
-| satchel        | 2 (34)                    | 0.8      | 0           | 56               | 17: 18% / 34% / 0%                                  |
+| satchel        | 7 (42)                    | 2.8      | 1           | 315              | 81: 12% / 12% / 100%                                |
 | tripmine+glock | 16 (16)                   | 6.4      | 0           | 0                | glock 1155: 18% / 12% / 15%; mines 1                |
-| snark          | 14 (66)                   | 5.6      | 1           | 270              | 85: 100% / 84% / 100%                               |
+| snark          | 19 (24)                   | 7.6      | 3           | 276              | 115: 57% / 100% / 100%                              |
 
 - **Gauss:** each bot fired 13–26 charged shots against 4–13 rolls for plain fire, 70% of its choices (the normal
   preset's `gauss_charge` is 0.75). No bot died by its own shot.
@@ -140,6 +141,34 @@ The first per-weapon run (earlier the same day) led to these changes:
 | Gauss self-kills      | 2 in a 10-minute mixed game                                    | none in the gauss set, one in the last mixed game: the charge is kept small for the nearest wall along the line         |
 | Crossbow after a miss | the scope came off after every shot, hit or miss               | stays zoomed and fires again until the kill, keeping to its target; 37–46 crossbow kills a set (was 30–33)              |
 
+## Satchels and snarks
+
+After the report, the stand and the production server showed that bots hardly ever set their satchels off, that they
+fought snarks with any gun, and that they did not empty their snarks at an enemy close by. The changes:
+
+| What                 | Before                                                              | After                                                                                                                             |
+|----------------------|---------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| Setting satchels off | only with an enemy within 160 units of a charge, the bot 324 away   | also once the enemy they were thrown at is out of sight by them, and after 8–15 s with nobody in sight; an enemy within 200 units |
+| Throwing satchels    | one at a time                                                       | a pile of 2–4 at once, then out of the blast; or one from a jump at an enemy in sight, set off as it comes by                     |
+| The satchel buttons  | learned by each bot, lost at a map change                           | checked by the first bot to set its satchels off, for every bot, kept over map changes; `lb compat` shows them                    |
+| Snarks near          | shot with the gun in hand (or a rocket), not with a player in sight | run from; burnt only with the egon in hand                                                                                        |
+| An enemy close by    | one snark every 3–6 s                                               | all the snarks at once (60–200 units, 50 health or more), then away from the swarm                                                |
+
+The satchel set (crowbar and satchels, 2.5 min) went from 17–31 satchels thrown, 9–12 set off and 2–9 kills to 73–91
+thrown, 20–27 set off and 7–18 kills in five runs, with one death by own hand in all. Why they went off, in one run:
+an enemy by them 16 times, the enemy out of sight by them 8, lying long enough 7, in flight by the enemy once. The
+jump throw is the hard one: of 14 tries in one run 2 went off by the enemy; the satchel lands short of a moving
+enemy, or the bot, carried on by its run-up, is still too close to it (a bot with 70 health or more now takes up to
+a quarter of the blast rather than let it pass, and backs off for a second after the throw).
+
+On the stand the check of the satchel buttons came from the first bot to set its satchels off in every run: "the
+secondary attack sets the charges off, the primary throws another (checked by thunder in the game)".
+
+The snark set (crowbar and snarks) went from 85–93 snarks thrown and 11–14 kills to 115–191 thrown and 19–42 kills.
+With nothing but a crowbar and fifteen snarks each, the swarms also turn on their owners: 3 deaths by own hand in the
+last run, 11 before the barrage was kept to 200 units with a longer run away. With the egon as well, the egon burns
+the snarks near: 1 death by own hand, 53 egon kills. In the mixed game: none.
+
 ## Found on the stand and fixed
 
 - **hlsdk-portable names a flying bolt `crossbow_bolt`**, not the SDK's `bolt`. Bolts went unseen and unscored. Both
@@ -163,8 +192,10 @@ The first per-weapon run (earlier the same day) led to these changes:
   or the target or someone else had come close.
 - **Satchels were set off 250 units away.** The blast of the multiplayer satchel reaches 300.
 - **Snarks were shot with whatever the bot fought with,** a rocket launcher included, and never with a player in
-  sight. A snark is now shot with a gun without a blast, and first when the player in sight is 300 units away or
-  more.
+  sight. The bot now runs from them, and burns them only with the egon in hand.
+- **Satchels were thrown again right after they went off,** while the game was still in its half-second reload. The
+  game leaves it only on a frame with both buttons up, so a press held from that moment threw nothing.
+- **The satchel buttons learned in a game were forgotten at the next map,** and so was the verdict of `lb selftest`.
 - **Explosives were not topped up.** An owned grenade, satchel or snark was worth nothing to pick up, so bots carried
   one handful a life.
 - **`lb stats` missed hits and throws.**
@@ -179,9 +210,11 @@ The first per-weapon run (earlier the same day) led to these changes:
 - `lb weapons <weapon>… give`, `lb weapons all`: a scenario's weapons, handed out on every spawn (needs
   `sv_cheats 1`).
 - `lb stats [reset]`: rounds, hit rate by distance, damage and kills per weapon and fire mode; own blast damage.
-- `lb selftest [name]`: the DLL's satchel buttons, crossbow zoom and grenade speed, with one bot.
+- `lb selftest [name]`: the DLL's satchel buttons, crossbow zoom and grenade speed, with one bot (`sv_cheats 1`).
+- `lb compat` shows the satchel buttons the bots use and who checked them in a game.
 - `lb brain` shows each bot's weapon protocol and counts:
-  - throws, scoped shots and zooms with why each zoom ended, charged and plain gauss rolls;
+  - throws and snark barrages, satchels set off and why, scoped shots and zooms with why each zoom ended, charged
+    and plain gauss rolls, runs from snarks;
   - time no charge could start for a drop behind or a wall ahead;
   - dodges and failures;
   - the explosives it carries.
@@ -191,10 +224,8 @@ The first per-weapon run (earlier the same day) led to these changes:
 
 ## Not done yet
 
-- **Satchels** are thrown often and set off seldom (2–9 kills a set). The bot waits for an enemy within 160 units of
-  the charge while it is itself out of the blast.
-- **A bot's own snarks** still bite it in a close fight (10 a bite), when it keeps shooting the player. In the snark
-  set the bots have only the crowbar to fend them off.
+- **A satchel from a jump** goes off by the enemy about one time in seven.
+- **A bot's own snarks** still turn on it now and then, most with only a crowbar and a pocketful of snarks.
 - **A tripmine's planter** may still be near when an enemy trips it (two deaths in four runs of its set).
 - **Satchel traps and mines at chokepoints** (the `PlantTrap` goal) are M4.2.
 - **A charged gauss shot** still kills its shooter now and then (one in the last mixed game). What it hit is not known

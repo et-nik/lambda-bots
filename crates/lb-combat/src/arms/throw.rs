@@ -5,16 +5,21 @@
 //!   throw solved for the target, stop for the last moment, and let go: the game throws on its next idle frame.
 //!   Once the pin is out the grenade is always thrown, at the latest shortly before the fuse runs out.
 //! - **Satchel:** draw it (a second), turn to the throw, press the DLL's throw button once; confirmed when the game
-//!   reports a charge out and one satchel fewer. A charge the game did not report is tried once more.
+//!   reports a charge out and one satchel fewer. A pile is thrown one after another as the game allows (a second
+//!   apart), each at the same spot. Thrown from a jump, the bot runs at the target, jumps, and presses the button a
+//!   moment after its feet leave the ground: the jump's lift and the run go into the throw.
 //! - **Snark:** draw, turn to the target (14 units above its origin, as yapb), press once when there is room in front
 //!   (the game's own check); confirmed by one snark fewer.
+//! - **Snark barrage** ([`Barrage`]): at an enemy close by, all the snarks: held down, the game lets one go every 0.3 s
+//!   while there is room in front, and they swarm the enemy.
 
 use lb_core::Vec3;
 use lb_core::math::{dir_to_view_angles, view_angle_vectors};
 use lb_core::time::SimTime;
 use lb_game::mechanics::{Attack, GRENADE_FUSE, GRENADE_MIN_COOK, Trigger};
 use lb_game::weapons::WeaponId;
-use lb_motor::LookIntent;
+use lb_knowledge::PlayerKey;
+use lb_motor::{LookIntent, MoveIntent, WeaponIntent};
 use lb_worldq::{TraceQuery, Tracer};
 
 use super::{Hands, Request, Status, hold, press, settled, stop};
@@ -64,6 +69,16 @@ const SATCHEL_CONFIRM: f64 = 1.5;
 /// A snark leaves this far in front of the thrower; the game wants free space there.
 const SNARK_ROOM: [f32; 2] = [20.0, 64.0];
 const SNARK_AIM_UP: f32 = 14.0;
+/// A satchel from a jump leaves this long after the feet leave the ground; the jump waits this long for them to.
+const JUMP_THROW: f64 = 0.12;
+const JUMP_GIVE_UP: f64 = 0.4;
+/// Before a jump throw the bot runs at the target until this fast toward it, for this long at most.
+const RUN_UP_SPEED: f32 = 320.0;
+const RUN_UP_MIN: f32 = 200.0;
+const RUN_UP_FOR: f64 = 0.8;
+/// A snark barrage lasts this long at most, and ends when the enemy is out of sight this long.
+const BARRAGE_FOR: f64 = 6.0;
+const BARRAGE_LOST: f64 = 0.4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
@@ -75,6 +90,8 @@ enum Phase {
     Released { at: SimTime },
     /// Pressing `button` since `at`, with `before` of the weapon's ammo, until the game shows the throw.
     Pressed { at: SimTime, before: i32, button: Attack },
+    /// Jumped at `at` to throw a satchel from the air.
+    Jump { at: SimTime },
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +106,12 @@ pub struct Thrower {
     steady_since: Option<SimTime>,
     /// Let go as soon as the game allows: the target is in sight and will not wait for a cooked grenade.
     quick: bool,
+    /// Satchels still to throw at the target, this one included.
+    pile: u32,
+    /// Satchels are thrown from a jump.
+    jump: bool,
+    /// Where the satchels thrown so far should land.
+    pub landings: Vec<Vec3>,
 }
 
 impl Thrower {
@@ -103,12 +126,27 @@ impl Thrower {
             resolved_at: now,
             steady_since: None,
             quick: false,
+            pile: 1,
+            jump: false,
+            landings: Vec::new(),
         }
     }
 
     /// Thrown as soon as the game allows, without cooking.
     pub fn quick(mut self) -> Thrower {
         self.quick = true;
+        self
+    }
+
+    /// `n` satchels thrown one after another at the target.
+    pub fn pile(mut self, n: u32) -> Thrower {
+        self.pile = n.max(1);
+        self
+    }
+
+    /// Satchels thrown from a jump.
+    pub fn from_jump(mut self) -> Thrower {
+        self.jump = true;
         self
     }
 
@@ -134,6 +172,7 @@ impl Thrower {
             Phase::Cook { .. } => "cook",
             Phase::Released { .. } => "released",
             Phase::Pressed { .. } => "pressed",
+            Phase::Jump { .. } => "jump",
         }
     }
 
@@ -195,12 +234,14 @@ impl Thrower {
                         weapon: Some(hold(w)),
                         look: Some(LookIntent::Angles(angles)),
                         movement: Some(stop()),
+                        jump: false,
                     });
                 }
                 Status::Running(Request {
                     weapon: Some(press(w, Attack::Primary, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: (held >= cook - STOP_BEFORE).then(stop),
+                    jump: false,
                 })
             }
             Phase::Released { at } => {
@@ -211,59 +252,108 @@ impl Thrower {
                     weapon: Some(hold(w)),
                     look: Some(LookIntent::Angles(self.angles())),
                     movement: Some(stop()),
+                    jump: false,
                 })
             }
-            Phase::Pressed { .. } => Status::Done,
+            Phase::Pressed { .. } | Phase::Jump { .. } => Status::Done,
         }
     }
 
     fn satchel(&mut self, h: &Hands<'_>) -> Status {
         let now = h.now;
         let w = WeaponId::Satchel;
-        let out = h.predicted(w).is_some_and(|p| p.charge_ready == 1);
+        let game = h.predicted(w);
+        let out = game.is_some_and(|p| p.charge_ready == 1);
         let count = h.reserve(w);
+        let button = if out {
+            h.dll.satchel_throw_more()
+        } else {
+            h.dll.satchel_throw()
+        };
+        // Just after satchels went off the game takes no throw until it has seen both buttons up (its idle frame).
+        let button_ready = game.is_none_or(|p| {
+            p.charge_ready != 2
+                && match button {
+                    Attack::Primary => p.next_primary <= 0.0,
+                    Attack::Secondary => p.next_secondary <= 0.0,
+                }
+        });
+        // From a jump the bot runs at the target first: the run carries the satchel on.
+        let toward = (self.target - h.origin).truncate().normalize_or_zero();
+        let run_up = self.jump.then_some(MoveIntent {
+            dir: toward,
+            speed: RUN_UP_SPEED,
+        });
+        let running = |weapon: WeaponIntent, angles: Vec3, jump: bool| {
+            Status::Running(Request {
+                weapon: Some(weapon),
+                look: Some(LookIntent::Angles(angles)),
+                movement: run_up,
+                jump,
+            })
+        };
+        let finished = |landings: &Vec<Vec3>, why: &'static str| {
+            if landings.is_empty() {
+                Status::Failed(why)
+            } else {
+                Status::Done
+            }
+        };
+        if now.since(self.resolved_at) >= RESOLVE || matches!(self.phase, Phase::Jump { .. }) {
+            self.resolved_at = now;
+            self.throw = ballistics::satchel(&mut Unchecked, h.origin, h.velocity, self.target, h.gravity);
+        }
+        let angles = self.angles();
         match self.phase {
             Phase::Draw => {
                 if now.since(self.started) > DRAW_TIMEOUT + 1.0 || count <= 0 {
-                    return Status::Failed("no satchel to throw");
+                    return finished(&self.landings, "no satchel to throw");
                 }
-                if now.since(self.resolved_at) >= RESOLVE {
-                    self.resolved_at = now;
-                    self.throw = ballistics::satchel(&mut Unchecked, h.origin, h.velocity, self.target, h.gravity);
+                if !(h.ready(w) && button_ready && settled(h.view, angles, 3.0)) {
+                    return running(hold(w), angles, false);
                 }
-                let angles = self.angles();
-                let mut weapon = hold(w);
-                if h.ready(w) && settled(h.view, angles, 3.0) {
-                    let button = if out {
-                        h.dll.satchel_throw_more()
-                    } else {
-                        h.dll.satchel_throw()
-                    };
-                    weapon = press(w, button, Trigger::Hold, 0.0);
-                    self.phase = Phase::Pressed {
-                        at: now,
-                        before: count,
-                        button,
-                    };
+                if self.jump && h.on_ground {
+                    let run = h.velocity.truncate().dot(toward);
+                    if run < RUN_UP_MIN && now.since(self.started) < RUN_UP_FOR {
+                        return running(hold(w), angles, false);
+                    }
+                    self.phase = Phase::Jump { at: now };
+                    return running(hold(w), angles, true);
                 }
-                Status::Running(Request {
-                    weapon: Some(weapon),
-                    look: Some(LookIntent::Angles(angles)),
-                    movement: None,
-                })
+                self.phase = Phase::Pressed {
+                    at: now,
+                    before: count,
+                    button,
+                };
+                running(press(w, button, Trigger::Hold, 0.0), angles, false)
+            }
+            Phase::Jump { at } => {
+                // Rising a moment after the feet left the ground: the lift goes into the throw.
+                if (h.on_ground || now.since(at) < JUMP_THROW) && now.since(at) < JUMP_GIVE_UP {
+                    return running(hold(w), angles, h.on_ground);
+                }
+                self.phase = Phase::Pressed {
+                    at: now,
+                    before: count,
+                    button,
+                };
+                running(press(w, button, Trigger::Hold, 0.0), angles, false)
             }
             Phase::Pressed { at, before, button } => {
                 if out && count < before {
+                    self.landings.push(self.landing(h.gravity));
+                    if self.pile > 1 && count > 0 {
+                        self.pile -= 1;
+                        self.phase = Phase::Draw;
+                        self.started = now;
+                        return running(hold(w), angles, false);
+                    }
                     return Status::Done;
                 }
                 if now.since(at) >= SATCHEL_CONFIRM {
-                    return Status::Failed("the game did not throw the satchel");
+                    return finished(&self.landings, "the game did not throw the satchel");
                 }
-                Status::Running(Request {
-                    weapon: Some(press(w, button, Trigger::Hold, 0.0)),
-                    look: Some(LookIntent::Angles(self.angles())),
-                    movement: None,
-                })
+                running(press(w, button, Trigger::Hold, 0.0), angles, false)
             }
             Phase::Cook { .. } | Phase::Released { .. } => Status::Done,
         }
@@ -293,6 +383,7 @@ impl Thrower {
                     weapon: Some(weapon),
                     look: Some(LookIntent::Angles(angles)),
                     movement: None,
+                    jump: false,
                 })
             }
             Phase::Pressed { at, before, button } => {
@@ -306,10 +397,72 @@ impl Thrower {
                     weapon: Some(press(w, button, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
                     movement: None,
+                    jump: false,
                 })
             }
-            Phase::Cook { .. } | Phase::Released { .. } => Status::Done,
+            Phase::Cook { .. } | Phase::Released { .. } | Phase::Jump { .. } => Status::Done,
         }
+    }
+}
+
+/// Emptying the snarks at an enemy close by. Held down, the game lets one go every 0.3 s while there is room in front
+/// (not with the enemy right against the thrower); they swarm the enemy and bite it where it stands.
+#[derive(Clone, Debug)]
+pub struct Barrage {
+    pub target: PlayerKey,
+    started: SimTime,
+    lost: Option<SimTime>,
+    last_count: Option<i32>,
+    /// Snarks let go.
+    pub thrown: u32,
+}
+
+impl Barrage {
+    pub fn new(target: PlayerKey, now: SimTime) -> Barrage {
+        Barrage {
+            target,
+            started: now,
+            lost: None,
+            last_count: None,
+            thrown: 0,
+        }
+    }
+
+    /// `at`: where the enemy is, while in sight.
+    pub fn update(&mut self, h: &Hands<'_>, at: Option<Vec3>) -> Status {
+        let now = h.now;
+        let w = WeaponId::Snark;
+        let count = h.reserve(w);
+        if let Some(last) = self.last_count
+            && count < last
+        {
+            self.thrown += (last - count) as u32;
+        }
+        self.last_count = Some(count);
+        if count <= 0 || now.since(self.started) > BARRAGE_FOR {
+            return Status::Done;
+        }
+        let Some(at) = at else {
+            let lost = *self.lost.get_or_insert(now);
+            if now.since(lost) > BARRAGE_LOST {
+                return Status::Done;
+            }
+            return Status::Running(Request {
+                weapon: Some(hold(w)),
+                ..Request::default()
+            });
+        };
+        self.lost = None;
+        let weapon = if h.ready(w) {
+            press(w, Attack::Primary, Trigger::Hold, 0.0)
+        } else {
+            hold(w)
+        };
+        Status::Running(Request {
+            weapon: Some(weapon),
+            look: Some(LookIntent::Angles(dir_to_view_angles(at - h.eye))),
+            ..Request::default()
+        })
     }
 }
 
@@ -417,6 +570,142 @@ mod tests {
             th.update(&scene.hands(t, WeaponId::HandGrenade), &mut Unchecked),
             Status::Done
         );
+    }
+
+    #[test]
+    fn a_pile_of_satchels_is_thrown_one_after_another() {
+        let target = Vec3::new(250.0, 0.0, -36.0);
+        let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
+        let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).pile(3);
+        let mut scene = Scene {
+            view: Vec3::new(throw.pitch, throw.yaw, 0.0),
+            arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(4))],
+            prediction: Prediction {
+                current: Some(WeaponId::Satchel),
+                primary_ammo: 4,
+                ..Prediction::default()
+            },
+        };
+        // The game: a press of the primary attack throws one when its cycle allows, a second apart.
+        let (mut carried, mut next, mut out) = (4, 0.0f64, 0);
+        let mut presses = Vec::new();
+        let mut t = 0.0;
+        while t < 6.0 {
+            scene.arsenal[0].reserve = Some(carried);
+            scene.prediction.primary_ammo = carried;
+            scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon {
+                charge_ready: out,
+                next_primary: (next - t) as f32,
+                ..PredictedWeapon::default()
+            });
+            match th.update(&scene.hands(t, WeaponId::Satchel), &mut Unchecked) {
+                Status::Running(r) => {
+                    if r.weapon.is_some_and(|w| w.fire == Fire::Primary) && t >= next && carried > 0 {
+                        carried -= 1;
+                        out = 1;
+                        next = t + 1.0;
+                        presses.push(t);
+                    }
+                }
+                Status::Done => break,
+                Status::Failed(why) => panic!("{why}"),
+            }
+            t += 0.01;
+        }
+        assert_eq!(presses.len(), 3, "{presses:?}");
+        assert_eq!(th.landings.len(), 3);
+        assert!(
+            presses.windows(2).all(|p| p[1] - p[0] < 1.2),
+            "as soon as the game allows: {presses:?}"
+        );
+        assert_eq!(carried, 1, "the pile, not every satchel");
+    }
+
+    #[test]
+    fn a_satchel_from_a_jump_leaves_as_the_bot_rises() {
+        let target = Vec3::new(450.0, 0.0, -36.0);
+        let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
+        let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).from_jump();
+        let mut scene = Scene {
+            view: Vec3::new(throw.pitch, throw.yaw, 0.0),
+            arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(1))],
+            prediction: Prediction {
+                current: Some(WeaponId::Satchel),
+                primary_ammo: 1,
+                ..Prediction::default()
+            },
+        };
+        scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon::default());
+        let Status::Running(r) = th.update(&scene.hands(0.0, WeaponId::Satchel), &mut Unchecked) else {
+            panic!()
+        };
+        let run = r.movement.expect("a run-up");
+        assert!(!r.jump && run.dir.x > 0.99, "runs at the target first: {r:?}");
+        // Running: the throw is solved again for the run, and the view is on it.
+        let run = Vec3::new(250.0, 0.0, 0.0);
+        let solved = ballistics::satchel(&mut Unchecked, Vec3::ZERO, run, target, 800.0);
+        scene.view = Vec3::new(solved.pitch, solved.yaw, 0.0);
+        let mut running = scene.hands(0.3, WeaponId::Satchel);
+        running.velocity = run;
+        let Status::Running(r) = th.update(&running, &mut Unchecked) else {
+            panic!()
+        };
+        assert!(r.jump && r.weapon.unwrap().fire == Fire::None, "then jumps");
+        // Airborne from 0.32 s: the throw waits for the lift.
+        let mut airborne = scene.hands(0.35, WeaponId::Satchel);
+        airborne.on_ground = false;
+        airborne.velocity = Vec3::new(250.0, 0.0, 250.0);
+        let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
+            panic!()
+        };
+        assert_eq!(r.weapon.unwrap().fire, Fire::None);
+        airborne.now = SimTime(0.5);
+        airborne.velocity = Vec3::new(250.0, 0.0, 150.0);
+        let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
+            panic!()
+        };
+        assert_eq!(r.weapon.unwrap().fire, Fire::Primary, "thrown while rising");
+        assert!(th.throw.velocity.z > 0.0 && th.throw.start == Vec3::ZERO);
+        assert!(
+            th.throw.velocity.x > 450.0,
+            "the run carries it on: {:?}",
+            th.throw.velocity
+        );
+    }
+
+    #[test]
+    fn a_barrage_empties_the_snarks_at_an_enemy_close_by() {
+        let mut b = Barrage::new(PlayerKey { slot: 3, userid: 3 }, SimTime(0.0));
+        let mut scene = Scene {
+            view: Vec3::ZERO,
+            arsenal: vec![Armed::new(WeaponId::Snark, None, Some(3))],
+            prediction: Prediction {
+                current: Some(WeaponId::Snark),
+                primary_ammo: 3,
+                ..Prediction::default()
+            },
+        };
+        let enemy = Some(Vec3::new(150.0, 0.0, 0.0));
+        let Status::Running(r) = b.update(&scene.hands(0.0, WeaponId::Snark), enemy) else {
+            panic!()
+        };
+        assert_eq!(r.weapon.unwrap().fire, Fire::Primary);
+        assert!(matches!(r.look, Some(LookIntent::Angles(_))));
+        for (t, left) in [(0.3, 2), (0.6, 1)] {
+            scene.arsenal[0].reserve = Some(left);
+            scene.prediction.primary_ammo = left;
+            assert!(matches!(
+                b.update(&scene.hands(t, WeaponId::Snark), enemy),
+                Status::Running(_)
+            ));
+        }
+        assert_eq!(b.thrown, 2);
+        // Out of sight a moment: held; longer: over.
+        assert!(matches!(
+            b.update(&scene.hands(0.7, WeaponId::Snark), None),
+            Status::Running(_)
+        ));
+        assert_eq!(b.update(&scene.hands(1.2, WeaponId::Snark), None), Status::Done);
     }
 
     #[test]

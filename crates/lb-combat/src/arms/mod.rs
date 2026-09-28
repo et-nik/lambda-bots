@@ -2,11 +2,12 @@
 //!
 //! - [`gauss`]: charging the gauss and letting it go when the view is on the target, or dumping a charge that has
 //!   been held too long.
-//! - [`throw`]: hand grenades (pin, cook, aim, release), satchels and snarks.
+//! - [`throw`]: hand grenades (pin, cook, aim, release), satchels (one, a pile, or from a jump) and snarks (one, or
+//!   all of them at an enemy close by).
 //! - [`mine`]: placing a tripmine on a wall.
 //! - [`launcher`]: the MP5's grenade on a lobbed arc.
 //! - [`scope`]: the crossbow's scope snapped on for a shot and off again.
-//! - [`detonate`]: setting off the bot's satchels, or shooting a tripmine, when an enemy walks up to it.
+//! - [`detonate`]: setting off the bot's satchels (lying, or flying by an enemy), or shooting a tripmine.
 //!
 //! A protocol reads the bot's own state ([`Hands`]) every frame and asks for a weapon, a look and a movement
 //! ([`Request`]); the brain offers them at `Prio::Protocol`, above combat, so a charge or a pulled pin is never
@@ -87,6 +88,8 @@ pub struct Request {
     pub weapon: Option<WeaponIntent>,
     pub look: Option<LookIntent>,
     pub movement: Option<MoveIntent>,
+    /// Jump (a fresh press; held, it stays one jump).
+    pub jump: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

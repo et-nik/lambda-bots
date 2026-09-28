@@ -9,7 +9,7 @@
 //!
 //! BugfixedHL-Rebased is told by its own cvars. Anything else is taken to play by the 2023 update, as current mods do
 //! (hlsdk-portable among them), unless the config names the DLL (`game.dll`); `lb selftest` checks the guess on a
-//! live server.
+//! live server, and the first bot to set its satchels off in a game checks their buttons.
 
 use crate::mechanics::Attack;
 
@@ -110,6 +110,13 @@ impl DllProfile {
     pub fn swap_satchel_buttons(&mut self) {
         self.satchel_swapped = !self.satchel_swapped;
     }
+
+    /// The server was seen to set satchels off with `detonate`.
+    pub fn set_satchel_detonate(&mut self, detonate: Attack) {
+        if self.satchel_detonate() != detonate {
+            self.swap_satchel_buttons();
+        }
+    }
 }
 
 fn other(a: Attack) -> Attack {
@@ -141,5 +148,17 @@ mod tests {
         assert_eq!(p.satchel_detonate(), Attack::Secondary);
         assert_eq!(p.satchel_throw_more(), Attack::Primary);
         assert_eq!(p.grenade_speed(), (4.0, 500.0), "the grenade keeps the classic speed");
+        let mut seen = bhl;
+        seen.set_satchel_detonate(Attack::Primary);
+        assert_eq!(
+            (seen.satchel_detonate(), seen.satchel_throw_more()),
+            (Attack::Primary, Attack::Secondary)
+        );
+        seen.set_satchel_detonate(Attack::Primary);
+        assert_eq!(
+            seen.satchel_detonate(),
+            Attack::Primary,
+            "setting the same button twice keeps it"
+        );
     }
 }

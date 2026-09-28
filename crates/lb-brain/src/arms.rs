@@ -17,12 +17,12 @@
 //!   run away from the blast (yapb ran toward it), checking for ledges.
 //! - **Gauss:** its charge runs whenever the gauss is in hand; nothing else starts while it charges.
 
-use lb_combat::arms::detonate::{MineShot, SatchelTrigger};
+use lb_combat::arms::detonate::{Airburst, Burst, MineShot, SatchelTrigger};
 use lb_combat::arms::gauss::{Gauss, GaussInput};
 use lb_combat::arms::launcher::Lob;
 use lb_combat::arms::mine::Planter;
 use lb_combat::arms::scope::{LOST_HOLD as SCOPE_LOST_HOLD, Scope, Sight};
-use lb_combat::arms::throw::{Kind, Thrower};
+use lb_combat::arms::throw::{Barrage, Kind, Thrower};
 use lb_combat::arms::{Hands, Request, Status};
 use lb_combat::ballistics;
 use lb_combat::fight::drops;
@@ -32,10 +32,10 @@ use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
 use lb_decision::GoalKind;
-use lb_game::mechanics::{WeaponClass, blast_radius, spec};
+use lb_game::mechanics::{Attack, WeaponClass, blast_radius, spec};
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
-use lb_motor::{LookIntent, MoveIntent, Prio};
+use lb_motor::{LookIntent, MoveIntent, Prio, StanceIntent, WeaponIntent};
 use lb_nav_api::NavService;
 use lb_worldq::{TraceQuery, Tracer};
 
@@ -77,9 +77,35 @@ const THROW_REST: [f32; 2] = [3.0, 6.0];
 const TOO_HIGH: f32 = 500.0;
 const SNARK_TOO_HIGH: f32 = 200.0;
 /// An enemy within this of a satchel is worth setting it off.
-const SATCHEL_VICTIM: f32 = 160.0;
+const SATCHEL_VICTIM: f32 = 200.0;
 /// The bot keeps this far beyond a satchel's blast before setting it off.
 const SATCHEL_SPARED: f32 = 24.0;
+/// Satchels go off once the enemy they were thrown at has been out of sight this long after it was seen near them
+/// (for so long it may still be there), or once they have lain this long with nobody in sight.
+const SATCHEL_LOST_WAIT: [f32; 2] = [1.0, 2.5];
+const SATCHEL_LOST_NEAR: f64 = 6.0;
+const SATCHEL_LIE: [f32; 2] = [8.0, 15.0];
+/// A pile is this many satchels (as many as the bot carries).
+const SATCHEL_PILE: [u32; 2] = [2, 4];
+/// At an enemy in sight this far away, a satchel is thrown from a jump and set off as it comes by.
+const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
+/// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
+/// fewest worth it.
+const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
+const BARRAGE_CHANCE: f32 = 0.35;
+const BARRAGE_SNARKS: i32 = 2;
+/// After a barrage the bot runs from the swarm this long; with less health it does not start one.
+const BARRAGE_RUN: f64 = 2.0;
+const BARRAGE_HEALTH: f32 = 50.0;
+/// A satchel flying at the enemy is watched while seen this recently; the enemy while lost this recently.
+const AIRBURST_SEEN: f64 = 0.25;
+/// A satchel in flight by the enemy is set off with the bot taking this share of its damage at most, with this much
+/// health at least.
+const AIRBURST_SELF: f32 = 0.25;
+const AIRBURST_HEALTH: f32 = 70.0;
+/// Backing off a pile takes this long at most; the bot does not close in on the enemy for this long after a throw.
+const PILE_BACK_OFF: f32 = 1.5;
+const SATCHEL_HOLD: f64 = 3.0;
 const MINE_VICTIM: f32 = 140.0;
 /// Far enough to be spared a mine's blast, near enough to hit its small box.
 const MINE_SHOT_BAND: [f32; 2] = [400.0, 800.0];
@@ -90,22 +116,14 @@ const MINE_SPACING: f32 = 96.0;
 const SPAWN_CLEAR: f32 = 256.0;
 /// Quiet this long before laying a mine or clearing one.
 const QUIET: f64 = 5.0;
-/// A dodge lasts this long once started.
+/// A dodge lasts this long once started; a run from a snark is renewed while it is near.
 const DODGE_FOR: f64 = 0.5;
-/// Someone else's snark this close is shot at; the bot's own when it comes back this close.
+const SNARK_RUN_FOR: f64 = 0.3;
+/// Someone else's snark this close is run from (or burnt with the egon); the bot's own when it comes back this close.
 const SNARK_NEAR: f32 = 300.0;
-const OWN_SNARK_NEAR: f32 = 150.0;
-/// A snark this close is shot even with a player in sight, unless that player is closer than `SNARK_OVER_PLAYER`.
-const SNARK_BITING: f32 = 150.0;
+const OWN_SNARK_NEAR: f32 = 250.0;
+/// With the egon in hand, a snark is burnt unless a player in sight is closer than this.
 const SNARK_OVER_PLAYER: f32 = 300.0;
-/// Snarks are shot with these, best first: none has a blast.
-const SNARK_GUNS: [WeaponId; 5] = [
-    WeaponId::Shotgun,
-    WeaponId::Mp5,
-    WeaponId::Glock,
-    WeaponId::Python,
-    WeaponId::Hornetgun,
-];
 /// Navigation keeps off a known beam this long, told again after `BEAM_REPORT`.
 const BEAM_AVOID: f32 = 60.0;
 const BEAM_REPORT: f64 = 30.0;
@@ -118,6 +136,8 @@ pub enum Active {
     Mine(Planter),
     Lob(Lob),
     Detonate(SatchelTrigger),
+    Airburst(Airburst),
+    Barrage(Barrage),
     Shoot(MineShot),
     Scope(Scope),
 }
@@ -129,6 +149,8 @@ impl Active {
             Active::Mine(_) => "tripmine",
             Active::Lob(_) => "m203",
             Active::Detonate(_) => "detonate",
+            Active::Airburst(_) => "satchel in flight",
+            Active::Barrage(_) => "snark barrage",
             Active::Shoot(_) => "shoot a mine",
             Active::Scope(_) => "scope",
         }
@@ -144,8 +166,13 @@ pub struct ArmsStats {
     pub mines: u32,
     pub lobs: u32,
     pub detonations: u32,
+    /// Why satchels were set off.
+    pub satchel_offs: Vec<(&'static str, u32)>,
+    pub barrages: u32,
     pub mine_shots: u32,
     pub dodges: u32,
+    /// Runs from snarks.
+    pub snark_runs: u32,
     /// Zoomed crossbow shots, the times the scope went on, and why it came off.
     pub scoped: u32,
     pub zooms: u32,
@@ -156,6 +183,14 @@ pub struct ArmsStats {
 }
 
 impl ArmsStats {
+    fn satchel_off(&mut self, why: &'static str) {
+        self.detonations += 1;
+        match self.satchel_offs.iter_mut().find(|(w, _)| *w == why) {
+            Some(e) => e.1 += 1,
+            None => self.satchel_offs.push((why, 1)),
+        }
+    }
+
     fn failure(&mut self, protocol: &'static str, why: &'static str) {
         self.failed += 1;
         match self.failures.iter_mut().find(|(p, w, _)| *p == protocol && *w == why) {
@@ -171,8 +206,17 @@ pub struct Arms {
     pub active: Option<Active>,
     pub stats: ArmsStats,
     pub last_failure: Option<&'static str>,
-    /// This server's satchel buttons turned out the other way round than its DLL profile says.
-    pub satchel_swapped: bool,
+    /// The button that set this bot's satchels off, for the server to learn its satchel buttons from.
+    pub satchel_fact: Option<Attack>,
+    /// The satchels out: whom they were thrown at and when they go off anyway.
+    satchels: Option<SatchelPlan>,
+    /// Why the satchels being set off go off.
+    detonate_why: &'static str,
+    /// The throw under way: at whom, and whether its satchel is to go off in flight; how many of its satchels are
+    /// noted as thrown.
+    throw_aim: Option<(Option<PlayerKey>, bool)>,
+    landed: usize,
+    next_barrage: SimTime,
     /// A fired rocket is guided until then; the point it was fired at and the target.
     pub guide: Option<(SimTime, Vec3, PlayerKey)>,
     /// The bot's own rocket or launched grenade is on its way to the target until then.
@@ -196,16 +240,16 @@ pub struct Arms {
 }
 
 impl Arms {
-    /// A new life: what was going on stops; statistics and what was learned about the server stay.
+    /// A new life: what was going on stops; statistics stay.
     pub fn reset(&mut self) {
         let stats = std::mem::take(&mut self.stats);
-        let swapped = self.satchel_swapped;
+        let fact = self.satchel_fact;
         let mut gauss = std::mem::take(&mut self.gauss);
         gauss.reset();
         *self = Arms {
             gauss,
             stats,
-            satchel_swapped: swapped,
+            satchel_fact: fact,
             ..Arms::default()
         };
     }
@@ -267,6 +311,37 @@ fn near_beam(p: Vec3, a: Vec3, b: Vec3) -> bool {
     (on.truncate() - p.truncate()).length() <= 20.0 && (on.z - p.z).abs() <= 36.0
 }
 
+/// How a throw is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Way {
+    Grenade,
+    /// A few satchels at one spot, to be set off from out of their blast.
+    Pile,
+    /// A satchel from a jump, set off as it comes by the enemy.
+    Airburst,
+    Snark,
+}
+
+/// The bot's satchels out: whom they were thrown at, and when they go off without a sight of an enemy by them.
+#[derive(Clone, Copy, Debug)]
+struct SatchelPlan {
+    target: Option<PlayerKey>,
+    /// Off once the target has been out of sight this long near them.
+    lost_wait: f64,
+    /// Off by then with nobody in sight.
+    lie_until: SimTime,
+}
+
+impl SatchelPlan {
+    fn roll(target: Option<PlayerKey>, now: SimTime, rng: &mut BotRng) -> SatchelPlan {
+        SatchelPlan {
+            target,
+            lost_wait: f64::from(rng.combat.range_f32(SATCHEL_LOST_WAIT[0], SATCHEL_LOST_WAIT[1])),
+            lie_until: now + f64::from(rng.combat.range_f32(SATCHEL_LIE[0], SATCHEL_LIE[1])),
+        }
+    }
+}
+
 /// Near the shooter's end of the line of fire: an explosive would burst on whoever stands there.
 const CROWD_REACH: f32 = 350.0;
 const CROWD_RADIUS: f32 = 64.0;
@@ -319,10 +394,7 @@ fn clear_line(tracer: &mut dyn Tracer, from: Vec3, to: Vec3) -> bool {
 
 impl BotBrain {
     pub(crate) fn hands<'a>(&self, body: &'a Body) -> Hands<'a> {
-        let mut dll = body.dll;
-        if self.mind.arms.satchel_swapped {
-            dll.swap_satchel_buttons();
-        }
+        let dll = body.dll;
         Hands {
             now: body.now,
             eye: body.eye,
@@ -363,13 +435,16 @@ impl BotBrain {
         if self.mind.arms.busy() || body.on_ladder {
             return;
         }
-        if satchel_out == Some(1) && self.detonation(body) {
+        if satchel_out == Some(1) && self.detonation(body, rng) {
             return;
         }
         if self.mine_shot(body, nav) {
             return;
         }
         if self.lob(body, nav, rng) {
+            return;
+        }
+        if self.barrage(body, ch, rng) {
             return;
         }
         if self.throw(body, ch, nav, rng) {
@@ -400,31 +475,96 @@ impl BotBrain {
         }
     }
 
-    fn detonation(&mut self, body: &Body) -> bool {
+    /// Sets the bot's satchels off, once it is out of their blast (it backs off first): with an enemy by them, with
+    /// the enemy they were thrown at out of sight a moment after it was near them, or after they have lain a while
+    /// with nobody in sight.
+    fn detonation(&mut self, body: &Body, rng: &mut BotRng) -> bool {
         let now = body.now;
-        let charges = &self.explosives.charges;
-        if charges.is_empty() {
+        if self.explosives.charges.is_empty() {
+            self.mind.arms.satchels = None;
             return false;
         }
-        let victim = self.beliefs.enemies().filter(|t| fresh(t, now)).any(|t| {
-            charges
-                .iter()
-                .any(|c| c.pos.distance(t.pos) <= SATCHEL_VICTIM && c.pos.distance(t.pos) < c.pos.distance(body.origin))
+        let plan = *self
+            .mind
+            .arms
+            .satchels
+            .get_or_insert_with(|| SatchelPlan::roll(None, now, rng));
+        let blast = blast_radius(body.damages.satchel);
+        let charges: smallvec::SmallVec<[Vec3; 5]> = self
+            .explosives
+            .charges
+            .iter()
+            .map(|c| c.at(now, body.gravity))
+            .collect();
+        let near = |p: Vec3, reach: f32| charges.iter().any(|c| c.distance(p) <= reach);
+        let victim = self
+            .beliefs
+            .enemies()
+            .any(|t| fresh(t, now) && near(t.pos, SATCHEL_VICTIM));
+        let lost = plan.target.and_then(|k| self.beliefs.track(k)).is_some_and(|t| {
+            let gone = now.since(t.last_seen);
+            t.state != TrackState::Visible && gone >= plan.lost_wait && gone <= SATCHEL_LOST_NEAR && near(t.pos, blast)
         });
-        if !victim {
+        let calm = self.beliefs.visible_enemies().next().is_none();
+        let why = if victim {
+            "an enemy by them"
+        } else if lost {
+            "the enemy out of sight by them"
+        } else if calm && now >= plan.lie_until {
+            "lying long enough"
+        } else {
             return false;
-        }
+        };
         let nearest = charges
             .iter()
-            .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)))
-            .map(|c| c.pos)
+            .copied()
+            .min_by(|a, b| a.distance(body.origin).total_cmp(&b.distance(body.origin)))
             .unwrap_or(body.origin);
-        if nearest.distance(body.origin) < blast_radius(body.damages.satchel) + SATCHEL_SPARED {
+        if nearest.distance(body.origin) < blast + SATCHEL_SPARED {
             let away = (body.origin - nearest).truncate().normalize_or(Vec2::X);
             self.mind.arms.dodge = Some((now + DODGE_FOR, away));
             return true;
         }
+        self.mind.arms.detonate_why = why;
         self.mind.arms.active = Some(Active::Detonate(SatchelTrigger::new(now)));
+        true
+    }
+
+    /// Ten times a second: all the snarks at an enemy in sight close by, when the bot carries a few. Swarmed, the
+    /// enemy is bitten where it stands.
+    fn barrage(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) -> bool {
+        let now = body.now;
+        if now < self.mind.arms.next_barrage {
+            return false;
+        }
+        self.mind.arms.next_barrage = now + THROW_CHECK;
+        let snarks = body.armed(WeaponId::Snark).and_then(|a| a.reserve).unwrap_or(0);
+        // A hurt bot keeps away from a swarm that may turn on it.
+        if snarks < BARRAGE_SNARKS
+            || body.health < BARRAGE_HEALTH
+            || !body.allows(WeaponId::Snark)
+            || body.waterlevel >= 2
+        {
+            return false;
+        }
+        let Some(t) = self
+            .mind
+            .target
+            .and_then(|k| self.beliefs.track(k))
+            .filter(|t| t.state == TrackState::Visible)
+        else {
+            return false;
+        };
+        let d = t.pos.distance(body.origin);
+        if !(BARRAGE_BAND[0]..=BARRAGE_BAND[1]).contains(&d) || (t.pos.z - body.origin.z).abs() > 72.0 {
+            return false;
+        }
+        let bold = if ch.aggression > ch.fear { 1.1 } else { 0.9 };
+        if rng.combat.next_f32() >= (BARRAGE_CHANCE * ch.skill.throw_rate * bold).min(0.9) {
+            return false;
+        }
+        self.mind.arms.active = Some(Active::Barrage(Barrage::new(t.who, now)));
+        self.mind.arms.next_barrage = now + f64::from(rng.combat.range_f32(THROW_REST[0], THROW_REST[1]));
         true
     }
 
@@ -557,47 +697,41 @@ impl BotBrain {
             GRENADE_BAND
         };
         let in_band = |band: [f32; 2]| (band[0]..=band[1]).contains(&d);
-        // The kinds worth a throw now, best first: at an enemy out of sight a grenade, a satchel close by, a snark;
-        // at one in sight a snark, a grenade, a satchel when it is coming this way.
-        let mut kinds: smallvec::SmallVec<[Kind; 3]> = smallvec::SmallVec::new();
-        let grenade = count(WeaponId::HandGrenade) > 0 && in_band(grenade_band);
-        let satchel = count(WeaponId::Satchel) > 0
-            && self.explosives.charges.is_empty()
-            && in_band(SATCHEL_BAND)
-            && (!seen || coming || war);
-        let snark = count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND);
-        if seen {
-            kinds.extend(
-                [(snark, Kind::Snark), (grenade, Kind::Grenade), (satchel, Kind::Satchel)]
-                    .into_iter()
-                    .filter(|k| k.0)
-                    .map(|k| k.1),
-            );
-        } else {
-            if satchel && d < 300.0 {
-                kinds.push(Kind::Satchel);
-            }
-            kinds.extend(
-                [(grenade, Kind::Grenade), (satchel, Kind::Satchel), (snark, Kind::Snark)]
-                    .into_iter()
-                    .filter(|k| k.0 && !(k.1 == Kind::Satchel && d < 300.0))
-                    .map(|k| k.1),
-            );
+        // The throws that fit, with their chance per look: a grenade; a pile of satchels at an enemy out of sight or
+        // coming this way; a satchel from a jump, set off as it comes by, at one in sight further off; a snark.
+        let satchels = count(WeaponId::Satchel);
+        let free = self.explosives.charges.is_empty();
+        let mut ways: smallvec::SmallVec<[(Way, f32); 4]> = smallvec::SmallVec::new();
+        if count(WeaponId::HandGrenade) > 0 && in_band(grenade_band) {
+            ways.push((Way::Grenade, if seen { SEEN_GRENADE } else { UNSEEN_GRENADE }));
         }
-        let Some(&kind) = kinds.first() else { return false };
-        let base = match (kind, seen) {
-            (Kind::Grenade, false) => UNSEEN_GRENADE,
-            (Kind::Satchel, false) => UNSEEN_SATCHEL,
-            (Kind::Snark, false) => UNSEEN_SNARK,
-            (Kind::Grenade, true) => SEEN_GRENADE,
-            (Kind::Satchel, true) => SEEN_SATCHEL,
-            (Kind::Snark, true) => SEEN_SNARK,
+        if satchels > 0 && free && in_band(SATCHEL_BAND) && (!seen || coming || war) {
+            ways.push((Way::Pile, if seen { SEEN_SATCHEL } else { UNSEEN_SATCHEL }));
+        }
+        if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) {
+            ways.push((Way::Airburst, SEEN_SATCHEL));
+        }
+        if count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND) {
+            ways.push((Way::Snark, if seen { SEEN_SNARK } else { UNSEEN_SNARK }));
+        }
+        let Some(best) = ways.iter().map(|w| w.1).max_by(f32::total_cmp) else {
+            return false;
         };
         let bold = if ch.aggression > ch.fear { 1.1 } else { 0.9 };
-        let chance = (base * ch.skill.throw_rate * bold * if war { 2.0 } else { 1.0 }).min(0.9);
+        let chance = (best * ch.skill.throw_rate * bold * if war { 2.0 } else { 1.0 }).min(0.9);
         if rng.combat.next_f32() >= chance {
             return false;
         }
+        // One of them, as likely as its chance.
+        let mut pick = rng.combat.next_f32() * ways.iter().map(|w| w.1).sum::<f32>();
+        let way = ways
+            .iter()
+            .find(|w| {
+                pick -= w.1;
+                pick <= 0.0
+            })
+            .or(ways.last())
+            .map_or(Way::Grenade, |w| w.0);
         // A target in sight is led by where it will be when the throw comes down.
         let lead = if seen && t.velocity_known(now) {
             t.vel.truncate().extend(0.0) * (WAR_LEAD + d / 650.0)
@@ -605,26 +739,45 @@ impl BotBrain {
             Vec3::ZERO
         };
         let floor = t.pos + lead - Vec3::Z * 32.0;
-        let throw = match kind {
-            Kind::Grenade => {
+        let (kind, throw) = match way {
+            Way::Grenade => {
                 let solved = ballistics::grenade(nav, body.eye, body.velocity, floor, body.gravity, body.dll, 2.4);
                 let clear = if war { WAR_SELF_CLEAR } else { SELF_CLEAR };
                 match solved {
-                    Some(s) if floor.distance(body.origin) >= clear => s,
+                    Some(s) if floor.distance(body.origin) >= clear => (Kind::Grenade, s),
                     _ => return false,
                 }
             }
-            Kind::Satchel | Kind::Snark => {
+            Way::Pile | Way::Airburst | Way::Snark => {
                 if !clear_line(nav, body.eye, floor + Vec3::Z * 8.0) {
                     return false;
                 }
-                ballistics::satchel(nav, body.origin, body.velocity, floor, body.gravity)
+                let kind = if way == Way::Snark { Kind::Snark } else { Kind::Satchel };
+                (
+                    kind,
+                    ballistics::satchel(nav, body.origin, body.velocity, floor, body.gravity),
+                )
             }
         };
         let target = if kind == Kind::Snark { t.pos } else { floor };
-        let thrower = Thrower::new(kind, target, throw, now);
+        let mut thrower = Thrower::new(kind, target, throw, now);
+        match way {
+            Way::Pile => {
+                let pile = rng
+                    .combat
+                    .range_f32(SATCHEL_PILE[0] as f32, SATCHEL_PILE[1] as f32 + 0.99) as u32;
+                thrower = thrower.pile(pile.min(satchels as u32));
+            }
+            Way::Airburst => thrower = thrower.from_jump(),
+            Way::Grenade | Way::Snark => {}
+        }
         // At an enemy in sight a grenade goes at once: it will not wait for a cooked one.
-        let thrower = if seen { thrower.quick() } else { thrower };
+        if seen {
+            thrower = thrower.quick();
+        }
+        self.mind.arms.throw_aim =
+            matches!(way, Way::Pile | Way::Airburst).then_some((Some(t.who), way == Way::Airburst));
+        self.mind.arms.landed = 0;
         self.mind.arms.active = Some(Active::Throw(thrower));
         self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(THROW_REST[0], THROW_REST[1]));
         true
@@ -722,7 +875,15 @@ impl BotBrain {
         if let Some(mut active) = self.mind.arms.active.take() {
             let in_sight = self.beliefs.visible_enemies().next().is_some();
             let status = match &mut active {
-                Active::Throw(t) => t.update(&hands, nav),
+                Active::Throw(t) => {
+                    let status = t.update(&hands, nav);
+                    // Each satchel of a pile is noted as it leaves the hand.
+                    for landing in t.landings.iter().skip(self.mind.arms.landed) {
+                        self.explosives.thrown_satchel(*landing, now);
+                    }
+                    self.mind.arms.landed = t.landings.len();
+                    status
+                }
                 // Laying a mine with an enemy in sight is left for later.
                 Active::Mine(_) if in_sight => Status::Failed("an enemy came into sight"),
                 Active::Mine(p) => p.update(&hands, nav),
@@ -735,6 +896,20 @@ impl BotBrain {
                     l.update(&hands, nav, clear)
                 }
                 Active::Detonate(d) => d.update(&hands),
+                Active::Airburst(a) => {
+                    let burst = self.burst(a.target, body);
+                    a.update(&hands, burst)
+                }
+                Active::Barrage(b) => {
+                    let at = self
+                        .beliefs
+                        .track(b.target)
+                        .filter(|t| {
+                            t.state == TrackState::Visible && t.pos.distance(body.origin) <= BARRAGE_BAND[1] * 1.2
+                        })
+                        .map(|t| t.pos);
+                    b.update(&hands, at)
+                }
                 Active::Scope(sc) => {
                     let current = self.mind.target == Some(sc.target);
                     let track = self.beliefs.track(sc.target);
@@ -768,8 +943,15 @@ impl BotBrain {
                     requests.push(r);
                     self.mind.arms.active = Some(active);
                 }
-                Status::Done => self.finished(&active, body),
+                Status::Done => self.finished(&active, body, rng),
                 Status::Failed(why) => {
+                    self.mind.arms.throw_aim = None;
+                    if let Active::Airburst(a) = &active {
+                        tracing::info!(
+                            "satchel in flight not set off: {why}; it came within {:?} of the enemy",
+                            a.closest
+                        );
+                    }
                     tracing::debug!("{} failed: {why}", active.name());
                     self.mind.arms.stats.failure(active.name(), why);
                     self.mind.arms.last_failure = Some(why);
@@ -806,7 +988,47 @@ impl BotBrain {
             if let Some(m) = r.movement {
                 self.intents.movement(Prio::Protocol, m);
             }
+            if r.jump {
+                self.intents.stance(
+                    Prio::Protocol,
+                    StanceIntent {
+                        jump: true,
+                        duck: false,
+                    },
+                );
+            }
         }
+    }
+
+    /// What a satchel thrown at `target` in flight is watched for: where it is while seen, where the target is, and
+    /// whether the bot is out of the blast of its satchels.
+    fn burst(&self, target: PlayerKey, body: &Body) -> Burst {
+        let now = body.now;
+        let satchel = self
+            .explosives
+            .charges
+            .iter()
+            .filter(|c| c.seen.is_some_and(|t| now.since(t) <= AIRBURST_SEEN))
+            .max_by(|a, b| a.since.0.total_cmp(&b.since.0))
+            .map(|c| c.at(now, body.gravity));
+        let enemy = self
+            .beliefs
+            .track(target)
+            .filter(|t| t.state == TrackState::Visible || now.since(t.last_seen) <= AIRBURST_SEEN)
+            .map(|t| t.pos);
+        // Rather than let the satchel pass the enemy, a bot in good health takes a little of its own blast.
+        let blast = blast_radius(body.damages.satchel);
+        let reach = if body.health >= AIRBURST_HEALTH {
+            blast * (1.0 - AIRBURST_SELF)
+        } else {
+            blast + SATCHEL_SPARED
+        };
+        let spared = self
+            .explosives
+            .charges
+            .iter()
+            .all(|c| c.at(now, body.gravity).distance(body.origin) >= reach);
+        Burst { satchel, enemy, spared }
     }
 
     /// How far along the view the first wall is with the gauss in hand, through players (the beam goes through them):
@@ -830,15 +1052,24 @@ impl BotBrain {
         wall
     }
 
-    fn finished(&mut self, active: &Active, body: &Body) {
+    fn finished(&mut self, active: &Active, body: &Body, rng: &mut BotRng) {
         let now = body.now;
+        let aim = self.mind.arms.throw_aim.take();
         let stats = &mut self.mind.arms.stats;
         match active {
             Active::Throw(t) => match t.kind {
                 Kind::Grenade => stats.grenades += 1,
                 Kind::Satchel => {
-                    stats.satchels += 1;
-                    self.explosives.thrown_satchel(t.landing(body.gravity), now);
+                    stats.satchels += t.landings.len() as u32;
+                    let (target, airburst) = aim.unwrap_or((None, false));
+                    self.mind.arms.satchels = Some(SatchelPlan::roll(target, now, rng));
+                    // Closing in would take the bot into its own blast.
+                    self.mind.arms.hold_until = self.mind.arms.hold_until.max(now + SATCHEL_HOLD);
+                    if airburst && let Some(target) = target {
+                        self.mind.arms.active = Some(Active::Airburst(Airburst::new(target, now)));
+                    } else {
+                        self.back_off_satchels(&t.landings, body);
+                    }
                 }
                 Kind::Snark => stats.snarks += 1,
             },
@@ -852,11 +1083,26 @@ impl BotBrain {
                 self.mind.arms.hold_until = self.mind.arms.hold_until.max(landing);
             }
             Active::Detonate(d) => {
-                stats.detonations += 1;
+                stats.satchel_off(self.mind.arms.detonate_why);
                 self.explosives.detonated();
-                if d.learned_swap {
-                    self.mind.arms.satchel_swapped = !self.mind.arms.satchel_swapped;
-                    tracing::info!("the satchel buttons are the other way round on this server");
+                self.mind.arms.satchels = None;
+                self.mind.arms.satchel_fact = d.button.or(self.mind.arms.satchel_fact);
+            }
+            Active::Airburst(a) => {
+                if a.burst() {
+                    stats.satchel_off("in flight by the enemy");
+                    self.explosives.detonated();
+                    self.mind.arms.satchels = None;
+                    self.mind.arms.satchel_fact = a.button.or(self.mind.arms.satchel_fact);
+                }
+            }
+            Active::Barrage(b) => {
+                stats.barrages += 1;
+                stats.snarks += b.thrown;
+                // Away from the swarm before it turns: a snark bites its owner too.
+                if let Some(t) = self.beliefs.track(b.target) {
+                    let away = (body.origin - t.pos).truncate().normalize_or(Vec2::X);
+                    self.mind.arms.dodge = Some((now + BARRAGE_RUN, away));
                 }
             }
             Active::Shoot(_) => stats.mine_shots += 1,
@@ -872,22 +1118,29 @@ impl BotBrain {
         }
     }
 
-    /// Every frame: shoot someone else's snark coming within 300 units, or the bot's own coming back at it within 150
-    /// (a snark bites its owner too), when no player is in sight; with a player in sight 300 units away or more, a
-    /// snark about to bite (within 150) is shot first. yapb shot at its own snarks and hornets whatever they did.
-    pub(crate) fn snark_defense(&mut self, body: &Body) {
-        let now = body.now;
-        let player = self
-            .mind
-            .target
-            .and_then(|k| self.beliefs.track(k))
-            .filter(|t| t.state == TrackState::Visible)
-            .map(|t| t.pos.distance(body.origin));
-        if player.is_some_and(|d| d < SNARK_OVER_PLAYER) || self.mind.arms.busy() {
+    /// After a pile of satchels, out of their blast: away from where they land for as long as it takes.
+    fn back_off_satchels(&mut self, landings: &[Vec3], body: &Body) {
+        let Some(nearest) = landings
+            .iter()
+            .copied()
+            .min_by(|a, b| a.distance(body.origin).total_cmp(&b.distance(body.origin)))
+        else {
             return;
+        };
+        let short = blast_radius(body.damages.satchel) + SATCHEL_SPARED - nearest.distance(body.origin);
+        if short > 0.0 {
+            let away = (body.origin - nearest).truncate().normalize_or(Vec2::X);
+            let secs = (short / body.maxspeed.max(1.0) + 0.2).min(PILE_BACK_OFF);
+            self.mind.arms.dodge = Some((body.now + f64::from(secs), away));
         }
-        // With a player in sight only a snark about to bite is worth the turn.
-        let reach = |r: f32| if player.is_some() { r.min(SNARK_BITING) } else { r };
+    }
+
+    /// Every frame, a snark near (someone else's within 300 units, the bot's own coming back at it within 150: a
+    /// snark bites its owner too). With the egon in hand the bot burns it, when no player in sight is closer than 300
+    /// units; with anything else it runs from it, which works far better than shooting at a small, hopping snark.
+    /// yapb shot at its own snarks and hornets whatever they did.
+    pub(crate) fn snark_defense(&mut self, body: &Body, nav: &mut dyn NavService) {
+        let now = body.now;
         let snark = self
             .explosives
             .flying
@@ -897,46 +1150,54 @@ impl BotBrain {
                 let d = f.pos.distance(body.origin);
                 let coming = f.vel.dot(body.origin - f.pos) > 0.0;
                 if f.own {
-                    d <= reach(OWN_SNARK_NEAR) && coming
+                    d <= OWN_SNARK_NEAR && coming
                 } else {
-                    d <= reach(SNARK_NEAR)
+                    d <= SNARK_NEAR
                 }
             })
-            .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)));
+            .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)))
+            .copied();
         let Some(s) = snark else { return };
-        // Small, fast and close: a gun without a blast, the one in hand if it is one.
-        let usable = |w: WeaponId| body.allows(w) && body.armed(w).is_some_and(|a| a.loaded());
-        let w = body
-            .weapon
-            .filter(|w| SNARK_GUNS.contains(w) && usable(*w))
-            .or_else(|| SNARK_GUNS.into_iter().find(|w| usable(*w)))
-            .unwrap_or(WeaponId::Crowbar);
-        // Over a player in sight, the snark must win the view and the trigger.
-        let prio = if player.is_some() { Prio::Protocol } else { Prio::Threat };
-        let (forward, _, _) = view_angle_vectors(self.motor.view);
-        let on_it = forward.dot((s.pos - body.eye).normalize_or_zero()) > 0.98;
-        self.intents.look(
-            prio,
-            LookIntent::Point {
-                at: s.pos,
-                engaged: true,
-            },
-        );
-        let spec = spec(w);
-        self.intents.weapon(
-            prio,
-            lb_motor::WeaponIntent {
-                select: Some(w),
-                fire: if on_it && body.weapon == Some(w) {
-                    lb_motor::Fire::Primary
-                } else {
-                    lb_motor::Fire::None
+        let player = self
+            .mind
+            .target
+            .and_then(|k| self.beliefs.track(k))
+            .filter(|t| t.state == TrackState::Visible)
+            .map(|t| t.pos.distance(body.origin));
+        let egon = body.weapon == Some(WeaponId::Egon)
+            && body.allows(WeaponId::Egon)
+            && body.armed(WeaponId::Egon).is_some_and(|a| a.loaded());
+        if egon && !self.mind.arms.busy() && player.is_none_or(|d| d >= SNARK_OVER_PLAYER) {
+            // Over a player in sight, the snark must win the view and the trigger.
+            let prio = if player.is_some() { Prio::Protocol } else { Prio::Threat };
+            let (forward, _, _) = view_angle_vectors(self.motor.view);
+            let on_it = forward.dot((s.pos - body.eye).normalize_or_zero()) > 0.97;
+            self.intents.look(
+                prio,
+                LookIntent::Point {
+                    at: s.pos,
+                    engaged: true,
                 },
-                trigger: spec.trigger,
-                interval: self.mind.click_interval.max(spec.cycle),
-                reload: false,
-            },
-        );
+            );
+            let mut fire = WeaponIntent::hold(WeaponId::Egon);
+            if on_it {
+                fire.fire = lb_motor::Fire::Primary;
+            }
+            self.intents.weapon(prio, fire);
+            return;
+        }
+        // Run from it, sideways when straight away is a drop. The run takes the legs only: the bot keeps fighting.
+        let away = (body.origin - s.pos).truncate().normalize_or(Vec2::X);
+        let options = [away, Vec2::new(-away.y, away.x), Vec2::new(away.y, -away.x)];
+        if let Some(dir) = options
+            .into_iter()
+            .find(|d| !drops(nav, body.origin, *d * body.maxspeed))
+        {
+            if self.mind.arms.dodge.is_none_or(|(until, _)| now >= until) {
+                self.mind.arms.stats.snark_runs += 1;
+            }
+            self.mind.arms.dodge = Some((now + SNARK_RUN_FOR, dir));
+        }
     }
 
     /// Every frame, after everything else asked to move: a move that would take the bot into the beam of an armed
@@ -1138,6 +1399,151 @@ mod tests {
         None
     }
 
+    fn params() -> BeliefParams {
+        BeliefParams {
+            track_forget: 12.0,
+            maxspeed: 300.0,
+        }
+    }
+
+    /// The satchel radio reports a charge out.
+    fn radio(b: &mut Body, carried: i32) {
+        use lb_game::self_state::{PredictedWeapon, Prediction};
+        b.arsenal.push(Armed::new(WeaponId::Satchel, None, Some(carried)));
+        let mut p = Prediction::default();
+        p.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon {
+            charge_ready: 1,
+            ..PredictedWeapon::default()
+        });
+        b.prediction = Some(p);
+    }
+
+    /// Runs the weapon options every tenth of a second from `from` until a protocol starts or `until`.
+    fn first_protocol(
+        brain: &mut BotBrain,
+        from: f64,
+        until: f64,
+        enemy: Option<(Vec3, f64)>,
+        dress: &dyn Fn(&mut Body),
+    ) -> Option<(f64, &'static str)> {
+        let mut rng = BotRng::new(7, 7);
+        let mut t = from;
+        while t < until {
+            if let Some((pos, seen_until)) = enemy
+                && t <= seen_until
+            {
+                brain.beliefs.on_sighting(&seen(t, pos));
+            }
+            brain.update(SimTime(t), &params());
+            let mut b = body(t);
+            dress(&mut b);
+            brain.weapon_options(&b, &character(), &mut Open, &mut rng);
+            if let Some(a) = &brain.mind.arms.active {
+                return Some((t, a.name()));
+            }
+            t += 0.1;
+        }
+        None
+    }
+
+    #[test]
+    fn satchels_lying_a_while_go_off_with_nobody_in_sight() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .thrown_satchel(Vec3::new(600.0, 0.0, -36.0), SimTime(0.0));
+        let (t, what) = first_protocol(&mut brain, 0.0, 20.0, None, &|b| radio(b, 1)).expect("set off");
+        assert_eq!(what, "detonate");
+        assert!((8.0..=15.1).contains(&t), "after lying 8–15 s: {t}");
+        assert_eq!(brain.mind.arms.detonate_why, "lying long enough");
+        // Lying next to the bot: it backs off first.
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .thrown_satchel(Vec3::new(100.0, 0.0, -36.0), SimTime(0.0));
+        assert_eq!(first_protocol(&mut brain, 0.0, 20.0, None, &|b| radio(b, 1)), None);
+        let (_, away) = brain.mind.arms.dodge.expect("backing off");
+        assert!(away.x < -0.9, "away from the charge: {away:?}");
+    }
+
+    #[test]
+    fn satchels_go_off_once_the_enemy_they_were_thrown_at_is_out_of_sight_by_them() {
+        let enemy = Vec3::new(500.0, 0.0, 0.0);
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .thrown_satchel(Vec3::new(560.0, 60.0, -36.0), SimTime(0.0));
+        let mut rng = BotRng::new(3, 3);
+        let plan = SatchelPlan::roll(Some(PlayerKey { slot: 5, userid: 50 }), SimTime(0.0), &mut rng);
+        brain.mind.arms.satchels = Some(plan);
+        // In sight 250 units from the charge until t = 1: not by them yet. No grenades to throw at it meanwhile.
+        let far = Vec3::new(500.0, 320.0, 0.0);
+        let satchels_only = |b: &mut Body| {
+            b.arsenal.retain(|a| a.id != WeaponId::HandGrenade);
+            radio(b, 1);
+        };
+        let (t, what) = first_protocol(&mut brain, 0.0, 6.0, Some((far, 1.0)), &satchels_only).expect("set off");
+        assert_eq!(what, "detonate");
+        assert!(
+            t >= 1.0 + plan.lost_wait - 0.11 && t <= 1.0 + plan.lost_wait + 0.25,
+            "{t} {}",
+            plan.lost_wait
+        );
+        assert_eq!(brain.mind.arms.detonate_why, "the enemy out of sight by them");
+        // Walking up to them in sight: at once.
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .thrown_satchel(Vec3::new(560.0, 60.0, -36.0), SimTime(0.0));
+        let (t, _) = first_protocol(&mut brain, 0.0, 6.0, Some((enemy, 6.0)), &satchels_only).expect("set off");
+        assert!(t < 0.3, "{t}");
+        assert_eq!(brain.mind.arms.detonate_why, "an enemy by them");
+    }
+
+    #[test]
+    fn snarks_are_run_from_unless_the_egon_is_in_hand() {
+        use lb_knowledge::ProjectileSighting;
+        let snark = |brain: &mut BotBrain, t: f64| {
+            brain.explosives.on_sighting(&ProjectileSighting {
+                t: SimTime(t),
+                kind: lb_game::entities::ProjectileKind::Snark,
+                index: 70,
+                pos: Vec3::new(150.0, 0.0, -20.0),
+                vel: Vec3::new(-200.0, 0.0, 0.0),
+                own: false,
+                beam: None,
+            });
+        };
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        snark(&mut brain, 1.0);
+        brain.snark_defense(&body(1.0), &mut Open);
+        let (_, away) = brain.mind.arms.dodge.expect("running");
+        assert!(away.x < -0.9, "away from the snark: {away:?}");
+        assert!(brain.intents.weapon.is_none(), "the gun is left to the fight");
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        snark(&mut brain, 1.0);
+        let mut b = body(1.0);
+        b.weapon = Some(WeaponId::Egon);
+        b.arsenal.push(Armed::new(WeaponId::Egon, None, Some(50)));
+        brain.motor.view = lb_core::math::dir_to_view_angles(Vec3::new(150.0, 0.0, -20.0) - b.eye);
+        brain.snark_defense(&b, &mut Open);
+        assert!(brain.mind.arms.dodge.is_none());
+        let (_, w) = brain.intents.weapon.expect("burning it");
+        assert_eq!((w.select, w.fire), (Some(WeaponId::Egon), lb_motor::Fire::Primary));
+    }
+
+    #[test]
+    fn all_the_snarks_go_at_an_enemy_close_by() {
+        let enemy = Vec3::new(120.0, 20.0, 0.0);
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.beliefs.on_sighting(&seen(0.0, enemy));
+        brain.mind.target = Some(PlayerKey { slot: 5, userid: 50 });
+        let snarks = |b: &mut Body| b.arsenal.push(Armed::new(WeaponId::Snark, None, Some(6)));
+        let (t, what) = first_protocol(&mut brain, 0.0, 3.0, Some((enemy, 3.0)), &snarks).expect("a barrage");
+        assert_eq!(what, "snark barrage");
+        assert!(t < 2.0, "{t}");
+    }
+
     #[test]
     fn grenades_go_after_a_lost_enemy_and_snarks_at_one_in_sight() {
         let enemy = Vec3::new(500.0, 150.0, 0.0);
@@ -1148,28 +1554,30 @@ mod tests {
             Some("grenade"),
             "lost a second ago, 500 units away"
         );
-        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
-        let mut rng = BotRng::new(7, 7);
-        let snarks = [Armed::new(WeaponId::Snark, None, Some(5))];
-        let mut thrown = None;
-        for i in 0..40 {
-            let t = f64::from(i) * 0.1;
-            brain.beliefs.on_sighting(&seen(t, enemy));
-            brain.update(
-                SimTime(t),
-                &BeliefParams {
-                    track_forget: 12.0,
-                    maxspeed: 300.0,
-                },
-            );
-            let mut b = body(t);
-            b.arsenal.extend(snarks);
-            brain.weapon_options(&b, &character(), &mut Open, &mut rng);
-            if let Some(a) = &brain.mind.arms.active {
-                thrown = Some(a.name());
+        // In sight, grenades and snarks both fit: each as likely as its chance, snarks more often.
+        let (mut snarks, mut grenades) = (0, 0);
+        for seed in 0..20u64 {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            let mut rng = BotRng::new(seed, seed);
+            for i in 0..40 {
+                let t = f64::from(i) * 0.1;
+                brain.beliefs.on_sighting(&seen(t, enemy));
+                brain.update(SimTime(t), &params());
+                let mut b = body(t);
+                b.arsenal.push(Armed::new(WeaponId::Snark, None, Some(5)));
+                brain.weapon_options(&b, &character(), &mut Open, &mut rng);
+                match brain.mind.arms.active.as_ref().map(Active::name) {
+                    Some("snark") => snarks += 1,
+                    Some("grenade") => grenades += 1,
+                    Some(other) => panic!("{other}"),
+                    None => continue,
+                }
                 break;
             }
         }
-        assert_eq!(thrown, Some("snark"), "an enemy in sight is sent snarks first");
+        assert!(
+            snarks > grenades && grenades > 0,
+            "{snarks} snarks, {grenades} grenades"
+        );
     }
 }

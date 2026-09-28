@@ -1,7 +1,8 @@
 //! What a bot knows of explosives around it.
 //!
-//! - **Its own satchels:** where it threw them (the solved landing point), moved to where it sees them; gone when
-//!   they go off or when the bot dies (the game removes a dead player's satchels).
+//! - **Its own satchels:** where it threw them (the solved landing point), moved to where it sees them, flying or
+//!   lying (each by its entity once seen); gone when they go off or when the bot dies (the game removes a dead
+//!   player's satchels).
 //! - **Tripmines:** its own where it placed them, and any it has seen (the mine or its beam) with the beam's line;
 //!   forgotten when an explosion goes off at the mine.
 //! - **Projectiles** in flight or lying about that it sees: where they are and how they move, and for grenades,
@@ -43,6 +44,21 @@ pub struct Flying {
 pub struct Charge {
     pub pos: Vec3,
     pub since: SimTime,
+    /// The satchel's entity, once seen.
+    pub index: Option<u16>,
+    /// How it moved and when, when last seen.
+    pub vel: Vec3,
+    pub seen: Option<SimTime>,
+}
+
+impl Charge {
+    /// Where it is at `now`: where it was seen, carried on by its motion for a moment (a satchel falls at half
+    /// gravity).
+    pub fn at(&self, now: SimTime, sv_gravity: f32) -> Vec3 {
+        let Some(seen) = self.seen else { return self.pos };
+        let dt = (now.since(seen) as f32).clamp(0.0, CHARGE_CARRY);
+        self.pos + self.vel * dt - Vec3::Z * (0.5 * sv_gravity * PROJECTILE_GRAVITY * dt * dt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,8 +88,14 @@ const FLYING_MEMORY: f64 = 0.4;
 const LYING_MEMORY: f64 = 10.0;
 /// Two sightings of explosives this close are the same one.
 const SAME_SPOT: f32 = 24.0;
-/// An own satchel seen this close to where one was thrown is that one.
+/// An own satchel not yet seen is taken for the first one seen within this of where it should land, or thrown this
+/// recently (it is still flying there).
 const OWN_CHARGE_MATCH: f32 = 200.0;
+const OWN_CHARGE_FLYING: f64 = 3.0;
+/// A seen satchel's motion is carried on this long at most.
+const CHARGE_CARRY: f32 = 0.2;
+/// A satchel first seen this shortly before its throw is noted is the one thrown (the game shows it at once).
+const JUST_THROWN: f64 = 0.5;
 /// An explosion this close to a mine or charge set it off.
 const BLOWN_WITH: f32 = 64.0;
 /// Faster than this when first seen: an MP5 grenade.
@@ -93,9 +115,22 @@ pub struct Explosives {
 
 impl Explosives {
     pub fn thrown_satchel(&mut self, landing: Vec3, now: SimTime) {
+        // Seen leaving the hand before the throw was noted: that one.
+        if let Some(c) = self
+            .charges
+            .iter_mut()
+            .filter(|c| c.index.is_some() && now.since(c.since) <= JUST_THROWN)
+            .max_by(|a, b| a.since.0.total_cmp(&b.since.0))
+        {
+            c.since = now;
+            return;
+        }
         self.charges.push(Charge {
             pos: landing,
             since: now,
+            index: None,
+            vel: Vec3::ZERO,
+            seen: None,
         });
     }
 
@@ -120,14 +155,39 @@ impl Explosives {
     pub fn on_sighting(&mut self, s: &ProjectileSighting) {
         match s.kind {
             ProjectileKind::Satchel if s.own => {
-                let nearest = self
-                    .charges
-                    .iter_mut()
-                    .filter(|c| c.pos.distance(s.pos) <= OWN_CHARGE_MATCH)
-                    .min_by(|a, b| a.pos.distance(s.pos).total_cmp(&b.pos.distance(s.pos)));
-                match nearest {
-                    Some(c) => c.pos = s.pos,
-                    None => self.charges.push(Charge { pos: s.pos, since: s.t }),
+                let known = self.charges.iter().position(|c| c.index == Some(s.index));
+                // Not seen before: the charge thrown last that has not been seen, while it may still fly, or the one
+                // meant to land nearest.
+                let unseen = || {
+                    let fresh = self
+                        .charges
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.index.is_none() && s.t.since(c.since) <= OWN_CHARGE_FLYING)
+                        .max_by(|a, b| a.1.since.0.total_cmp(&b.1.since.0))
+                        .map(|(i, _)| i);
+                    fresh.or_else(|| {
+                        self.charges
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.index.is_none() && c.pos.distance(s.pos) <= OWN_CHARGE_MATCH)
+                            .min_by(|a, b| a.1.pos.distance(s.pos).total_cmp(&b.1.pos.distance(s.pos)))
+                            .map(|(i, _)| i)
+                    })
+                };
+                let seen = Charge {
+                    pos: s.pos,
+                    since: s.t,
+                    index: Some(s.index),
+                    vel: s.vel,
+                    seen: Some(s.t),
+                };
+                match known.or_else(unseen) {
+                    Some(i) => {
+                        let c = &mut self.charges[i];
+                        *c = Charge { since: c.since, ..seen };
+                    }
+                    None => self.charges.push(seen),
                 }
             }
             ProjectileKind::Tripmine => {
@@ -289,6 +349,50 @@ mod tests {
         assert_eq!(e.charges[0].pos, Vec3::new(180.0, 20.0, 0.0));
         e.detonated();
         assert!(e.charges.is_empty());
+    }
+
+    #[test]
+    fn a_satchel_seen_in_flight_is_the_one_just_thrown() {
+        let mut e = Explosives::default();
+        e.thrown_satchel(Vec3::new(500.0, 0.0, 0.0), SimTime(1.0));
+        // Just out of the hand, far from where it is meant to land.
+        let flying = Vec3::new(40.0, 0.0, 30.0);
+        e.on_sighting(&seen(
+            ProjectileKind::Satchel,
+            41,
+            flying,
+            Vec3::new(300.0, 0.0, 100.0),
+            true,
+            1.05,
+        ));
+        assert_eq!(e.charges.len(), 1, "{:?}", e.charges);
+        let later = e.charges[0].at(SimTime(1.15), 800.0);
+        assert!((later.x - 70.0).abs() < 1.0 && later.z > flying.z, "{later:?}");
+        // Seen again by its entity, wherever it is.
+        e.on_sighting(&seen(
+            ProjectileKind::Satchel,
+            41,
+            Vec3::new(420.0, 0.0, 0.0),
+            Vec3::ZERO,
+            true,
+            2.2,
+        ));
+        assert_eq!(e.charges.len(), 1);
+        assert_eq!(e.charges[0].pos, Vec3::new(420.0, 0.0, 0.0));
+        assert_eq!(e.charges[0].since, SimTime(1.0), "thrown when it was thrown");
+        // Seen leaving the hand before the throw is noted: still one.
+        let mut e = Explosives::default();
+        e.on_sighting(&seen(
+            ProjectileKind::Satchel,
+            42,
+            flying,
+            Vec3::new(300.0, 0.0, 100.0),
+            true,
+            2.0,
+        ));
+        e.thrown_satchel(Vec3::new(500.0, 0.0, 0.0), SimTime(2.01));
+        assert_eq!(e.charges.len(), 1, "{:?}", e.charges);
+        assert_eq!(e.charges[0].index, Some(42));
     }
 
     #[test]

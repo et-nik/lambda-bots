@@ -262,6 +262,7 @@ impl Gauss {
                     weapon: Some(hold(WeaponId::Gauss)),
                     look: angles.map(LookIntent::Angles),
                     movement: None,
+                    jump: false,
                 })
             }
         }

@@ -1,8 +1,9 @@
 //! `lb selftest`: checks on the live server the weapon rules the bots take from the game DLL's profile
 //! (`lb_game::dll`): which button throws a satchel and which sets it off, that the crossbow zooms, and how fast a hand
 //! grenade leaves the hand. One bot does it, standing still and facing the most open way; it is given the weapons,
-//! so the server needs `sv_cheats 1`. The result goes to the console and the log, and a profile the server
-//! contradicts is corrected for the session.
+//! so the server needs `sv_cheats 1` (set before the map starts). The result goes to the console and the log, and a
+//! profile the server contradicts is corrected for the session. Without cheats, the first bot to set its satchels off
+//! in a game checks their buttons (`lb compat` shows the result).
 
 use lb_core::Vec3;
 use lb_core::time::SimTime;
@@ -119,7 +120,8 @@ impl SelfTest {
 
     fn fail(&mut self, what: &str, now: SimTime) {
         self.lines.push(format!(
-            "  {what}: no answer from the game (is sv_cheats 1?); test stopped"
+            "  {what}: no answer from the game (is sv_cheats 1 since the map started?); test stopped. Without \
+             cheats the first bot to set its satchels off in a game checks their buttons: see `lb compat`"
         ));
         self.next(Step::Done, now);
     }
