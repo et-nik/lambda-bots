@@ -1253,14 +1253,9 @@ impl Runtime {
         }
     }
 
-    /// A bot set its satchels off with a button: the server's satchel buttons are that way for every bot, for the rest
-    /// of the session. The first bot to do it checks them for all.
+    /// A bot's presses showed which satchel button sets the charges off: the server's satchel buttons are that way for
+    /// every bot, for the rest of the session. The first bot to show it checks them for all.
     fn learn_satchel_buttons(&mut self) {
-        use lb_game::mechanics::Attack;
-        let name = |a: Attack| match a {
-            Attack::Primary => "primary",
-            Attack::Secondary => "secondary",
-        };
         for bot in &mut self.bots {
             let Some(detonate) = bot.brain.mind.arms.satchel_fact.take() else {
                 continue;
@@ -1269,10 +1264,10 @@ impl Runtime {
             self.game.dll.set_satchel_detonate(detonate);
             if news {
                 tracing::info!(
-                    "satchel buttons checked by {} in the game: the {} attack sets the charges off, the {} throws another",
+                    "satchel buttons checked by {} in the game: the {} attack throws, the {} sets the charges off",
                     bot.persona.name,
-                    name(detonate),
-                    name(self.game.dll.satchel_throw_more())
+                    self.game.dll.satchel_throw().as_str(),
+                    detonate.as_str()
                 );
             }
             self.game.satchel_checked = Some((detonate, bot.persona.name.clone()));
@@ -1281,22 +1276,24 @@ impl Runtime {
 
     /// The satchel buttons the bots use, and where they come from, for `lb compat`.
     pub fn satchel_buttons(&self) -> String {
-        use lb_game::mechanics::Attack;
-        let name = |a: Attack| match a {
-            Attack::Primary => "primary",
-            Attack::Secondary => "secondary",
-        };
+        let dll = self.game.dll;
         let how = format!(
-            "the {} attack sets the charges off, the {} throws another",
-            name(self.game.dll.satchel_detonate()),
-            name(self.game.dll.satchel_throw_more())
+            "the {} attack throws, the {} sets the charges off",
+            dll.satchel_throw().as_str(),
+            dll.satchel_detonate().as_str()
         );
+        let from = if self.game.rules_verdict.is_some() {
+            "as `lb selftest` found".to_string()
+        } else if !dll.detected {
+            format!("the {} rules named in the config", dll.kind.as_str())
+        } else if dll.kind == lb_game::dll::DllKind::Bugfixed {
+            "BugfixedHL-Rebased's".to_string()
+        } else {
+            "the bots' own for a DLL not known".to_string()
+        };
         match &self.game.satchel_checked {
             Some((_, by)) => format!("{how} (checked by {by} in the game)"),
-            None => format!(
-                "{how} (the {} rules; not checked in the game yet)",
-                self.game.dll.kind.as_str()
-            ),
+            None => format!("{how} ({from}; not checked in the game yet)"),
         }
     }
 

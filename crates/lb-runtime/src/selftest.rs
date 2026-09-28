@@ -19,9 +19,14 @@ use lb_perception::projectiles::ProjectileEntity;
 enum Step {
     Give,
     SatchelDraw,
-    /// Running on toward the open side, to throw the satchel far.
-    SatchelRun,
-    SatchelThrow,
+    /// Running on toward the open side, to throw the satchel far; `other`: with the other button than the profile's,
+    /// which threw nothing.
+    SatchelRun {
+        other: bool,
+    },
+    SatchelThrow {
+        other: bool,
+    },
     /// Standing still until the satchel is at rest, far enough to be spared its blast.
     SatchelWait,
     /// A second satchel was thrown close by: backing off the way the bot came before trying the other button.
@@ -63,7 +68,8 @@ pub struct SelfTest {
     /// The profile the server turned out to have; `None` when the test did not get that far.
     pub verdict: Option<DllProfile>,
     pub finished: bool,
-    satchel_ok: Option<bool>,
+    /// The satchel button that set the charges off.
+    detonated_with: Option<Attack>,
     grenade_speed: Option<f32>,
 }
 
@@ -107,7 +113,7 @@ impl SelfTest {
             lines: vec![format!("self-test of the weapon rules, profile {}", dll.kind.as_str())],
             verdict: None,
             finished: false,
-            satchel_ok: None,
+            detonated_with: None,
             grenade_speed: None,
         }
     }
@@ -168,34 +174,37 @@ impl SelfTest {
                     }
                 } else if waited >= SETTLE {
                     self.satchels = count(WeaponId::Satchel);
-                    self.next(Step::SatchelRun, now);
+                    self.next(Step::SatchelRun { other: false }, now);
                 }
             }
-            Step::SatchelRun => {
+            Step::SatchelRun { other } => {
                 f.forward = 250.0;
                 f.view.x = SATCHEL_PITCH;
                 if waited >= RUN_UP {
-                    self.next(Step::SatchelThrow, now);
+                    self.next(Step::SatchelThrow { other }, now);
                 }
             }
-            Step::SatchelThrow => {
+            Step::SatchelThrow { other } => {
                 f.view.x = SATCHEL_PITCH;
+                let throw = if other {
+                    self.dll.satchel_throw().other()
+                } else {
+                    self.dll.satchel_throw()
+                };
                 if !self.pressed {
                     f.forward = 250.0;
-                    f.buttons = button(self.dll.satchel_throw());
+                    f.buttons = button(throw);
                     self.pressed = true;
                 } else if waited >= 1.0 {
                     let out = predicted(WeaponId::Satchel).is_some_and(|p| p.charge_ready == 1);
                     self.lines.push(format!(
-                        "  satchel: the {} attack {}",
-                        name(self.dll.satchel_throw()),
-                        if out {
-                            "throws one (as expected)"
-                        } else {
-                            "threw nothing"
-                        }
+                        "  satchel: with none out, the {} attack {}",
+                        name(throw),
+                        if out { "throws one" } else { "threw nothing" }
                     ));
-                    if !out {
+                    if !out && !other {
+                        self.next(Step::SatchelRun { other: true }, now);
+                    } else if !out {
                         self.fail("throwing a satchel", now);
                     } else {
                         self.satchels = count(WeaponId::Satchel);
@@ -216,7 +225,7 @@ impl SelfTest {
             }
             Step::SatchelDetonate { tried_other } => {
                 let detonate = if tried_other {
-                    other(self.dll.satchel_detonate())
+                    self.dll.satchel_detonate().other()
                 } else {
                     self.dll.satchel_detonate()
                 };
@@ -229,7 +238,7 @@ impl SelfTest {
                     if state != 1 && !thrown {
                         self.lines
                             .push(format!("  satchel: the {} attack sets the charges off", name(detonate)));
-                        self.satchel_ok = Some(!tried_other);
+                        self.detonated_with = Some(detonate);
                         self.next(Step::CrossbowDraw, now);
                     } else if thrown && !tried_other {
                         self.lines.push(format!(
@@ -238,6 +247,12 @@ impl SelfTest {
                         ));
                         self.satchels = count(WeaponId::Satchel);
                         self.next(Step::SatchelBackOff, now);
+                    } else if !tried_other {
+                        self.lines.push(format!(
+                            "  satchel: the {} attack did nothing with a charge out",
+                            name(detonate)
+                        ));
+                        self.next(Step::SatchelDetonate { tried_other: true }, now);
                     } else {
                         self.lines.push("  satchel: neither attack sets the charges off".into());
                         self.next(Step::CrossbowDraw, now);
@@ -333,49 +348,53 @@ impl SelfTest {
 
     fn finish(&mut self) {
         self.finished = true;
-        let classic_satchel = match self.satchel_ok {
-            Some(true) => Some(self.dll.satchel_detonate() == Attack::Primary),
-            Some(false) => Some(self.dll.satchel_detonate() == Attack::Secondary),
-            None => None,
-        };
+        // The grenade tells the classic SDK from the rest; the satchel buttons are their own finding.
         let classic_grenade = self.grenade_speed.map(|v| (v - 400.0).abs() < (v - 650.0).abs());
-        let kind = match (classic_satchel, classic_grenade) {
-            (Some(true), _) | (None, Some(true)) => Some(DllKind::Classic),
-            (Some(false), Some(false)) | (None, Some(false)) | (Some(false), None) => Some(match self.dll.kind {
-                DllKind::Classic => DllKind::Valve25,
-                k => k,
-            }),
-            (Some(false), Some(true)) | (None, None) => None,
-        };
-        match kind {
-            Some(k) if k == self.dll.kind => {
+        let classic = classic_grenade.or(self.detonated_with.map(|b| b == Attack::Primary));
+        let kind = match classic {
+            Some(true) => DllKind::Classic,
+            Some(false) if self.dll.kind == DllKind::Classic => DllKind::Valve25,
+            Some(false) => self.dll.kind,
+            None => {
                 self.lines
-                    .push(format!("  verdict: the {} profile is right", k.as_str()));
-                self.verdict = Some(self.dll);
+                    .push("  verdict: the results do not fit a known profile".into());
+                return;
             }
-            Some(k) => {
-                self.lines.push(format!(
-                    "  verdict: the server plays by the {} rules, not {}: set game.dll: {} in config/lambdabots.yaml",
-                    k.as_str(),
-                    self.dll.kind.as_str(),
-                    k.as_str()
-                ));
-                self.verdict = Some(DllProfile {
-                    kind: k,
-                    detected: false,
-                    satchel_swapped: false,
-                });
-            }
-            None => self
-                .lines
-                .push("  verdict: the results do not fit a known profile".into()),
+        };
+        let mut dll = DllProfile {
+            kind,
+            detected: kind == self.dll.kind && self.dll.detected,
+            satchel: if kind == self.dll.kind {
+                self.dll.satchel
+            } else {
+                kind.satchel_buttons()
+            },
+        };
+        if let Some(b) = self.detonated_with {
+            dll.set_satchel_detonate(b);
         }
-    }
-}
-
-fn other(a: Attack) -> Attack {
-    match a {
-        Attack::Primary => Attack::Secondary,
-        Attack::Secondary => Attack::Primary,
+        let satchels = format!(
+            "the {} attack throws satchels, the {} sets them off",
+            name(dll.satchel_throw()),
+            name(dll.satchel_detonate())
+        );
+        if dll == self.dll {
+            self.lines
+                .push(format!("  verdict: the {} profile is right; {satchels}", kind.as_str()));
+        } else if kind == self.dll.kind {
+            self.lines.push(format!(
+                "  verdict: the {} profile is right but for the satchels: {satchels}",
+                kind.as_str()
+            ));
+        } else {
+            self.lines.push(format!(
+                "  verdict: the server throws grenades by the {} rules, not {}: set game.dll: {} in \
+                 config/lambdabots.yaml; {satchels}",
+                kind.as_str(),
+                self.dll.kind.as_str(),
+                kind.as_str()
+            ));
+        }
+        self.verdict = Some(dll);
     }
 }

@@ -1,15 +1,17 @@
 //! What differs between game DLLs in how weapons are worked, and which DLL the server runs.
 //!
-//! - **Satchel buttons.** With no charge out, the primary attack throws one everywhere. With charges out, the
-//!   classic SDK (and mods built on it, such as hlsdk-portable) sets them off with the primary attack and throws
-//!   another with the secondary; Valve's 2023 update and BugfixedHL-Rebased swapped that: the secondary sets them
-//!   off, the primary throws.
+//! - **Satchel buttons.** The classic SDK (and mods built on it) throws a satchel with the secondary attack whether
+//!   charges are out or not, and sets the charges off with the primary (with none out, the primary throws too).
+//!   Valve's 2023 update and BugfixedHL-Rebased swapped that: the primary throws, the secondary sets them off (and in
+//!   the 2023 update does nothing with none out).
 //! - **Hand grenade speed.** `(90 − pitch′) × 4`, at most 500, in the classic SDK; `× 6.5`, at most 1000, since
 //!   the 2023 update and in BugfixedHL-Rebased.
 //!
-//! BugfixedHL-Rebased is told by its own cvars. Anything else is taken to play by the 2023 update, as current mods do
-//! (hlsdk-portable among them), unless the config names the DLL (`game.dll`); `lb selftest` checks the guess on a
-//! live server, and the first bot to set its satchels off in a game checks their buttons.
+//! BugfixedHL-Rebased is told by its own cvars. Anything else is taken to throw grenades by the 2023 update, as
+//! current mods do (hlsdk-portable among them), and to work satchels the classic way, as yapb did; the config can
+//! name the DLL (`game.dll`). `lb selftest` checks it all on a live server. The bots check the satchel buttons as
+//! they use them: a press that does the other thing, or nothing, is followed by the other button, and what it showed
+//! holds for every bot.
 
 use crate::mechanics::Attack;
 
@@ -39,6 +41,22 @@ impl DllKind {
             .into_iter()
             .find(|k| k.as_str().eq_ignore_ascii_case(s.trim()))
     }
+
+    pub fn satchel_buttons(self) -> SatchelButtons {
+        match self {
+            DllKind::Classic => SatchelButtons::SecondaryThrows,
+            DllKind::Bugfixed | DllKind::Valve25 => SatchelButtons::PrimaryThrows,
+        }
+    }
+}
+
+/// Which satchel button throws; the other one sets the charges out off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SatchelButtons {
+    /// The classic SDK's way, and the bots' own when the DLL is not known.
+    SecondaryThrows,
+    /// Valve's 2023 update and BugfixedHL-Rebased.
+    PrimaryThrows,
 }
 
 /// How the server's DLL works the weapons that differ.
@@ -47,17 +65,12 @@ pub struct DllProfile {
     pub kind: DllKind,
     /// Detected rather than named in the config.
     pub detected: bool,
-    /// The satchel buttons were seen to work the other way round than `kind` has them.
-    pub satchel_swapped: bool,
+    pub satchel: SatchelButtons,
 }
 
 impl Default for DllProfile {
     fn default() -> Self {
-        DllProfile {
-            kind: DllKind::Bugfixed,
-            detected: true,
-            satchel_swapped: false,
-        }
+        DllProfile::resolve("auto", false)
     }
 }
 
@@ -68,34 +81,32 @@ impl DllProfile {
             Some(kind) => DllProfile {
                 kind,
                 detected: false,
-                satchel_swapped: false,
+                satchel: kind.satchel_buttons(),
+            },
+            None if bugfixed_cvars => DllProfile {
+                kind: DllKind::Bugfixed,
+                detected: true,
+                satchel: SatchelButtons::PrimaryThrows,
             },
             None => DllProfile {
-                kind: if bugfixed_cvars {
-                    DllKind::Bugfixed
-                } else {
-                    DllKind::Valve25
-                },
+                kind: DllKind::Valve25,
                 detected: true,
-                satchel_swapped: false,
+                satchel: SatchelButtons::SecondaryThrows,
             },
         }
     }
 
-    /// Throws a satchel while none of the bot's is out.
+    /// Throws a satchel, whether some are out or not.
     pub fn satchel_throw(self) -> Attack {
-        Attack::Primary
-    }
-
-    /// Throws another satchel while some are out.
-    pub fn satchel_throw_more(self) -> Attack {
-        other(self.satchel_detonate())
+        match self.satchel {
+            SatchelButtons::SecondaryThrows => Attack::Secondary,
+            SatchelButtons::PrimaryThrows => Attack::Primary,
+        }
     }
 
     /// Sets off the satchels that are out.
     pub fn satchel_detonate(self) -> Attack {
-        let secondary = matches!(self.kind, DllKind::Bugfixed | DllKind::Valve25) != self.satchel_swapped;
-        if secondary { Attack::Secondary } else { Attack::Primary }
+        self.satchel_throw().other()
     }
 
     /// Hand grenade throw speed per degree of the throw angle below straight up, and its cap.
@@ -106,23 +117,12 @@ impl DllProfile {
         }
     }
 
-    /// The satchel buttons turned out the other way round (a detonation press threw a satchel).
-    pub fn swap_satchel_buttons(&mut self) {
-        self.satchel_swapped = !self.satchel_swapped;
-    }
-
     /// The server was seen to set satchels off with `detonate`.
     pub fn set_satchel_detonate(&mut self, detonate: Attack) {
-        if self.satchel_detonate() != detonate {
-            self.swap_satchel_buttons();
-        }
-    }
-}
-
-fn other(a: Attack) -> Attack {
-    match a {
-        Attack::Primary => Attack::Secondary,
-        Attack::Secondary => Attack::Primary,
+        self.satchel = match detonate {
+            Attack::Primary => SatchelButtons::SecondaryThrows,
+            Attack::Secondary => SatchelButtons::PrimaryThrows,
+        };
     }
 }
 
@@ -134,30 +134,40 @@ mod tests {
     fn detection_and_buttons() {
         let bhl = DllProfile::resolve("auto", true);
         assert_eq!(bhl.kind, DllKind::Bugfixed);
-        assert_eq!(bhl.satchel_detonate(), Attack::Secondary);
-        assert_eq!(bhl.satchel_throw_more(), Attack::Primary);
+        assert_eq!(
+            (bhl.satchel_throw(), bhl.satchel_detonate()),
+            (Attack::Primary, Attack::Secondary)
+        );
         let other = DllProfile::resolve("auto", false);
-        assert_eq!(other.kind, DllKind::Valve25);
-        assert_eq!(other.satchel_detonate(), Attack::Secondary);
+        assert_eq!((other.kind, other.detected), (DllKind::Valve25, true));
+        assert_eq!(
+            (other.satchel_throw(), other.satchel_detonate()),
+            (Attack::Secondary, Attack::Primary),
+            "an unknown DLL is taken to work satchels the classic way"
+        );
+        assert_eq!(other.grenade_speed(), (6.5, 1000.0));
+        assert_eq!(DllProfile::default(), other);
+        let hl25 = DllProfile::resolve("hl25", false);
+        assert_eq!((hl25.detected, hl25.satchel_detonate()), (false, Attack::Secondary));
         let classic = DllProfile::resolve("classic", false);
         assert_eq!((classic.kind, classic.detected), (DllKind::Classic, false));
         assert_eq!(classic.satchel_detonate(), Attack::Primary);
         assert_eq!(classic.grenade_speed(), (4.0, 500.0));
-        let mut p = classic;
-        p.swap_satchel_buttons();
-        assert_eq!(p.satchel_detonate(), Attack::Secondary);
-        assert_eq!(p.satchel_throw_more(), Attack::Primary);
-        assert_eq!(p.grenade_speed(), (4.0, 500.0), "the grenade keeps the classic speed");
-        let mut seen = bhl;
-        seen.set_satchel_detonate(Attack::Primary);
+        let mut seen = classic;
+        seen.set_satchel_detonate(Attack::Secondary);
         assert_eq!(
-            (seen.satchel_detonate(), seen.satchel_throw_more()),
+            (seen.satchel_throw(), seen.satchel_detonate()),
             (Attack::Primary, Attack::Secondary)
         );
-        seen.set_satchel_detonate(Attack::Primary);
+        assert_eq!(
+            seen.grenade_speed(),
+            (4.0, 500.0),
+            "the grenade keeps the classic speed"
+        );
+        seen.set_satchel_detonate(Attack::Secondary);
         assert_eq!(
             seen.satchel_detonate(),
-            Attack::Primary,
+            Attack::Secondary,
             "setting the same button twice keeps it"
         );
     }

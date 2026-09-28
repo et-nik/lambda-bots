@@ -107,6 +107,15 @@ pub(crate) fn fire_of(a: Attack) -> Fire {
     }
 }
 
+/// The game takes `attack` of the weapon now (its clock for that button has run out), as far as its prediction data
+/// shows; taken when there is none.
+pub(crate) fn takes(p: Option<PredictedWeapon>, attack: Attack) -> bool {
+    p.is_none_or(|p| match attack {
+        Attack::Primary => p.next_primary <= 0.0,
+        Attack::Secondary => p.next_secondary <= 0.0,
+    })
+}
+
 /// Holds `w` in hand without firing.
 pub(crate) fn hold(w: WeaponId) -> WeaponIntent {
     WeaponIntent::hold(w)

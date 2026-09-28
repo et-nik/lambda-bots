@@ -5,9 +5,11 @@
 //!   30), or a pistol or shotgun against an enemy facing the bot, makes it strafe.
 //! - **Strafe side:** away from the side the enemy aims at, swapped 30% of the time, re-decided every 0.3–0.8 s.
 //!   Walls within 134 units on a side turn it around.
-//! - **Distance:** skilled bots drift in when they feel strong and far, back off when weak and close, and back off
-//!   when cornered. Everyone backs off under 96 units or while reloading; melee charges. Nobody closes in while its
-//!   own rocket or launched grenade is on the way to the target.
+//! - **Distance:** further off than the weapon in hand does well at ([`close_in`]), a bot with the will to (health ×
+//!   aggression 30 or more) closes in at a run, along the way there when navigation gives one, strafing as it goes;
+//!   it does not stand then. Otherwise skilled bots drift in when they feel strong and far, back off when weak and
+//!   close, and back off when cornered. Everyone backs off under 96 units or while reloading; melee charges. Nobody
+//!   closes in while its own rocket or launched grenade is on the way to the target.
 //! - **Extras:** crouch taps and dodge jumps by skill.
 //! - **Ledges:** a move that would drop more than 160 units is reversed.
 
@@ -16,9 +18,14 @@ use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
 use lb_game::mechanics::WeaponClass;
+use lb_game::weapons::WeaponId;
 use lb_worldq::{TraceQuery, Tracer};
 
 const WALL_DISTANCE: f32 = 134.0;
+/// Closing in takes this much will (health × aggression) at least; with less the bot keeps its distance, as yapb's.
+pub const PUSH_WILL: f32 = 30.0;
+/// Strafing while closing in, as a share of the run.
+const PUSH_STRAFE: f32 = 0.6;
 const SAFE_DROP: f32 = 160.0;
 const CHECK_PERIOD: f64 = 0.1;
 
@@ -48,6 +55,33 @@ pub struct FightInput {
     pub hold_ground: bool,
     pub on_ground: bool,
     pub maxspeed: f32,
+    /// Further off than this the weapon in hand does poorly ([`close_in`]).
+    pub close_in: f32,
+    /// The way toward the enemy along the navigation path, when there is one.
+    pub path: Option<Vec2>,
+}
+
+/// How far off `weapon` still does well: pellets and bullets spread, darts home in close, beams are hard to hold on
+/// a target far off. Guns that hit as well far off (the 357, the crossbow, the RPG) never close in.
+pub fn close_in(weapon: Option<WeaponId>) -> f32 {
+    match weapon {
+        Some(WeaponId::Shotgun) => 350.0,
+        Some(WeaponId::Hornetgun | WeaponId::Egon) => 600.0,
+        Some(WeaponId::Glock | WeaponId::Mp5) => 700.0,
+        Some(WeaponId::Gauss) => 1200.0,
+        _ => f32::INFINITY,
+    }
+}
+
+impl FightInput {
+    /// Far off for the weapon in hand, with the will to close in and nothing holding the bot back.
+    pub fn wants_closer(&self, distance: f32) -> bool {
+        self.weapon != WeaponClass::Melee
+            && !self.reloading
+            && !self.hold_ground
+            && self.approach >= PUSH_WILL
+            && distance > self.close_in
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -91,6 +125,7 @@ impl Fight {
         let right = Vec2::new(forward.y, -forward.x);
         let melee = i.weapon == WeaponClass::Melee;
         let skilled = s.skill >= 50;
+        let push = i.wants_closer(distance);
         if i.now >= self.style_until {
             self.style = if melee || distance < 768.0 {
                 Style::Strafe
@@ -107,6 +142,9 @@ impl Fight {
                 self.duck_until = i.now + f64::from(rng.range_f32(0.25, 0.5));
             }
             self.style_until = i.now + f64::from(rng.range_f32(1.0, 3.0));
+        }
+        if push {
+            self.style = Style::Strafe;
         }
         let mut out = FightMove::default();
         let (mut ahead, mut sideways) = (0.0f32, 0.0f32);
@@ -136,14 +174,23 @@ impl Fight {
             }
             sideways = self.side * i.maxspeed;
             if !melee {
-                if skilled && i.approach >= 60.0 && distance > 400.0 {
+                if push {
+                    ahead = i.maxspeed;
+                    sideways *= PUSH_STRAFE;
+                } else if skilled && i.approach >= 60.0 && distance > 400.0 {
                     ahead = 0.5 * i.maxspeed;
                 } else if skilled && i.approach < 60.0 && distance < 300.0 {
                     ahead = -0.5 * i.maxspeed;
                 }
                 if left_wall && right_wall {
                     sideways = 0.0;
-                    ahead = if skilled { -i.maxspeed } else { 0.0 };
+                    ahead = if push {
+                        i.maxspeed
+                    } else if skilled {
+                        -i.maxspeed
+                    } else {
+                        0.0
+                    };
                 }
             }
             if let Some(cooldown) = s.dodge_hop_cooldown
@@ -171,6 +218,14 @@ impl Fight {
             ahead = -i.maxspeed;
             self.duck_until = i.now;
         }
+        // Closing in goes the way navigation gives (round walls and drops), the strafe across it.
+        let (forward, right) = match i.path.filter(|p| push && ahead > 0.0 && *p != Vec2::ZERO) {
+            Some(p) => {
+                let p = p.normalize();
+                (p, Vec2::new(p.y, -p.x))
+            }
+            None => (forward, right),
+        };
         let velocity = forward * ahead + right * sideways;
         if i.now >= self.next_check {
             self.next_check = i.now + CHECK_PERIOD;
@@ -231,6 +286,8 @@ mod tests {
             hold_ground: false,
             on_ground: true,
             maxspeed: 300.0,
+            close_in: f32::INFINITY,
+            path: None,
         }
     }
 
@@ -294,6 +351,38 @@ mod tests {
         let mut f = Fight::default();
         let m = f.update(&strong(true), &SKILL, &mut open, &mut Pcg32::new(5, 5));
         assert!(m.velocity.x <= 0.0, "not while its rocket flies: {m:?}");
+    }
+
+    #[test]
+    fn closes_in_when_the_weapon_wants_it_closer() {
+        let mut open = Floor { wall_y: None };
+        let shotgun = |distance: f32, approach: f32| FightInput {
+            approach,
+            weapon: WeaponClass::Shotgun,
+            close_in: close_in(Some(WeaponId::Shotgun)),
+            ..input(0.0, distance)
+        };
+        // Far off with a shotgun: at a run, strafing a little, and never standing (even where the skill stays).
+        let stays = FightSkill { stay_far: 1.0, ..SKILL };
+        let mut f = Fight::default();
+        let m = f.update(&shotgun(1200.0, 50.0), &stays, &mut open, &mut Pcg32::new(4, 4));
+        assert!(m.velocity.x > 250.0 && m.velocity.y.abs() > 100.0, "{m:?}");
+        // Close enough, or without the will (hurt or timid): strafing where it is.
+        for i in [shotgun(300.0, 50.0), shotgun(1200.0, 20.0)] {
+            let mut f = Fight::default();
+            let m = f.update(&i, &SKILL, &mut open, &mut Pcg32::new(4, 4));
+            assert!(m.velocity.x.abs() < 1.0, "{m:?}");
+        }
+        // The way there goes round a wall: along it.
+        let round = FightInput {
+            path: Some(Vec2::new(0.0, 1.0)),
+            ..shotgun(1200.0, 50.0)
+        };
+        let mut f = Fight::default();
+        let m = f.update(&round, &SKILL, &mut open, &mut Pcg32::new(4, 4));
+        assert!(m.velocity.y > 250.0, "{m:?}");
+        // A crossbow does as well far off.
+        assert_eq!(close_in(Some(WeaponId::Crossbow)), f32::INFINITY);
     }
 
     #[test]

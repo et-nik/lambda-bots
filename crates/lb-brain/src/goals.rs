@@ -1,6 +1,6 @@
 //! What the bot does for a goal beyond walking somewhere:
 //! - **hunt:** a lost enemy is looked for from the place that sees most of where it may be now, chosen again every
-//!   1.5 s;
+//!   1.5 s, and half a second after getting there;
 //! - **investigate:** a sound is gone to see about, to a place in sight of where it came from, and looked at;
 //! - **retreat:** out of the threat's sight to a place the bot gets to first, where it holds and watches the way the
 //!   threat would come;
@@ -21,12 +21,13 @@ use lb_nav_api::{CampKind, MapView, NavService, NavStatus, NodeId};
 use crate::BotBrain;
 use crate::mind::{Body, Character, apply_step};
 
-/// A search place is chosen again this often, or on arriving there.
+/// A search place is chosen again this often, and this soon once the bot is there.
 const SEARCH_EVERY: f64 = 1.5;
+const SEARCH_LOOK: f64 = 0.5;
 /// Places a lost enemy is most likely at, looked for.
 const SEARCH_PLACES: usize = 12;
 /// On arriving where a sound came from, the bot looks this long.
-const LOOK_AROUND: f64 = 1.5;
+const LOOK_AROUND: f64 = 0.8;
 /// A place to see a sound's place from is at most this far from it.
 const VANTAGE_REACH: f32 = 1200.0;
 /// A sound seen about is not gone to again (it is old news by then).
@@ -36,8 +37,8 @@ const COVER_REPLAN: f64 = 2.0;
 const COVER_MOVED: f32 = 400.0;
 /// At a spot within this, across.
 const AT_SPOT: f32 = 32.0;
-const CAMP_FOR: [f32; 2] = [8.0, 15.0];
-const AMBUSH_FOR: [f32; 2] = [10.0, 20.0];
+const CAMP_FOR: [f32; 2] = [6.0, 10.0];
+const AMBUSH_FOR: [f32; 2] = [8.0, 14.0];
 /// A style this fond of a kind of spot holds it half as long again, and rests less between spots.
 const FOND: f32 = 1.5;
 const CAMP_LOOK: [f32; 2] = [1.5, 4.0];
@@ -47,8 +48,9 @@ const TRAP_REST: [f32; 2] = [20.0, 30.0];
 const FOND_TRAP_REST: [f32; 2] = [10.0, 18.0];
 /// After a trap given up.
 const TRAP_GIVE_UP_REST: f64 = 8.0;
-/// Satchels thrown as a trap are watched this long.
-const SATCHEL_GUARD: [f32; 2] = [20.0, 30.0];
+/// Satchels thrown as a trap are watched this long, with the radio up (renewed while at the spot).
+const SATCHEL_GUARD: [f32; 2] = [12.0, 20.0];
+const RADIO_WATCH: f64 = 0.3;
 /// The throw of a trap's satchels must show within this.
 const TRAP_THROW_FOR: f64 = 3.0;
 /// Satchels are thrown at a chokepoint from this close (a satchel flies some 200 units).
@@ -218,7 +220,11 @@ impl BotBrain {
         let searching = t.state != TrackState::RecentlyLost;
         let dest = match (map, t.spread.as_deref()) {
             (Some(map), Some(spread)) if searching => match self.mind.task {
-                Some(Task::Search { who, dest, at }) if who == k && now.since(at) < SEARCH_EVERY => dest,
+                Some(Task::Search { who, dest, at })
+                    if who == k && now.since(at) < if at_spot(body, dest) { SEARCH_LOOK } else { SEARCH_EVERY } =>
+                {
+                    dest
+                }
                 _ => {
                     let dest = search_spot(map, spread, body.origin).unwrap_or(t.pos);
                     self.mind.task = Some(Task::Search { who: k, dest, at: now });
@@ -622,6 +628,8 @@ impl BotBrain {
                         },
                     );
                     self.look_at(choke);
+                    // The radio up while watching: an enemy by them is set off at once.
+                    self.mind.arms.radio_until = self.mind.arms.radio_until.max(now + RADIO_WATCH);
                     return;
                 }
                 // Thrown: once the charges lie there, off to the spot.

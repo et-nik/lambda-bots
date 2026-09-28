@@ -566,7 +566,7 @@ impl BotBrain {
                     arrive(status, m);
                     return;
                 }
-                let input = FightInput {
+                let mut input = FightInput {
                     now,
                     origin: body.origin,
                     enemy: t.pos,
@@ -578,7 +578,21 @@ impl BotBrain {
                     hold_ground: now < m.arms.hold_until,
                     on_ground: body.on_ground,
                     maxspeed: body.maxspeed,
+                    close_in: lb_combat::fight::close_in(body.weapon),
+                    path: None,
                 };
+                // Closing in: the way there by the graph, round walls and drops; a jump or a ladder on it is taken
+                // whole.
+                if input.wants_closer(distance) {
+                    let (_, step) = nav.go_to(t.pos);
+                    if let Some(step) = step {
+                        if step.mandatory {
+                            apply_step(&mut self.intents, &step, body.eye, m);
+                            return;
+                        }
+                        input.path = Some(step.move_dir);
+                    }
+                }
                 let skill = FightSkill {
                     skill: ch.level,
                     stay_mid: ch.skill.stay_mid,

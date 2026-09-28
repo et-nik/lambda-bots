@@ -159,7 +159,9 @@ const HUNT_HOLD: f32 = 3.0;
 const RETREAT_HOLD: f32 = 2.0;
 const ROAM_HOLD: f32 = 5.0;
 const RETREAT_THRESHOLD: f32 = 0.4;
-const HUNT_THRESHOLD: f32 = 0.6;
+const HUNT_THRESHOLD: f32 = 0.5;
+/// A lost enemy's place is known well enough to hunt it until it is this uncertain (σ, units): some 8 s of running.
+const HUNT_SIGMA: f32 = 3000.0;
 const COLLECT_THRESHOLD: f32 = 0.1;
 /// A charger is worth it only this low on health (armor).
 const CHARGER_HEALTH: f32 = 60.0;
@@ -524,7 +526,7 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
         t.relation == Relation::Enemy && matches!(t.state, TrackState::RecentlyLost | TrackState::Predicted)
     }) {
         let d = t.pos.distance(s.origin);
-        let confidence = (1.0 - t.sigma / 1500.0).clamp(0.0, 1.0);
+        let confidence = (1.0 - t.sigma / HUNT_SIGMA).clamp(0.0, 1.0);
         let w = (((4096.0 - (1.0 - aggr) * d) / 4096.0 - retreat).min(0.89)) * confidence * s.affinity.hunt;
         if w >= HUNT_THRESHOLD {
             out.push(Goal {
@@ -862,7 +864,10 @@ mod tests {
         assert_eq!(g.kind, GoalKind::Hunt(key), "lost 1.5 s ago, close: worth chasing");
         b.update(SimTime(6.0), &p);
         let g = d.decide(&situation(6.0, &b, None, &KIT, 100.0, None, &none), &mut rng);
-        assert_eq!(g.kind, GoalKind::Roam, "too uncertain by now");
+        assert_eq!(g.kind, GoalKind::Hunt(key), "6 s on, still worth chasing");
+        b.update(SimTime(9.0), &p);
+        let g = d.decide(&situation(9.0, &b, None, &KIT, 100.0, None, &none), &mut rng);
+        assert_eq!(g.kind, GoalKind::Roam, "forgotten by now");
         assert_eq!(d.stats.switches, 2);
     }
 
