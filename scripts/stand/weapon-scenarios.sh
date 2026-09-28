@@ -23,6 +23,7 @@ fi
 OUT="$ROOT/stand-runs/current/weapons"
 mkdir -p "$OUT"
 CMD="$ROOT/scripts/stand/lbcmd.sh"
+trap '"$CMD" "lb weapons all" >/dev/null || true' EXIT
 for set in "${SETS[@]}"; do
     weapons="${set//+/ }"
     echo "== $set: $SECONDS_PER s"
@@ -38,4 +39,5 @@ for set in "${SETS[@]}"; do
     grep -E "kills by bots|damage from explosions|\]   weapon_|failures" "$OUT/$set.txt" | sed 's/^/   /' || true
 done
 "$CMD" "lb weapons all" >/dev/null
+trap - EXIT
 echo "reports in $OUT"

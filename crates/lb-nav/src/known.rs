@@ -94,7 +94,10 @@ impl KnownChanges {
             repeats: 0,
             at: now,
         });
-        e.until = e.until.max(until);
+        if until > e.until {
+            e.until = until;
+            e.reason = FailReason::Hazard;
+        }
     }
 
     pub fn blocked(&self, from: NodeId, to: NodeId, now: f64) -> bool {
@@ -196,6 +199,24 @@ mod tests {
         assert!(k.penalty(5, 6, 60.0).is_infinite());
         k.expire(1000.0);
         assert_eq!(k.active(1000.0).count(), 0);
+    }
+
+    #[test]
+    fn a_hazard_takes_over_the_blocks_it_extends() {
+        let mut k = KnownChanges::default();
+        k.fail(1, 2, FailReason::TemporarilyOccupied, 0.0);
+        k.avoid(1, 2, 0.0, 60.0);
+        k.fail(3, 4, FailReason::GeometryInvalid, 0.0);
+        k.avoid(3, 4, 0.0, 60.0);
+        let mut blocks: Vec<_> = k.active(0.0).map(|(l, f)| (l, f.reason, f.until)).collect();
+        blocks.sort_by_key(|b| b.0);
+        assert_eq!(
+            blocks,
+            [
+                ((1, 2), FailReason::Hazard, 60.0),
+                ((3, 4), FailReason::GeometryInvalid, 120.0)
+            ]
+        );
     }
 
     #[test]

@@ -94,7 +94,8 @@ where the game reports it came from (bullets). For a projectile it goes to whoev
 
 ## A mixed game
 
-10 minutes, 8 bots, crossfire, every weapon allowed, the final build.
+10 minutes, 8 bots, crossfire, every weapon allowed, the build before the satchel and snark changes below. The two
+mixed games since are under the criteria above.
 
 | Measure                       | Value                                               |
 |-------------------------------|-----------------------------------------------------|
@@ -138,7 +139,7 @@ The first per-weapon run (earlier the same day) led to these changes:
 | Glock                 | rapid fire only under 150 units                                | rapid fire where it lands more bullets a second than aimed clicks, given the bot's aim and clicking speed               |
 | MP5 grenades          | 2–7 deaths by own hand a set                                   | none in the last two runs: the arc is looked along again at the moment of firing                                        |
 | Rockets               | 2 deaths by own hand a set, 237 own blast damage               | 1 death and 61: launch line checked from where the rocket leaves, guided on its own target, no closing in               |
-| Gauss self-kills      | 2 in a 10-minute mixed game                                    | none in the gauss set, one in the last mixed game: the charge is kept small for the nearest wall along the line         |
+| Gauss self-kills      | 2 in a 10-minute mixed game                                    | none in the gauss set, one in the mixed game above: the charge is kept small for the nearest wall along the line        |
 | Crossbow after a miss | the scope came off after every shot, hit or miss               | stays zoomed and fires again until the kill, keeping to its target; 37–46 crossbow kills a set (was 30–33)              |
 
 ## Satchels and snarks
@@ -228,6 +229,6 @@ the snarks near: 1 death by own hand, 53 egon kills. In the mixed game: none.
 - **A bot's own snarks** still turn on it now and then, most with only a crowbar and a pocketful of snarks.
 - **A tripmine's planter** may still be near when an enemy trips it (two deaths in four runs of its set).
 - **Satchel traps and mines at chokepoints** (the `PlantTrap` goal) are M4.2.
-- **A charged gauss shot** still kills its shooter now and then (one in the last mixed game). What it hit is not known
+- **A charged gauss shot** still kills its shooter now and then (one in the mixed game above). What it hit is not known
   yet: damage a bot takes from its own gauss is logged since (`unattributed damage with the gauss in hand`).
 - **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live.

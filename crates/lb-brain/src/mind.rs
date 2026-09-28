@@ -554,6 +554,8 @@ impl BotBrain {
         let there =
             (body.origin - c.spot).truncate().length() < CHARGER_SPOT && (body.origin.z - c.spot.z).abs() < 40.0;
         let m = &mut self.mind;
+        // The goal may go straight from another charger to this one.
+        m.charging = m.charging.filter(|&(at, ..)| at == i);
         if !there && m.charging.is_none() {
             let (status, step) = nav.go_to(c.spot);
             if let Some(step) = step {
