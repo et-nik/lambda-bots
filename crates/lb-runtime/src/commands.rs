@@ -35,6 +35,10 @@ const HELP: &[(&str, &str)] = &[
         "the obstacle course: a bot carries out special links (lift, jump, drop, ladder, door, ...)",
     ),
     (
+        "map [spots|mines|danger]",
+        "the map as bots know it: chokepoints, spots to hold, tripmine spots, where bots get hurt",
+    ),
+    (
         "vision [name|#userid]",
         "what bots see, hear and remember: contacts, tracks, sounds, recognition times",
     ),
@@ -103,6 +107,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             Some("regen") => nav_regen(rt),
             _ => nav(rt),
         },
+        "map" => map_knowledge(rt, rest),
         "vision" => vision(rt, rest),
         "brain" => brain(rt, rest),
         "profile" => profile(rt, rest),
@@ -635,7 +640,156 @@ fn goal_text(rt: &Runtime, b: &crate::manager::Bot, kind: lb_decision::GoalKind)
             let suit = b.brain.chargers.as_ref().and_then(|c| c.spots.get(i)).map(|c| c.suit);
             format!("charger ({})", if suit == Some(true) { "suit" } else { "health" })
         }
+        lb_decision::GoalKind::ControlItem(i) => format!(
+            "control {}",
+            b.brain
+                .items
+                .as_ref()
+                .and_then(|items| items.spots.get(i))
+                .map(|s| s.kind.as_str())
+                .unwrap_or_default()
+        ),
+        lb_decision::GoalKind::Investigate(id) => format!(
+            "investigate {}",
+            b.brain
+                .beliefs
+                .hypothesis(id)
+                .map(|h| match h.kind {
+                    lb_knowledge::HypothesisKind::Sound(k) => k.as_str(),
+                    lb_knowledge::HypothesisKind::Cue => "glimpse",
+                    lb_knowledge::HypothesisKind::Damage => "damage",
+                })
+                .unwrap_or("-")
+        ),
+        lb_decision::GoalKind::Camp(i) => format!(
+            "camp {}",
+            rt.tactics
+                .as_ref()
+                .and_then(|t| t.camps.get(i as usize))
+                .map(|c| format!("{} node {}", c.kind.as_str(), c.node))
+                .unwrap_or_default()
+        ),
+        lb_decision::GoalKind::PlantTrap(t) => match t {
+            lb_decision::Trap::Mine(i) => format!("trap: tripmine at spot {i}"),
+            lb_decision::Trap::Satchels(i) => format!("trap: satchels from spot {i}"),
+        },
         k => k.as_str().to_string(),
+    }
+}
+
+fn map_knowledge(rt: &Runtime, args: &[&str]) -> Vec<String> {
+    let Some(t) = rt.tactics.as_deref() else {
+        return vec!["no tactics: the map's graph is not loaded".into()];
+    };
+    let at = |p: lb_core::Vec3| format!("{:.0} {:.0} {:.0}", p.x, p.y, p.z);
+    let n = t.origins.len();
+    let mut out = vec![format!(
+        "{n} places, {} pairs in sight of each other ({:.1}%), {} chokepoints, {} spots to hold, {} tripmine spots; \
+         worked out in {} ms",
+        t.stats.pairs,
+        200.0 * t.stats.pairs as f64 / (n * n.saturating_sub(1)).max(1) as f64,
+        t.chokes.len(),
+        t.camps.len(),
+        t.mines.len(),
+        t.stats.millis
+    )];
+    let x = rt.experience.as_ref();
+    match args.first().copied() {
+        Some("spots") => {
+            for (i, c) in t.camps.iter().enumerate() {
+                out.push(format!(
+                    "  {i}: {} at {}, score {:.2}, watching {:.0}° and {:.0}° {:.0} u away{}",
+                    c.kind.as_str(),
+                    at(c.pos),
+                    c.score,
+                    c.watch[0],
+                    c.watch[1],
+                    c.range,
+                    c.guards
+                        .map(|g| format!(", guards {}", at(t.origins[g as usize])))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        Some("mines") => {
+            for (i, m) in t.mines.iter().enumerate() {
+                out.push(format!(
+                    "  {i}: {} at {}, beam {:.0} u, flow {:.2}",
+                    if m.corner { "corner" } else { "across" },
+                    at(m.wall),
+                    m.wall.distance(m.beam_end),
+                    m.flow
+                ));
+            }
+        }
+        Some("danger") => match x {
+            Some(x) => {
+                for (node, d) in x.worst(15) {
+                    let from = x
+                        .danger_from(node)
+                        .map(|f| format!(", mostly from {}", at(t.origins[f as usize])))
+                        .unwrap_or_default();
+                    let e = &x.nodes[node as usize];
+                    out.push(format!(
+                        "  {}: danger {d:.2} ({:.0} damage, {:.1} deaths){from}",
+                        at(t.origins[node as usize]),
+                        e.hurt,
+                        e.deaths
+                    ));
+                }
+            }
+            None => out.push("nothing learned yet".into()),
+        },
+        _ => {
+            let learned = x.map_or(0, |x| x.worst(usize::MAX).len());
+            out.push(format!(
+                "experience: bots got hurt at {learned} places{}; `lb map spots|mines|danger` for the lists",
+                if x.is_some_and(|x| x.changed) {
+                    " (not saved yet)"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    out
+}
+
+/// What the bot's goal is doing, for `lb brain`.
+fn task_text(t: &lb_brain::goals::Task, now: lb_core::time::SimTime) -> String {
+    use lb_brain::goals::Task;
+    let at = |p: lb_core::Vec3| format!("{:.0} {:.0} {:.0}", p.x, p.y, p.z);
+    match t {
+        Task::Search { dest, at: when, .. } => {
+            format!("searching from {} (chosen {:.1} s ago)", at(*dest), now.since(*when))
+        }
+        Task::Investigate { dest, arrived, .. } => match arrived {
+            Some(t) => format!("looking about for {:.1} s", now.since(*t)),
+            None => format!("going to see from {}", at(*dest)),
+        },
+        Task::Hide { dest, arrived, .. } => {
+            if *arrived {
+                format!("hiding at {}", at(*dest))
+            } else {
+                format!("off to cover at {}", at(*dest))
+            }
+        }
+        Task::Camp { until, .. } => match until {
+            Some(u) => format!("holding the spot {:.1} s more", u.since(now)),
+            None => "on the way to the spot".into(),
+        },
+        Task::Control { wait_at, waited, .. } => {
+            if *waited {
+                format!("waiting at {}", at(*wait_at))
+            } else {
+                format!("on the way to wait at {}", at(*wait_at))
+            }
+        }
+        Task::Trap { started, until, .. } => match (started, until) {
+            (_, Some(u)) => format!("watching the trap {:.1} s more", u.since(now)),
+            (Some(_), None) => "laying it".into(),
+            (None, None) => "on the way".into(),
+        },
     }
 }
 
@@ -677,6 +831,40 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             .map(|g| format!("{} {}/{:.2}", goal_text(rt, b, g.kind), g.rank, g.weight))
             .collect();
         out.push(format!("  candidates: {}", candidates.join(" | ")));
+        let gs = &m.decider.stats;
+        let ms = &m.stats;
+        let taken: Vec<String> = gs.taken.iter().map(|(k, n)| format!("{k} ×{n}")).collect();
+        let (own_aggr, own_fear) = m.mood.base();
+        out.push(format!(
+            "  mind: {}; aggression {:.2} (own {:.2}), fear {:.2} (own {:.2}); goals taken: {}; {} goal changes ({} \
+             before the hold ran out, {} with no fight in them), {} target changes; {} sounds seen about, {} covers, {} \
+             spots held, {} items waited for, {} traps{}",
+            m.task.as_ref().map(|t| task_text(t, now)).unwrap_or_else(|| "-".into()),
+            m.mood.aggression,
+            own_aggr,
+            m.mood.fear,
+            own_fear,
+            if taken.is_empty() { "-".into() } else { taken.join(", ") },
+            gs.switches,
+            gs.early,
+            gs.calm,
+            ms.target_switches,
+            ms.investigated,
+            ms.covers,
+            ms.camps,
+            ms.controlled,
+            ms.traps,
+            b.brain
+                .expect
+                .map(|(k, p)| format!(
+                    "; expects {} at {:.0} {:.0} {:.0}",
+                    name(k.slot),
+                    p.x,
+                    p.y,
+                    p.z
+                ))
+                .unwrap_or_default()
+        ));
         let target = m.target.map(|k| {
             let track = b.brain.beliefs.track(k);
             format!(
@@ -720,8 +908,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         let st = &arms.stats;
         out.push(format!(
             "  arms: {}; thrown {} grenades, {} satchels, {} snarks ({} barrages); {} m203, {} mines laid, {} \
-             detonations, {} mines shot, {} scoped in {} zooms, gauss {} fired {} dumped {} plain rolls {:.1} s \
-             cramped, {} dodges, {} runs from snarks, {} failed{}; explosives known: {} own satchels, {} mines, {} in \
+             detonations, {} mines shot, {} scoped in {} zooms, gauss {} fired ({} through walls) {} dumped {} plain \
+             rolls {:.1} s cramped, {} dodges, {} runs from snarks, {} failed{}; explosives known: {} own satchels, {} mines, {} in \
              flight",
             arms.describe(now),
             st.grenades,
@@ -735,6 +923,7 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             st.scoped,
             st.zooms,
             arms.gauss.fired,
+            st.wallbangs,
             arms.gauss.dumped,
             arms.gauss.plain_rolls,
             f64::from(arms.gauss.cramped) * 0.1,
@@ -881,12 +1070,25 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             p.aggression, p.fear, p.weight, p.seed
         ),
         format!(
-            "  weapons: {}; tags: {}",
+            "  weapons: favourites {}; the style's likes {}, throws ×{:.1}; tags: {}",
             if p.weapons.is_empty() {
-                "style default".into()
+                "none".into()
             } else {
                 p.weapons.join(", ")
             },
+            {
+                let likes = &rt.styles.weapons(p.style).guns;
+                if likes.is_empty() {
+                    "none".to_string()
+                } else {
+                    likes
+                        .iter()
+                        .map(|(n, v)| format!("{n} ×{v:.2}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            },
+            rt.styles.weapons(p.style).throwables,
             if p.tags.is_empty() {
                 "-".into()
             } else {
@@ -903,14 +1105,24 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             k.turn_speed
         ),
         format!(
-            "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, bhop {}",
+            "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, gauss through \
+             walls {}, bhop {}",
             k.hearing_threshold,
             k.sound_bearing_sigma,
             k.track_forget,
             opt(k.dodge_hop_cooldown, " s"),
             if k.tricks { "yes" } else { "no" },
+            if k.gauss_walls { "yes" } else { "no" },
             opt(k.bhop_speed, "x"),
         ),
+        {
+            let g = rt.styles.goals(p.style);
+            format!(
+                "  goals: engage ×{:.1}, hunt ×{:.1}, retreat ×{:.1}, collect ×{:.1}, investigate ×{:.1}, camp ×{:.1}, \
+                 ambush ×{:.1}, control ×{:.1}, trap ×{:.1}",
+                g.engage, g.hunt, g.retreat, g.collect, g.investigate, g.camp, g.ambush, g.control, g.trap
+            )
+        },
         format!(
             "  overrides: {}",
             if p.overrides.is_empty() {

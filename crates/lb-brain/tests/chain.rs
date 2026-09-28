@@ -171,6 +171,7 @@ fn character(skill: u8) -> Character {
         aggression: 0.55,
         fear: 0.5,
         affinity: StyleId::Balanced.goal_affinity(),
+        weapons: lb_brain::WeaponLike::default(),
     }
 }
 
@@ -214,6 +215,7 @@ fn body(now: SimTime, weapon: Option<WeaponId>) -> Body {
         dll: lb_game::dll::DllProfile::default(),
         gravity: 800.0,
         allowed: u32::MAX,
+        selfgauss: 0,
     }
 }
 
@@ -265,8 +267,10 @@ fn run(mut world: World, frames: usize, seed: u64) -> Run {
                 track_forget: 8.0,
                 maxspeed: 300.0,
             },
+            None,
+            None,
         );
-        let out = brain.act(&body(now, weapon), &ch, &mut world, &mut rng);
+        let out = brain.act(&body(now, weapon), &ch, &mut world, None, &mut rng);
         if let Some(w) = out.commands.first().and_then(|c| WeaponId::from_classname(c)) {
             weapon = Some(w);
         }

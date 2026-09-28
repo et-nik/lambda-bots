@@ -88,6 +88,13 @@ pub struct GaussInput {
     pub allowed: bool,
     /// Share of fights fought with the charged shot, 0..1.
     pub charge_share: f32,
+    /// View angles to dump a charge along, found clear of walls ahead and drops behind; `None`: back the way the bot
+    /// goes.
+    pub dump: Option<lb_core::Vec3>,
+    /// A charged shot of this much damage or less, missing, comes back at its shooter: in vanilla HLDM a beam that
+    /// fails to punch through a wall met square starts over from the gun, the shooter no longer left out. Zero where
+    /// it never does (BugfixedHL by default) or the wall along the view is punched through or glanced off.
+    pub backfire: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -122,6 +129,21 @@ pub struct Gauss {
     pub dumped: u32,
     pub plain_rolls: u32,
     pub cramped: u32,
+    /// The last charge let go, for the log when a bot dies by its own gauss.
+    pub last: Option<Release>,
+}
+
+/// A charge let go: when, how strong, whether dumped or at a target (and how far), the view, and how far the first
+/// wall along it was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Release {
+    pub at: SimTime,
+    pub damage: f32,
+    pub dump: bool,
+    pub target: Option<f32>,
+    pub view: lb_core::Vec3,
+    pub wall_ahead: f32,
+    pub recoil_room: f32,
 }
 
 impl Gauss {
@@ -203,11 +225,18 @@ impl Gauss {
                     || h.on_ladder
                     || (!combat && !i.expected && i.target.is_none() && age >= READY_HOLD);
                 if must_dump {
-                    self.state = State::Dumping {
-                        angles: dump_angles(h, i.heading),
-                        since: now,
-                    };
+                    let angles = i.dump.unwrap_or_else(|| dump_angles(h, i.heading));
+                    self.state = State::Dumping { angles, since: now };
                     self.dumped += 1;
+                    self.last = Some(Release {
+                        at: now,
+                        damage: charged_damage(age, i.full_damage),
+                        dump: true,
+                        target: None,
+                        view: angles,
+                        wall_ahead: i.wall_ahead,
+                        recoil_room: i.recoil_room,
+                    });
                     return Some(charge_request());
                 }
                 let wait = if combat { release_after } else { GAUSS_MIN_CHARGE };
@@ -219,12 +248,22 @@ impl Gauss {
                     && age >= wait
                     && throw <= i.recoil_room
                     && i.wall_ahead >= wall_blast(damage)
+                    && damage > i.backfire
                 {
                     self.state = State::Releasing {
                         since: now,
                         angles: None,
                     };
                     self.fired += 1;
+                    self.last = Some(Release {
+                        at: now,
+                        damage,
+                        dump: false,
+                        target: i.target.map(|t| t.0),
+                        view: h.view,
+                        wall_ahead: i.wall_ahead,
+                        recoil_room: i.recoil_room,
+                    });
                     return Some(Request {
                         weapon: Some(hold(WeaponId::Gauss)),
                         ..Request::default()
@@ -440,6 +479,8 @@ mod tests {
             heading: Vec2::X,
             allowed: true,
             charge_share: 1.0,
+            dump: None,
+            backfire: 0.0,
         }
     }
 

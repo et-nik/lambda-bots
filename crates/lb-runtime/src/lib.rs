@@ -8,6 +8,7 @@ pub mod clients;
 pub mod commands;
 pub mod cvars;
 pub mod editor;
+pub mod learned;
 pub mod logging;
 pub mod manager;
 pub mod motor_test;
@@ -105,6 +106,8 @@ pub struct GameState {
     pub rules_verdict: Option<DllProfile>,
     /// The button a bot was seen to set its satchels off with in the game, and which bot; kept over map changes.
     pub satchel_checked: Option<(lb_game::mechanics::Attack, String)>,
+    /// Respawn times the bots timed on this server (items, weapons, ammo), kept in `data/learned/respawn.json`.
+    pub respawns: [lb_knowledge::Learned; 3],
 }
 
 #[derive(Default, Debug, Clone, Serialize)]
@@ -212,6 +215,11 @@ pub struct Runtime {
     compat_pending: bool,
     pub nav_loader: Option<nav::NavLoader>,
     pub graph: Option<Arc<lb_nav::NavGraph>>,
+    /// Who sees whom, chokepoints, spots to hold and to mine, worked out from the graph; `None` without one.
+    pub tactics: Option<Arc<lb_mapknow::MapTactics>>,
+    /// Where bots got hurt on this map, this game and before (`data/experience/<map>.json`).
+    pub experience: Option<lb_mapknow::Experience>,
+    experience_saved: SimTime,
     /// Where the map's doors, lifts and breakables are now.
     pub mechs: nav::LiveMechs,
     /// Links switched off for every bot after several failed them.
@@ -366,6 +374,9 @@ impl Runtime {
             compat_pending: false,
             nav_loader: None,
             graph: None,
+            tactics: None,
+            experience: None,
+            experience_saved: SimTime::ZERO,
             mechs: nav::LiveMechs::default(),
             link_health: LinkHealth::default(),
             live_check: lb_nav::probe::LiveCheck::default(),
@@ -402,6 +413,7 @@ impl Runtime {
             record_request: None,
             record_status: "not recording".into(),
         };
+        rt.game.respawns = learned::load_respawns(&rt.init.install_dir);
         rt.register_cvars(host);
         rt.open_telemetry();
         let summary = rt.startup_summary();
@@ -488,8 +500,8 @@ impl Runtime {
         for bot in &mut self.bots {
             if let Some(p) = self.roster.get(&bot.persona.name) {
                 let skill = p.skill_params(&self.presets);
-                let affinity = self.styles.goals(p.style);
-                bot.set_persona(p, skill, affinity);
+                let style = (self.styles.goals(p.style), self.styles.weapons(p.style));
+                bot.set_persona(p, skill, style);
             }
             bot.driver.set_rate(self.config.engine.cmd_rate as f64);
         }
@@ -614,6 +626,9 @@ impl Runtime {
         self.build_compat(host);
         self.compat_pending = true;
         self.graph = None;
+        self.tactics = None;
+        self.experience = None;
+        self.experience_saved = SimTime::ZERO;
         self.vis = None;
         self.clients_now.clear();
         self.sounds_now.clear();
@@ -693,6 +708,8 @@ impl Runtime {
     }
 
     pub fn map_end(&mut self, _host: &mut dyn Host) {
+        self.save_experience();
+        self.keep_respawns();
         if self.config.bots.save_names {
             let saved: Vec<String> = self
                 .bots
@@ -704,6 +721,45 @@ impl Runtime {
         }
         self.bots.clear();
         self.map = None;
+    }
+
+    /// The tactics of a newly loaded graph, and what was learned on the map put on its nodes: from the old
+    /// graph's nodes when the graph changed during the map, else from the file kept.
+    fn set_tactics(&mut self, map: &str, tactics: Option<Arc<lb_mapknow::MapTactics>>) {
+        let before = match (self.experience.take(), self.tactics.as_deref()) {
+            (Some(x), Some(old)) => Some(x.to_file(map, old)),
+            _ => None,
+        };
+        self.experience = tactics.as_deref().map(|t| match &before {
+            Some(f) => lb_mapknow::Experience::from_file(f, t).0,
+            None => learned::load_experience(&self.init.install_dir, map, t),
+        });
+        self.tactics = tactics;
+    }
+
+    /// Adds the respawn times the bots timed on this map to the server's, and keeps them.
+    fn keep_respawns(&mut self) {
+        let before = self.game.respawns;
+        for bot in &self.bots {
+            if let Some(items) = &bot.brain.items {
+                for (kept, own) in self.game.respawns.iter_mut().zip(&items.own) {
+                    kept.merge(own);
+                }
+            }
+        }
+        if self.game.respawns != before {
+            learned::save_respawns(&self.init.install_dir, &self.game.respawns);
+        }
+    }
+
+    /// Keeps what was learned on the map, at most every few minutes of play and at the map's end.
+    fn save_experience(&mut self) {
+        let (Some(map), Some(t), Some(x)) = (self.map.as_ref(), self.tactics.as_deref(), self.experience.as_mut())
+        else {
+            return;
+        };
+        learned::save_experience(&self.init.install_dir, &map.name, t, x);
+        self.experience_saved = self.now;
     }
 
     fn resolve_messages(&mut self, host: &mut dyn Host) {
@@ -936,7 +992,7 @@ impl Runtime {
                     self.vis = Some(loaded.vis);
                     tracing::info!("{map}: {} item spots", loaded.items.len());
                     for bot in &mut self.bots {
-                        bot.brain.set_items(&loaded.items, self.now);
+                        bot.brain.set_items(&loaded.items, self.now, self.game.respawns);
                     }
                     self.item_spots = Some(loaded.items);
                     for bot in &mut self.bots {
@@ -984,6 +1040,7 @@ impl Runtime {
                                 }
                             }
                             self.graph = Some(graph);
+                            self.set_tactics(&map, loaded.tactics);
                         }
                         Err(e) => {
                             self.nav_status = format!("{map}: {e}");
@@ -1381,6 +1438,12 @@ impl Runtime {
         if self.safe_mode.is_none() {
             self.drive_bots(host);
         }
+        if let Some(x) = self.experience.as_mut() {
+            x.decay(self.now.secs());
+        }
+        if self.now.since(self.experience_saved) >= learned::SAVE_EVERY {
+            self.save_experience();
+        }
         self.draw_editor(host);
         self.sounds_now.clear();
         self.public_now.clear();
@@ -1477,6 +1540,15 @@ impl Runtime {
                                 );
                                 if let Some(d) = felt {
                                     bot.brain.on_damage(&d);
+                                    const DMG_FALL: i32 = 32;
+                                    let body = &bot.self_state.body;
+                                    let from = bot.brain.damage_source(&d, body.origin + body.view_ofs);
+                                    if let (Some(t), Some(x)) = (self.tactics.as_deref(), self.experience.as_mut())
+                                        && d.bits & DMG_FALL == 0
+                                        && let Some(at) = t.nearest_standing(body.origin, 256.0)
+                                    {
+                                        x.hurt(at, d.amount as f32, from.and_then(|p| t.nearest_standing(p, 256.0)));
+                                    }
                                 }
                                 let victim = (bot.id.slot, bot.self_state.body.origin);
                                 self.credit_damage(victim, *source, (*health + *armor) as f32);
@@ -1490,6 +1562,54 @@ impl Runtime {
                         GameMsg::GameMode { teamplay } => self.game.teamplay_message = *teamplay,
                         GameMsg::DeathMsg { killer, victim, weapon } => {
                             tracing::debug!("kill: {killer} -> {victim} ({weapon})");
+                            let dead_bot = self.bots.iter().find(|b| b.id.slot == *victim && b.is_active());
+                            if killer == victim
+                                && weapon == "gauss"
+                                && let Some(b) = dead_bot
+                            {
+                                let gauss = &b.brain.mind.arms.gauss;
+                                let body = &b.self_state.body;
+                                tracing::info!(
+                                    "{} killed itself with the gauss at {:.0} {:.0} {:.0} ({}, velocity {:.0}); last \
+                                     charge: {}",
+                                    b.persona.name,
+                                    body.origin.x,
+                                    body.origin.y,
+                                    body.origin.z,
+                                    if body.flags & lb_game::self_state::FL_ONGROUND != 0 {
+                                        "on the ground"
+                                    } else {
+                                        "in the air"
+                                    },
+                                    body.velocity.length(),
+                                    gauss
+                                        .last
+                                        .map(|r| format!(
+                                            "{:.2} s before, {:.0} damage, {}, view {:.0} {:.0}, wall ahead {:.0}, \
+                                             room behind {:.0}",
+                                            self.now.since(r.at),
+                                            r.damage,
+                                            match (r.dump, r.target) {
+                                                (true, _) => "dumped".to_string(),
+                                                (false, Some(d)) => format!("at a target {d:.0} u away"),
+                                                (false, None) => "at no target".to_string(),
+                                            },
+                                            r.view.x,
+                                            r.view.y,
+                                            r.wall_ahead,
+                                            r.recoil_room
+                                        ))
+                                        .unwrap_or_else(|| "none".into())
+                                );
+                            }
+                            if let (Some(b), Some(t), Some(x)) =
+                                (dead_bot, self.tactics.as_deref(), self.experience.as_mut())
+                                && *killer != 0
+                                && killer != victim
+                                && let Some(at) = t.nearest_standing(b.self_state.body.origin, 256.0)
+                            {
+                                x.died(at);
+                            }
                             let ours = |slot: u8| self.bots.iter().any(|b| b.id.slot == slot && b.is_active());
                             self.arms_stats.death(
                                 weapon,
@@ -1862,14 +1982,14 @@ impl Runtime {
                     userid,
                     persona.clone(),
                     skill,
-                    self.styles.goals(persona.style),
+                    (self.styles.goals(persona.style), self.styles.weapons(persona.style)),
                     self.now,
                     self.master_seed,
                     self.config.engine.cmd_rate as f64,
                     self.config.engine.max_cmd_debt_ms as f64,
                 );
                 if let Some(spots) = &self.item_spots {
-                    bot.brain.set_items(spots, self.now);
+                    bot.brain.set_items(spots, self.now, self.game.respawns);
                 }
                 if let Some(spawns) = &self.spawns {
                     bot.brain.spawns = spawns.to_vec();
@@ -2116,8 +2236,17 @@ impl Runtime {
             &self.last_shot,
             &teams,
         );
+        let map = match (graph.as_deref(), self.tactics.as_deref()) {
+            (Some(graph), Some(tactics)) => Some(lb_mapknow::MapKnowledge {
+                graph,
+                tactics,
+                experience: self.experience.as_ref(),
+            }),
+            _ => None,
+        };
         let world = Senses {
             now,
+            map,
             subjects: &subjects,
             sounds: &self.sounds_now,
             public: &self.public_now,
@@ -2156,6 +2285,7 @@ impl Runtime {
                     frame_ms,
                     freeze,
                     graph: graph.as_deref(),
+                    map,
                     stuck_kill,
                     registry,
                     opponents,
@@ -2164,6 +2294,7 @@ impl Runtime {
                     damages,
                     dll,
                     allowed,
+                    selfgauss: self.game.rules.selfgauss,
                     projectiles: &self.projectile_entities,
                 };
                 drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
@@ -2546,6 +2677,7 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
         dll: ctx.dll,
         gravity: ctx.gravity,
         allowed: ctx.allowed,
+        selfgauss: ctx.selfgauss,
     }
 }
 
@@ -2748,6 +2880,8 @@ fn behave(
     let mut service = nav::BotNavService {
         nav: &mut bot.nav,
         graph: ctx.graph,
+        tactics: ctx.map.map(|m| m.tactics),
+        experience: ctx.map.and_then(|m| m.experience),
         tracer,
         mechs: ctx.mechs,
         health: link_health,
@@ -2758,7 +2892,8 @@ fn behave(
         kill: false,
         plan_budget,
     };
-    let out = bot.brain.act(&body, &bot.character, &mut service, &mut bot.rng);
+    let map = ctx.map.as_ref().map(|m| m as &dyn lb_nav_api::MapView);
+    let out = bot.brain.act(&body, &bot.character, &mut service, map, &mut bot.rng);
     if service.kill {
         tracing::info!("{} is stuck for {} s, using kill", bot.persona.name, ctx.stuck_kill);
         bot.pending_client_cmds.push(vec!["kill".to_string()]);
@@ -2774,6 +2909,8 @@ fn behave(
 /// The world as the senses get it this frame, shared by every bot.
 struct Senses<'a> {
     now: SimTime,
+    /// The map as the bots know it, once its graph and tactics are loaded.
+    map: Option<lb_mapknow::MapKnowledge<'a>>,
     subjects: &'a [Subject<'a>],
     sounds: &'a [SoundEvent],
     public: &'a [PublicEvent],
@@ -2793,6 +2930,7 @@ struct DriveCtx<'a> {
     frame_ms: f64,
     freeze: bool,
     graph: Option<&'a lb_nav::NavGraph>,
+    map: Option<lb_mapknow::MapKnowledge<'a>>,
     stuck_kill: f64,
     registry: &'a WeaponRegistry,
     opponents: usize,
@@ -2803,6 +2941,8 @@ struct DriveCtx<'a> {
     dll: DllProfile,
     /// Weapons bots may use (`lb weapons`).
     allowed: u32,
+    /// `mp_selfgauss` (1 where the DLL has no such cvar).
+    selfgauss: u8,
     projectiles: &'a [ProjectileEntity],
 }
 
@@ -2888,8 +3028,23 @@ fn sense(
         track_forget: bot.skill.track_forget,
         maxspeed: w.maxspeed,
     };
-    bot.brain.update(w.now, &params);
+    let body = &bot.self_state.body;
+    let eyes = (bot.state == BotState::Alive).then(|| lb_brain::Eyes {
+        origin: body.origin,
+        eye: body.origin + body.view_ofs,
+        view: bot.view,
+        half_fov: if body.fov > 0.0 && body.fov < 89.0 {
+            body.fov / 2.0
+        } else {
+            HALF_FOV
+        },
+    });
+    let map = w.map.as_ref().map(|m| m as &dyn lb_nav_api::MapView);
+    bot.brain.update(w.now, &params, map, eyes.as_ref());
 }
+
+/// Half the default field of view as a widescreen player has it, degrees.
+const HALF_FOV: f32 = 50.0;
 
 pub fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {

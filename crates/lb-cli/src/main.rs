@@ -12,6 +12,7 @@ const USAGE: &str = "usage:
   lb-cli config check <file-or-dir>...
   lb-cli nav gen <map.bsp> [--out <file.lbnav>]
   lb-cli nav coverage <map.bsp> [--json]
+  lb-cli nav tactics <map.bsp> [--all]
   lb-cli nav path <map.bsp> <x,y,z> <x,y,z>
   lb-cli nav validate-overlay <map.bsp> <overlay.yaml>...
   lb-cli nav tracecheck <map.bsp> <tracedump.jsonl>
@@ -35,6 +36,7 @@ fn run(args: &[&str]) -> Result<bool> {
         ["config", "check", paths @ ..] if !paths.is_empty() => Ok(config_check(paths)),
         ["nav", "gen", bsp, opts @ ..] => nav_gen(Path::new(bsp), opts),
         ["nav", "coverage", bsp, opts @ ..] => nav_coverage(Path::new(bsp), opts),
+        ["nav", "tactics", bsp, opts @ ..] => nav_tactics(Path::new(bsp), opts),
         ["nav", "path", bsp, from, to] => nav_path(Path::new(bsp), from, to),
         ["nav", "validate-overlay", bsp, files @ ..] if !files.is_empty() => validate_overlay(Path::new(bsp), files),
         ["nav", "tracecheck", bsp, dump] => trace_check(Path::new(bsp), Path::new(dump)),
@@ -85,6 +87,87 @@ fn nav_gen(bsp: &Path, args: &[&str]) -> Result<bool> {
     std::fs::write(&out, lb_nav::store::write(&generated.graph, &key))
         .map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?;
     println!("written {}", out.display());
+    Ok(true)
+}
+
+/// Where players spawn and where the map puts items.
+fn places(world: &lb_bsp::BspWorld) -> (Vec<lb_core::Vec3>, Vec<lb_core::Vec3>) {
+    let spawns = world
+        .entities
+        .iter()
+        .filter(|e| matches!(e.classname(), "info_player_deathmatch" | "info_player_start"))
+        .map(|e| e.origin())
+        .collect();
+    let items = world
+        .entities
+        .iter()
+        .filter(|e| lb_game::items::ItemKind::from_classname(e.classname()).is_some())
+        .map(|e| e.origin())
+        .collect();
+    (spawns, items)
+}
+
+/// Works out a map's tactics as the server does and prints what came out.
+fn nav_tactics(bsp: &Path, args: &[&str]) -> Result<bool> {
+    let all = match args {
+        [] => false,
+        ["--all"] => true,
+        _ => bail!(USAGE),
+    };
+    let (mut world, generated, _) = generate(bsp)?;
+    let mech = lb_bsp::mech::Mechanisms::from_world(&world);
+    lb_navgen::site::rest_poses(&mut world, &mech);
+    let vis = lb_bsp::MapVis::build(&world.bsp);
+    let (spawns, items) = places(&world);
+    let t = lb_mapknow::MapTactics::build(&generated.graph, &world, &vis, &spawns, &items);
+    let n = t.origins.len();
+    println!(
+        "{n} nodes: {} pairs see each other ({:.1}% of all), {} traces, {} ms",
+        t.stats.pairs,
+        200.0 * t.stats.pairs as f64 / (n * n.saturating_sub(1)).max(1) as f64,
+        t.stats.traces,
+        t.stats.millis
+    );
+    let busy = t.flow.iter().filter(|f| **f >= 0.3).count();
+    println!("flow: {busy} nodes at 0.3 or more of the busiest");
+    let at = |p: lb_core::Vec3| format!("{:.0} {:.0} {:.0}", p.x, p.y, p.z);
+    let show = |count: usize| if all { usize::MAX } else { count };
+    println!("{} chokepoints:", t.chokes.len());
+    for &c in t.chokes.iter().take(show(8)) {
+        let s = &t.spots[c as usize];
+        println!(
+            "  node {c} at {}: flow {:.2}, {:.0} u wide",
+            at(t.origins[c as usize]),
+            t.flow[c as usize],
+            s.width
+        );
+    }
+    println!("{} spots to hold:", t.camps.len());
+    for c in t.camps.iter().take(show(24)) {
+        println!(
+            "  {} node {} at {}: score {:.2}, watch {:.0}° / {:.0}°, pitch {:.0}°, {:.0} u away{}",
+            c.kind.as_str(),
+            c.node,
+            at(c.pos),
+            c.score,
+            c.watch[0],
+            c.watch[1],
+            c.pitch,
+            c.range,
+            c.guards.map(|g| format!(", guards node {g}")).unwrap_or_default()
+        );
+    }
+    println!("{} tripmine spots:", t.mines.len());
+    for m in t.mines.iter().take(show(12)) {
+        println!(
+            "  node {} {}: wall {}, beam {:.0} u, flow {:.2}",
+            m.node,
+            if m.corner { "corner" } else { "across" },
+            at(m.wall),
+            m.wall.distance(m.beam_end),
+            m.flow
+        );
+    }
     Ok(true)
 }
 

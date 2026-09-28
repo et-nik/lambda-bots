@@ -1,14 +1,105 @@
 //! Navigation interface visible to the AI: NavQuery trait and request types.
 //!
 //! Behavior asks navigation for movement toward a point, for wandering, or for a place to fall back to; it never
-//! sees the graph. The service is also the bot's tracer, so behavior code can check walls and ledges through the
-//! same handle.
+//! walks the graph itself. The service is also the bot's tracer, so behavior code can check walls and ledges
+//! through the same handle.
+//!
+//! What an experienced player knows of a map comes through [`MapView`]: its places (graph nodes) and the ways
+//! between them, who sees whom from where, where players pass and where the way narrows, spots to watch from and
+//! walls to set tripmines on, and where the bots got hurt before.
 
 #![forbid(unsafe_code)]
 
 use lb_core::rng::Pcg32;
 use lb_core::{Vec2, Vec3};
 use lb_worldq::Tracer;
+use serde::{Deserialize, Serialize};
+
+/// A place on the map: a node of the navigation graph.
+pub type NodeId = u32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CampKind {
+    /// Long sightlines over ways players take, little in close.
+    Overwatch,
+    /// Out of the way, close to a chokepoint players come through.
+    Ambush,
+}
+
+impl CampKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CampKind::Overwatch => "overwatch",
+            CampKind::Ambush => "ambush",
+        }
+    }
+}
+
+/// A place worth holding for a while, and where to look from it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CampSpot {
+    pub node: NodeId,
+    /// Player origin standing there.
+    pub pos: Vec3,
+    pub kind: CampKind,
+    /// World yaws worth watching, the best first (the same twice when there is one).
+    pub watch: [f32; 2],
+    /// Pitch toward what is watched, degrees (negative up).
+    pub pitch: f32,
+    /// Typical distance of what is watched.
+    pub range: f32,
+    /// How good the spot is of its kind, 0..1.
+    pub score: f32,
+    /// The chokepoint an ambush spot watches.
+    pub guards: Option<NodeId>,
+}
+
+/// A wall a tripmine can go on, its beam across a way players take.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MineSpot {
+    pub node: NodeId,
+    /// Where to stand (player origin) to put the mine on the wall.
+    pub stand: Vec3,
+    /// Where on the wall to aim, and the wall's normal.
+    pub wall: Vec3,
+    pub normal: Vec3,
+    /// Where the beam ends across the way.
+    pub beam_end: Vec3,
+    /// How much players pass there, 0..1.
+    pub flow: f32,
+    /// Behind a turn: players round a corner into the beam.
+    pub corner: bool,
+}
+
+/// The map as an experienced player knows it. Static knowledge worked out from the map once, plus what the bots
+/// learned by playing it; nothing here tells where anyone is now.
+pub trait MapView {
+    fn node_count(&self) -> usize;
+    /// Player origin standing (crouched for crouch-only places) at `n`.
+    fn node_origin(&self, n: NodeId) -> Vec3;
+    /// The node nearest to `p` within `max` units, vertical distance counting double.
+    fn nearest_node(&self, p: Vec3, max: f32) -> Option<NodeId>;
+    /// Every usable way out of `n`: where it leads and the least time it takes, seconds.
+    fn for_each_link(&self, n: NodeId, f: &mut dyn FnMut(NodeId, f32));
+    /// A player at `a` sees one at `b` (eye to eye, through glass; the same both ways).
+    fn visible(&self, a: NodeId, b: NodeId) -> bool;
+    /// Every node a player at `n` sees.
+    fn for_each_visible(&self, n: NodeId, f: &mut dyn FnMut(NodeId));
+    /// How much players pass through `n`, 0..1.
+    fn flow(&self, n: NodeId) -> f32;
+    /// How much traffic sees `n` from close by, 0..1.
+    fn exposure(&self, n: NodeId) -> f32;
+    /// Not a place to stop at: a ladder, water, mid-air, a lift.
+    fn transit(&self, n: NodeId) -> bool;
+    /// How much bots got hurt at `n` before, 0..1.
+    fn danger(&self, n: NodeId) -> f32;
+    /// Where the damage taken at `n` mostly came from.
+    fn danger_from(&self, n: NodeId) -> Option<NodeId>;
+    fn camp_spots(&self) -> &[CampSpot];
+    fn mine_spots(&self) -> &[MineSpot];
+    /// Narrow places many players pass, busiest first.
+    fn chokepoints(&self) -> &[NodeId];
+}
 
 /// Movement for one frame along a path.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,6 +159,11 @@ pub trait NavService: Tracer {
     fn roam(&mut self, rng: &mut Pcg32) -> Option<NavStep>;
     /// A place to fall back to, away from `threat`.
     fn away_from(&mut self, threat: Vec3) -> Option<Vec3>;
+    /// A place near the bot out of sight of `threat` that the bot gets to before the threat could; `None` when there
+    /// is none within reach.
+    fn cover_from(&mut self, _threat: Vec3) -> Option<Vec3> {
+        None
+    }
     /// A navigation graph is loaded.
     fn available(&self) -> bool;
     /// Keeps paths off the line `a → b` at body height for `seconds` (a tripmine's beam the bot knows of).

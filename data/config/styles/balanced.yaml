@@ -3,9 +3,14 @@ schema: lambdabots/style@1
 # The base style: fights, hunts, collects and backs off in equal measure.
 #
 #   traits   ranges new personalities of this style draw aggression and fear from (0..1)
-#   goals    multipliers of goal weights, 1 = the balanced style:
+#   goals    multipliers of goal weights:
 #            engage (fight an enemy in sight), hunt (chase one lost moments ago), retreat (back off when hurt),
-#            collect (go for weapons, ammo, health, armor), roam (wander)
+#            collect (go for weapons, ammo, health, armor), roam (wander), investigate (go and see what made a
+#            sound), camp (hold a spot with long sightlines), ambush (wait out of the way by a chokepoint),
+#            control (wait by an item about to come back), trap (lay tripmines and satchels where players pass)
+#   weapons  guns: multipliers of how good the style finds a gun (its classname without weapon_, 1 = as good as
+#            its damage says; a list given replaces the built-in one), throwables: how readily it throws grenades,
+#            satchels and snarks
 #
 # Anything left out keeps its built-in value.
 
@@ -19,3 +24,11 @@ goals:
   retreat: 1.0
   collect: 1.0
   roam: 1.0
+  investigate: 1.0
+  camp: 0.4
+  ambush: 0.5
+  control: 0.6
+  trap: 0.5
+weapons:
+  guns: {}
+  throwables: 1.0

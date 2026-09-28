@@ -25,13 +25,14 @@ use lb_game::self_state::Prediction;
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{Fire, Intents, LookIntent, LookParams, MoveIntent, Prio, StanceIntent, WeaponIntent};
-use lb_nav_api::{NavService, NavStatus, NavStep};
-use lb_styles::GoalAffinity;
+use lb_nav_api::{MapView, NavService, NavStatus, NavStep};
+use lb_styles::{Emotions, GoalAffinity};
 use smallvec::SmallVec;
 
 use crate::BotBrain;
 use crate::arms::Arms;
 use crate::attention::LookReason;
+use crate::goals::Task;
 
 const COMBAT_PERIOD: f64 = 0.1;
 const DECISION_PERIOD: f64 = 0.2;
@@ -57,10 +58,13 @@ const CHARGER_SPOT: f32 = 24.0;
 /// A charger that gave nothing for this long is spent; nobody stays at one longer than the timeout.
 const CHARGER_DRY: f64 = 1.5;
 const CHARGER_TIMEOUT: f64 = 15.0;
-const RETREAT_REPLAN: f64 = 2.0;
 /// A melee fighter walks a path to enemies further than this, and charges straight at closer ones.
 const MELEE_CHARGE: f32 = 200.0;
 const REACTION_SAMPLES: usize = 128;
+/// An item spot just reached is not gone to again this soon.
+const COLLECTED_REST: f64 = 3.0;
+/// A target in sight is kept at least this long.
+const TARGET_HOLD: f64 = 1.0;
 
 /// How fast the bot answers an enemy: from the first glimpse and from recognition to the first shot at it.
 #[derive(Clone, Debug, Default)]
@@ -129,6 +133,8 @@ pub struct Body {
     pub gravity: f32,
     /// Weapons the bot may use, as a mask of weapon bits (`lb weapons` on the stand); all by default.
     pub allowed: u32,
+    /// BugfixedHL's `mp_selfgauss` (1 elsewhere): whether a charged gauss beam may come back at its shooter.
+    pub selfgauss: u8,
 }
 
 impl Body {
@@ -146,6 +152,29 @@ impl Body {
     }
 }
 
+/// How much a bot likes each weapon: a multiplier of how good it finds each gun (by `WeaponId`, 1 = as good as its
+/// damage says) and how readily it throws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeaponLike {
+    pub guns: [f32; 16],
+    pub throwables: f32,
+}
+
+impl Default for WeaponLike {
+    fn default() -> Self {
+        WeaponLike {
+            guns: [1.0; 16],
+            throwables: 1.0,
+        }
+    }
+}
+
+impl WeaponLike {
+    pub fn gun(&self, w: WeaponId) -> f32 {
+        self.guns.get(w as usize).copied().unwrap_or(1.0)
+    }
+}
+
 /// Who the bot is.
 #[derive(Clone, Debug)]
 pub struct Character {
@@ -155,6 +184,7 @@ pub struct Character {
     pub aggression: f32,
     pub fear: f32,
     pub affinity: GoalAffinity,
+    pub weapons: WeaponLike,
 }
 
 impl Character {
@@ -175,6 +205,20 @@ impl Character {
     }
 }
 
+/// What the goals came to, for `lb brain` and the stand statistics.
+#[derive(Clone, Debug, Default)]
+pub struct MindStats {
+    /// The enemy aimed at changed to another while the first was still in sight.
+    pub target_switches: u32,
+    pub investigated: u32,
+    /// Cover found from a threat (rather than just away from it).
+    pub covers: u32,
+    pub camps: u32,
+    /// Items waited for and taken as they came back.
+    pub controlled: u32,
+    pub traps: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Mind {
     pub decider: Decider,
@@ -186,9 +230,8 @@ pub struct Mind {
     pub(crate) click_interval: f32,
     next_combat: SimTime,
     next_decision: SimTime,
-    urgent: bool,
+    pub(crate) urgent: bool,
     seen_damage: Option<SimTime>,
-    retreat_to: Option<(Vec3, SimTime)>,
     reload_until: SimTime,
     last_enemy_seen: SimTime,
     /// Where the path wants the bot to look, for vigilance.
@@ -204,25 +247,41 @@ pub struct Mind {
     pub arms: Arms,
     /// Where the aim was on the last frame an enemy was in sight.
     pub last_aim: Option<Vec3>,
-    /// When the bot last had a target to shoot at.
+    /// When the bot last had a target to shoot at, and when it took the current one.
     target_at: SimTime,
+    target_since: SimTime,
     /// The last look along the line an explosive would take (a wall or someone close in front): when, for which
     /// weapon, and whether it was clear.
     blast_check: Option<(SimTime, WeaponId, bool)>,
     /// Using a charger: which, since when, when it last gave something and what the bot had then.
     charging: Option<(usize, SimTime, SimTime, f32)>,
+    /// What the goal is doing: where it chose to go and what it does there.
+    pub task: Option<Task>,
+    /// Moods that come and go around the personality's aggression and fear.
+    pub mood: Emotions,
+    /// Spots are not held, and traps not laid, again before these.
+    pub camp_rest_until: SimTime,
+    pub trap_rest_until: SimTime,
+    /// The distance weapons are chosen for when no enemy is about: the range a spot held watches.
+    pub calm_distance: Option<f32>,
+    pub stats: MindStats,
 }
 
 impl Mind {
     pub fn reset(&mut self) {
         let decider = std::mem::take(&mut self.decider);
         let reactions = std::mem::take(&mut self.reactions);
+        let stats = std::mem::take(&mut self.stats);
+        let mut mood = self.mood;
+        mood.settle();
         let mut arms = std::mem::take(&mut self.arms);
         arms.reset();
         *self = Mind::default();
         self.decider = decider;
         self.decider.reset();
         self.reactions = reactions;
+        self.stats = stats;
+        self.mood = mood;
         self.arms = arms;
     }
 
@@ -235,7 +294,7 @@ impl Mind {
     }
 }
 
-fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &mut Mind) {
+pub(crate) fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &mut Mind) {
     intents.movement(
         Prio::Goal,
         MoveIntent {
@@ -278,14 +337,29 @@ impl BotBrain {
         body: &Body,
         ch: &Character,
         nav: &mut dyn NavService,
+        map: Option<&dyn MapView>,
         rng: &mut BotRng,
     ) -> lb_motor::MotorOut {
         let now = body.now;
         self.intents.clear();
         self.explosives.update(now);
+        if self.mind.mood.base() != (ch.aggression, ch.fear) {
+            self.mind.mood = Emotions::new(ch.aggression, ch.fear);
+        }
+        let seen = (self.mind.last_enemy_seen > SimTime::ZERO).then_some(self.mind.last_enemy_seen);
+        self.mind.mood.update(now, seen);
+        if std::mem::take(&mut self.hurt) {
+            self.mind.mood.on_hurt(body.health);
+        }
+        // Everything below sees the bot as it feels now.
+        let ch = &Character {
+            aggression: self.mind.mood.aggression,
+            fear: self.mind.mood.fear,
+            ..ch.clone()
+        };
         self.combat_tick(body, ch, nav, rng);
-        self.decide(body, ch, rng);
-        self.pursue(body, ch, nav, rng);
+        self.decide(body, ch, map, rng);
+        self.pursue(body, ch, nav, map, rng);
         self.dodge(body, nav);
         self.run_protocols(body, ch, nav, rng);
         self.aim_and_fire(body, ch, nav, rng);
@@ -330,10 +404,18 @@ impl BotBrain {
         }
         .and_then(|k| self.beliefs.track(k))
         .filter(|t| now.since(t.last_seen) <= lb_combat::arms::scope::LOST_HOLD);
-        let seen = match scoped {
-            Some(t) => (t.state == TrackState::Visible).then_some(t.who),
-            None => target::select(self.beliefs.enemies(), body.origin, now, previous),
+        // A target in sight is kept for a second at least: turning to another and back loses both.
+        let held = previous
+            .filter(|_| now.since(m.target_since) < TARGET_HOLD)
+            .and_then(|k| self.beliefs.track(k))
+            .filter(|t| t.state == TrackState::Visible);
+        let seen = match (scoped, held) {
+            (Some(t), _) | (None, Some(t)) => (t.state == TrackState::Visible).then_some(t.who),
+            (None, None) => target::select(self.beliefs.enemies(), body.origin, now, previous),
         };
+        if seen.is_some() && seen != previous {
+            m.target_since = now;
+        }
         if seen.is_some() {
             m.last_enemy_seen = now;
         }
@@ -349,9 +431,17 @@ impl BotBrain {
         };
         if seen.is_some() && seen != previous {
             m.urgent = true;
+            // Turning from an enemy still in sight to another one.
+            if previous
+                .and_then(|k| self.beliefs.track(k))
+                .is_some_and(|t| t.state == TrackState::Visible)
+            {
+                m.stats.target_switches += 1;
+            }
         }
         let track = m.target.and_then(|k| self.beliefs.track(k));
-        let distance = track.map_or(CALM_DISTANCE, |t| t.pos.distance(body.eye));
+        let calm = m.calm_distance.unwrap_or(CALM_DISTANCE);
+        let distance = track.map_or(calm, |t| t.pos.distance(body.eye));
         let speed = track
             .filter(|t| t.velocity_known(now))
             .map_or(250.0, |t| t.vel.truncate().length());
@@ -360,8 +450,8 @@ impl BotBrain {
             speed,
             aim_sigma: ch.aim_sigma(distance),
         };
-        let allowed = |w: WeaponId| body.allows(w);
-        let choice = policy::choose(&body.arsenal, body.weapon, &t, body.underwater, &body.damages, &allowed);
+        let like = |w: WeaponId| if body.allows(w) { ch.weapons.gun(w) } else { 0.0 };
+        let choice = policy::choose(&body.arsenal, body.weapon, &t, body.underwater, &body.damages, &like);
         if m.choice != Some(choice) {
             if let Choice::Use(w) = choice {
                 m.click_interval = fire::click_interval(w, ch.skill.semi_auto_delay, &mut rng.combat);
@@ -371,8 +461,9 @@ impl BotBrain {
         self.weapon_options(body, ch, nav, rng);
     }
 
-    fn decide(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) {
+    fn decide(&mut self, body: &Body, ch: &Character, map: Option<&dyn MapView>, rng: &mut BotRng) {
         let now = body.now;
+        let calm_for = self.calm_for(now);
         let m = &mut self.mind;
         if !m.urgent && now < m.next_decision && m.decider.current.is_some() {
             return;
@@ -380,6 +471,8 @@ impl BotBrain {
         m.urgent = false;
         m.next_decision = now + DECISION_PERIOD;
         let need = |a: Ammo| body.ammo_need[a.index()];
+        let mines: SmallVec<[Vec3; 8]> = self.explosives.mines.iter().map(|x| x.pos).collect();
+        let old = m.goal.map(|g| g.kind);
         let s = Situation {
             now,
             origin: body.origin,
@@ -398,14 +491,53 @@ impl BotBrain {
             target: m.target,
             opponents: body.opponents,
             maxspeed: body.maxspeed,
+            allowed: body.allowed,
+            map,
+            calm_for,
+            camp_ready: now >= m.camp_rest_until,
+            trap_ready: now >= m.trap_rest_until,
+            mines: &mines,
+            charges_out: !self.explosives.charges.is_empty(),
         };
-        m.goal = Some(m.decider.decide(&s, &mut rng.decision));
+        let goal = m.decider.decide(&s, &mut rng.decision);
+        m.goal = Some(goal);
+        if let Some(old) = old
+            && old != goal.kind
+        {
+            self.left_goal(old, ch, now, rng);
+        }
     }
 
-    fn pursue(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
+    fn pursue(
+        &mut self,
+        body: &Body,
+        ch: &Character,
+        nav: &mut dyn NavService,
+        map: Option<&dyn MapView>,
+        rng: &mut BotRng,
+    ) {
         let now = body.now;
         self.mind.nav_fire = None;
         let Some(goal) = self.mind.goal else { return };
+        if !matches!(goal.kind, GoalKind::ControlItem(_)) {
+            self.item_focus = None;
+        }
+        if !matches!(goal.kind, GoalKind::UseCharger(_)) {
+            self.mind.charging = None;
+        }
+        match (goal.kind, map) {
+            (GoalKind::Hunt(k), _) => return self.hunt(k, body, map, nav, rng),
+            (GoalKind::Investigate(id), _) => return self.investigate(id, body, map, nav, rng),
+            (GoalKind::Retreat, _) => return self.retreat(body, nav, rng),
+            (GoalKind::ControlItem(i), _) => return self.control(i, body, map, nav, rng),
+            (GoalKind::Camp(i), Some(map)) => return self.camp(i, body, ch, map, nav, rng),
+            (GoalKind::PlantTrap(t), Some(map)) => return self.trap(t, body, ch, map, nav, rng),
+            (GoalKind::Camp(_) | GoalKind::PlantTrap(_), None) => {
+                self.mind.decider.complete();
+                return;
+            }
+            _ => {}
+        }
         let m = &mut self.mind;
         let mut arrive = |status: NavStatus, m: &mut Mind| match status {
             NavStatus::Arrived => {
@@ -471,51 +603,17 @@ impl BotBrain {
                 );
                 m.path_look = None;
             }
-            GoalKind::Hunt(k) => {
-                let Some(t) = self.beliefs.track(k) else {
-                    m.decider.complete();
-                    return;
-                };
-                let (status, step) = nav.go_to(t.pos);
-                if let Some(step) = step {
-                    apply_step(&mut self.intents, &step, body.eye, m);
-                }
-                arrive(status, m);
-            }
-            GoalKind::Retreat => {
-                let threat = self
-                    .beliefs
-                    .enemies()
-                    .filter(|t| t.state != TrackState::Stale)
-                    .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)))
-                    .map(|t| t.pos);
-                let stale = m.retreat_to.is_none_or(|(_, at)| now.since(at) > RETREAT_REPLAN);
-                if stale && let Some(threat) = threat {
-                    m.retreat_to = nav.away_from(threat).map(|p| (p, now));
-                }
-                match m.retreat_to {
-                    Some((dest, _)) => {
-                        let (status, step) = nav.go_to(dest);
-                        if let Some(step) = step {
-                            apply_step(&mut self.intents, &step, body.eye, m);
-                        }
-                        if status != NavStatus::Moving {
-                            m.retreat_to = None;
-                        }
-                        arrive(status, m);
-                    }
-                    None => m.decider.fail(now, &mut rng.decision),
-                }
-            }
             GoalKind::CollectItem(i) => {
                 let Some(spot) = self.items.as_ref().and_then(|items| items.spots.get(i)).copied() else {
                     m.decider.complete();
                     return;
                 };
+                // Not there by the time the bot gets there (as the decision reckoned the way).
+                let eta = spot.origin.distance(body.origin) * 1.4 / body.maxspeed.max(100.0);
                 let gone = self
                     .items
                     .as_ref()
-                    .is_some_and(|items| items.availability(i, now, 0.0, body.opponents) <= 0.0);
+                    .is_some_and(|items| items.availability(i, now, eta, body.opponents) <= 0.0);
                 if gone {
                     m.decider.complete();
                     m.urgent = true;
@@ -525,6 +623,10 @@ impl BotBrain {
                 if let Some(step) = step {
                     apply_step(&mut self.intents, &step, body.eye, m);
                 }
+                // Whatever is there now (taken, or left for being of no use) shows on the next look.
+                if status == NavStatus::Arrived {
+                    m.decider.rest(goal.kind, now + COLLECTED_REST);
+                }
                 arrive(status, m);
             }
             GoalKind::UseCharger(i) => self.use_charger(i, body, nav, rng),
@@ -533,9 +635,12 @@ impl BotBrain {
                     apply_step(&mut self.intents, &step, body.eye, m);
                 }
             }
-        }
-        if !matches!(goal.kind, GoalKind::UseCharger(_)) {
-            self.mind.charging = None;
+            GoalKind::Hunt(_)
+            | GoalKind::Investigate(_)
+            | GoalKind::Retreat
+            | GoalKind::ControlItem(_)
+            | GoalKind::Camp(_)
+            | GoalKind::PlantTrap(_) => {}
         }
     }
 
@@ -546,7 +651,13 @@ impl BotBrain {
             self.mind.decider.complete();
             return;
         };
-        if !self.chargers.as_ref().is_some_and(|ch| ch.available(i, now)) {
+        // Spent until after the bot gets there (as the decision reckoned the way).
+        let eta = c.spot.distance(body.origin) * 1.4 / body.maxspeed.max(100.0);
+        if !self
+            .chargers
+            .as_ref()
+            .is_some_and(|ch| ch.available(i, now + f64::from(eta)))
+        {
             self.mind.decider.complete();
             self.mind.urgent = true;
             return;
@@ -715,13 +826,14 @@ impl BotBrain {
                     self.intents.weapon(Prio::Goal, toggle);
                     return;
                 }
+                let calm_distance = m.calm_distance.unwrap_or(CALM_DISTANCE);
                 let t = Target {
-                    distance: CALM_DISTANCE,
+                    distance: calm_distance,
                     speed: 250.0,
-                    aim_sigma: ch.aim_sigma(CALM_DISTANCE),
+                    aim_sigma: ch.aim_sigma(calm_distance),
                 };
-                let allowed = |w: WeaponId| body.allows(w);
-                let low = policy::preferred(&body.arsenal, &t, &body.damages, &allowed)
+                let like = |w: WeaponId| if body.allows(w) { ch.weapons.gun(w) } else { 0.0 };
+                let low = policy::preferred(&body.arsenal, &t, &body.damages, &like)
                     .and_then(|w| body.armed(w))
                     .filter(|a| {
                         let clip = spec(a.id).clip;
@@ -862,7 +974,9 @@ impl BotBrain {
                 LookReason::Enemy(_) => None,
                 LookReason::Damage => Some(Prio::Threat),
                 LookReason::Lost(_) => Some(Prio::Goal),
-                LookReason::Glimpse | LookReason::Sound(_) => Some(Prio::Optional),
+                LookReason::Expect(_) | LookReason::Danger | LookReason::Glimpse | LookReason::Sound(_) => {
+                    Some(Prio::Optional)
+                }
             };
             if let Some(prio) = prio {
                 self.intents.look(

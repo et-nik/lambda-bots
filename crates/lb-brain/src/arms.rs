@@ -37,7 +37,7 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{LookIntent, MoveIntent, Prio, StanceIntent, WeaponIntent};
 use lb_nav_api::NavService;
-use lb_worldq::{TraceQuery, Tracer};
+use lb_worldq::{Trace, TraceQuery, Tracer};
 
 use crate::BotBrain;
 use crate::mind::{Body, Character};
@@ -105,6 +105,17 @@ const AIRBURST_SELF: f32 = 0.25;
 const AIRBURST_HEALTH: f32 = 70.0;
 /// Backing off a pile takes this long at most; the bot does not close in on the enemy for this long after a throw.
 const PILE_BACK_OFF: f32 = 1.5;
+/// Seconds of stepping along the wall after laying a mine (it arms in 2.5 s).
+const MINE_STEP_AWAY: f64 = 0.6;
+/// Satchels thrown as a trap lie this long with nobody by them before they go off anyway.
+const TRAP_LIE: [f32; 2] = [60.0, 90.0];
+/// A charged gauss shot goes through a wall this thick at most, with this much of its damage left beyond it.
+const WALLBANG_THICK: f32 = 48.0;
+const WALLBANG_LEFT: f32 = 80.0;
+/// At an enemy lost behind a wall this recently, placed this closely.
+const WALLBANG_AGE: f64 = 1.0;
+const WALLBANG_SIGMA: f32 = 120.0;
+const WALLBANG_CHECK: f64 = 0.05;
 const SATCHEL_HOLD: f64 = 3.0;
 const MINE_VICTIM: f32 = 140.0;
 /// Far enough to be spared a mine's blast, near enough to hit its small box.
@@ -177,6 +188,8 @@ pub struct ArmsStats {
     pub scoped: u32,
     pub zooms: u32,
     pub scope_ends: Vec<(&'static str, u32)>,
+    /// Charged gauss shots through a wall at an enemy lost behind it.
+    pub wallbangs: u32,
     pub failed: u32,
     /// Failures by protocol and reason.
     pub failures: Vec<(&'static str, &'static str, u32)>,
@@ -215,6 +228,8 @@ pub struct Arms {
     /// The throw under way: at whom, and whether its satchel is to go off in flight; how many of its satchels are
     /// noted as thrown.
     throw_aim: Option<(Option<PlayerKey>, bool)>,
+    /// The throw under way lays a trap: its satchels lie long.
+    trap_throw: bool,
     landed: usize,
     next_barrage: SimTime,
     /// A fired rocket is guided until then; the point it was fired at and the target.
@@ -233,10 +248,17 @@ pub struct Arms {
     next_mine: SimTime,
     /// How far back the bot may be thrown before it would drop further than is safe.
     recoil_room: f32,
-    /// When the gauss's line of fire was last looked along, and how far its first wall was.
-    gauss_wall: Option<(SimTime, f32)>,
+    /// When the gauss's line of fire was last looked along, how far its first wall was, and the most damage a missed
+    /// charged shot along it would come back at the bot with.
+    gauss_wall: Option<(SimTime, f32, f32)>,
+    /// When a shot through a wall was last looked for, and the point to shoot at if there was one.
+    wallbang: Option<(SimTime, Option<Vec3>)>,
+    /// When a way to dump a charge was last looked for, and the view angles found.
+    dump_way: Option<(SimTime, Option<Vec3>)>,
     /// Running from a blast until then, along this direction.
     dodge: Option<(SimTime, Vec2)>,
+    /// A mine just laid on a wall with this normal: the bot steps along the wall, out of where its beam will be.
+    step_off: Option<Vec3>,
 }
 
 impl Arms {
@@ -386,6 +408,25 @@ fn recoil_room(tracer: &mut dyn Tracer, origin: Vec3, back: Vec2) -> f32 {
         d += STEP;
     }
     f32::INFINITY
+}
+
+/// How far a gauss beam goes.
+const BEAM_REACH: f32 = 8192.0;
+
+/// The most damage a charged gauss beam fired from `eye` along `dir` may carry for a miss to come back at the shooter
+/// (vanilla HLDM): the first wall along it (`hit`, traced through players) met square, and thick enough not to be
+/// punched through. The game then starts the beam over from the gun with the shooter no longer left out. Worked out
+/// as the game does: on from inside the wall to the beam's end, back to where it would come out.
+fn backfire(tracer: &mut dyn Tracer, eye: Vec3, dir: Vec3, hit: &Trace) -> f32 {
+    if hit.fraction >= 1.0 || hit.start_solid || -hit.normal.dot(dir) < 0.5 {
+        return 0.0;
+    }
+    let on = tracer.trace(&TraceQuery::line(hit.end + dir * 8.0, eye + dir * BEAM_REACH));
+    if on.all_solid {
+        return 0.0;
+    }
+    let out = tracer.trace(&TraceQuery::line(on.end, hit.end)).end;
+    out.distance(hit.end).max(1.0)
 }
 
 fn clear_line(tracer: &mut dyn Tracer, from: Vec3, to: Vec3) -> bool {
@@ -560,7 +601,7 @@ impl BotBrain {
             return false;
         }
         let bold = if ch.aggression > ch.fear { 1.1 } else { 0.9 };
-        if rng.combat.next_f32() >= (BARRAGE_CHANCE * ch.skill.throw_rate * bold).min(0.9) {
+        if rng.combat.next_f32() >= (BARRAGE_CHANCE * ch.skill.throw_rate * ch.weapons.throwables * bold).min(0.9) {
             return false;
         }
         self.mind.arms.active = Some(Active::Barrage(Barrage::new(t.who, now)));
@@ -718,7 +759,8 @@ impl BotBrain {
             return false;
         };
         let bold = if ch.aggression > ch.fear { 1.1 } else { 0.9 };
-        let chance = (best * ch.skill.throw_rate * bold * if war { 2.0 } else { 1.0 }).min(0.9);
+        let rate = ch.skill.throw_rate * ch.weapons.throwables;
+        let chance = (best * rate * bold * if war { 2.0 } else { 1.0 }).min(0.9);
         if rng.combat.next_f32() >= chance {
             return false;
         }
@@ -777,6 +819,37 @@ impl BotBrain {
         }
         self.mind.arms.throw_aim =
             matches!(way, Way::Pile | Way::Airburst).then_some((Some(t.who), way == Way::Airburst));
+        self.mind.arms.landed = 0;
+        self.mind.arms.active = Some(Active::Throw(thrower));
+        self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(THROW_REST[0], THROW_REST[1]));
+        true
+    }
+
+    /// Puts a tripmine on the wall at `wall` (the trap goal brought the bot where it reaches it).
+    pub(crate) fn plant_mine(&mut self, wall: Vec3, normal: Vec3, now: SimTime) -> bool {
+        if self.mind.arms.busy() {
+            return false;
+        }
+        self.mind.arms.active = Some(Active::Mine(Planter::new(wall, normal, now)));
+        self.mind.arms.next_mine = self.mind.arms.next_mine.max(now + 20.0);
+        true
+    }
+
+    /// Throws a pile of satchels at `at` (a chokepoint the trap goal watches); they lie long before going off with
+    /// nobody by them.
+    pub(crate) fn trap_satchels(&mut self, body: &Body, nav: &mut dyn NavService, at: Vec3, rng: &mut BotRng) -> bool {
+        let carried = body.armed(WeaponId::Satchel).and_then(|a| a.reserve).unwrap_or(0);
+        if self.mind.arms.busy() || carried < 2 || !body.allows(WeaponId::Satchel) {
+            return false;
+        }
+        let now = body.now;
+        let throw = ballistics::satchel(nav, body.origin, body.velocity, at, body.gravity);
+        let pile = rng
+            .combat
+            .range_f32(SATCHEL_PILE[0] as f32, SATCHEL_PILE[1] as f32 + 0.99) as u32;
+        let thrower = Thrower::new(Kind::Satchel, at, throw, now).pile(pile.min(carried as u32));
+        self.mind.arms.throw_aim = Some((None, false));
+        self.mind.arms.trap_throw = true;
         self.mind.arms.landed = 0;
         self.mind.arms.active = Some(Active::Throw(thrower));
         self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(THROW_REST[0], THROW_REST[1]));
@@ -847,7 +920,7 @@ impl BotBrain {
         let hands = self.hands(body);
         let mut requests: smallvec::SmallVec<[Request; 2]> = smallvec::SmallVec::new();
         if body.weapon == Some(WeaponId::Gauss) || self.mind.arms.gauss.active() {
-            let target = self
+            let seen = self
                 .mind
                 .target
                 .and_then(|k| self.beliefs.track(k))
@@ -856,7 +929,15 @@ impl BotBrain {
                     let aim = self.mind.last_aim.unwrap_or(t.pos);
                     (t.pos.distance(body.eye), on_target(self.motor.view, body.eye, aim))
                 });
-            let expected = matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::Hunt(_)));
+            let through = if seen.is_none() {
+                self.wallbang(body, ch, nav)
+            } else {
+                None
+            };
+            let target =
+                seen.or_else(|| through.map(|p| (p.distance(body.eye), on_target(self.motor.view, body.eye, p))));
+            let expected = matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::Hunt(_))) || through.is_some();
+            let fired = self.mind.arms.gauss.fired;
             let input = GaussInput {
                 target,
                 expected,
@@ -867,9 +948,15 @@ impl BotBrain {
                 heading: body.velocity.truncate().normalize_or_zero(),
                 allowed: body.allows(WeaponId::Gauss),
                 charge_share: ch.skill.gauss_charge,
+                dump: self.safe_dump(body, nav),
+                backfire: self.mind.arms.gauss_wall.map_or(0.0, |w| w.2),
             };
             if let Some(r) = self.mind.arms.gauss.update(&hands, &input, &mut rng.combat) {
                 requests.push(r);
+            }
+            if through.is_some() && self.mind.arms.gauss.fired > fired {
+                self.mind.arms.stats.wallbangs += 1;
+                tracing::debug!("gauss shot through a wall at a lost enemy");
             }
         }
         if let Some(mut active) = self.mind.arms.active.take() {
@@ -946,6 +1033,7 @@ impl BotBrain {
                 Status::Done => self.finished(&active, body, rng),
                 Status::Failed(why) => {
                     self.mind.arms.throw_aim = None;
+                    self.mind.arms.trap_throw = false;
                     if let Active::Airburst(a) = &active {
                         tracing::info!(
                             "satchel in flight not set off: {why}; it came within {:?} of the enemy",
@@ -1031,25 +1119,128 @@ impl BotBrain {
         Burst { satchel, enemy, spared }
     }
 
-    /// How far along the view the first wall is with the gauss in hand, through players (the beam goes through them):
-    /// looked at again every 30 ms at most, as far as a full charge's burst on a wall reaches.
+    /// How far along the view the first wall is with the gauss in hand, through players (the beam goes through them),
+    /// when within a full charge's burst on a wall; and where a missed charged shot would come back at the bot
+    /// (vanilla `mp_selfgauss`), the most damage it may carry for that: a wall met square that a beam of so little
+    /// cannot punch through. Looked along again every 30 ms at most.
     fn gauss_wall(&mut self, body: &Body, tracer: &mut dyn Tracer) -> f32 {
         const PERIOD: f64 = 0.03;
-        if let Some((at, wall)) = self.mind.arms.gauss_wall
+        if let Some((at, wall, _)) = self.mind.arms.gauss_wall
             && body.now.since(at) < PERIOD
         {
             return wall;
         }
         let reach = lb_combat::arms::gauss::wall_blast(body.damages.gauss_charged);
         let (forward, _, _) = view_angle_vectors(self.motor.view);
-        let tr = tracer.trace(&TraceQuery::line(body.eye, body.eye + forward * reach));
-        let wall = if tr.fraction >= 1.0 {
-            f32::INFINITY
+        let far = tracer.trace(&TraceQuery::line(body.eye, body.eye + forward * BEAM_REACH));
+        let along = far.fraction * BEAM_REACH;
+        let wall = if far.fraction < 1.0 && along <= reach {
+            along
         } else {
-            tr.fraction * reach
+            f32::INFINITY
         };
-        self.mind.arms.gauss_wall = Some((body.now, wall));
+        let backfire = if body.selfgauss == 1 {
+            backfire(tracer, body.eye, forward, &far)
+        } else {
+            0.0
+        };
+        self.mind.arms.gauss_wall = Some((body.now, wall, backfire));
         wall
+    }
+
+    /// A point to shoot a charged gauss beam at through a wall: the enemy just lost behind a thin wall, the beam
+    /// meeting the wall square enough not to glance off, enough of its damage left beyond, and its burst where it
+    /// comes out of the wall far enough from the bot. Only for skills that do it (`gauss_walls`), looked for again
+    /// every 50 ms.
+    fn wallbang(&mut self, body: &Body, ch: &Character, tracer: &mut dyn Tracer) -> Option<Vec3> {
+        let now = body.now;
+        if !ch.skill.gauss_walls || body.weapon != Some(WeaponId::Gauss) {
+            return None;
+        }
+        if let Some((at, point)) = self.mind.arms.wallbang
+            && now.since(at) < WALLBANG_CHECK
+        {
+            return point;
+        }
+        let point = self
+            .mind
+            .target
+            .and_then(|k| self.beliefs.track(k))
+            .filter(|t| {
+                t.state != TrackState::Visible && now.since(t.last_seen) <= WALLBANG_AGE && t.sigma <= WALLBANG_SIGMA
+            })
+            .map(|t| t.pos + Vec3::Z * 8.0)
+            .filter(|&p| {
+                let dir = (p - body.eye).normalize_or_zero();
+                let hit = tracer.trace(&TraceQuery::line(body.eye, p));
+                if hit.fraction >= 1.0 || hit.start_solid || -hit.normal.dot(dir) < 0.5 {
+                    return false;
+                }
+                // Out of the wall: on from inside it, then back to where the beam comes out.
+                let through = tracer.trace(&TraceQuery::line(hit.end + dir * 8.0, p + dir * 32.0));
+                if through.all_solid {
+                    return false;
+                }
+                let exit = tracer.trace(&TraceQuery::line(through.end, hit.end)).end;
+                let thick = exit.distance(hit.end);
+                let left = body.damages.gauss_charged - thick;
+                let out = exit.distance(body.eye);
+                thick <= WALLBANG_THICK
+                    && left >= WALLBANG_LEFT
+                    && out >= lb_combat::arms::gauss::wall_blast(left)
+                    && out + 16.0 < p.distance(body.eye)
+            });
+        self.mind.arms.wallbang = Some((now, point));
+        point
+    }
+
+    /// Where to dump a gauss charge the bot must let go of with no target: level, along the one of eight ways whose
+    /// first wall is farthest (its burst must spare the bot) with no drop behind within the throw of the recoil.
+    /// Looked for four times a second while charging.
+    fn safe_dump(&mut self, body: &Body, tracer: &mut dyn Tracer) -> Option<Vec3> {
+        const PERIOD: f64 = 0.25;
+        // Looked for only once a dump draws near: some eighty traces each time.
+        const SOON: f32 = 5.5;
+        let soon = self.mind.arms.gauss.charge(body.now) >= SOON || body.waterlevel >= 2 || body.on_ladder;
+        if !self.mind.arms.gauss.active() || !soon {
+            return None;
+        }
+        if let Some((at, way)) = self.mind.arms.dump_way
+            && body.now.since(at) < PERIOD
+        {
+            return way;
+        }
+        let full = body.damages.gauss_charged;
+        let reach = lb_combat::arms::gauss::wall_blast(full);
+        let throw = lb_combat::arms::gauss::recoil_throw(full, Vec3::X, body.gravity);
+        let (forward, _, _) = view_angle_vectors(self.motor.view);
+        let back = -forward.truncate().normalize_or(Vec2::X);
+        let way = (0..8)
+            .map(|k| {
+                let yaw = k as f32 * 45.0;
+                let (s, c) = lb_core::dmath::sin_cos(yaw.to_radians());
+                let dir = Vec2::new(c, s);
+                let far = tracer.trace(&TraceQuery::line(body.eye, body.eye + dir.extend(0.0) * BEAM_REACH));
+                let wall = (far.fraction * BEAM_REACH).min(reach);
+                let backfires = body.selfgauss == 1 && backfire(tracer, body.eye, dir.extend(0.0), &far) >= full;
+                let room = if backfires {
+                    0.0
+                } else {
+                    recoil_room(tracer, body.origin, -dir)
+                };
+                (yaw, dir, wall, room)
+            })
+            .filter(|w| w.3 >= throw)
+            .max_by(|a, b| {
+                // The farthest wall; among the clear ones the one nearest to back the way the bot looks from.
+                let clear = |w: f32| w.min(reach);
+                clear(a.2)
+                    .total_cmp(&clear(b.2))
+                    .then(a.1.dot(back).total_cmp(&b.1.dot(back)))
+            })
+            .map(|(yaw, ..)| Vec3::new(0.0, lb_core::math::normalize_angle(yaw), 0.0));
+        self.mind.arms.dump_way = Some((body.now, way));
+        way
     }
 
     fn finished(&mut self, active: &Active, body: &Body, rng: &mut BotRng) {
@@ -1062,7 +1253,11 @@ impl BotBrain {
                 Kind::Satchel => {
                     stats.satchels += t.landings.len() as u32;
                     let (target, airburst) = aim.unwrap_or((None, false));
-                    self.mind.arms.satchels = Some(SatchelPlan::roll(target, now, rng));
+                    let mut plan = SatchelPlan::roll(target, now, rng);
+                    if std::mem::take(&mut self.mind.arms.trap_throw) {
+                        plan.lie_until = now + f64::from(rng.combat.range_f32(TRAP_LIE[0], TRAP_LIE[1]));
+                    }
+                    self.mind.arms.satchels = Some(plan);
                     // Closing in would take the bot into its own blast.
                     self.mind.arms.hold_until = self.mind.arms.hold_until.max(now + SATCHEL_HOLD);
                     if airburst && let Some(target) = target {
@@ -1076,6 +1271,8 @@ impl BotBrain {
             Active::Mine(p) => {
                 stats.mines += 1;
                 self.explosives.placed_mine(p.mine(), p.normal, now);
+                // Out of the beam's way before it arms (see `dodge`).
+                self.mind.arms.step_off = Some(p.normal);
             }
             Active::Lob(l) => {
                 stats.lobs += 1;
@@ -1224,9 +1421,25 @@ impl BotBrain {
         }
     }
 
-    /// Every frame: run from a blast about to go off near the bot.
+    /// Every frame: run from a blast about to go off near the bot, and out of the beam of a mine it just laid.
     pub(crate) fn dodge(&mut self, body: &Body, nav: &mut dyn NavService) {
         let now = body.now;
+        if let Some(normal) = self.mind.arms.step_off.take() {
+            // Along the wall, the way the bot faces, or back the other way from a drop.
+            let (forward, _, _) = view_angle_vectors(self.motor.view);
+            let along = Vec2::new(-normal.y, normal.x).normalize_or(Vec2::X);
+            let dir = if along.dot(forward.truncate()) >= 0.0 {
+                along
+            } else {
+                -along
+            };
+            if let Some(safe) = [dir, -dir]
+                .into_iter()
+                .find(|d| !drops(nav, body.origin, *d * body.maxspeed))
+            {
+                self.mind.arms.dodge = Some((now + MINE_STEP_AWAY, safe));
+            }
+        }
         let floor = body.origin.z - 36.0;
         let threat = self
             .explosives
@@ -1319,6 +1532,7 @@ mod tests {
             aggression: 0.8,
             fear: 0.2,
             affinity: lb_styles::StyleId::Balanced.goal_affinity(),
+            weapons: crate::WeaponLike::default(),
         }
     }
 
@@ -1352,6 +1566,7 @@ mod tests {
             dll: lb_game::dll::DllProfile::default(),
             gravity: 800.0,
             allowed: u32::MAX,
+            selfgauss: 0,
         }
     }
 
@@ -1388,6 +1603,8 @@ mod tests {
                     track_forget: 12.0,
                     maxspeed: 300.0,
                 },
+                None,
+                None,
             );
             let mut b = body(t);
             b.arsenal.extend(extra.iter().copied());
@@ -1434,7 +1651,7 @@ mod tests {
             {
                 brain.beliefs.on_sighting(&seen(t, pos));
             }
-            brain.update(SimTime(t), &params());
+            brain.update(SimTime(t), &params(), None, None);
             let mut b = body(t);
             dress(&mut b);
             brain.weapon_options(&b, &character(), &mut Open, &mut rng);
@@ -1444,6 +1661,75 @@ mod tests {
             t += 0.1;
         }
         None
+    }
+
+    /// A slab of solid between x = `from` and x = `to`, open all around; traced along x only.
+    struct Slab {
+        from: f32,
+        to: f32,
+    }
+
+    impl Tracer for Slab {
+        fn trace(&mut self, q: &TraceQuery) -> Trace {
+            let inside = |x: f32| x > self.from && x < self.to;
+            let (a, b) = (q.start.x, q.end.x);
+            let len = (b - a).abs().max(1e-6);
+            if inside(a) && inside(b) {
+                let mut t = Trace::clear(q.start);
+                t.all_solid = true;
+                t.start_solid = true;
+                t.fraction = 0.0;
+                return t;
+            }
+            if inside(a) {
+                let mut t = Trace::clear(q.end);
+                t.start_solid = true;
+                return t;
+            }
+            let face = if b > a { self.from } else { self.to };
+            if (a - face) * (b - face) < 0.0 {
+                let f = (face - a).abs() / len;
+                let mut t = Trace::clear(q.start + (q.end - q.start) * f);
+                t.fraction = f;
+                t.normal = Vec3::new(if b > a { -1.0 } else { 1.0 }, 0.0, 0.0);
+                return t;
+            }
+            Trace::clear(q.end)
+        }
+
+        fn point_contents(&mut self, _p: Vec3) -> i32 {
+            contents::EMPTY
+        }
+    }
+
+    #[test]
+    fn a_missed_charge_comes_back_only_from_a_wall_too_thick_to_punch() {
+        let eye = Vec3::ZERO;
+        let hit_along = |slab: &mut Slab, dir: Vec3| {
+            let far = slab.trace(&TraceQuery::line(eye, eye + dir * BEAM_REACH));
+            backfire(slab, eye, dir, &far)
+        };
+        let mut thick = Slab { from: 500.0, to: 800.0 };
+        assert!(
+            (hit_along(&mut thick, Vec3::X) - 300.0).abs() < 1.0,
+            "a 300-unit wall stops any charge"
+        );
+        let mut thin = Slab { from: 500.0, to: 516.0 };
+        assert!(
+            (hit_along(&mut thin, Vec3::X) - 16.0).abs() < 1.0,
+            "a thin one only a charge under 16 damage"
+        );
+        let mut glancing = Slab { from: 500.0, to: 800.0 };
+        let far = Trace {
+            normal: Vec3::new(-0.3, 0.95, 0.0),
+            fraction: 0.1,
+            ..Trace::clear(Vec3::new(500.0, 0.0, 0.0))
+        };
+        assert_eq!(
+            backfire(&mut glancing, eye, Vec3::X, &far),
+            0.0,
+            "a glancing beam reflects instead"
+        );
     }
 
     #[test]
@@ -1562,7 +1848,7 @@ mod tests {
             for i in 0..40 {
                 let t = f64::from(i) * 0.1;
                 brain.beliefs.on_sighting(&seen(t, enemy));
-                brain.update(SimTime(t), &params());
+                brain.update(SimTime(t), &params(), None, None);
                 let mut b = body(t);
                 b.arsenal.push(Armed::new(WeaponId::Snark, None, Some(5)));
                 brain.weapon_options(&b, &character(), &mut Open, &mut rng);

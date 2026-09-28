@@ -59,7 +59,8 @@ pub struct TraitRanges {
     pub fear: [f32; 2],
 }
 
-/// How much a style likes each goal; 1 is the balanced style.
+/// How much a style likes each goal; 1 is the balanced style's like for fighting, chasing, backing off, collecting
+/// and wandering. Holding spots, waiting for items and laying traps are rarer for every style.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GoalAffinity {
     pub engage: f32,
@@ -67,13 +68,34 @@ pub struct GoalAffinity {
     pub retreat: f32,
     pub collect: f32,
     pub roam: f32,
+    /// Going to see what made a sound.
+    pub investigate: f32,
+    /// Holding a spot with long sightlines.
+    pub camp: f32,
+    /// Waiting out of the way by a chokepoint.
+    pub ambush: f32,
+    /// Waiting by an item about to come back.
+    pub control: f32,
+    /// Laying tripmines and satchels where players pass.
+    pub trap: f32,
 }
 
-/// Trait ranges and goal weights of every style: the built-in values with `config/styles/*.yaml` applied.
+/// Which weapons a style favours: gun names as their classnames without `weapon_` (`crossbow`, `357`, `9mmAR`) with a
+/// multiplier of how good the style finds each (1 = as good as its damage says), and how readily it throws
+/// grenades, satchels and snarks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeaponLikes {
+    pub guns: Vec<(String, f32)>,
+    pub throwables: f32,
+}
+
+/// Trait ranges, goal weights and weapon likes of every style: the built-in values with `config/styles/*.yaml`
+/// applied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyleTable {
     traits: [TraitRanges; 5],
     goals: [GoalAffinity; 5],
+    weapons: [WeaponLikes; 5],
 }
 
 impl Default for StyleTable {
@@ -81,6 +103,7 @@ impl Default for StyleTable {
         StyleTable {
             traits: StyleId::ALL.map(StyleId::trait_ranges),
             goals: StyleId::ALL.map(StyleId::goal_affinity),
+            weapons: StyleId::ALL.map(StyleId::weapon_likes),
         }
     }
 }
@@ -101,6 +124,10 @@ impl StyleTable {
         self.goals[Self::index(style)]
     }
 
+    pub fn weapons(&self, style: StyleId) -> &WeaponLikes {
+        &self.weapons[Self::index(style)]
+    }
+
     /// Takes the values a style file sets.
     pub fn apply(&mut self, f: &lb_config::styles::StyleFile) {
         let Some(style) = StyleId::parse(&f.id) else { return };
@@ -115,25 +142,71 @@ impl StyleTable {
         g.retreat = goals.retreat.unwrap_or(g.retreat);
         g.collect = goals.collect.unwrap_or(g.collect);
         g.roam = goals.roam.unwrap_or(g.roam);
+        g.investigate = goals.investigate.unwrap_or(g.investigate);
+        g.camp = goals.camp.unwrap_or(g.camp);
+        g.ambush = goals.ambush.unwrap_or(g.ambush);
+        g.control = goals.control.unwrap_or(g.control);
+        g.trap = goals.trap.unwrap_or(g.trap);
+        let w = &mut self.weapons[i];
+        if let Some(guns) = &f.weapons.guns {
+            w.guns = guns.iter().map(|(n, v)| (n.clone(), *v)).collect();
+        }
+        w.throwables = f.weapons.throwables.unwrap_or(w.throwables);
     }
 }
 
 impl StyleId {
-    /// Goal weights of the style (design §8): rushers hunt and fight, snipers hold back, controllers collect.
+    /// Goal weights of the style (design §8): rushers hunt and fight and never camp, snipers hold spots with long
+    /// sightlines, controllers wait for items to come back, trappers lay tripmines and satchels.
+    #[rustfmt::skip]
     pub fn goal_affinity(self) -> GoalAffinity {
-        let a = |engage, hunt, retreat, collect| GoalAffinity {
-            engage,
-            hunt,
-            retreat,
-            collect,
-            roam: 1.0,
+        let a = |engage, hunt, retreat, collect, investigate, camp, ambush, control, trap| GoalAffinity {
+            engage, hunt, retreat, collect, roam: 1.0, investigate, camp, ambush, control, trap,
         };
         match self {
-            StyleId::Balanced => a(1.0, 1.0, 1.0, 1.0),
-            StyleId::Rusher => a(1.2, 1.4, 0.6, 1.0),
-            StyleId::Sniper => a(1.0, 0.3, 1.4, 1.0),
-            StyleId::Controller => a(1.0, 1.0, 1.0, 1.3),
-            StyleId::Trapper => a(1.0, 0.8, 1.2, 1.0),
+            StyleId::Balanced =>   a(1.0, 1.0, 1.0, 1.0, 1.0, 0.4, 0.5, 0.6, 0.5),
+            StyleId::Rusher =>     a(1.2, 1.4, 0.6, 1.0, 1.3, 0.0, 0.2, 0.4, 0.3),
+            StyleId::Sniper =>     a(1.0, 0.3, 1.4, 1.0, 0.6, 2.0, 1.2, 0.6, 0.5),
+            StyleId::Controller => a(1.0, 1.0, 1.0, 1.3, 0.9, 0.5, 0.6, 2.0, 0.4),
+            StyleId::Trapper =>    a(1.0, 0.8, 1.2, 1.0, 0.8, 0.6, 1.2, 0.6, 2.0),
+        }
+    }
+}
+
+impl StyleId {
+    /// Weapons of the style (design §8): snipers favour the crossbow and the 357, rushers the shotgun and the MP5,
+    /// controllers the big guns, trappers throw most.
+    pub fn weapon_likes(self) -> WeaponLikes {
+        // By name, as a style file lists them.
+        let w = |guns: &[(&str, f32)], throwables: f32| {
+            let mut guns: Vec<(String, f32)> = guns.iter().map(|(n, v)| (n.to_string(), *v)).collect();
+            guns.sort_by(|a, b| a.0.cmp(&b.0));
+            WeaponLikes { guns, throwables }
+        };
+        match self {
+            StyleId::Balanced => w(&[], 1.0),
+            StyleId::Rusher => w(
+                &[
+                    ("shotgun", 1.25),
+                    ("9mmAR", 1.15),
+                    ("egon", 1.1),
+                    ("crossbow", 0.8),
+                    ("357", 0.9),
+                ],
+                1.0,
+            ),
+            StyleId::Sniper => w(
+                &[
+                    ("crossbow", 1.35),
+                    ("357", 1.25),
+                    ("gauss", 1.1),
+                    ("shotgun", 0.8),
+                    ("egon", 0.9),
+                ],
+                0.8,
+            ),
+            StyleId::Controller => w(&[("gauss", 1.15), ("rpg", 1.1), ("egon", 1.1)], 1.0),
+            StyleId::Trapper => w(&[("9mmAR", 1.1)], 1.6),
         }
     }
 }

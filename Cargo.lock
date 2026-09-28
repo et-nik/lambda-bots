@@ -596,8 +596,11 @@ dependencies = [
  "lb-config",
  "lb-core",
  "lb-ffi",
+ "lb-game",
  "lb-kin",
+ "lb-mapknow",
  "lb-nav",
+ "lb-nav-api",
  "lb-navgen",
  "lb-runtime",
  "lb-worldq",
@@ -720,6 +723,7 @@ dependencies = [
  "lb-core",
  "lb-game",
  "lb-nav-api",
+ "serde",
  "smallvec",
 ]
 
@@ -731,7 +735,13 @@ dependencies = [
  "lb-core",
  "lb-nav",
  "lb-nav-api",
+ "lb-navgen",
+ "lb-worldq",
+ "rayon",
+ "serde",
+ "serde_json",
  "smallvec",
+ "tracing",
 ]
 
 [[package]]
@@ -785,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "lb-core",
  "lb-worldq",
+ "serde",
  "smallvec",
 ]
 
@@ -859,6 +870,7 @@ dependencies = [
  "lb-host",
  "lb-kin",
  "lb-knowledge",
+ "lb-mapknow",
  "lb-motor",
  "lb-nav",
  "lb-nav-api",

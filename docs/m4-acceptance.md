@@ -1,19 +1,20 @@
-# M4 acceptance: the arsenal (M4.1)
+# M4 acceptance: the arsenal (M4.1), knowledge, goals and styles (M4.2)
 
-State as of 2026-09-28, after sub-stage M4.1, the arsenal. Still to come: knowledge, goals and styles (M4.2), the
-tricks (M4.3) and the M4 acceptance runs. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS + hlsdk-portable,
-macOS, crossfire at 1000 fps, 8 bots of the normal preset (skill 44–57). The ReHLDS server with BugfixedHL has not
-run M4.1 yet.
+State as of 2026-09-28, after sub-stages M4.1, the arsenal, and M4.2, knowledge, goals and styles. Still to come:
+the tricks (M4.3) and the M4 acceptance runs. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS + hlsdk-portable,
+macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61). The ReHLDS server with BugfixedHL has run
+neither sub-stage yet.
 
 ## Results against the plan's criteria
 
-| Criterion                                  | Status | How it was checked                                                           |
-|--------------------------------------------|--------|------------------------------------------------------------------------------|
-| A scenario for every weapon                | yes    | `scripts/stand/weapon-scenarios.sh`: each weapon on its own, table below     |
-| Deaths by own hand an hour below a limit   | yes    | the last mixed game: none in 10 min of 8 bots; the games before, below       |
-| Accuracy tables                            | yes    | `lb stats`: hit rate by distance for every weapon and fire mode              |
-| The game DLL's weapon rules                | partly | `lb selftest` on hlsdk-portable; BugfixedHL and the classic SDK not run live |
-| Target switches, tricks, the 60-minute run | later  | M4.2, M4.3 and the M4 acceptance runs                                        |
+| Criterion                                | Status | How it was checked                                                           |
+|------------------------------------------|--------|------------------------------------------------------------------------------|
+| A scenario for every weapon              | yes    | `scripts/stand/weapon-scenarios.sh`: each weapon on its own, table below     |
+| Deaths by own hand an hour below a limit | yes    | M4.2's last mixed game: 0.7 a bot-hour (one snark); the games before, below  |
+| Accuracy tables                          | yes    | `lb stats`: hit rate by distance for every weapon and fire mode              |
+| The game DLL's weapon rules              | partly | `lb selftest` on hlsdk-portable; BugfixedHL and the classic SDK not run live |
+| Target switches ≤ 6 a minute             | yes    | M4.2's last mixed game: 1.2–3.3 a minute a bot (7.8 before the fix below)    |
+| Tricks, the 60-minute run                | later  | M4.3 and the M4 acceptance runs                                              |
 
 The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game. The mixed
 games of the day came to 0.75 and 1.5 a bot-hour (two grenades and one charged gauss shot), then 2.25 (three snarks,
@@ -206,6 +207,111 @@ the snarks near: 1 death by own hand, 53 egon kills. In the mixed game: none.
     it carries now.
   - The scope's shots and the MP5's grenades now have rows of their own.
 
+## Knowledge, goals and styles (M4.2)
+
+What the bots now know and do (see `docs/behavior.md` for the details):
+- **The map, worked out once:** who sees whom between the graph's places, where players pass, chokepoints, spots to
+  hold (overwatch and ambush) with the directions to watch, walls for tripmines across corridors and round corners,
+  and cover from a threat. `lb map` shows it.
+- **What the bots learn by playing:** where they got hurt and died and where from (kept per map in
+  `data/experience/<map>.json`), and item respawn times they timed themselves (kept for the server in
+  `data/learned/respawn.json`).
+- **Lost enemies:** spread over the places they could have reached, less the places in sight since; the bot searches
+  from the place that sees most of them and watches where they would come into view.
+- **New goals:** seeing about a sound, holding a spot, waiting by an item about to come back, laying a trap (a tripmine
+  on a mine spot, satchels at a chokepoint watched from an ambush spot); backing off goes to cover.
+- **Moods:** aggression and fear sway with fights, kills and damage around the personality's own.
+- **Styles:** goal weights for the new goals, the guns each style favours and how readily it throws; a personality's
+  favourite weapons count on top.
+- **Hard and expert bots** shoot the gauss through thin walls at an enemy lost behind one.
+- Items are heard taken and coming back; a calm bot glances where the damage at its place used to come from.
+
+### The map's tactics
+
+Worked out by `lb-cli nav tactics <map.bsp>` from the generated graph (on the server in the map loader, the same way):
+
+| Map           | Places | Pairs in sight | Chokepoints | Spots to hold | Tripmine spots | ms (8 threads) |
+|---------------|--------|----------------|-------------|---------------|----------------|----------------|
+| boot_camp     | 2826   | 3.4%           | 67          | 24            | 48             | 25             |
+| bounce        | 782    | 21.3%          | 12          | 20            | 32             | 10             |
+| crossfire     | 890    | 11.8%          | 38          | 24            | 48             | 7              |
+| datacore      | 581    | 9.4%           | 22          | 17            | 23             | 2              |
+| frenzy        | 492    | 12.6%          | 17          | 19            | 35             | 2              |
+| gasworks      | 1418   | 9.2%           | 26          | 24            | 48             | 13             |
+| lambda_bunker | 707    | 10.5%          | 14          | 20            | 25             | 3              |
+| rapidcore     | 437    | 10.3%          | 22          | 20            | 44             | 2              |
+| snark_pit     | 399    | 10.7%          | 19          | 18            | 42             | 1              |
+| stalkyard     | 703    | 16.4%          | 25          | 19            | 14             | 4              |
+| subtransit    | 898    | 8.2%           | 39          | 24            | 48             | 6              |
+| undertow      | 784    | 12.9%          | 29          | 24            | 48             | 4              |
+
+It takes so little that nothing is kept on disk: the tactics are worked out anew with every map load.
+
+### The styles on the stand
+
+`scripts/stand/style-scenarios.sh` fills the server with bots of one style (trappers get tripmines and satchels on
+every spawn) for 3 minutes each. With 8 bots on crossfire someone is always in a fight, and holding a spot or waiting
+for an item is cut short almost every time; with 3 bots the goals come through:
+
+| 3 bots, 3 min | Kills | By own hand | Spots held | Items waited for | Traps laid | Target changes a minute | Goal changes a minute (no fight in them) |
+|---------------|-------|-------------|------------|------------------|------------|-------------------------|------------------------------------------|
+| snipers       | 10    | 1           | 5          | 1                | 0          | 0–0.7                   | 12–15 (1.7–3.7)                          |
+| controllers   | 9     | 0           | 0          | 3                | 0          | 0.3–2.0                 | 13–15 (3.3–5.3)                          |
+| trappers      | 4     | 1           | 6          | 0                | 9          | 0                       | 9–10 (6–8.7)                             |
+
+In the 8-bot runs (on a build before the fixes below) rushers never backed off to cover and went to see about
+sounds most, snipers backed off to cover most (12–35 times a bot in 3 minutes), and every style changed its target
+0.3–5.7 times a minute.
+
+**A mixed game** on the final build: 10.5 minutes, 8 bots on crossfire (three balanced, three trappers, a controller,
+a sniper), every weapon allowed:
+
+| Measure                         | Value                                                          |
+|---------------------------------|----------------------------------------------------------------|
+| Kills by bots                   | 155, 14.7 a minute                                             |
+| Deaths by own hand              | 1 (a snark): 0.7 a bot-hour                                    |
+| Target changes a minute, a bot  | 1.2–3.3                                                        |
+| Goal changes a minute, a bot    | 20–28, of them 2.1–5.5 with no fight in them                   |
+| Spots held, items waited for    | 9 (the sniper 4), 1                                            |
+| Sounds seen about, covers found | 0–10 and 1–20 a bot                                            |
+| Core time a frame at 1000 fps   | average 78 µs; the last 4 s: p50 62 µs, p95 135 µs, p99 213 µs |
+
+Kills by weapon: crossbow 41, glock 32, gauss 25, MP5 16, RPG 10, egon 8, the rest 3–7 each. The six mixed games of
+the day before it, on earlier builds, came to 13.7–15.5 kills a minute and 1.2–2.8 deaths by own hand a bot-hour, most
+of them the gauss's (see below). What the map knowledge costs a bot, measured on crossfire
+(`examples/map_costs.rs`): a look at the places in sight 2 µs, a lost enemy's spread worked out again 12.5 µs, a cover
+query 27 µs; on boot_camp (2826 places) 2, 20 and 40 µs.
+
+**Replay.** A recording of 120 s of an 8-bot game on crossfire replays with every one of its 88,849 bot commands the
+same (`lb-cli replay`), the map's tactics included.
+
+### Found on the stand and fixed
+
+- **The map's tactics differed between a graph read back from the cache and one just made.** Making the graph moves
+  doors and lifts about; a replay makes the graph again, and its bots saw other places from each other. The tactics
+  are worked out with every mover where the map starts it now.
+- **Goals picked and dropped on every frame.** An item or a charger that would be back by the time the bot got there
+  was chosen, then given up because it was not back yet, then chosen again. Both now reckon with the way there as the
+  decision does, and a spot just reached rests a moment.
+- **Nobody held a spot.** Holding one wanted 50 health counting armor as the goals do (a third of health plus twice
+  the armor), which a bot without armor never has.
+- **Satchel traps fell short.** A satchel flies some 200 units; they were thrown from the ambush spot, up to 650 units
+  from the chokepoint, and some landed by the thrower. The bot now goes up to the chokepoint, throws, and watches from
+  a spot 350 units or more away.
+- **Laying a mine, the bot stood in its beam.** It steps along the wall out of the beam's way before the mine arms.
+- **A sound, a place to see it from, straight through a wall.** Places were compared by straight distance; a place
+  across a wall looked near. They are compared by the run there now.
+- **A gauss charge that had to go was dumped with no look at the walls,** back the way the bot went and a little down.
+  It goes level along the way whose first wall is farthest now, with no drop behind within the recoil's throw.
+- **A missed charged gauss shot killed its shooter.** The stand's DLL (hlsdk-portable) works the gauss as vanilla
+  HLDM does: a beam that fails to punch through a wall met square starts over from the gun with the shooter no
+  longer left out. A shot that missed a target far away, with a thick wall behind it, came back at full damage (the
+  log now tells: `killed itself with the gauss`, with the charge, the distance and the walls). Where the DLL does it
+  (`mp_selfgauss 1`, and every DLL without that cvar; BugfixedHL's default 0 does not), the charge is not let go while
+  the first wall along the view, at any distance, would stop it, nor dumped toward one.
+- **Targets flicked between two enemies.** Facing and firing flicker as enemies strafe; the target in sight is kept
+  for a second and another takes over only when 1.6 times as pressing (was 1.3).
+
 ## Tools
 
 - `lb weapons <weapon>… give`, `lb weapons all`: a scenario's weapons, handed out on every spawn (needs
@@ -221,14 +327,27 @@ the snarks near: 1 death by own hand, 53 egon kills. In the mixed game: none.
   - the explosives it carries.
 - `scripts/stand/weapon-scenarios.sh [--seconds 150] [set…]`: the per-weapon runs above, reports in
   `stand-runs/current/weapons/`.
-- Own blast incidents are logged with the distances involved (`own blast:` in `logs/lambdabots.*.log`).
+- Own blast incidents are logged with the distances involved (`own blast:` in `logs/lambdabots.*.log`), and a death
+  by the bot's own gauss with its last charge (`killed itself with the gauss`).
+- `lb map [spots|mines|danger]`: the map's tactics and where the bots got hurt.
+- `lb brain` also shows each bot's goal task, mood, goals taken, goal and target changes, and what came of the new
+  goals; `lb profile <name>` shows a personality's goal weights, favourite weapons and whether it shoots the gauss
+  through walls.
+- `scripts/stand/style-scenarios.sh [--seconds 180] [--bots 8] [style…]`: the per-style runs above, reports in
+  `stand-runs/current/styles/`.
 
 ## Not done yet
 
 - **A satchel from a jump** goes off by the enemy about one time in seven.
 - **A bot's own snarks** still turn on it now and then, most with only a crowbar and a pocketful of snarks.
 - **A tripmine's planter** may still be near when an enemy trips it (two deaths in four runs of its set).
-- **Satchel traps and mines at chokepoints** (the `PlantTrap` goal) are M4.2.
-- **A charged gauss shot** still kills its shooter now and then (one in the mixed game above). What it hit is not known
-  yet: damage a bot takes from its own gauss is logged since (`unattributed damage with the gauss in hand`).
+- **Holding spots and waiting for items** rarely come through in a crowded game: with 8 bots on crossfire a fight
+  cuts them short almost every time.
+- **Spawn protection** and the rest of the plan's M4 knowledge (the prior over spawn points after a death, TDM sharing)
+  are later stages.
+- **Deaths by own hand** vary from game to game: 0.7 a bot-hour in M4.2's last mixed game, 1.2–2.8 in the games
+  before the gauss fix. One charged gauss shot still killed its shooter in the gauss set after it (fired in a jump,
+  looking a little up, no wall near along the view): a beam glancing off more than one surface may come back.
+- **Shots through walls** came 3 times in 3 minutes of four expert bots with the gauss only (55 kills, no death by own
+  hand); whether they hit is not counted yet.
 - **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live.

@@ -24,7 +24,8 @@ pub struct ItemEntity {
     pub drawn: bool,
 }
 
-/// Looks at up to [`ITEM_TRACES`] spots in view, starting after the one checked last.
+/// Looks at up to [`ITEM_TRACES`] spots in view: `focus` first when given (an item the bot waits for), then the
+/// others in turn, starting after the one checked last.
 #[allow(clippy::too_many_arguments)]
 pub fn look(
     now: SimTime,
@@ -35,6 +36,7 @@ pub fn look(
     vis: &dyn VisSets,
     tracer: &mut dyn Tracer,
     cursor: &mut usize,
+    focus: Option<usize>,
 ) -> u32 {
     let n = items.spots.len();
     if n == 0 {
@@ -42,11 +44,15 @@ pub fn look(
     }
     let frustum = Frustum::new(viewer.eye, viewer.angles, viewer.fov, viewer.aspect);
     let mut traces = 0;
-    for k in 0..n {
+    let focus = focus.filter(|&f| f < n);
+    let start = *cursor;
+    let order = focus
+        .into_iter()
+        .chain((0..n).map(|k| (start + 1 + k) % n).filter(|&i| Some(i) != focus));
+    for i in order {
         if traces >= ITEM_TRACES {
             break;
         }
-        let i = (*cursor + 1 + k) % n;
         let spot = items.spots[i];
         let point = spot.origin + Vec3::Z * 8.0;
         if point.distance(viewer.eye) > range
@@ -60,7 +66,9 @@ pub fn look(
             continue;
         }
         traces += 1;
-        *cursor = i;
+        if Some(i) != focus {
+            *cursor = i;
+        }
         let tr = tracer.trace(&TraceQuery::sight(viewer.eye, point, viewer.index));
         if tr.fraction < 1.0 && tr.end.distance(point) > 16.0 {
             continue;

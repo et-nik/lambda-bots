@@ -162,22 +162,23 @@ pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
     }
 }
 
-/// Best gun against `t`, among the weapons `allowed` admits; `underwater` rules out those that do not fire there.
+/// Best gun against `t`, weighted by how much the bot likes each (`like`: 1 as good as its damage says, more for a
+/// favourite, 0 for one it must not use); `underwater` rules out those that do not fire there.
 pub fn choose(
     weapons: &[Armed],
     current: Option<WeaponId>,
     t: &Target,
     underwater: bool,
     damages: &Damages,
-    allowed: &dyn Fn(WeaponId) -> bool,
+    like: &dyn Fn(WeaponId) -> f32,
 ) -> Choice {
     let usable = |a: &&Armed| {
         let s = spec(a.id);
-        s.class != WeaponClass::Throwable && (s.underwater || !underwater) && allowed(a.id)
+        s.class != WeaponClass::Throwable && (s.underwater || !underwater) && like(a.id) > 0.0
     };
     let rank = |a: &Armed| {
         let s = spec(a.id);
-        let mut v = score(a, t, damages);
+        let mut v = score(a, t, damages) * like(a.id);
         if !s.in_band(t.distance) {
             v *= OUT_OF_BAND;
         }
@@ -208,22 +209,20 @@ pub fn choose(
 }
 
 /// The gun the bot would like in hand at `distance` if everything were loaded: the one worth reloading when calm.
-pub fn preferred(
-    weapons: &[Armed],
-    t: &Target,
-    damages: &Damages,
-    allowed: &dyn Fn(WeaponId) -> bool,
-) -> Option<WeaponId> {
+pub fn preferred(weapons: &[Armed], t: &Target, damages: &Damages, like: &dyn Fn(WeaponId) -> f32) -> Option<WeaponId> {
     weapons
         .iter()
         .filter(|a| spec(a.id).class != WeaponClass::Throwable && spec(a.id).class != WeaponClass::Melee)
-        .filter(|a| allowed(a.id) && (a.loaded() || a.can_reload()))
+        .filter(|a| like(a.id) > 0.0 && (a.loaded() || a.can_reload()))
         .map(|a| {
             let full = Armed {
                 clip: Some(spec(a.id).clip.max(1)),
                 ..*a
             };
-            (a.id, score(&full, t, damages) + f32::from(spec(a.id).rank) * 1e-3)
+            (
+                a.id,
+                score(&full, t, damages) * like(a.id) + f32::from(spec(a.id).rank) * 1e-3,
+            )
         })
         .filter(|(_, v)| *v > 0.0)
         .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -246,7 +245,7 @@ mod tests {
         }
     }
 
-    const ANY: &dyn Fn(WeaponId) -> bool = &|_| true;
+    const ANY: &dyn Fn(WeaponId) -> f32 = &|_| 1.0;
 
     fn pick(kit: &[Armed], current: Option<WeaponId>, t: Target, underwater: bool) -> Choice {
         choose(kit, current, &t, underwater, &Damages::default(), ANY)
@@ -344,10 +343,29 @@ mod tests {
         let d = Damages::default();
         let t = at(300.0, 10.0);
         assert_eq!(
-            choose(&kit, None, &t, false, &d, &|w| w != WeaponId::Glock),
+            choose(&kit, None, &t, false, &d, &|w| if w == WeaponId::Glock {
+                0.0
+            } else {
+                1.0
+            }),
             Choice::Reload(WeaponId::Mp5)
         );
         assert_eq!(choose(&kit, None, &t, false, &d, ANY), Choice::Use(WeaponId::Glock));
         assert_eq!(preferred(&kit, &t, &d, ANY), Some(WeaponId::Mp5));
+    }
+
+    #[test]
+    fn a_favourite_wins_a_close_call() {
+        let kit = [armed(WeaponId::Python, 6, 12), armed(WeaponId::Mp5, 50, 100)];
+        let d = Damages::default();
+        let t = at(900.0, 10.0);
+        let plain = choose(&kit, None, &t, false, &d, ANY);
+        let other = if plain == Choice::Use(WeaponId::Mp5) {
+            WeaponId::Python
+        } else {
+            WeaponId::Mp5
+        };
+        let fond = move |w: WeaponId| if w == other { 3.0 } else { 1.0 };
+        assert_eq!(choose(&kit, None, &t, false, &d, &fond), Choice::Use(other));
     }
 }

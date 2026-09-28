@@ -4,9 +4,12 @@ Bots for Half-Life 1 Deathmatch, packaged as a Metamod plugin. Behavior is writt
 talks to the engine. The algorithms are based on YaPB and its HLDM port (yapb-halflife), moved onto an
 architecture with fair perception, utility-based decisions and verifiable navigation transitions.
 
-Status: **M3 — graphs made from the map.** Bots see, hear, decide, fight and get around any map: the navigation
-graph is made from the BSP (jumps, drops, ladders, lifts, doors, teleports, breakables, water, push fields), kept
-in a cache, and corrected with per-map overlays and an in-game editor; every session can be recorded and replayed.
+Status: **M4.2 — the whole arsenal, map knowledge, goals and styles.** Bots see, hear, decide, fight with every HLDM
+weapon and get around any map: the navigation graph is made from the BSP (jumps, drops, ladders, lifts, doors,
+teleports, breakables, water, push fields), kept in a cache, and corrected with per-map overlays and an in-game
+editor. They know the map as an experienced player does (who sees whom, chokepoints, spots to hold, walls for
+tripmines, cover) and learn where they get hurt; they look for lost enemies, see about sounds, hold spots, wait for
+items and lay traps as their style bids. Every session can be recorded and replayed.
 Acceptance results and known limitations: `docs/m0-acceptance.md` … `docs/m4-acceptance.md`. The ReHLDS and Windows
 test stands are in `docs/stands/`, design notes in `docs/design/`.
 
@@ -51,8 +54,10 @@ How vision, hearing and memory work, and the skill parameters behind them: `docs
 
 ## Behavior
 
-Bots pick a goal (fight, chase, back off, collect an item, use a wall charger, roam) by weighted utility with
-commitment, fight with yapb's movement and aim model, and choose weapons by expected damage at the distance. They use
+Bots pick a goal (fight, look for a lost enemy, see about a sound, back off to cover, collect an item, use a wall
+charger, wait by an item about to come back, hold a spot, lay a trap, roam) by weighted utility with commitment,
+weighted by their play style and their mood, fight with yapb's movement and aim model, and choose weapons by expected
+damage at the distance and the guns their style and personality favour. They use
 the whole arsenal the way the game works it: the gauss charged and let go on target, the crossbow's scope snapped on
 and kept until the kill, guided rockets, the MP5's grenades, cooked hand grenades, piles of satchels set off from out
 of their blast and satchels thrown from a jump and set off as they come by the enemy, tripmines across corridors,
@@ -95,6 +100,7 @@ run them from their own console.
 | `lb record [start [s]\|stop]`          | record the next map for `lb-cli replay`                         |
 | `lb vision [name]`                     | what bots see, hear and remember                                |
 | `lb brain [name]`                      | goals, candidates, target, weapon, reactions, weapon prediction |
+| `lb map [spots\|mines\|danger]`        | the map as bots know it and where they got hurt                 |
 | `lb perf [reset\|bots]`                | core time per frame, bot command timing                         |
 | `lb compat`                            | server compatibility profile                                    |
 | `lb config show\|reload`               | show the config, or reload config and profiles                  |
