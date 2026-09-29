@@ -507,6 +507,21 @@ fn sounds_fade_with_distance_and_carry_a_bearing_error() {
             .is_none(),
         "own shot masks faint sounds"
     );
+    // A grenade bounces with no player behind the sound: heard all the same, the bot's own grenade too.
+    let bounce = SoundEvent {
+        t: SimTime(5.0),
+        source: None,
+        origin: Vec3::new(150.0, 0.0, 0.0),
+        class: SoundClass {
+            kind: SoundKind::Bounce,
+            weapon: None,
+        },
+        volume: 0.25,
+        attenuation: ATTN_NORM,
+        global: false,
+    };
+    let heard = hearing.hear(&bounce, &listener, &AllVisible, &PARAMS, &mut rng);
+    assert!(heard.is_some_and(|s| s.pos.distance(bounce.origin) < 3.0 * s.sigma().max(1.0)));
 }
 
 #[test]

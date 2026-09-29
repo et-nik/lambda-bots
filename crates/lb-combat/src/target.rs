@@ -1,5 +1,6 @@
 //! Target selection: among enemies in sight, the nearest counts most, one aiming at the bot or firing more, and
-//! the current target keeps a bonus so the bot does not flick between two equal ones.
+//! the current target keeps a bonus so the bot does not flick between two equal ones. The game mode may favor some
+//! (in GunGame the leader and a player one kill from winning).
 
 use lb_core::Vec3;
 use lb_core::dmath;
@@ -20,9 +21,26 @@ pub fn faces(track: &EnemyTrack, me: Vec3) -> bool {
     angle_diff(track.traits.facing, toward_me).abs() <= FACING_ME_DEGREES
 }
 
-pub fn priority(track: &EnemyTrack, me: Vec3, now: SimTime, current: Option<PlayerKey>) -> f32 {
-    let d = track.pos.distance(me);
-    let mut p = 1.0 / (1.0 + (d / 600.0).powi(2));
+/// How the game mode favors a target: its distance counts as `scale` of what it is, and its priority is `weight`
+/// times more.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Favor {
+    pub scale: f32,
+    pub weight: f32,
+}
+
+impl Default for Favor {
+    fn default() -> Self {
+        Favor {
+            scale: 1.0,
+            weight: 1.0,
+        }
+    }
+}
+
+pub fn priority(track: &EnemyTrack, me: Vec3, now: SimTime, current: Option<PlayerKey>, favor: Favor) -> f32 {
+    let d = track.pos.distance(me) * favor.scale;
+    let mut p = favor.weight / (1.0 + (d / 600.0).powi(2));
     let mut threat = 1.0;
     if faces(track, me) {
         threat += 0.5;
@@ -43,10 +61,11 @@ pub fn select<'a>(
     me: Vec3,
     now: SimTime,
     current: Option<PlayerKey>,
+    favor: &dyn Fn(&EnemyTrack) -> Favor,
 ) -> Option<PlayerKey> {
     tracks
         .filter(|t| t.state == TrackState::Visible)
-        .map(|t| (priority(t, me, now, current), t.who))
+        .map(|t| (priority(t, me, now, current, favor(t)), t.who))
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, who)| who)
 }

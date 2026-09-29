@@ -216,6 +216,7 @@ fn body(now: SimTime, weapon: Option<WeaponId>) -> Body {
         dll: lb_game::dll::DllProfile::default(),
         gravity: 800.0,
         allowed: u32::MAX,
+        gungame: None,
         selfgauss: 0,
         tricks: lb_config::main_config::TricksConfig::default(),
     }
@@ -229,12 +230,17 @@ struct Run {
 
 /// The bot stands at the origin; the scene's players move with their velocities. The game confirms any weapon
 /// the bot selects on the next frame.
-fn run(mut world: World, frames: usize, seed: u64) -> Run {
+fn run(world: World, frames: usize, seed: u64) -> Run {
+    run_dressed(world, frames, seed, WeaponId::Glock, &|_| {})
+}
+
+/// As [`run`], the bot's body dressed by `dress` every frame and `weapon` in hand at the start.
+fn run_dressed(mut world: World, frames: usize, seed: u64, weapon: WeaponId, dress: &dyn Fn(&mut Body)) -> Run {
     world.players.insert(0, player(ME, Vec3::ZERO, Vec3::ZERO));
     let ch = character(50);
     let mut brain = BotBrain::new(ME, lb_perception::PerceptionParams::from_skill(&ch.skill));
     let mut rng = BotRng::new(seed, 7);
-    let mut weapon = Some(WeaponId::Glock);
+    let mut weapon = Some(weapon);
     let mut outs = Vec::new();
     let mut first_shot = None;
     for i in 0..frames {
@@ -272,7 +278,9 @@ fn run(mut world: World, frames: usize, seed: u64) -> Run {
             None,
             None,
         );
-        let out = brain.act(&body(now, weapon), &ch, &mut world, None, &mut rng);
+        let mut b = body(now, weapon);
+        dress(&mut b);
+        let out = brain.act(&b, &ch, &mut world, None, &mut rng);
         if let Some(w) = out.commands.first().and_then(|c| WeaponId::from_classname(c)) {
             weapon = Some(w);
         }
@@ -364,4 +372,61 @@ fn commands_never_conflict() {
         assert!(out.angles.x.abs() <= 89.0);
         previous = out.buttons;
     }
+}
+
+/// A GunGame bot on the level `kit` gave, the enemy (slot 2) leading.
+fn gungame_level(kit: &[Armed]) -> impl Fn(&mut Body) + '_ {
+    move |b: &mut Body| {
+        let weapons = kit.iter().fold(0, |m, a| m | a.id.bit());
+        let board = lb_game::gungame::Board::new([(ME, 300, 0), (2, 700, 0)], 100, true);
+        let g = lb_game::gungame::GunGame::new(&board, ME, weapons);
+        b.arsenal = kit.iter().copied().collect();
+        b.allowed = g.kit.weapons();
+        b.gungame = Some(g);
+    }
+}
+
+#[test]
+fn a_gungame_bot_throws_its_grenades_and_reaches_for_nothing_else() {
+    let world = World {
+        players: vec![player(2, Vec3::new(550.0, -100.0, 0.0), Vec3::new(0.0, 60.0, 0.0))],
+        ..World::default()
+    };
+    let kit = [Armed::new(WeaponId::HandGrenade, None, Some(10))];
+    let r = run_dressed(world, 600, 4, WeaponId::HandGrenade, &gungame_level(&kit));
+    for out in &r.outs {
+        assert!(
+            out.commands.iter().all(|c| c == "weapon_handgrenade"),
+            "only the level's weapon is asked for: {:?}",
+            out.commands
+        );
+    }
+    // The scene has no game to take the grenade from the hand: the pin pulled is as far as a throw gets here.
+    assert!(
+        r.outs.iter().any(|o| o.buttons & IN_ATTACK != 0),
+        "the grenades are its weapon"
+    );
+}
+
+#[test]
+fn a_gungame_launcher_too_close_backs_off_and_stays_in_hand() {
+    let world = World {
+        players: vec![player(2, Vec3::new(160.0, 0.0, 0.0), Vec3::ZERO)],
+        ..World::default()
+    };
+    let kit = [Armed::new(WeaponId::Rpg, Some(1), Some(4))];
+    let r = run_dressed(world, 300, 6, WeaponId::Rpg, &gungame_level(&kit));
+    assert!(
+        r.outs.iter().all(|o| o.commands.is_empty()),
+        "no crowbar where the level gave none"
+    );
+    assert!(r.first_shot.is_none(), "no rocket into its own blast");
+    // The scene does not move the bot: stuck, it backs out aside now and then, never at the enemy.
+    let late = &r.outs[150..];
+    let backing = late.iter().filter(|o| o.forward < -100.0).count();
+    assert!(
+        backing > 60,
+        "out to where a rocket spares it: {backing} frames backing off"
+    );
+    assert!(late.iter().all(|o| o.forward < 100.0), "never toward the enemy");
 }

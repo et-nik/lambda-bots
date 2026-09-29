@@ -36,7 +36,7 @@ use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
 pub const MAGIC: &[u8; 8] = b"LBREC\0\r\n";
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 /// Uncompressed bytes gathered before a block goes to the writer thread.
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
@@ -128,7 +128,6 @@ pub struct Carried {
     pub roster_warned: bool,
     pub rng: Pcg32,
     pub master_seed: u64,
-    pub gg_bridge_state: Option<bool>,
     pub safe_mode: Option<String>,
     pub dev: bool,
     pub freeze: bool,
@@ -216,7 +215,6 @@ impl Runtime {
             roster_warned: self.roster_warned,
             rng: self.rng.clone(),
             master_seed: self.master_seed,
-            gg_bridge_state: self.game.gg_bridge_state,
             safe_mode: self.safe_mode.clone(),
             dev: self.dev,
             freeze: self.freeze,
@@ -234,7 +232,6 @@ impl Runtime {
         self.roster_warned = c.roster_warned;
         self.rng = c.rng;
         self.master_seed = c.master_seed;
-        self.game.gg_bridge_state = c.gg_bridge_state;
         self.safe_mode = c.safe_mode;
         self.dev = c.dev;
         self.freeze = c.freeze;

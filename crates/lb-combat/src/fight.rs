@@ -9,8 +9,9 @@
 //! - **Distance:** further off than the weapon in hand does well at ([`close_in`]), a bot with the will to (health ×
 //!   aggression 30 or more) closes in at a run, along the way there when navigation gives one, strafing as it goes;
 //!   it does not stand then. Otherwise skilled bots drift in when they feel strong and far, back off when weak and
-//!   close, and back off when cornered. Everyone backs off under 96 units or while reloading; melee charges. Nobody
-//!   closes in while its own rocket or launched grenade is on the way to the target.
+//!   close, and back off when cornered. Everyone backs off under 96 units, while reloading and closer than the fight
+//!   allows (its own weapon's blast, a GunGame player one kill from winning); melee charges. Nobody closes in while
+//!   its own rocket or launched grenade is on the way to the target.
 //! - **Extras:** crouch taps and dodge jumps by skill.
 //! - **Ledges:** a move that would drop more than 160 units is reversed.
 //! - **Stuck:** a move on the ground that hardly gets anywhere for a third of a second (a box the wall traces pass
@@ -75,6 +76,9 @@ pub struct FightInput {
     pub maxspeed: f32,
     /// Further off than this the weapon in hand does poorly ([`close_in`]).
     pub close_in: f32,
+    /// Closer than this the bot backs off: its own weapon's blast would reach it there, or the enemy is one to keep
+    /// off.
+    pub keep_away: f32,
     /// The way toward the enemy along the navigation path, when there is one.
     pub path: Option<Vec2>,
 }
@@ -247,7 +251,7 @@ impl Fight {
         }
         if melee {
             ahead = i.maxspeed;
-        } else if distance < 96.0 {
+        } else if distance < 96.0 || distance < i.keep_away {
             ahead = -i.maxspeed;
         }
         if i.hold_ground {
@@ -307,7 +311,7 @@ impl Fight {
         let back = -self.asked / asked;
         // Not at the enemy while keeping away from it (its own blast on the way, a reload): aside then.
         let toward = (i.enemy - i.origin).truncate().normalize_or_zero();
-        let keep_off = i.hold_ground || i.back_off || i.reloading;
+        let keep_off = i.hold_ground || i.back_off || i.reloading || i.enemy.distance(i.origin) < i.keep_away;
         let way = [back, Vec2::new(-back.y, back.x), Vec2::new(back.y, -back.x)]
             .into_iter()
             .filter(|d| !keep_off || d.dot(toward) <= KEEP_OFF_TOWARD)
@@ -369,6 +373,7 @@ mod tests {
             velocity: Vec2::ZERO,
             maxspeed: 300.0,
             close_in: f32::INFINITY,
+            keep_away: 0.0,
             path: None,
         }
     }
@@ -461,6 +466,25 @@ mod tests {
         };
         let m = f.update(&close, &SKILL, &mut open, &mut Pcg32::new(5, 5));
         assert!(m.velocity.x < -200.0, "away from its rocket's blast close by: {m:?}");
+    }
+
+    #[test]
+    fn backs_off_from_what_it_keeps_away_from() {
+        let mut open = Floor { wall_y: None };
+        let keep = FightInput {
+            keep_away: 350.0,
+            approach: 90.0,
+            ..input(0.0, 250.0)
+        };
+        let mut f = Fight::default();
+        let m = f.update(&keep, &SKILL, &mut open, &mut Pcg32::new(6, 6));
+        assert!(m.velocity.x < -250.0, "back to where it keeps the enemy: {m:?}");
+        let out = FightInput {
+            keep_away: 350.0,
+            ..input(0.0, 400.0)
+        };
+        let m = f.update(&out, &SKILL, &mut open, &mut Pcg32::new(6, 6));
+        assert!(m.velocity.x > -200.0, "far enough, the fight goes on as ever: {m:?}");
     }
 
     #[test]

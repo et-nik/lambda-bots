@@ -19,8 +19,8 @@ const char *fake_args();
 // Seed substitution in CmdStart.
 bool take_pending_seed(const edict_t *player, uint32_t *seed);
 
-// Network-layer duties the engine skips for fake clients.
-void emulate_fixangle();
+// Network-layer duties the engine skips for fake clients: fixangle, and the fake client flag every spawn clears.
+void emulate_network_duties();
 
 void forget_slot(int slot);
 

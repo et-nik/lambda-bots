@@ -152,7 +152,7 @@ void call_frame_pre() {
     if (!state().core_ok || !state().map_active) return;
     state().frame_no++;
     advance_clock();
-    emulate_fixangle();
+    emulate_network_duties();
     build_snapshots();
     arena().swap();
     LbFrameInput in{};

@@ -24,6 +24,8 @@
 //!   enough, it looks again in 4–6 s.
 //! - The weapons' part of a boost (charge, turn, jump, let go) is the `GaussBoost` protocol, started when
 //!   navigation stops at a boost's takeoff and asks for it.
+//! - **GunGame:** in the warmup leaps at enemies come twice as readily; where a suicide costs a kill, gauss jumps and
+//!   boosts need 80 health.
 
 use lb_core::math::{angle_diff, dir_to_view_angles, view_angle_vectors};
 use lb_core::rng::BotRng;
@@ -46,6 +48,11 @@ const RUNWAY_ROLL: [f32; 2] = [8.0, 12.0];
 const BOOST_URANIUM: i32 = 40;
 const BOOST_CHARGE_CELLS: i32 = 16;
 const BOOST_HEALTH: f32 = 60.0;
+/// ... and where a suicide costs a GunGame kill.
+const DESCORE_BOOST_HEALTH: f32 = 80.0;
+/// In the GunGame warmup (kills do not count, everyone has the crowbar and a long jump) leaps at enemies come this
+/// much more readily.
+const WARMUP_LEAPS: f32 = 2.0;
 /// No enemy seen this long: calm enough to stop and charge for a boost.
 const BOOST_CALM: f64 = 2.0;
 /// A long jump at an enemy: how far (horizontally; not bold, bold), how far below and above, the least will, how
@@ -146,6 +153,15 @@ impl TrickState {
     }
 }
 
+/// The health a gauss jump or boost needs.
+fn boost_health(body: &Body) -> f32 {
+    if body.gungame.is_some_and(|g| g.descore()) {
+        DESCORE_BOOST_HEALTH
+    } else {
+        BOOST_HEALTH
+    }
+}
+
 /// How readily the bot takes a long jump: along the way (`fight` false) or in a fight. The skill's readiness times
 /// how much the style likes it against a balanced bot's liking.
 pub fn leap_chance(ch: &Character, fight: bool) -> f32 {
@@ -175,7 +191,7 @@ impl BotBrain {
         let boost_now = ch.skill.tricks
             && body.allows(WeaponId::Gauss)
             && (boosting || uranium >= BOOST_CHARGE_CELLS)
-            && body.health >= BOOST_HEALTH
+            && body.health >= boost_health(body)
             && body.waterlevel < 2
             && calm;
         let bold = ch.skill.longjump_bold;
@@ -215,7 +231,8 @@ impl BotBrain {
         if now < self.mind.tricks.leap_until {
             return body.on_ground;
         }
-        let chance = leap_chance(ch, true);
+        let warmup = body.gungame.is_some_and(|g| g.warmup);
+        let chance = (leap_chance(ch, true) * if warmup { WARMUP_LEAPS } else { 1.0 }).min(1.0);
         let allowed = body.has_longjump && body.tricks.longjump && ch.skill.tricks && chance > 0.0;
         if !allowed || !closing || now < self.mind.tricks.next_leap || !visible {
             return false;
@@ -475,7 +492,7 @@ impl BotBrain {
             "no gauss ready in hand"
         } else if uranium < GAUSS_URANIUM {
             "too little uranium"
-        } else if body.health < BOOST_HEALTH {
+        } else if body.health < boost_health(body) {
             "too little health"
         } else if !calm {
             "an enemy about"
@@ -634,6 +651,7 @@ mod tests {
             dll: lb_game::dll::DllProfile::default(),
             gravity: 800.0,
             allowed: u32::MAX,
+            gungame: None,
             selfgauss: 0,
             tricks: lb_config::main_config::TricksConfig::default(),
         }

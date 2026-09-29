@@ -9,6 +9,8 @@
 //!   rockets and satchels where they are going to blow up.
 //! - **Its own hand grenades:** where each should come down and when it goes off (the bot pulled the pin), seen or
 //!   not, until then.
+//! - **Hand grenades heard bouncing:** where the last bounce seemed to be, as well as the ear tells it, for a while
+//!   after; whoever threw them, the bot's own that came back off a wall out of sight among them.
 
 use lb_core::Vec3;
 use lb_core::time::SimTime;
@@ -111,6 +113,12 @@ const ROCKET_RADIUS: f32 = 300.0;
 const SATCHEL_RADIUS: f32 = 300.0;
 /// A rocket passing this close is coming for the bot.
 const ROCKET_CLOSE: f32 = 160.0;
+/// A grenade heard bouncing is kept in mind this long after its last bounce (its fuse runs three seconds from the pin,
+/// and the last bounces come as it rolls out); bounces heard this close are the same grenade, and its blast reaches as
+/// far again as the ear may be off, up to this.
+const HEARD_FOR: f64 = 2.5;
+const HEARD_SAME: f32 = 200.0;
+const HEARD_SLACK: f32 = 120.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct Explosives {
@@ -118,6 +126,15 @@ pub struct Explosives {
     pub mines: Vec<Mine>,
     pub flying: Vec<Flying>,
     pub own_grenades: Vec<OwnGrenade>,
+    pub heard: Vec<HeardGrenade>,
+}
+
+/// A hand grenade heard bouncing: where the last bounce seemed to be, 1σ of that, and when.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeardGrenade {
+    pub at: Vec3,
+    pub sigma: f32,
+    pub t: SimTime,
 }
 
 /// A hand grenade the bot threw: where it should come down (where it was seen going when it was), and when it goes
@@ -285,11 +302,21 @@ impl Explosives {
         }
     }
 
+    /// A hand grenade was heard bouncing at `at`, known to `sigma` (1σ).
+    pub fn heard_bounce(&mut self, at: Vec3, sigma: f32, now: SimTime) {
+        let heard = HeardGrenade { at, sigma, t: now };
+        match self.heard.iter_mut().find(|h| h.at.distance(at) <= HEARD_SAME) {
+            Some(h) => *h = heard,
+            None => self.heard.push(heard),
+        }
+    }
+
     /// An explosion was seen or heard at `pos`: what lay there is gone.
     pub fn on_explosion(&mut self, pos: Vec3) {
         self.mines.retain(|m| m.pos.distance(pos) > BLOWN_WITH);
         self.charges.retain(|c| c.pos.distance(pos) > BLOWN_WITH);
         self.flying.retain(|f| f.pos.distance(pos) > BLOWN_WITH);
+        self.heard.retain(|h| h.at.distance(pos) > HEARD_SAME);
     }
 
     /// The bot died: the game removes its satchels.
@@ -297,10 +324,12 @@ impl Explosives {
         self.charges.clear();
         self.flying.clear();
         self.own_grenades.clear();
+        self.heard.clear();
     }
 
     pub fn update(&mut self, now: SimTime) {
         self.own_grenades.retain(|g| now.since(g.goes_off) <= OWN_GRENADE_LATE);
+        self.heard.retain(|h| now.since(h.t) <= HEARD_FOR);
         self.flying.retain(|f| {
             let memory = match f.kind {
                 ProjectileKind::Satchel | ProjectileKind::Snark => LYING_MEMORY,
@@ -311,7 +340,8 @@ impl Explosives {
     }
 
     /// Explosions the projectiles the bot has seen are about to set off, `sv_gravity` for their fall: others', and its
-    /// own grenades (a grenade does not care who threw it). Its own satchels go off only when it sets them off.
+    /// own grenades (a grenade does not care who threw it); and grenades heard bouncing. Its own satchels go off only
+    /// when it sets them off.
     pub fn blasts(&self, now: SimTime, sv_gravity: f32, floor: f32) -> impl Iterator<Item = Blast> + '_ {
         self.flying
             .iter()
@@ -320,6 +350,11 @@ impl Explosives {
             .chain(self.own_grenades.iter().map(|g| Blast {
                 at: g.at,
                 radius: GRENADE_RADIUS,
+                kind: ProjectileKind::Grenade,
+            }))
+            .chain(self.heard.iter().map(|h| Blast {
+                at: h.at,
+                radius: GRENADE_RADIUS + h.sigma.min(HEARD_SLACK),
                 kind: ProjectileKind::Grenade,
             }))
     }
@@ -393,6 +428,29 @@ mod tests {
             own,
             beam: None,
         }
+    }
+
+    #[test]
+    fn a_grenade_heard_bouncing_is_kept_away_from_until_it_goes_off() {
+        let mut e = Explosives::default();
+        e.heard_bounce(Vec3::new(100.0, 0.0, 0.0), 40.0, SimTime(1.0));
+        e.heard_bounce(Vec3::new(140.0, 30.0, 0.0), 30.0, SimTime(1.4));
+        assert_eq!(e.heard.len(), 1, "bounces close together are one grenade");
+        let blast = e.blasts(SimTime(1.5), 800.0, 0.0).next().expect("a blast");
+        assert_eq!(blast.at, Vec3::new(140.0, 30.0, 0.0));
+        assert_eq!(blast.radius, GRENADE_RADIUS + 30.0);
+        e.update(SimTime(3.0));
+        assert_eq!(e.heard.len(), 1);
+        e.on_explosion(Vec3::new(150.0, 20.0, 0.0));
+        assert!(e.heard.is_empty(), "gone off");
+        e.heard_bounce(Vec3::new(-300.0, 0.0, 0.0), 500.0, SimTime(4.0));
+        assert_eq!(
+            e.blasts(SimTime(4.0), 800.0, 0.0).next().map(|b| b.radius),
+            Some(GRENADE_RADIUS + HEARD_SLACK),
+            "an ear far off widens it only so much"
+        );
+        e.update(SimTime(6.6));
+        assert!(e.heard.is_empty(), "forgotten well after its fuse ran out");
     }
 
     #[test]
