@@ -52,6 +52,10 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("status", "runtime status and counters"),
     (
+        "gg",
+        "GunGame as the bots see it: every player's level from the scoreboard, the leader, what each bot's level gave it",
+    ),
+    (
         "weapons [all|melee|<weapon>...] [give]",
         "weapons bots may use; with give every bot gets them on spawn (needs sv_cheats 1)",
     ),
@@ -116,6 +120,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "brain" => brain(rt, rest),
         "profile" => profile(rt, rest),
         "status" => status(rt),
+        "gg" => gungame(rt),
         "weapons" => weapons(rt, rest),
         "items" => items(rt, rest),
         "selftest" => selftest(rt, host, rest),
@@ -241,6 +246,86 @@ fn status(rt: &Runtime) -> Vec<String> {
             rt.commands.rejected
         ),
     ]
+}
+
+/// A bot's GunGame: its level (from 1, as the plugin shows it), what the level gave it, the warmup and the leader.
+fn gungame_text(rt: &Runtime, board: &lb_game::gungame::Board, b: &crate::manager::Bot) -> String {
+    use lb_game::gungame::{GunGame, Kit};
+    let g = GunGame::new(board, b.id.slot, b.self_state.body.weapons_mask);
+    let kit = match g.kit {
+        Kit::Gun(w) | Kit::Throwable(w) => format!("{} {}", g.kit.as_str(), w.classname()),
+        Kit::Other => {
+            let carried: Vec<&str> = lb_game::weapons::weapons_in_mask(b.self_state.body.weapons_mask)
+                .map(|w| w.classname())
+                .collect();
+            if carried.is_empty() {
+                "no weapons".to_string()
+            } else {
+                format!("other: {}", carried.join(" "))
+            }
+        }
+        k => k.as_str().to_string(),
+    };
+    let place = if g.warmup {
+        ", warmup".to_string()
+    } else if g.leads() {
+        ", leads".to_string()
+    } else {
+        let leader = board
+            .leader
+            .and_then(|slot| rt.clients.get(slot))
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        format!(", {} behind {leader}", g.behind())
+    };
+    format!(
+        "level {} ({kit}){place}{}",
+        g.level + 1,
+        if g.descore() { ", descore" } else { "" }
+    )
+}
+
+fn gungame(rt: &Runtime) -> Vec<String> {
+    let Some(board) = rt.gungame_board() else {
+        return vec![format!(
+            "not a GunGame match (mode {:?}); lb_gungame auto|on|off",
+            rt.game.mode
+        )];
+    };
+    let name = |slot: u8| rt.clients.get(slot).map(|c| c.name.clone()).unwrap_or_default();
+    let mut out = vec![format!(
+        "{:?}: descore {}, leader {} (level {}), top level {}",
+        rt.game.mode.unwrap_or(lb_game::mode::GameModeKind::Ffa),
+        if board.descore { "on" } else { "off" },
+        board.leader.map(name).unwrap_or_else(|| "-".into()),
+        board.leader.and_then(|s| board.level(s)).map_or(0, |l| l + 1),
+        board.top() + 1
+    )];
+    let mut players: Vec<(u8, i32, i32)> = board
+        .levels
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.is_some())
+        .filter_map(|(slot, _)| {
+            let e = rt.game.scoreboard.entries.get(slot)?;
+            Some((slot as u8, e.frags, e.deaths))
+        })
+        .collect();
+    players.sort_by_key(|&(slot, frags, deaths)| (-frags, deaths, slot));
+    for (slot, frags, deaths) in players {
+        let bot = rt
+            .bots
+            .iter()
+            .find(|b| b.id.slot == slot)
+            .map(|b| format!("  bot: {}", gungame_text(rt, &board, b)))
+            .unwrap_or_default();
+        out.push(format!(
+            "  level {:>2}  frags {frags:>5}  deaths {deaths:>3}  {}{bot}",
+            board.level(slot).unwrap_or(0) + 1,
+            name(slot)
+        ));
+    }
+    out
 }
 
 fn perf(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
@@ -857,6 +942,9 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             .map(|g| format!("{} {}/{:.2}", goal_text(rt, b, g.kind), g.rank, g.weight))
             .collect();
         out.push(format!("  candidates: {}", candidates.join(" | ")));
+        if let Some(board) = rt.gungame_board() {
+            out.push(format!("  gungame: {}", gungame_text(rt, &board, b)));
+        }
         let gs = &m.decider.stats;
         let ms = &m.stats;
         let taken: Vec<String> = gs.taken.iter().map(|(k, n)| format!("{k} ×{n}")).collect();

@@ -304,7 +304,6 @@ LB_EXPORT LB_ENTRY int Meta_Detach(mm::PlugLoadTime, mm::PlUnloadReason) {
     rehlds_shutdown();
     const uint8_t no_messages[32] = {};
     capture_set_mask(no_messages);
-    capture_set_msgmgr_mask(no_messages);
     reset_interned();
     registry_clear();
     arena().clear();

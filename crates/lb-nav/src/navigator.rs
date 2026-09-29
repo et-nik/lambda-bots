@@ -211,7 +211,8 @@ impl Navigator {
         {
             tracing::warn!("link {from} -> {to} fails for several bots; switched off until checked again");
         }
-        tracing::debug!("bot {} failed link {from} -> {to}: {}", ctx.bot, reason.as_str());
+        let kind = ctx.graph.find_link(from, to).map_or("?", |l| l.kind.as_str());
+        tracing::debug!("bot {} failed {kind} link {from} -> {to}: {}", ctx.bot, reason.as_str());
         self.last_failure = Some(Failure {
             from,
             to,

@@ -8,12 +8,9 @@
 
 namespace lb {
 
-// User messages. With the ReHLDS message manager hooked for a type, only that source records it: it also sees
-// messages other plugins send through the raw engine functions.
-enum class MsgSource { Metamod, MessageManager };
+// User messages, as Metamod shows them: what the game DLL sends (other plugins call the raw engine functions).
 void capture_set_mask(const uint8_t mask[32]);
-void capture_set_msgmgr_mask(const uint8_t mask[32]);
-void capture_message_begin(MsgSource source, int dest, int type, const float *origin, edict_t *ed);
+void capture_message_begin(int dest, int type, const float *origin, edict_t *ed);
 void capture_arg_int(uint8_t tag, int value);
 void capture_arg_float(uint8_t tag, float value);
 void capture_arg_string(const char *value);

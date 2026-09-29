@@ -185,7 +185,8 @@ pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
 }
 
 /// Best gun against `t`, weighted by how much the bot likes each (`like`: 1 as good as its damage says, more for a
-/// favourite, 0 for one it must not use); `underwater` rules out those that do not fire there.
+/// favourite, 0 for one it must not use); `underwater` rules out those that do not fire there. With nothing to fire
+/// or to reload, `fallback` (the crowbar, in GunGame the level's weapon).
 pub fn choose(
     weapons: &[Armed],
     current: Option<WeaponId>,
@@ -193,6 +194,7 @@ pub fn choose(
     underwater: bool,
     damages: &Damages,
     like: &dyn Fn(WeaponId) -> f32,
+    fallback: WeaponId,
 ) -> Choice {
     let usable = |a: &&Armed| {
         let s = spec(a.id);
@@ -227,7 +229,7 @@ pub fn choose(
     {
         return Choice::Reload(a.id);
     }
-    Choice::Use(WeaponId::Crowbar)
+    Choice::Use(fallback)
 }
 
 /// The gun the bot would like in hand at `distance` if everything were loaded: the one worth reloading when calm.
@@ -271,7 +273,15 @@ mod tests {
     const ANY: &dyn Fn(WeaponId) -> f32 = &|_| 1.0;
 
     fn pick(kit: &[Armed], current: Option<WeaponId>, t: Target, underwater: bool) -> Choice {
-        choose(kit, current, &t, underwater, &Damages::default(), ANY)
+        choose(
+            kit,
+            current,
+            &t,
+            underwater,
+            &Damages::default(),
+            ANY,
+            WeaponId::Crowbar,
+        )
     }
 
     #[test]
@@ -383,15 +393,37 @@ mod tests {
         let d = Damages::default();
         let t = at(300.0, 10.0);
         assert_eq!(
-            choose(&kit, None, &t, false, &d, &|w| if w == WeaponId::Glock {
-                0.0
-            } else {
-                1.0
-            }),
+            choose(
+                &kit,
+                None,
+                &t,
+                false,
+                &d,
+                &|w| if w == WeaponId::Glock { 0.0 } else { 1.0 },
+                WeaponId::Crowbar
+            ),
             Choice::Reload(WeaponId::Mp5)
         );
-        assert_eq!(choose(&kit, None, &t, false, &d, ANY), Choice::Use(WeaponId::Glock));
+        assert_eq!(
+            choose(&kit, None, &t, false, &d, ANY, WeaponId::Crowbar),
+            Choice::Use(WeaponId::Glock)
+        );
         assert_eq!(preferred(&kit, &t, &d, ANY), Some(WeaponId::Mp5));
+    }
+
+    #[test]
+    fn a_gungame_launcher_too_close_stays_in_hand() {
+        let kit = [armed(WeaponId::Rpg, 1, 5)];
+        let d = Damages::default();
+        let near = Target {
+            rocket_min: 300.0,
+            ..at(150.0, 10.0)
+        };
+        assert_eq!(
+            choose(&kit, None, &near, false, &d, ANY, WeaponId::Rpg),
+            Choice::Use(WeaponId::Rpg),
+            "no crowbar where the level gave none"
+        );
     }
 
     #[test]
@@ -399,13 +431,16 @@ mod tests {
         let kit = [armed(WeaponId::Python, 6, 12), armed(WeaponId::Mp5, 50, 100)];
         let d = Damages::default();
         let t = at(900.0, 10.0);
-        let plain = choose(&kit, None, &t, false, &d, ANY);
+        let plain = choose(&kit, None, &t, false, &d, ANY, WeaponId::Crowbar);
         let other = if plain == Choice::Use(WeaponId::Mp5) {
             WeaponId::Python
         } else {
             WeaponId::Mp5
         };
         let fond = move |w: WeaponId| if w == other { 3.0 } else { 1.0 };
-        assert_eq!(choose(&kit, None, &t, false, &d, &fond), Choice::Use(other));
+        assert_eq!(
+            choose(&kit, None, &t, false, &d, &fond, WeaponId::Crowbar),
+            Choice::Use(other)
+        );
     }
 }

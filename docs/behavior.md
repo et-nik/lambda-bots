@@ -362,9 +362,12 @@ never within 256 units of a spawn point nor within 96 of another mine. A known m
 units away is shot (with the 357, the glock, the MP5 or the gauss) when an enemy is within 140 units of it; an
 enemy's mine ahead of a quiet bot is shot to clear the way. Shooting a mine credits the shooter.
 
-**Dodging.** A grenade the bot sees coming down near it (its own too), an MP5 grenade about to land, a rocket passing
-within 160 units or an enemy satchel lying close make it run from the blast for half a second (away from it: yapb's
-sign was wrong), checking the ground for ledges and taking a side when straight away is a drop. It does not walk into
+**Dodging.** A grenade the bot sees coming down near it (its own too) or hears bouncing near it, an MP5 grenade
+about to land, a rocket passing within 160 units or an enemy satchel lying close make it run from the blast for half
+a second (away from it: yapb's sign was wrong), checking the ground for ledges and taking a side when straight away is
+a drop. A grenade heard bouncing is where the ear places the bounce, its reach widened by how far off the ear may be
+(up to 120 units), for 2.5 s after the last bounce or until a blast is heard there: whoever threw it, the bot's own
+come back off a wall out of sight among them. It does not walk into
 one either: any move that would take it deeper into the reach of a grenade about to go off (its own above all, thrown
 where it goes next to look for the enemy) or of where its own rocket in flight is going keeps only its part along the
 edge, whatever asked for it (a path, a fight, an item), until it has gone off.
@@ -475,6 +478,48 @@ take), its uranium, why the last look for a gauss jump came to nothing, how the 
 (landed where they should or not, by kind), the long jumps at enemies and to dodge, the gauss jumps found and the
 boosts started and fired. `lb stats` sums them over the bots since the last reset. A missed trick is logged with
 where it left the ground, how fast, and where it came down.
+
+## GunGame
+
+The bots know a GunGame match the way a player does: from the scoreboard and from what they carry.
+- **The match.** GunGame is on when the plugin's `gg_enabled` is above 0 (the cvar is `gungame.detect_cvar`), or
+  with `lb_gungame on`. The plugin writes every player's level to the scoreboard as frags (level × 100), so a
+  player's level is its frags over 100 (`gungame.frags_per_level`); the leader is the scoreboard's first line: most
+  frags, then fewest deaths. What the bot's own level gave it is what it carries:
+  - one gun;
+  - hand grenades, snarks or satchels;
+  - tripmines and a glock (the tripmine level);
+  - the crowbar alone: the last level, or on the first level the warmup, when kills do not count (the plugin stays in
+    the warmup while only bots are on the server).
+
+  The order of the levels is not known and not needed: a player on the last level shows the crowbar in its hands.
+- **Weapons.** Only the level's weapons hurt other players (the plugin blocks the rest), so a bot fights with nothing
+  else: no crowbar on a gun's level. Where its gun does nothing at the distance (a rocket too close, a crossbow bolt
+  or the egon beam's end bursting on the bot itself) it keeps the gun in hand and backs off. On their levels
+  throwables are its weapon (yapb's grenade war: grenades from 220 units, thrown more readily); on the tripmine level
+  the glock only sets mines off.
+- **Pickups.** Weapons and ammo are left alone (the plugin blocks picking them up and hides the map's); health,
+  armor, the long jump and chargers are not.
+- **Targets.** The leader counts as if half as far, a player on the last level (the crowbar in hand past the first
+  level) 1.5 times more, and the player who killed the bot last 1.2 times more. A player on the last level is kept
+  300 units off.
+- **The duel.** Against an enemy whose gun it sees, a bot weighs its own gun's damage a second against the enemy's at
+  100–1300 units and keeps to a distance where it clearly does better than where it is: off a crowbar or a shotgun
+  with a gun that reaches further, in on a gun that does better far off.
+- **The levels.**
+  - The crowbar alone: a lost enemy is hunted with at least 0.7 weight, as yapb's knife level.
+  - Tripmines: no enemy is engaged or hunted, one in sight closer than 700 units is got away from, and mines go down
+    whenever no enemy is in sight: the map's mine spots (liked 1.5 times as much as a balanced trapper does, the next
+    2–4 s after the last) and across the way the bot walks every 3–6 s. A mine is shot with the glock when an enemy
+    is by it. On the other levels a mine is not shot at an enemy: its blast hurts nobody for a player on another level.
+- **Moods.** Two levels or more behind the leader a bot is 0.2 more aggressive; leading, 0.15 more afraid; in the
+  warmup, where it has nothing to lose, 0.3 more aggressive and 0.3 less afraid, and it leaps at enemies twice as
+  readily.
+- **Suicides.** Where a suicide costs a kill (`gg_descore`, FFA), satchels are not thrown from a jump and gauss jumps
+  and boosts need 80 health.
+- A level that changes in the bot's hands ends what its old weapons were doing (a throw, a charge).
+
+`lb gg` shows every player's level, the leader and what each bot's level gave it; `lb brain` shows each bot's level.
 
 ## Priorities
 

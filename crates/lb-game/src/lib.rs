@@ -9,6 +9,7 @@
 pub mod compat;
 pub mod dll;
 pub mod entities;
+pub mod gungame;
 pub mod input;
 pub mod items;
 pub mod mechanics;

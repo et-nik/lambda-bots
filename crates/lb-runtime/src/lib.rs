@@ -99,7 +99,8 @@ pub struct GameState {
     pub weapons: WeaponRegistry,
     pub mode: Option<GameModeKind>,
     pub teamplay_message: bool,
-    pub gg_bridge_state: Option<bool>,
+    /// GunGame's `gg_descore`: a suicide costs a kill (the plugin's default when the cvar is not there).
+    pub gg_descore: bool,
     pub resolved_msgs: Vec<(String, i32)>,
     /// How the game DLL works the weapons that differ.
     pub dll: DllProfile,
@@ -611,7 +612,9 @@ impl Runtime {
                 self.carry_over = saved;
             }
         }
-        // Sim time restarts with every map; the first frame of this one sets it again.
+        // Sim time restarts with every map; the first frame of this one sets it again. The weapon statistics go on
+        // counting over the change.
+        self.arms_stats.since -= self.now.secs();
         self.now = SimTime::ZERO;
         self.last_quota_check = SimTime::ZERO;
         self.last_cvar_poll = SimTime::ZERO;
@@ -1243,6 +1246,16 @@ impl Runtime {
                     .map_or("none of its grenades known".to_string(), |d| {
                         format!("its grenade believed {d:.0} u off the blast")
                     });
+                let heard = bot
+                    .and_then(|b| {
+                        b.brain
+                            .explosives
+                            .heard
+                            .iter()
+                            .map(|h| h.at.distance(source))
+                            .min_by(f32::total_cmp)
+                    })
+                    .map_or(String::new(), |d| format!(", a bounce heard {d:.0} u off it"));
                 let moving = bot
                     .and_then(|b| b.brain.intents.movement.map(|(p, mv)| (p, mv.speed, b.nav.phase())))
                     .map_or("no move".to_string(), |(p, speed, phase)| {
@@ -1250,7 +1263,7 @@ impl Runtime {
                     });
                 tracing::info!(
                     "own blast: slot {owner} took {damage:.0} from its {row:?} {:.0} u away; fired {:.1} s before from \
-                     {:.0} u off the blast, {:.0} u from where the bot is now; {known}; {moving}",
+                     {:.0} u off the blast, {:.0} u from where the bot is now; {known}{heard}; {moving}",
                     victim.1.distance(source),
                     now.since(at),
                     from.distance(source),
@@ -1932,8 +1945,12 @@ impl Runtime {
                 .cvars
                 .game_value(host, "gg_teamplay")
                 .and_then(|v| v.trim().parse().ok()),
-            gungame_bridge_state: self.game.gg_bridge_state,
         };
+        self.game.gg_descore = self
+            .cvars
+            .game_value(host, "gg_descore")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .is_none_or(|v| v > 0.0);
         let mode = lb_game::mode::detect(&inputs);
         if self.game.mode != Some(mode) {
             tracing::info!("game mode: {mode:?}");
@@ -2225,6 +2242,27 @@ impl Runtime {
     // Motor (M0: lifecycle, respawn protocol and scripted motor tests)
     // -----------------------------------------------------------------------------------------
 
+    /// Everyone's level and the leader, from the public scoreboard, in a GunGame match.
+    pub(crate) fn gungame_board(&self) -> Option<lb_game::gungame::Board> {
+        let Some(lb_game::mode::GameModeKind::GunGame { team }) = self.game.mode else {
+            return None;
+        };
+        let players = self
+            .clients_now
+            .iter()
+            .filter(|c| c.state == lb_raw::ClientState::Spawned)
+            .filter_map(|c| {
+                let e = self.game.scoreboard.entries.get(c.slot as usize)?;
+                Some((c.slot, e.frags, e.deaths))
+            });
+        let per_level = self.config.gungame.frags_per_level.round() as i32;
+        Some(lb_game::gungame::Board::new(
+            players,
+            per_level,
+            self.game.gg_descore && !team,
+        ))
+    }
+
     /// Team index of every slot from the public scoreboard; all 0 unless the mode has teams.
     fn teams(&self) -> Vec<u8> {
         let slots = self.clients_now.len().max(self.game.scoreboard.entries.len());
@@ -2307,6 +2345,7 @@ impl Runtime {
         let damages = self.game.rules.damages;
         let dll = self.game.dll;
         let allowed = self.weapons_allowed;
+        let gungame = self.gungame_board();
         let mut recognized = Vec::new();
         let mechs = &self.mechs;
         let link_health = &mut self.link_health;
@@ -2340,6 +2379,7 @@ impl Runtime {
                     damages,
                     dll,
                     allowed,
+                    gungame: gungame.as_ref(),
                     selfgauss: self.game.rules.selfgauss,
                     falldamage_progressive: self.game.rules.falldamage_progressive,
                     tricks: self.config.tricks,
@@ -2739,6 +2779,9 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
     let b = &state.body;
     let arsenal = arsenal(state, ctx.registry);
     let ammo_need = Ammo::ALL.map(|a| ammo_need(state, ctx.registry, a));
+    let gungame = ctx
+        .gungame
+        .map(|board| lb_game::gungame::GunGame::new(board, bot.id.slot, b.weapons_mask));
     lb_brain::Body {
         now: ctx.now,
         dt: (ctx.frame_ms / 1000.0) as f32,
@@ -2762,7 +2805,8 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
         damages: ctx.damages,
         dll: ctx.dll,
         gravity: ctx.gravity,
-        allowed: ctx.allowed,
+        allowed: ctx.allowed & gungame.map_or(u32::MAX, |g| g.kit.weapons()),
+        gungame,
         selfgauss: ctx.selfgauss,
         tricks: ctx.tricks,
     }
@@ -3109,6 +3153,8 @@ struct DriveCtx<'a> {
     dll: DllProfile,
     /// Weapons bots may use (`lb weapons`).
     allowed: u32,
+    /// The scoreboard of a GunGame match.
+    gungame: Option<&'a lb_game::gungame::Board>,
     /// `mp_selfgauss` (1 where the DLL has no such cvar).
     selfgauss: u8,
     /// Tricks the config lets the bots use.

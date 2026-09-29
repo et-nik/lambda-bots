@@ -31,7 +31,6 @@ const MAX_HYPOTHESES: usize = 12;
 const ALERT_FOR: f64 = 3.0;
 const PRIMED_FOR: f64 = 2.0;
 const PRIMED_ANGLE: f32 = 30.0;
-const RANGE_ERROR: f32 = 0.3;
 /// Sounds are tied only to tracks this certain (about 3 s after the last fix) and seen within the bot's memory
 /// span: an older track would soak up the steps of players the bot has never seen.
 const ASSOCIATE_MAX_SIGMA: f32 = 600.0;
@@ -303,8 +302,7 @@ impl Beliefs {
     }
 
     pub fn on_sound(&mut self, s: &SoundStimulus) {
-        let lateral = s.range * dmath::tan(s.bearing_sigma.to_radians());
-        let sigma = (lateral * lateral + (RANGE_ERROR * s.range).powi(2)).sqrt();
+        let sigma = s.sigma();
         let memory = self.memory;
         let fits = |t: &EnemyTrack| {
             t.relation == Relation::Enemy

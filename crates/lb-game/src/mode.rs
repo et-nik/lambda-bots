@@ -17,7 +17,6 @@ pub struct ModeInputs {
     pub gungame_mode: String,
     pub gungame_cvar: Option<f32>,
     pub gungame_teamplay_cvar: Option<f32>,
-    pub gungame_bridge_state: Option<bool>,
 }
 
 pub fn detect(i: &ModeInputs) -> GameModeKind {
@@ -29,9 +28,7 @@ pub fn detect(i: &ModeInputs) -> GameModeKind {
     let gungame = match i.gungame_mode.as_str() {
         "on" => true,
         "off" => false,
-        _ => i
-            .gungame_bridge_state
-            .unwrap_or(i.gungame_cvar.is_some_and(|v| v > 0.0)),
+        _ => i.gungame_cvar.is_some_and(|v| v > 0.0),
     };
     if gungame {
         GameModeKind::GunGame {
@@ -58,8 +55,8 @@ mod tests {
         assert_eq!(detect(&i), GameModeKind::Ffa);
         i.gungame_cvar = Some(1.0);
         assert_eq!(detect(&i), GameModeKind::GunGame { team: false });
-        i.gungame_bridge_state = Some(false);
-        assert_eq!(detect(&i), GameModeKind::Ffa, "bridge state is authoritative");
+        i.gungame_cvar = Some(0.0);
+        assert_eq!(detect(&i), GameModeKind::Ffa, "the plugin switched off");
         i.gungame_mode = "on".into();
         assert_eq!(detect(&i), GameModeKind::GunGame { team: false });
         i.gungame_mode = "off".into();

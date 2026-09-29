@@ -95,7 +95,12 @@ impl Hearing {
             }
             return None;
         }
-        if ev.source.is_none() && !matches!(ev.class.kind, SoundKind::Explosion | SoundKind::ItemRespawn) {
+        if ev.source.is_none()
+            && !matches!(
+                ev.class.kind,
+                SoundKind::Explosion | SoundKind::ItemRespawn | SoundKind::Bounce
+            )
+        {
             return None;
         }
         if !ev.global && !vis.in_pas(l.origin, ev.origin) {

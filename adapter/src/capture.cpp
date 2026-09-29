@@ -13,7 +13,6 @@ struct MsgCapture {
     bool active = false;
     bool own_send = false;
     uint8_t mask[32] = {};
-    uint8_t msgmgr_mask[32] = {};
     LbEvUserMsg head{};
     std::vector<LbMsgArg> args;
     std::string strings;
@@ -79,20 +78,14 @@ void capture_set_mask(const uint8_t mask[32]) {
     std::memcpy(cap().mask, mask, 32);
 }
 
-void capture_set_msgmgr_mask(const uint8_t mask[32]) {
-    std::memcpy(cap().msgmgr_mask, mask, 32);
-}
-
 void capture_set_own_send(bool own) {
     cap().own_send = own;
 }
 
-void capture_message_begin(MsgSource source, int dest, int type, const float *origin, edict_t *ed) {
+void capture_message_begin(int dest, int type, const float *origin, edict_t *ed) {
     MsgCapture &c = cap();
     if (c.active) finish(true);
     if (c.own_send || !state().core_ok || !in_mask(c.mask, type)) return;
-    const bool from_msgmgr = source == MsgSource::MessageManager;
-    if (!from_msgmgr && in_mask(c.msgmgr_mask, type)) return;
     uint8_t target = 0;
     if (dest == MSG_ONE || dest == MSG_ONE_UNRELIABLE) {
         if (!is_our_bot(ed)) return;
@@ -105,7 +98,6 @@ void capture_message_begin(MsgSource source, int dest, int type, const float *or
     c.head.msg_id = type;
     c.head.dest = static_cast<uint8_t>(dest);
     c.head.target_slot = target;
-    if (from_msgmgr) c.head.flags |= LB_MSG_FLAG_FROM_MSGMGR;
     if (origin) {
         c.head.flags |= LB_MSG_FLAG_HAS_ORIGIN;
         c.head.origin = vec(origin);

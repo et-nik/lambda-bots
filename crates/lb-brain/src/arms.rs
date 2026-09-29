@@ -17,7 +17,9 @@
 //!   be spared backs off first.
 //! - **Tripmines** are shot when an enemy is within 140 units of one 400–1200 units away; a known enemy mine ahead is
 //!   shot to clear the way when nothing else goes on. When quiet the bot now and then lays a mine across a corridor it
-//!   walks along, never near a spawn point and not next to another mine.
+//!   walks along, never near a spawn point and not next to another mine. On the GunGame tripmine level, where mines
+//!   are the weapon, it lays them every few seconds whenever no enemy is in sight; elsewhere in GunGame a mine is not
+//!   shot at an enemy (the plugin keeps its blast off other players).
 //! - **Dodge:** a grenade coming down (its own too), an MP5 grenade landing or a rocket passing near the bot makes it
 //!   run away from the blast (yapb ran toward it), checking for ledges.
 //! - **Gauss:** its charge runs whenever the gauss is in hand; nothing else starts while it charges.
@@ -38,6 +40,7 @@ use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
 use lb_decision::GoalKind;
+use lb_game::gungame::Kit;
 use lb_game::mechanics::{Attack, WeaponClass, blast_radius, spec};
 use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
@@ -173,6 +176,9 @@ const MINE_SHOT_BAND: [f32; 2] = [400.0, 800.0];
 const CORRIDOR: f32 = 300.0;
 const WALL_NEAR: f32 = 90.0;
 const MINE_SPACING: f32 = 96.0;
+/// Seconds before another mine is laid along the way; on the GunGame tripmine level, where mines are the weapon.
+const MINE_REST: [f32; 2] = [20.0, 30.0];
+const MINES_LEVEL_REST: [f32; 2] = [3.0, 6.0];
 const SPAWN_CLEAR: f32 = 256.0;
 /// Quiet this long before laying a mine or clearing one.
 const QUIET: f64 = 5.0;
@@ -870,6 +876,8 @@ impl BotBrain {
             .find(|w| body.arsenal.iter().any(|a| a.id == *w && a.loaded()) && body.allows(*w));
         let Some(gun) = gun else { return false };
         let calm = self.calm_for(now) >= QUIET;
+        // In GunGame a mine's blast hurts others only for a player on the tripmine level.
+        let victims = body.gungame.is_none_or(|g| g.kit == Kit::Mines);
         let heading = body.velocity.truncate().normalize_or_zero();
         let target = self.explosives.mines.iter().find_map(|m| {
             if now < m.armed_at {
@@ -879,10 +887,11 @@ impl BotBrain {
             if !(MINE_SHOT_BAND[0]..=MINE_SHOT_BAND[1]).contains(&d) || d < blast_radius(body.damages.tripmine) + 25.0 {
                 return None;
             }
-            let victim = self
-                .beliefs
-                .enemies()
-                .any(|t| fresh(t, now) && t.pos.distance(m.pos) <= MINE_VICTIM);
+            let victim = victims
+                && self
+                    .beliefs
+                    .enemies()
+                    .any(|t| fresh(t, now) && t.pos.distance(m.pos) <= MINE_VICTIM);
             let in_the_way = calm && !m.own && heading.dot((m.pos - body.origin).truncate().normalize_or_zero()) > 0.7;
             (victim || in_the_way).then_some(m.pos)
         });
@@ -1007,8 +1016,9 @@ impl BotBrain {
         if satchels > 0 && free && in_band(SATCHEL_BAND) && (!seen || coming || war) {
             ways.push((Way::Pile, if seen { SEEN_SATCHEL } else { UNSEEN_SATCHEL }));
         }
-        // From a jump: a trick, for skills that do tricks, as often as the style likes (the balanced style's the base).
-        let jump_throw = ch.skill.tricks && body.tricks.satchel_jump;
+        // From a jump: a trick, for skills that do tricks, as often as the style likes (the balanced style's the base);
+        // not where a suicide costs a GunGame kill.
+        let jump_throw = ch.skill.tricks && body.tricks.satchel_jump && !body.gungame.is_some_and(|g| g.descore());
         if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) && jump_throw {
             ways.push((
                 Way::Airburst,
@@ -1208,16 +1218,23 @@ impl BotBrain {
             return;
         }
         self.mind.arms.next_mine = now + f64::from(rng.combat.range_f32(1.5, 3.0));
+        // On the GunGame tripmine level mines are the weapon: laid on any way, with no enemy in sight.
+        let mines_level = body.gungame.is_some_and(|g| g.kit == Kit::Mines);
         let walking = matches!(
             self.mind.goal.map(|g| g.kind),
             Some(GoalKind::Roam | GoalKind::CollectItem(_))
-        );
+        ) || (mines_level && !matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::PlantTrap(_))));
+        let quiet = if mines_level {
+            self.beliefs.visible_enemies().next().is_none()
+        } else {
+            self.calm_for(now) >= QUIET
+        };
         let speed = body.velocity.truncate().length();
         if !walking
             || speed < 100.0
             || !body.on_ground
             || body.waterlevel >= 2
-            || self.calm_for(now) < QUIET
+            || !quiet
             || !body.allows(WeaponId::Tripmine)
             || body
                 .arsenal
@@ -1256,7 +1273,8 @@ impl BotBrain {
             return;
         }
         self.mind.arms.active = Some(Active::Mine(Planter::new(spot, normal, now)));
-        self.mind.arms.next_mine = now + f64::from(rng.combat.range_f32(20.0, 30.0));
+        let rest = if mines_level { MINES_LEVEL_REST } else { MINE_REST };
+        self.mind.arms.next_mine = now + f64::from(rng.combat.range_f32(rest[0], rest[1]));
     }
 
     /// Every frame: the gauss charge, the running protocol and a rocket in flight get their say at `Prio::Protocol`.
@@ -2071,6 +2089,7 @@ mod tests {
             dll: lb_game::dll::DllProfile::default(),
             gravity: 800.0,
             allowed: u32::MAX,
+            gungame: None,
             selfgauss: 0,
             tricks: lb_config::main_config::TricksConfig::default(),
         }

@@ -2,8 +2,6 @@
 
 #if defined(LB_WITH_REHLDS)
 
-#include <cstring>
-
 #include "capture.h"
 #include "rehlds_api.h"
 
@@ -27,7 +25,6 @@ struct Bridge {
     rehlds::StartSoundRegistry *start_sound = nullptr;
     int minor = 0;
     int build = 0;
-    uint8_t hooked[32] = {};
 };
 
 Bridge &br() {
@@ -65,46 +62,9 @@ void on_start_sound(rehlds::StartSoundChain *chain, int recipients, edict_t *ent
     chain->callNext(recipients, ent, channel, sample, volume, attn, flags, pitch);
 }
 
-bool origin_matters(rehlds::IMessage::Dest d) {
-    using D = rehlds::IMessage::Dest;
-    return d == D::PVS || d == D::PAS || d == D::PVS_R || d == D::PAS_R;
-}
-
-void on_message(rehlds::IVoidHookChain<rehlds::IMessage *> *chain, rehlds::IMessage *msg) {
-    using P = rehlds::IMessage::ParamType;
-    const rehlds::IMessage::Dest dest = msg->getDest();
-    capture_message_begin(MsgSource::MessageManager, static_cast<int>(dest), msg->getId(),
-                          origin_matters(dest) ? msg->getOrigin() : nullptr, msg->getEdict());
-    const int count = msg->getParamCount();
-    for (int i = 0; i < count; i++) {
-        switch (msg->getParamType(i)) {
-            case P::Byte: capture_arg_int(LB_MSG_ARG_BYTE, msg->getParamInt(i)); break;
-            case P::Char: capture_arg_int(LB_MSG_ARG_CHAR, msg->getParamInt(i)); break;
-            case P::Short: capture_arg_int(LB_MSG_ARG_SHORT, msg->getParamInt(i)); break;
-            case P::Long: capture_arg_int(LB_MSG_ARG_LONG, msg->getParamInt(i)); break;
-            case P::Entity: capture_arg_int(LB_MSG_ARG_ENTITY, msg->getParamInt(i)); break;
-            case P::Angle: capture_arg_float(LB_MSG_ARG_ANGLE, msg->getParamFloat(i)); break;
-            case P::Coord: capture_arg_float(LB_MSG_ARG_COORD, msg->getParamFloat(i)); break;
-            case P::String: capture_arg_string(msg->getParamString(i)); break;
-        }
-    }
-    capture_message_end();
-    chain->callNext(msg);
-}
-
 // GetBuildNumber is the engine's date-based build (e.g. 4419), not a commit count, so only the API minor counts.
 bool has_message_manager(const Bridge &b) {
     return b.minor >= rehlds::kMessageManagerMinor;
-}
-
-void unhook_messages() {
-    Bridge &b = br();
-    if (!b.msgmgr) return;
-    for (int id = 0; id < 256; id++) {
-        if (b.hooked[id / 8] & (1u << (id % 8))) b.msgmgr->unregisterHook(id, on_message);
-    }
-    std::memset(b.hooked, 0, sizeof(b.hooked));
-    capture_set_msgmgr_mask(b.hooked);
 }
 
 }  // namespace
@@ -139,7 +99,6 @@ bool rehlds_init() {
 void rehlds_shutdown() {
     Bridge &b = br();
     if (!b.api) return;
-    unhook_messages();
     if (b.start_sound) b.start_sound->unregisterHook(on_start_sound);
     b = Bridge{};
 }
@@ -157,25 +116,6 @@ void rehlds_fill_compat(LbCompatFacts *out) {
 
 bool rehlds_sound_channel() {
     return br().start_sound != nullptr;
-}
-
-bool rehlds_hook_messages(const uint8_t mask[32]) {
-    Bridge &b = br();
-    if (!b.msgmgr) return false;
-    for (int id = 0; id < 256; id++) {
-        const uint8_t bit = static_cast<uint8_t>(1u << (id % 8));
-        const bool want = (mask[id / 8] & bit) != 0;
-        const bool have = (b.hooked[id / 8] & bit) != 0;
-        if (want && !have) {
-            b.msgmgr->registerHook(id, on_message, rehlds::HC_PRIORITY_LOW);
-            b.hooked[id / 8] |= bit;
-        } else if (!want && have) {
-            b.msgmgr->unregisterHook(id, on_message);
-            b.hooked[id / 8] &= static_cast<uint8_t>(~bit);
-        }
-    }
-    capture_set_msgmgr_mask(b.hooked);
-    return true;
 }
 
 bool rehlds_drop_client(int slot, const char *reason) {
@@ -210,10 +150,6 @@ void rehlds_shutdown() {}
 void rehlds_fill_compat(LbCompatFacts *) {}
 
 bool rehlds_sound_channel() {
-    return false;
-}
-
-bool rehlds_hook_messages(const uint8_t *) {
     return false;
 }
 

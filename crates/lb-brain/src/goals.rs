@@ -47,6 +47,8 @@ const CAMP_REST: [f32; 2] = [50.0, 70.0];
 const FOND_CAMP_REST: [f32; 2] = [15.0, 25.0];
 const TRAP_REST: [f32; 2] = [20.0, 30.0];
 const FOND_TRAP_REST: [f32; 2] = [10.0, 18.0];
+/// On the GunGame tripmine level mines are the weapon: the next spot is gone to soon.
+const MINES_LEVEL_TRAP_REST: [f32; 2] = [2.0, 4.0];
 /// After a trap given up.
 const TRAP_GIVE_UP_REST: f64 = 8.0;
 /// Satchels thrown as a trap are watched this long, with the radio up (renewed while at the spot).
@@ -646,7 +648,13 @@ impl BotBrain {
             return;
         };
         let fond = ch.affinity.trap >= FOND;
-        let rest = if fond { FOND_TRAP_REST } else { TRAP_REST };
+        let rest = if body.gungame.is_some_and(|g| g.kit == lb_game::gungame::Kit::Mines) {
+            MINES_LEVEL_TRAP_REST
+        } else if fond {
+            FOND_TRAP_REST
+        } else {
+            TRAP_REST
+        };
         match trap {
             Trap::Mine(i) => {
                 let Some(spot) = map.mine_spots().get(i as usize).copied() else {

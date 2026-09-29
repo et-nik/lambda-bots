@@ -17,6 +17,7 @@ use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
 use lb_decision::{Decider, Goal, GoalKind, Situation};
 use lb_game::dll::DllProfile;
+use lb_game::gungame::{GunGame, Kit};
 use lb_game::items::Ammo;
 use lb_game::mechanics::{
     AltFire, Attack, BOLT_SPEED, DART_SPEED, Damages, ROCKET_GUIDE, ROCKET_SPEED, WeaponClass, spec,
@@ -72,6 +73,28 @@ const COLLECTED_REST: f64 = 3.0;
 const TARGET_HOLD: f64 = 1.0;
 /// Slower than this the bot stands still (for the statistics).
 const STILL_SPEED: f32 = 60.0;
+/// GunGame targets: the leader counts as if this much as far (yapb's `gungame_leader_priority` 0.25 on the squared
+/// distance), a player one kill from winning and the one who killed the bot last this much more.
+const LEADER_SCALE: f32 = 0.5;
+const LAST_LEVEL_WEIGHT: f32 = 1.5;
+const GRUDGE_WEIGHT: f32 = 1.2;
+/// GunGame's say in how a bot feels: two levels or more behind the leader it pushes on, leading it takes care, and in
+/// the warmup, where kills do not count, it has nothing to lose.
+const BEHIND_AGGRESSION: f32 = 0.2;
+const LEADER_FEAR: f32 = 0.15;
+const WARMUP_AGGRESSION: f32 = 0.3;
+const WARMUP_FEAR: f32 = -0.3;
+/// A GunGame player one kill from winning is kept this far off: its crowbar and long jump.
+const LAST_LEVEL_KEEP: f32 = 300.0;
+/// Out of the bot's own blast by this much more.
+const KEEP_MARGIN: f32 = 40.0;
+/// A grenade thrown at an enemy closer than this comes down on the thrower too; a snark or a satchel turns on it.
+const GRENADE_KEEP: f32 = 280.0;
+const SNARK_KEEP: f32 = 200.0;
+/// Distances a GunGame duel is weighed at, and how much more damage a second a distance must give the bot (its own
+/// less the enemy's) than where it is, to be gone for.
+const DUEL_DISTANCES: [f32; 8] = [100.0, 200.0, 300.0, 450.0, 600.0, 800.0, 1000.0, 1300.0];
+const DUEL_EDGE: f32 = 10.0;
 
 /// How fast the bot answers an enemy: from the first glimpse and from recognition to the first shot at it.
 #[derive(Clone, Debug, Default)]
@@ -138,8 +161,11 @@ pub struct Body {
     pub dll: DllProfile,
     /// `sv_gravity`.
     pub gravity: f32,
-    /// Weapons the bot may use, as a mask of weapon bits (`lb weapons` on the stand); all by default.
+    /// Weapons the bot may use, as a mask of weapon bits: in GunGame what its level gave, on the stand those of
+    /// `lb weapons`; all by default.
     pub allowed: u32,
+    /// A GunGame match as the bot sees it.
+    pub gungame: Option<GunGame>,
     /// BugfixedHL's `mp_selfgauss` (1 elsewhere): whether a charged gauss beam may come back at its shooter.
     pub selfgauss: u8,
     /// Tricks the server lets the bots use.
@@ -149,6 +175,16 @@ pub struct Body {
 impl Body {
     pub fn allows(&self, w: WeaponId) -> bool {
         self.allowed & w.bit() != 0
+    }
+
+    /// `w` hurts other players: in GunGame only the level's weapons do.
+    pub fn hurts(&self, w: WeaponId) -> bool {
+        self.gungame.is_none_or(|g| g.kit.hurts_with(w))
+    }
+
+    /// What the bot holds with nothing to fire: the crowbar, in GunGame the weapon its level gave.
+    pub fn fallback(&self) -> WeaponId {
+        self.gungame.and_then(|g| g.kit.main()).unwrap_or(WeaponId::Crowbar)
     }
 
     /// The scope is on (a crossbow or a 357 zoomed in).
@@ -297,6 +333,11 @@ pub struct Mind {
     pub tricks: crate::tricks::TrickState,
     /// Navigation stands at a gauss boost's takeoff and asks for it this frame.
     pub(crate) nav_boost: Option<lb_nav_api::BoostCall>,
+    /// Where the GunGame duel with the target is won, from what each side has in hand: the target, the distance to
+    /// keep it off at and the one to close in to.
+    pub(crate) duel: Option<(PlayerKey, f32, f32)>,
+    /// What the bot's GunGame level gave it, on the last frame.
+    kit: Option<Kit>,
 }
 
 impl Mind {
@@ -389,10 +430,21 @@ impl BotBrain {
         if std::mem::take(&mut self.hurt) {
             self.mind.mood.on_hurt(body.health);
         }
+        // A GunGame level changed in the bot's hands: what its old weapons were doing is over.
+        let kit = body.gungame.map(|g| g.kit);
+        if kit != self.mind.kit {
+            if self.mind.kit.is_some() {
+                self.mind.arms.reset();
+                self.mind.next_combat = now;
+                self.mind.urgent = true;
+            }
+            self.mind.kit = kit;
+        }
         // Everything below sees the bot as it feels now.
+        let (aggression, fear) = gungame_spirit(body.gungame.as_ref(), self.mind.mood.aggression, self.mind.mood.fear);
         let ch = &Character {
-            aggression: self.mind.mood.aggression,
-            fear: self.mind.mood.fear,
+            aggression,
+            fear,
             ..ch.clone()
         };
         self.combat_tick(body, ch, nav, rng);
@@ -462,9 +514,11 @@ impl BotBrain {
             .filter(|_| now.since(m.target_since) < TARGET_HOLD)
             .and_then(|k| self.beliefs.track(k))
             .filter(|t| t.state == TrackState::Visible);
+        let grudge = self.last_killer;
+        let favor = |t: &EnemyTrack| gungame_favor(body.gungame.as_ref(), t, grudge);
         let seen = match (scoped, held) {
             (Some(t), _) | (None, Some(t)) => (t.state == TrackState::Visible).then_some(t.who),
-            (None, None) => target::select(self.beliefs.enemies(), body.origin, now, previous),
+            (None, None) => target::select(self.beliefs.enemies(), body.origin, now, previous, &favor),
         };
         if seen.is_some() && seen != previous {
             m.target_since = now;
@@ -511,19 +565,33 @@ impl BotBrain {
         // A weapon the game just would not draw (it has no ammo for it, whatever the bot believed) is left alone.
         let refused = self.motor.weapon.refused(now);
         let like = |w: WeaponId| {
-            if body.allows(w) && Some(w) != refused {
+            if body.allows(w) && body.hurts(w) && Some(w) != refused {
                 ch.weapons.gun(w)
             } else {
                 0.0
             }
         };
-        let choice = policy::choose(&body.arsenal, body.weapon, &t, body.underwater, &body.damages, &like);
+        let choice = policy::choose(
+            &body.arsenal,
+            body.weapon,
+            &t,
+            body.underwater,
+            &body.damages,
+            &like,
+            body.fallback(),
+        );
         if m.choice != Some(choice) {
             if let Choice::Use(w) = choice {
                 m.click_interval = fire::click_interval(w, ch.skill.semi_auto_delay, &mut rng.combat);
             }
             m.choice = Some(choice);
         }
+        m.duel = match (body.gungame, track) {
+            (Some(g), Some(t)) if !g.warmup => {
+                duel(body, ch, t, choice.weapon()).map(|(keep, close)| (t.who, keep, close))
+            }
+            _ => None,
+        };
         self.weapon_options(body, ch, nav, rng);
     }
 
@@ -574,6 +642,7 @@ impl BotBrain {
             mines: &mines,
             charges_out: !self.explosives.charges.is_empty(),
             lure: self.expect.map(|(_, p)| p).or(self.approach),
+            gungame: body.gungame,
         };
         let goal = m.decider.decide(&s, &mut rng.decision);
         m.goal = Some(goal);
@@ -870,6 +939,11 @@ impl BotBrain {
                 self.intents
                     .look(Prio::Threat, LookIntent::Point { at: aim, engaged: true });
                 let intent = match choice {
+                    // Throws and mines are the protocols': in hand, never fired at the target.
+                    Choice::Use(w) if spec(w).class == WeaponClass::Throwable => {
+                        m.hold_fire = Some("nothing to fire but throws");
+                        WeaponIntent::hold(w)
+                    }
                     Choice::Use(w) => {
                         let in_hand = body.weapon == Some(w) && !m.reloading(now);
                         if in_hand && w == WeaponId::Crossbow && distance >= XBOW_ZOOM_FROM {
@@ -923,13 +997,18 @@ impl BotBrain {
                 }
             }
             _ if m.nav_fire.is_some() => {
-                // Breaking an obstacle in the way: the crowbar when asked, else the weapon of choice.
+                // Breaking an obstacle in the way: the crowbar when asked (and carried), else the weapon of choice;
+                // never a throw.
                 let Some((at, melee)) = m.nav_fire else { unreachable!() };
-                let weapon = if melee || weapon_choice.is_none() {
-                    WeaponId::Crowbar
-                } else {
-                    weapon_choice.unwrap_or(WeaponId::Crowbar)
+                let crowbar = body.allows(WeaponId::Crowbar) && body.armed(WeaponId::Crowbar).is_some();
+                let weapon = match weapon_choice {
+                    Some(w) if !(melee && crowbar) => w,
+                    _ if crowbar => WeaponId::Crowbar,
+                    _ => body.fallback(),
                 };
+                if spec(weapon).class == WeaponClass::Throwable {
+                    return;
+                }
                 let (forward, _, _) = lb_core::math::view_angle_vectors(self.motor.view);
                 let on_it = forward.dot((at - body.eye).normalize_or_zero()) > 0.995;
                 let ready = body.weapon == Some(weapon);
@@ -961,7 +1040,13 @@ impl BotBrain {
                     aim_sigma: ch.aim_sigma(calm_distance),
                     rocket_min: rocket_min(body),
                 };
-                let like = |w: WeaponId| if body.allows(w) { ch.weapons.gun(w) } else { 0.0 };
+                let like = |w: WeaponId| {
+                    if body.allows(w) && body.hurts(w) {
+                        ch.weapons.gun(w)
+                    } else {
+                        0.0
+                    }
+                };
                 let low = policy::preferred(&body.arsenal, &t, &body.damages, &like)
                     .and_then(|w| body.armed(w))
                     .filter(|a| {
@@ -1005,9 +1090,99 @@ fn rocket_from(body: &Body, t: &EnemyTrack, distance: f32) -> f32 {
     rocket_min(body) + (theirs + mine) * rocket_flight(distance)
 }
 
+/// Aggression and fear with GunGame's say in them.
+fn gungame_spirit(gungame: Option<&GunGame>, aggression: f32, fear: f32) -> (f32, f32) {
+    let (more, less) = match gungame {
+        Some(g) if g.warmup => (WARMUP_AGGRESSION, WARMUP_FEAR),
+        Some(g) if g.leads() => (0.0, LEADER_FEAR),
+        Some(g) if g.behind() >= 2 => (BEHIND_AGGRESSION, 0.0),
+        _ => (0.0, 0.0),
+    };
+    ((aggression + more).clamp(0.0, 1.0), (fear + less).clamp(0.0, 1.0))
+}
+
+/// How much GunGame makes `t` count as a target: the leader as if nearer, a player one kill from winning and the one
+/// who killed the bot last (`grudge`) more.
+fn gungame_favor(gungame: Option<&GunGame>, t: &EnemyTrack, grudge: Option<u8>) -> target::Favor {
+    let mut favor = target::Favor::default();
+    let Some(g) = gungame.filter(|g| !g.warmup) else {
+        return favor;
+    };
+    if g.board.leader == Some(t.who.slot) {
+        favor.scale = LEADER_SCALE;
+    }
+    if g.on_last_level(t.who.slot, t.traits.weapon) {
+        favor.weight *= LAST_LEVEL_WEIGHT;
+    }
+    if grudge == Some(t.who.slot) {
+        favor.weight *= GRUDGE_WEIGHT;
+    }
+    favor
+}
+
+/// Where the duel of the bot's gun `mine` against the one `t` shows is won: the distances to keep `t` off at and to
+/// close in to, when some distance gives the bot (its damage a second less the enemy's) a clear edge over where it is.
+fn duel(body: &Body, ch: &Character, t: &EnemyTrack, mine: WeaponId) -> Option<(f32, f32)> {
+    if matches!(spec(mine).class, WeaponClass::Melee | WeaponClass::Throwable) {
+        return None;
+    }
+    let theirs = t.traits.weapon.filter(|w| *w != mine)?;
+    let full = |w: WeaponId| Armed::new(w, Some(spec(w).clip.max(1)), Some(spec(w).clip.max(1)));
+    let edge = |d: f32| {
+        let at = Target {
+            distance: d,
+            speed: 250.0,
+            aim_sigma: ch.aim_sigma(d),
+            rocket_min: rocket_min(body),
+        };
+        policy::score(&full(mine), &at, &body.damages) - policy::score(&full(theirs), &at, &body.damages)
+    };
+    let now_at = t.pos.distance(body.origin);
+    let here = edge(now_at);
+    let (best_at, best) = DUEL_DISTANCES
+        .iter()
+        .map(|&d| (d, edge(d)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if best < here + DUEL_EDGE {
+        None
+    } else if best_at > now_at {
+        Some((best_at * 0.8, f32::INFINITY))
+    } else {
+        Some((0.0, best_at * 1.2))
+    }
+}
+
+/// How close the bot lets `t` come: not into its own weapon's blast, not within the reach of a GunGame player one
+/// kill from winning, not where the duel is lost.
+fn keep_away(m: &Mind, t: &EnemyTrack, body: &Body) -> f32 {
+    let weapon = m.choice.map(Choice::weapon).or(body.weapon);
+    if weapon.is_none_or(|w| spec(w).class == WeaponClass::Melee) {
+        return 0.0;
+    }
+    let own = match weapon {
+        Some(WeaponId::Rpg) => rocket_min(body) + KEEP_MARGIN,
+        Some(WeaponId::Crossbow) if !body.zoomed() => BOLT_CLEAR + KEEP_MARGIN,
+        Some(WeaponId::Egon) => EGON_CLEAR + KEEP_MARGIN,
+        Some(WeaponId::HandGrenade) => GRENADE_KEEP,
+        Some(WeaponId::Snark | WeaponId::Satchel) => SNARK_KEEP,
+        _ => 0.0,
+    };
+    let last = body
+        .gungame
+        .as_ref()
+        .is_some_and(|g| g.on_last_level(t.who.slot, t.traits.weapon));
+    let duel = m.duel.filter(|(k, ..)| *k == t.who).map_or(0.0, |(_, keep, _)| keep);
+    own.max(if last { LAST_LEVEL_KEEP } else { 0.0 }).max(duel)
+}
+
 /// What the fight module goes by against `t`.
 pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character) -> FightInput {
     let now = body.now;
+    let keep = keep_away(m, t, body);
+    let close = m
+        .duel
+        .filter(|(k, ..)| *k == t.who)
+        .map_or(f32::INFINITY, |(.., close)| close);
     FightInput {
         now,
         origin: body.origin,
@@ -1023,7 +1198,8 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         on_ground: body.on_ground,
         velocity: body.velocity.truncate(),
         maxspeed: body.maxspeed,
-        close_in: lb_combat::fight::close_in(body.weapon),
+        close_in: lb_combat::fight::close_in(body.weapon).min(close).max(keep * 1.25),
+        keep_away: keep,
         path: None,
     }
 }

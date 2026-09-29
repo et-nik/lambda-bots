@@ -1,8 +1,7 @@
 # M4 acceptance: the arsenal (M4.1), knowledge, goals and styles (M4.2), tricks (M4.3)
 
 State as of 2026-09-29, after sub-stages M4.1, the arsenal, M4.2, knowledge, goals and styles, and M4.3, the tricks,
-with long jumps by skill after its feedback.
-Still to come: the M4 acceptance runs (the 60-minute soak). Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS +
+with long jumps by skill after its feedback, and the 60-minute run. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS +
 hlsdk-portable, macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61); the feedback round after M4.2
 and the tricks ran on dm_snow, a small map where a run takes a minute or two, and stalkyard. The ReHLDS server with
 BugfixedHL has run none of the sub-stages yet.
@@ -17,7 +16,7 @@ BugfixedHL has run none of the sub-stages yet.
 | The game DLL's weapon rules              | partly | `lb selftest` on hlsdk-portable; the classic SDK in tests, not run live     |
 | Target switches ≤ 6 a minute             | yes    | M4.2's last mixed game: 1.2–3.3 a minute a bot (7.8 before the fix below)   |
 | Tricks succeed in ≥ 90% of scenarios     | yes    | long jumps 41/42 and boosts 349/352 offline, 52/52 boosts live; see M4.3    |
-| The 60-minute run                        | later  | the M4 acceptance runs                                                      |
+| The 60-minute run                        | yes    | 8 bots, five maps, 12 minutes each; see *The 60-minute run*                 |
 
 The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game. The mixed
 games of the day came to 0.75 and 1.5 a bot-hour (two grenades and one charged gauss shot), then 2.25 (three snarks,
@@ -643,11 +642,44 @@ much as before, and none killed its thrower.
 
 - **A grenade that comes back unseen** (off a wall, below the view) is believed where it was meant to land: 4 of the
   6 own grenades that hurt their throwers in the last runs were believed 490–1540 units from where they went off. A
-  player hears the grenade bounce close by; hearing the bounces would close this.
+  player hears the grenade bounce close by: the bots hear the bounces since M5.1 (`docs/m5-acceptance.md`).
 - **A gun chosen with no ammo** (the gauss, its uranium not known) is given up only after the game refused the
   switch three times, up to 3 s. The wait for the switch cannot be shorter: the launcher stays in hand while its
   rocket flies.
 - Most of what is left of "not fought" is reloading with every gun empty.
+
+## The 60-minute run
+
+Eight bots of the normal preset, the map's weapons, 1000 fps, a map change every 12 minutes: crossfire, stalkyard,
+boot_camp, dm_snow, bounce (the script checks the bots are back after each change; `tools/observer/soak_assert.py`
+watches the telemetry).
+
+The first try stopped at the second map change: no bot could join, the server full. Every spawn clears a player's
+flags but `FL_PROXY` (`pev->flags &= FL_PROXY` in `CBasePlayer::Spawn`, hlsdk-portable and BugfixedHL alike), the
+fake client flag among them, and Xash3D drops fake clients on a level change by that flag: bots that had died once
+stayed on as clients no one moves, their slots taken, 8 more with every change. The 20 map changes of M0 passed
+because they came seconds apart, before any bot died. The adapter now sets the flag again on its bots every frame and
+after every move (the plan allows it: it is what the engine's network layer would keep). ReHLDS drops fake clients by
+its own client record and was not hit.
+
+The second run:
+
+| Map       | Kills | Kills a minute | Suicides | Core time p99, µs |
+|-----------|-------|----------------|----------|-------------------|
+| crossfire | 187   | 15.6           | 4        | 875               |
+| stalkyard | 91    | 7.6            | 2        | 532               |
+| boot_camp | 80    | 6.7            | 0        | 429               |
+| dm_snow   | 259   | 21.6           | 1        | 491               |
+| bounce    | 124   | 10.3           | 4        | 664               |
+
+- After every map change the 8 bots were back in slots 1–8 within 20 s.
+- 3.7 million frames, 2.9 million bot commands; no stale move, no failed move call, no dropped or malformed event, no
+  bot fault, no safe mode; no error in the log (63 warnings, all navigation links the server did not confirm).
+- The watchdog's one complaint is the moment of the first map change with no bot in it; the worst p99 of the core,
+  1172 µs, came in the first 12 minutes, while the next sub-stage was being compiled on the same machine.
+- 11 suicides, 1.4 a bot-hour: six by the bots' own grenades, three by their own snarks, two by rockets. The
+  grenades are thrown three to four times as often since the feedback after M4.3; hearing grenades bounce (M5.1)
+  answers the ones that came back unseen.
 
 ## Tools
 
@@ -703,7 +735,8 @@ much as before, and none killed its thrower.
   checked against a model of the three DLLs in the tests.
 - **Gauss boosts in a fight-heavy game** are rare: the uranium goes on the fight and a boost wants two calm seconds.
 - **A long jump at the enemy** is checked before it is taken, but whether it helped (a kill, a hit) is not counted.
-- **Tricks and GunGame** (twice the leaps in warmup, gauss jumps only at 80 health with descore) come with M5.
+- **Tricks and GunGame** (twice the leaps in warmup, gauss jumps only at 80 health with descore) came with M5.1
+  (`docs/m5-acceptance.md`).
 - **The long jump links are few** (1–8 a map): only those every checked takeoff makes; the rest of the gaps are
   walked round.
 - **Other players** are not in a long jump's check (it follows the flight through the map only): one on the way stops

@@ -9,6 +9,10 @@
 //! - rank 1: hunt a lost enemy, investigate a sound, collect an item, use a charger, wait by an item about to come
 //!   back, hold a spot (camp), lay a trap;
 //! - rank 0: roam.
+//!
+//! GunGame (`Situation::gungame`) changes a few: weapons and ammo are not picked up (the plugin blocks it), a bot
+//! with the crowbar alone (the last level, the warmup) hunts the enemies it lost, and on the tripmine level, where
+//! nothing hurts a player but the mines, it lays them rather than engaging and gets away from enemies close by.
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +21,7 @@ use lb_core::Vec3;
 use lb_core::dmath;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
+use lb_game::gungame::{GunGame, Kit};
 use lb_game::items::{Ammo, ItemKind};
 use lb_game::mechanics::{WeaponClass, carry_max, spec};
 use lb_game::sounds::SoundKind;
@@ -119,6 +124,8 @@ pub struct Situation<'a> {
     pub charges_out: bool,
     /// Where an enemy is expected, for satchels to wait for it by.
     pub lure: Option<Vec3>,
+    /// A GunGame match as the bot sees it.
+    pub gungame: Option<GunGame>,
 }
 
 impl Situation<'_> {
@@ -156,6 +163,10 @@ impl Situation<'_> {
     /// No enemy seen or heard for `secs` and none in sight.
     fn calm(&self, secs: f64) -> bool {
         self.calm_for >= secs && self.beliefs.visible_enemies().next().is_none()
+    }
+
+    fn kit(&self) -> Option<Kit> {
+        self.gungame.map(|g| g.kit)
     }
 }
 
@@ -197,6 +208,13 @@ const SATCHEL_WATCH: f32 = 350.0;
 /// may be.
 const LURE_WEIGHT: f32 = 0.45;
 const LURE_RANGE: f32 = 1200.0;
+/// A GunGame bot with only the crowbar hunts a lost enemy with at least this weight (yapb's knife level desire 70).
+const KNIFE_HUNT: f32 = 0.7;
+/// On the tripmine level: enemies in sight this close are got away from, with at least this weight; mine spots are
+/// liked this much (a balanced trapper's is 1), and one is laid again this soon after the last.
+const MINES_EVADE: f32 = 700.0;
+const MINES_RETREAT: f32 = 0.6;
+const MINES_TRAP: f32 = 1.5;
 /// Weapons to hold a spot with: long sightlines, close by a chokepoint.
 const LONG_GUNS: [WeaponId; 4] = [WeaponId::Crossbow, WeaponId::Python, WeaponId::Gauss, WeaponId::Rpg];
 const CLOSE_GUNS: [WeaponId; 4] = [WeaponId::Shotgun, WeaponId::Mp5, WeaponId::Egon, WeaponId::Gauss];
@@ -231,6 +249,9 @@ fn retreat_weight(s: &Situation<'_>) -> f32 {
 
 fn item_benefit(s: &Situation<'_>, kind: ItemKind) -> f32 {
     let owns = |w| s.weapons.iter().any(|a| a.id == w);
+    if s.gungame.is_some() && matches!(kind, ItemKind::Weapon(_) | ItemKind::Ammo(_)) {
+        return 0.0;
+    }
     match kind {
         ItemKind::Health if s.health < 85.0 => 0.8 * (1.0 - s.health / 100.0),
         ItemKind::Battery if s.armor < 90.0 => 0.6 * (1.0 - s.armor / 100.0),
@@ -271,6 +292,9 @@ fn item_benefit(s: &Situation<'_>, kind: ItemKind) -> f32 {
 /// others.
 fn control_value(s: &Situation<'_>, kind: ItemKind) -> f32 {
     let owns = |w| s.weapons.iter().any(|a| a.id == w);
+    if s.gungame.is_some() && matches!(kind, ItemKind::Weapon(_) | ItemKind::Ammo(_)) {
+        return 0.0;
+    }
     match kind {
         ItemKind::Battery => 0.15 + 0.6 * (1.0 - s.armor / 100.0),
         ItemKind::Health => 0.1 + 0.5 * (1.0 - s.health / 100.0),
@@ -459,9 +483,17 @@ fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
         });
         return;
     }
-    if !s.trap_ready || !s.calm(TRAP_CALM) || s.affinity.trap <= 0.0 {
+    // On the tripmine level mines are the only weapon: laid whenever no enemy is in sight.
+    let mines_level = s.kit() == Some(Kit::Mines);
+    let ready = if mines_level {
+        s.beliefs.visible_enemies().next().is_none()
+    } else {
+        s.calm(TRAP_CALM) && s.affinity.trap > 0.0
+    };
+    if !s.trap_ready || !ready {
         return;
     }
+    let like = if mines_level { MINES_TRAP } else { s.affinity.trap };
     if s.carried(WeaponId::Satchel) >= 1
         && !s.charges_out
         && let Some(at) = s.lure.filter(|p| p.distance(s.origin) <= LURE_RANGE)
@@ -489,7 +521,7 @@ fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
                 let corner = if m.corner { 1.1 } else { 1.0 };
                 (
                     i,
-                    s.affinity.trap * (0.25 + 0.75 * m.flow) * 0.6 * corner * dmath::exp(-eta / 10.0),
+                    like * (0.25 + 0.75 * m.flow) * 0.6 * corner * dmath::exp(-eta / 10.0),
                     eta,
                 )
             })
@@ -538,7 +570,15 @@ fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
 pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     out.clear();
     let aggr = s.aggression.clamp(0.0, 1.0);
-    let retreat = retreat_weight(s);
+    let mines_level = s.kit() == Some(Kit::Mines);
+    let mut retreat = retreat_weight(s);
+    if mines_level
+        && s.beliefs
+            .visible_enemies()
+            .any(|t| t.pos.distance(s.origin) < MINES_EVADE)
+    {
+        retreat = retreat.max(MINES_RETREAT);
+    }
     if retreat >= RETREAT_THRESHOLD {
         out.push(Goal {
             kind: GoalKind::Retreat,
@@ -551,7 +591,7 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
         .target
         .and_then(|k| s.beliefs.track(k))
         .filter(|t| t.state == TrackState::Visible || s.now.since(t.last_seen) <= 0.5);
-    if let Some(t) = engage {
+    if let Some(t) = engage.filter(|_| !mines_level) {
         out.push(Goal {
             kind: GoalKind::Engage(t.who),
             rank: 2,
@@ -564,8 +604,11 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
     }) {
         let d = t.pos.distance(s.origin);
         let confidence = (1.0 - t.sigma / HUNT_SIGMA).clamp(0.0, 1.0);
-        let w = (((4096.0 - (1.0 - aggr) * d) / 4096.0 - retreat).min(0.89)) * confidence * s.affinity.hunt;
-        if w >= HUNT_THRESHOLD {
+        let mut w = (((4096.0 - (1.0 - aggr) * d) / 4096.0 - retreat).min(0.89)) * confidence * s.affinity.hunt;
+        if s.kit() == Some(Kit::Crowbar) && confidence > 0.0 {
+            w = w.max(KNIFE_HUNT);
+        }
+        if w >= HUNT_THRESHOLD && !mines_level {
             out.push(Goal {
                 kind: GoalKind::Hunt(t.who),
                 rank: 1,
@@ -865,6 +908,7 @@ mod tests {
             mines: &[],
             charges_out: false,
             lure: None,
+            gungame: None,
         }
     }
 
@@ -944,6 +988,78 @@ mod tests {
             GoalKind::Roam,
             "a healthy bot leaves the medkit"
         );
+    }
+
+    fn gungame(level_frags: i32, kit: &[WeaponId]) -> Option<GunGame> {
+        let board = lb_game::gungame::Board::new([(1, level_frags, 0), (3, 500, 0)], 100, true);
+        let weapons = kit.iter().fold(0, |m, w| m | w.bit());
+        Some(GunGame::new(&board, 1, weapons))
+    }
+
+    #[test]
+    fn gungame_bots_leave_weapons_and_ammo_but_take_health() {
+        let spots = [
+            ItemSpot {
+                kind: ItemKind::Weapon(WeaponId::Shotgun),
+                origin: Vec3::new(200.0, 0.0, 0.0),
+            },
+            ItemSpot {
+                kind: ItemKind::Ammo(Ammo::Buckshot),
+                origin: Vec3::new(150.0, 0.0, 0.0),
+            },
+            ItemSpot {
+                kind: ItemKind::Health,
+                origin: Vec3::new(600.0, 0.0, 0.0),
+            },
+        ];
+        let items = Items::new(&spots, SimTime(0.0));
+        let calm = Beliefs::default();
+        let need = |_| 1.0;
+        let mut rng = Pcg32::new(8, 8);
+        let mut s = situation(1.0, &calm, Some(&items), &KIT, 100.0, None, &need);
+        s.gungame = gungame(300, &[WeaponId::Glock]);
+        assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::Roam);
+        s.health = 30.0;
+        assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::CollectItem(2));
+    }
+
+    #[test]
+    fn on_the_tripmine_level_enemies_are_got_away_from_not_fought() {
+        let mut b = Beliefs::default();
+        let p = BeliefParams {
+            track_forget: 8.0,
+            maxspeed: 300.0,
+        };
+        b.on_sighting(&sighting(0.0, Vec3::new(400.0, 0.0, 0.0)));
+        b.update(SimTime(0.0), &p);
+        let none = |_| 0.0;
+        let key = PlayerKey { slot: 3, userid: 30 };
+        let mut rng = Pcg32::new(9, 9);
+        let mut s = situation(0.0, &b, None, &KIT, 100.0, Some(key), &none);
+        s.gungame = gungame(900, &[WeaponId::Tripmine, WeaponId::Glock]);
+        assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::Retreat);
+        s.gungame = gungame(900, &[WeaponId::Rpg]);
+        assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::Engage(key));
+    }
+
+    #[test]
+    fn with_the_crowbar_alone_a_lost_enemy_is_hunted_further() {
+        let mut b = Beliefs::default();
+        let p = BeliefParams {
+            track_forget: 8.0,
+            maxspeed: 300.0,
+        };
+        b.on_sighting(&sighting(0.0, Vec3::new(2500.0, 0.0, 0.0)));
+        b.update(SimTime(3.0), &p);
+        let none = |_| 0.0;
+        let key = PlayerKey { slot: 3, userid: 30 };
+        let mut rng = Pcg32::new(10, 10);
+        let mut s = situation(3.0, &b, None, &KIT, 100.0, None, &none);
+        s.aggression = 0.1;
+        let plain = Decider::default().decide(&s, &mut rng).kind;
+        assert_ne!(plain, GoalKind::Hunt(key), "a timid bot lets a far enemy go");
+        s.gungame = gungame(1100, &[WeaponId::Crowbar]);
+        assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::Hunt(key));
     }
 
     #[test]

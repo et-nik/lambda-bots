@@ -197,6 +197,9 @@ int32_t run_player_moves(const LbBotCommand *cmds, uint32_t count, LbMoveFeedbac
             ArenaContext ctx(LB_CTX_BOTCMD | (static_cast<uint32_t>(c.slot) << 8));
             g_engfuncs.pfnRunPlayerMove(ed, angles, c.forwardmove, c.sidemove, c.upmove, c.buttons, c.impulse, c.msec);
         }
+        // A respawn in the move clears the flag (`pev->flags &= FL_PROXY`), and Xash keeps a fake client without it
+        // over a level change, its slot taken for good.
+        ed->v.flags |= FL_FAKECLIENT;
         s.has_seed = false;
         fb.status = LB_MOVE_OK;
         fb.deadflag = static_cast<uint8_t>(ed->v.deadflag);
@@ -221,12 +224,13 @@ bool take_pending_seed(const edict_t *player, uint32_t *seed) {
     return true;
 }
 
-void emulate_fixangle() {
+void emulate_network_duties() {
     for (int slot = 1; slot <= state().max_clients && slot <= kMaxSlots; slot++) {
         SlotInfo &s = state().slots[slot];
         if (!s.ours || s.zombie) continue;
         edict_t *ed = edict_of(slot);
         if (!ed || ed->free || !ed->pvPrivateData) continue;
+        ed->v.flags |= FL_FAKECLIENT;
         if (ed->v.fixangle == 1) {
             record_fixangle(slot, s.bot_gen, 1, ed->v.angles);
             ed->v.fixangle = 0;

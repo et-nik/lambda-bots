@@ -198,9 +198,11 @@ int32_t h_get_entity(void *, LbEntRef ref, LbEntitySnapshot *out) {
     return registry_get(ref, out);
 }
 
+// Messages come through Metamod only, never through ReHLDS's message manager: hooking a message type there turns on
+// ReHLDS's interception of every message of that type, and with it the test server crashed in PF_MessageEnd_Intercept
+// on AMXX's HUD text (a temp entity). Frags written by other plugins are read from the players' entities instead.
 int32_t h_set_capture_mask(void *, const uint8_t *mask) {
     capture_set_mask(mask);
-    rehlds_hook_messages(mask);
     return LB_OK;
 }
 

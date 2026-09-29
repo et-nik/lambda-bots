@@ -2,6 +2,7 @@
 //! read on the HUD; none of it comes from raw server state.
 
 use lb_core::Vec3;
+use lb_core::dmath;
 use lb_core::time::SimTime;
 use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
@@ -150,6 +151,17 @@ pub struct SoundStimulus {
     pub range: f32,
     /// Gain at the ear, 0..1.
     pub gain: f32,
+}
+
+/// A heard range is off by about this share of itself.
+const RANGE_ERROR: f32 = 0.3;
+
+impl SoundStimulus {
+    /// 1σ of where the sound came from, units: across the bearing and along the range.
+    pub fn sigma(&self) -> f32 {
+        let lateral = self.range * dmath::tan(self.bearing_sigma.to_radians());
+        (lateral * lateral + (RANGE_ERROR * self.range).powi(2)).sqrt()
+    }
 }
 
 /// Damage taken, as far as the HUD damage compass tells.

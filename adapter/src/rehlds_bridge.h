@@ -13,9 +13,6 @@ void rehlds_fill_compat(LbCompatFacts *out);
 // SV_StartSound is hooked: every sound (including footsteps from player movement) arrives through the bridge.
 bool rehlds_sound_channel();
 
-// Registers message manager hooks for the capture mask; returns false when the manager is unavailable.
-bool rehlds_hook_messages(const uint8_t mask[32]);
-
 // Drops a client immediately (instead of a deferred `kick`).
 bool rehlds_drop_client(int slot, const char *reason);
 

@@ -84,6 +84,8 @@ pub struct BotBrain {
     pub item_focus: Option<usize>,
     /// Damage taken since the last frame, for the moods.
     pub(crate) hurt: bool,
+    /// Slot of the player who killed the bot last, from the kill feed.
+    pub last_killer: Option<u8>,
     slot: u8,
     item_cursor: usize,
     charger_cursor: usize,
@@ -116,6 +118,7 @@ impl BotBrain {
             next_expect: SimTime::ZERO,
             item_focus: None,
             hurt: false,
+            last_killer: None,
             slot,
             item_cursor: 0,
             charger_cursor: 0,
@@ -168,6 +171,9 @@ impl BotBrain {
                 if *killer == Some(self.slot) {
                     self.mind.mood.on_kill();
                 }
+                if *victim == self.slot && killer.is_some_and(|k| k != self.slot) {
+                    self.last_killer = *killer;
+                }
             }
         }
     }
@@ -180,6 +186,11 @@ impl BotBrain {
     pub fn hear(&mut self, sounds: &[SoundEvent], listener: &Listener, vis: &dyn VisSets, rng: &mut Pcg32) {
         for ev in sounds {
             if let Some(s) = self.perception.hearing.hear(ev, listener, vis, &self.params, rng) {
+                // A grenade bouncing is where it will go off, whoever threw it; it tells nothing of where a player is.
+                if s.kind == lb_game::sounds::SoundKind::Bounce {
+                    self.explosives.heard_bounce(s.pos, s.sigma(), s.t);
+                    continue;
+                }
                 self.beliefs.on_sound(&s);
                 if matches!(
                     s.kind,

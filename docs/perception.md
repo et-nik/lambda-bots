@@ -66,9 +66,12 @@ attenuation / 1000)`, is above `hearing_threshold`. A gunshot at normal attenuat
 The bot's own shot masks quieter sounds for 0.3 s (the threshold triples); running raises the threshold by a
 fifth.
 
-What is heard is anonymous: a kind (step, jump, pain, shot, reload, pickup, item respawn, explosion), sometimes a
-weapon, and a guessed position. Explosions reach the bots as the engine sends them to clients (`TE_EXPLOSION`, to the
-PAS of the blast): heard like a loud shot, and a mine or satchel the bot knew of at the spot is gone. The bearing error grows from `sound_bearing_sigma` for loud sounds up to 35° for
+What is heard is anonymous: a kind (step, jump, pain, shot, reload, pickup, item respawn, explosion, a grenade
+bouncing), sometimes a weapon, and a guessed position. Explosions reach the bots as the engine sends them to clients
+(`TE_EXPLOSION`, to the PAS of the blast): heard like a loud shot, and a mine or satchel the bot knew of at the spot is
+gone. A hand grenade's bounce (`weapons/grenade_hit*`, played by the grenade at a quarter of full volume, heard out
+to about 1000 units) tells where it may go off, not where anyone is: the bot keeps away from it, and it never joins
+what the bot believes of players. The bearing error grows from `sound_bearing_sigma` for loud sounds up to 35° for
 faint ones, and faint sounds are sometimes placed behind instead of in front. The range is off by about 30%, the
 height by about 10°.
 

@@ -21,6 +21,8 @@ pub enum SoundKind {
     ItemRespawn,
     Charger,
     Explosion,
+    /// A hand grenade bouncing (`weapons/grenade_hit*`), played by the grenade itself.
+    Bounce,
     Mechanism,
     Other,
 }
@@ -37,6 +39,7 @@ impl SoundKind {
             SoundKind::ItemRespawn => "respawn",
             SoundKind::Charger => "charger",
             SoundKind::Explosion => "explosion",
+            SoundKind::Bounce => "bounce",
             SoundKind::Mechanism => "mechanism",
             SoundKind::Other => "other",
         }
@@ -119,6 +122,8 @@ pub fn classify_sample(sample: &[u8]) -> SoundClass {
         SoundKind::Pickup
     } else if starts(&["weapons/explode", "weapons/debris"]) {
         SoundKind::Explosion
+    } else if starts(&["weapons/grenade_hit"]) {
+        SoundKind::Bounce
     } else if starts(&["weapons/"]) {
         SoundKind::WeaponNoise
     } else if starts(&["doors/", "buttons/", "plats/"]) {
@@ -181,6 +186,7 @@ mod tests {
         assert_eq!(classify_sample(b"items/suitchargeok1.wav").kind, SoundKind::ItemRespawn);
         assert_eq!(classify_sample(b"items/gunpickup2.wav").kind, SoundKind::Pickup);
         assert_eq!(classify_sample(b"weapons/reload3.wav").kind, SoundKind::WeaponNoise);
+        assert_eq!(classify_sample(b"weapons/grenade_hit2.wav").kind, SoundKind::Bounce);
         let shot = classify_sample(b"weapons/pl_gun3.wav");
         assert_eq!((shot.kind, shot.weapon), (SoundKind::Shot, Some(WeaponId::Glock)));
         assert_eq!(classify_sample(b"!HG_ALERT").kind, SoundKind::Other);
