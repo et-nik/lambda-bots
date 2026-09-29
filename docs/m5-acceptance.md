@@ -93,6 +93,15 @@ close by), and kill as many.
 
 ### Found on the way
 
+- **The test server crashed** four times in 13 hours (`PF_MessageEnd_Intercept` in ReHLDS, called from AMXX's
+  `ShowSyncHudMsg`; the cores are in `/var/lib/apport/coredump`). The adapter hooked every message it captures
+  through ReHLDS's message manager, temp entities included, and the server's ReHLDS (API 3.15, build 4419) predates
+  the April 2025 fix of that manager: a hooked message of more than 16 parameters (a HUD text is a temp entity of
+  17–18) overflows it. The adapter now hooks through the manager only what other plugins send and the bots need,
+  `ScoreInfo` and `TeamInfo`; everything else comes from the game DLL through Metamod as on any engine. A GunGame
+  match played to its end on the test server (the plugin shows the final standings to every player, bots
+  included) no longer takes the server down.
+
 - **Slots lost on a map change** (Xash3D): every spawn clears the fake client flag, and Xash drops fake clients on a
   level change by it; the bots that had died stayed on as clients no one moves. Found by M4's 60-minute run, fixed
   in the adapter (`docs/m4-acceptance.md`, *The 60-minute run*).

@@ -254,6 +254,16 @@ fn gungame_text(rt: &Runtime, board: &lb_game::gungame::Board, b: &crate::manage
     let g = GunGame::new(board, b.id.slot, b.self_state.body.weapons_mask);
     let kit = match g.kit {
         Kit::Gun(w) | Kit::Throwable(w) => format!("{} {}", g.kit.as_str(), w.classname()),
+        Kit::Other => {
+            let carried: Vec<&str> = lb_game::weapons::weapons_in_mask(b.self_state.body.weapons_mask)
+                .map(|w| w.classname())
+                .collect();
+            if carried.is_empty() {
+                "no weapons".to_string()
+            } else {
+                format!("other: {}", carried.join(" "))
+            }
+        }
         k => k.as_str().to_string(),
     };
     let place = if g.warmup {
