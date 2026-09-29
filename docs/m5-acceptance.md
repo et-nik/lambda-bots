@@ -93,15 +93,17 @@ close by), and kill as many.
 
 ### Found on the way
 
-- **The test server crashed** four times in 13 hours (`PF_MessageEnd_Intercept` in ReHLDS, called from AMXX's
-  `ShowSyncHudMsg`; the cores are in `/var/lib/apport/coredump`). The adapter hooked every message it captures
-  through ReHLDS's message manager, temp entities included, and the server's ReHLDS (API 3.15, build 4419) predates
-  the April 2025 fix of that manager: a hooked message of more than 16 parameters (a HUD text is a temp entity of
-  17–18) overflows it. The adapter now hooks through the manager only what other plugins send and the bots need,
-  `ScoreInfo` and `TeamInfo`; everything else comes from the game DLL through Metamod as on any engine. A GunGame
-  match played to its end on the test server (the plugin shows the final standings to every player, bots
-  included) no longer takes the server down.
-
+- **The test server crashed** four times in 13 hours: a segfault in ReHLDS's `PF_MessageEnd_Intercept`, called
+  from AMXX's `ShowSyncHudMsg` (the cores are in `/var/lib/apport/coredump` on the server; a fifth, at 12:02, jumped
+  to address 0 as the plugin's file was replaced under the running server). ReHLDS intercepts a message type only
+  while some plugin hooks it through its message manager, and on that server only the adapter did: it hooked every
+  message it captures there, temp entities (HUD text among them) included, to see what AMXX sends. At the crash the
+  manager took a message off an empty or broken stack. It could not be reproduced with bots alone (HUD text goes to
+  humans; a test plugin sending it to every player twenty times a second for five minutes did not crash the old
+  build either), so the exact fault inside ReHLDS stays unknown. The adapter no longer hooks anything through the
+  message manager: every message comes through Metamod, as on any engine, and the frags other plugins write
+  (GunGame's levels) are read from the players' entities, as they already were. The server's ReHLDS is the official
+  3.15.0.896.
 - **Slots lost on a map change** (Xash3D): every spawn clears the fake client flag, and Xash drops fake clients on a
   level change by it; the bots that had died stayed on as clients no one moves. Found by M4's 60-minute run, fixed
   in the adapter (`docs/m4-acceptance.md`, *The 60-minute run*).

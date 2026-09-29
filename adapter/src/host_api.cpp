@@ -198,24 +198,11 @@ int32_t h_get_entity(void *, LbEntRef ref, LbEntitySnapshot *out) {
     return registry_get(ref, out);
 }
 
-// What other plugins send that the bots need through ReHLDS's message manager (Metamod shows plugins only the raw
-// engine calls): the scoreboard, where GunGame keeps the levels. Everything else comes from the game DLL through
-// Metamod. ReHLDS builds before April 2025 overflow a hooked message of more than 16 parameters, such as AMXX's HUD
-// text (a temp entity), and crash in PF_MessageEnd_Intercept.
-const char *const kFromPlugins[] = {"ScoreInfo", "TeamInfo"};
-
+// Messages come through Metamod only, never through ReHLDS's message manager: hooking a message type there turns on
+// ReHLDS's interception of every message of that type, and with it the test server crashed in PF_MessageEnd_Intercept
+// on AMXX's HUD text (a temp entity). Frags written by other plugins are read from the players' entities instead.
 int32_t h_set_capture_mask(void *, const uint8_t *mask) {
     capture_set_mask(mask);
-    uint8_t from_plugins[32] = {};
-    for (const char *name : kFromPlugins) {
-        int size = 0;
-        const int id = state().util && state().util->get_user_msg_id
-                           ? state().util->get_user_msg_id(&state().plugin_info, name, &size)
-                           : 0;
-        const uint8_t bit = static_cast<uint8_t>(1u << (id % 8));
-        if (id > 0 && id < 256 && (mask[id / 8] & bit)) from_plugins[id / 8] |= bit;
-    }
-    rehlds_hook_messages(from_plugins);
     return LB_OK;
 }
 

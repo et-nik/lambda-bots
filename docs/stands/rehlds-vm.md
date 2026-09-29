@@ -3,7 +3,8 @@
 The stand mirrors production: ReHLDS + Metamod-r + BugfixedHL-Rebased + AMX Mod X + GunGame. It covers what the
 Mac stand cannot:
 - the 32-bit module;
-- ReHLDS channels (`SV_StartSound`, `IMessageManager`, `DropClient`, host time);
+- ReHLDS channels (`SV_StartSound`, `DropClient`, host time; the message manager is only reported, not hooked:
+  hooking it crashed a production-like server, see `docs/m5-acceptance.md`);
 - compatibility with AMXX and GunGame;
 - load at 1000 fps.
 
@@ -96,8 +97,8 @@ scripts/stand/msec-matrix.sh                # fps 100/500/1000 × lb_cmd_rate ev
 ReHLDS-specific:
 - **AMXX sees the bots.** `amx_who` or `status` in the console: bots are listed; GunGame gives them level 1 weapons.
 - **Kick via `DropClient`.** `lb kick #<id>` removes the bot immediately, `lb list` shows no `leaving` state.
-- **AMXX messages reach the core.** With `rehlds_message_manager: true` the GunGame level (frags) is visible in
-  `lb list` right after a kill.
+- **GunGame levels reach the core.** The frags the plugin writes (level × 100) are read from the players' entities:
+  `lb gg` shows every player's level right after a level change.
 
 Core logs are in `/opt/hlds/valve/addons/lambdabots/logs/`, the run console in `stand-runs/<time>/console.log`.
 

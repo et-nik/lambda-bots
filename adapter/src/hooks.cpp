@@ -382,7 +382,7 @@ LB_ENTRY void h_GameShutdown() {
 // ------------------------------------------------------------------------------------------------
 
 LB_ENTRY void e_MessageBegin(int dest, int type, const float *origin, edict_t *ed) {
-    capture_message_begin(MsgSource::Metamod, dest, type, origin, ed);
+    capture_message_begin(dest, type, origin, ed);
     LB_RETURN_META(mm::MRES_IGNORED);
 }
 
