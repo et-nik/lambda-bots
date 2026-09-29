@@ -11,12 +11,14 @@
 //!
 //! A bot with the long jump module and the will to use it long jumps along straight, level stretches of the path
 //! at least 400 units long (yapb's runway), onto a node 300–470 units ahead, once the flight is followed through the
-//! server's traces and comes down there without fall damage. The same way the follower takes a gauss boost onto a
-//! node further along when the bot asks for one: both are shortcuts off the graph's links, and a failed one is not
-//! the link's fault.
+//! server's traces and comes down there without fall damage. A bold one (skilled) also long jumps round corners onto
+//! the path past them, down drops, onto nodes only 250 units off and one long jump after another, and takes a hard
+//! landing it can afford. The same way the follower takes a gauss boost onto a node further along when the bot asks
+//! for one: both are shortcuts off the graph's links, and a failed one is not the link's fault.
 
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3};
+use lb_kin::tricks::LONGJUMP_TAKEOFF;
 use lb_nav_api::NavStep;
 use lb_worldq::{HullKind, TraceQuery, Tracer};
 
@@ -40,11 +42,32 @@ const DRIFT: f32 = 1.0;
 const RECHECK: f64 = 0.25;
 /// A straight, level stretch of the path this long is a runway for a long jump.
 const RUNWAY: f32 = 400.0;
-/// A long jump along the path lands this far ahead.
+/// A long jump along the path lands this far ahead; a bold one from this near on, as far as it carries.
 const RUNWAY_REACH: [f32; 2] = [300.0, 470.0];
-/// A runway is looked for this often at most, and not again this soon after a long jump.
-const RUNWAY_CHECK: f64 = 0.5;
-const LEAP_COOLDOWN: f64 = 1.1;
+const BOLD_REACH: f32 = 250.0;
+/// A bold long jump comes down this far below the takeoff at most.
+const BOLD_DROP: f32 = 400.0;
+/// The nodes a long jump that is not bold passes over lie this close to its line.
+const RUNWAY_CORRIDOR: f32 = 24.0;
+/// A long jump goes this close to the way the bot runs (cosine): not bold, bold.
+const RUNWAY_HEADING: [f32; 2] = [0.93, 0.87];
+/// A runway is looked for this often at most, and not again this soon after a long jump: not bold, bold (one long
+/// jump after another).
+const RUNWAY_CHECK: [f64; 2] = [0.5, 0.05];
+const LEAP_COOLDOWN: [f64; 2] = [1.1, 0.0];
+/// How far along the path, and over how many nodes, landings are looked for.
+const RUNWAY_SCAN: f32 = 1100.0;
+const RUNWAY_NODES: usize = 20;
+/// Landings whose flights are followed per look at most; one that did not come down right is not tried again from
+/// within this of where it was tried.
+const RUNWAY_TRIES: usize = 2;
+const RUNWAY_RETRY: f32 = 48.0;
+/// A long jump along the path takes off within this of where its flight was followed from, or not at all: a
+/// takeoff further along overshoots a near landing, or meets what the flight cleared from there.
+const RUNWAY_TAKEOFF: f32 = 32.0;
+/// Room a long jump along the path has on each side of its flight: taking off a little off the line or the view a
+/// little off, it still gets through.
+const RUNWAY_MARGIN: [f32; 2] = [-8.0, 8.0];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FollowStatus {
@@ -159,6 +182,8 @@ pub struct PathFollower {
     /// When a runway was last looked for, and when a long jump may be taken again.
     runway_at: f64,
     leap_after: f64,
+    /// Landings whose flights did not come down right, and where they were tried from.
+    leap_misses: smallvec::SmallVec<[(NodeId, Vec3); 4]>,
     /// A trick that left the ground just ended: which, and whether it landed where it should.
     event: Option<(TrickKind, bool)>,
 }
@@ -191,6 +216,7 @@ impl PathFollower {
             shortcut: None,
             runway_at: f64::NEG_INFINITY,
             leap_after: f64::NEG_INFINITY,
+            leap_misses: smallvec::SmallVec::new(),
             event: None,
         }
     }
@@ -424,7 +450,16 @@ impl PathFollower {
         NavStep::hold(self.look_on(s))
     }
 
-    pub fn tick(&mut self, g: &NavGraph, s: &NavInput, mech: &dyn MechView, tracer: &mut dyn Tracer) -> FollowOutput {
+    /// One frame on the path. `flights`: long jump flights the follower may still follow through the traces this
+    /// frame (shared by the bots), taken from as it does.
+    pub fn tick(
+        &mut self,
+        g: &NavGraph,
+        s: &NavInput,
+        mech: &dyn MechView,
+        tracer: &mut dyn Tracer,
+        flights: &mut u32,
+    ) -> FollowOutput {
         for _ in 0..4 {
             if let Some(out) = self.run_shortcut(g, s, mech, tracer) {
                 match out {
@@ -510,7 +545,7 @@ impl PathFollower {
                 self.advance(s.now);
                 continue;
             }
-            if kind == LinkKind::Walk && self.next > 0 && self.runway(g, s, tracer) {
+            if kind == LinkKind::Walk && self.next > 0 && self.runway(g, s, tracer, flights) {
                 continue;
             }
             return self.walk(g, s, mech, tracer, from, to, kind, link.map(|l| l.flags));
@@ -546,6 +581,10 @@ impl PathFollower {
             Action::GaussBoost { .. } => TrickKind::GaussLeap,
             _ => TrickKind::Runway,
         };
+        // In the air the view is free: along the way on from the landing, lined up for the next long jump.
+        if flying && let Some(at) = sc.at {
+            step.look_at = along_path(g, &self.path, at, LOOK_AHEAD) + Vec3::Z * EYE_HEIGHT;
+        }
         if step.pitch.is_none() {
             step.look_at = travel_look(s.eye(), step.look_at);
         }
@@ -593,94 +632,147 @@ impl PathFollower {
         }
     }
 
-    /// A long jump along the straight, level stretch of the path ahead, when the bot may take one: onto the node
-    /// 300–470 units along it that the flight, followed through the server's traces, comes down on without fall
-    /// damage. Takes it as a shortcut and says so.
-    fn runway(&mut self, g: &NavGraph, s: &NavInput, tracer: &mut dyn Tracer) -> bool {
+    /// A long jump along the path ahead, when the bot may take one: onto the node furthest along the path that the
+    /// flight, followed through the server's traces, comes down on without more fall damage than the bot may take.
+    /// Not bold: along a straight, level stretch 400 units long at least, onto a node 300–470 units ahead. Bold:
+    /// onto any node from 250 units off to as far as the jump carries, round corners, down drops. Takes it as a
+    /// shortcut and says so.
+    fn runway(&mut self, g: &NavGraph, s: &NavInput, tracer: &mut dyn Tracer, flights: &mut u32) -> bool {
         let t = s.tricks;
-        if !(t.longjump && t.runway) || s.now < self.leap_after || s.now - self.runway_at < RUNWAY_CHECK {
+        let bold = t.runway_bold;
+        let b = usize::from(bold);
+        if !(t.longjump && t.runway) || s.now < self.leap_after || s.now - self.runway_at < RUNWAY_CHECK[b] {
             return false;
         }
-        if !s.on_ground || s.on_ladder || s.ducked || s.waterlevel > 0 {
+        if !s.on_ground || s.on_ladder || s.ducked || s.waterlevel > 0 || *flights == 0 {
             return false;
         }
         let v = s.velocity.truncate();
-        if v.length() < 150.0 {
+        if v.length() < if bold { LONGJUMP_TAKEOFF } else { 150.0 } {
             return false;
         }
         self.runway_at = s.now;
         let feet = s.feet();
         let unfit =
             NodeFlags::CROUCH | NodeFlags::LADDER | NodeFlags::WATER | NodeFlags::AIRBORNE | NodeFlags::ON_MOVER;
-        let mut points: smallvec::SmallVec<[Vec3; 12]> = smallvec::SmallVec::new();
+        let (low, high) = if bold { (-BOLD_DROP, 40.0) } else { (-64.0, 40.0) };
+        let mut points: smallvec::SmallVec<[Vec3; 24]> = smallvec::SmallVec::new();
         points.push(s.origin);
         let mut along = 0.0;
-        let mut target = None;
+        let mut landings: smallvec::SmallVec<[usize; 24]> = smallvec::SmallVec::new();
         for k in self.next..self.path.len() {
             let n = g.node(self.path[k]);
-            let n_feet = n.origin.z - 36.0;
-            let plain = k == self.next
-                || g.find_link(self.path[k - 1], self.path[k])
-                    .is_some_and(|l| l.kind == LinkKind::Walk);
-            if n.flags.intersects(unfit) || !(-64.0..=40.0).contains(&(n_feet - feet)) || !plain {
+            let dz = n.origin.z - 36.0 - feet;
+            let flown_over = k == self.next
+                || g.find_link(self.path[k - 1], self.path[k]).is_some_and(|l| {
+                    !l.flags.contains(LinkFlags::DYNAMIC)
+                        && match l.kind {
+                            LinkKind::Walk => true,
+                            LinkKind::Drop | LinkKind::Jump => bold,
+                            _ => false,
+                        }
+                });
+            if n.flags.intersects(unfit) || !(low..=high).contains(&dz) || !flown_over {
                 break;
             }
             along += (n.origin - *points.last().unwrap_or(&s.origin)).truncate().length();
             points.push(n.origin);
-            if (RUNWAY_REACH[0]..=RUNWAY_REACH[1]).contains(&along) {
-                target = Some(k);
+            let flat = (n.origin - s.origin).truncate().length();
+            let reach = if bold {
+                BOLD_REACH..=lb_kin::tricks::longjump_reach(dz, s.gravity()).unwrap_or(0.0) - 24.0
+            } else {
+                RUNWAY_REACH[0]..=RUNWAY_REACH[1]
+            };
+            // Not onto the start of a link walking does not do: its executor wants the bot there under control.
+            let walked_on = self
+                .path
+                .get(k + 1)
+                .is_none_or(|&after| g.find_link(self.path[k], after).is_some_and(|l| l.kind.is_walk()));
+            if reach.contains(&flat) && walked_on {
+                landings.push(k);
             }
-            if along > RUNWAY_REACH[1] || points.len() >= 12 {
+            if along > RUNWAY_SCAN || points.len() > RUNWAY_NODES {
                 break;
             }
         }
-        let Some(k) = target else { return false };
-        if along < RUNWAY || points.len() < 3 {
+        if !bold && (along < RUNWAY || points.len() < 3) {
             return false;
         }
-        let corridor = (points[points.len() - 1] - points[0]).truncate().normalize_or_zero();
-        if v.normalize().dot(corridor) < 0.93 {
-            return false;
-        }
-        let straight = points.windows(2).all(|w| {
-            let leg = (w[1] - w[0]).truncate();
-            leg.length() < 1.0 || leg.normalize().dot(corridor) >= 0.94
-        });
-        if !straight {
-            return false;
-        }
-        let node = *g.node(self.path[k]);
-        let to = node.origin;
-        let yaw = lb_core::math::dir_to_view_angles((to - s.origin).truncate().extend(0.0)).y;
+        let heading = v.normalize();
+        let hurt_allowed = if bold { t.runway_hurt.max(0.0) } else { 0.0 };
         let phys = crate::tricks::physics(s);
-        let mut world = lb_kin::tricks::Traced(&mut *tracer);
-        let v = lb_kin::tricks::longjump_from(&mut world, &phys, crate::tricks::player(s), yaw, Some(to));
-        if !v.ok || phys.fall_damage(v.impact) > 0.0 {
-            return false;
+        let mut tries = 0;
+        // Furthest along the path first.
+        for &k in landings.iter().rev() {
+            let node = *g.node(self.path[k]);
+            let to = node.origin;
+            let line = (to - s.origin).truncate();
+            if heading.dot(line.normalize_or_zero()) < RUNWAY_HEADING[b] {
+                continue;
+            }
+            let passed = &points[1..=k - self.next];
+            let straight = passed.iter().all(|p| {
+                let off = (*p - s.origin).truncate();
+                (off - line * (off.dot(line) / line.length_squared())).length() <= RUNWAY_CORRIDOR
+            });
+            let cut = !straight && bold && crate::tricks::leap_line_clear(tracer, s, to, 0.0);
+            if !straight && !cut {
+                continue;
+            }
+            if !RUNWAY_MARGIN
+                .iter()
+                .all(|&side| crate::tricks::leap_line_clear(tracer, s, to, side))
+            {
+                continue;
+            }
+            if self
+                .leap_misses
+                .iter()
+                .any(|(n, at)| *n == self.path[k] && at.distance(s.origin) < RUNWAY_RETRY)
+            {
+                continue;
+            }
+            if tries == RUNWAY_TRIES || *flights == 0 {
+                break;
+            }
+            tries += 1;
+            *flights -= 1;
+            let yaw = lb_core::math::dir_to_view_angles(line.extend(0.0)).y;
+            let mut world = lb_kin::tricks::Traced(&mut *tracer);
+            let v = lb_kin::tricks::longjump_from(&mut world, &phys, crate::tricks::player(s), yaw, Some(to));
+            let hurt = phys.fall_damage(v.impact);
+            if !v.ok || hurt > hurt_allowed || lb_kin::tricks::lands_in_hazard(&mut world, v.landing) {
+                if self.leap_misses.len() == self.leap_misses.inline_size() {
+                    self.leap_misses.remove(0);
+                }
+                self.leap_misses.push((self.path[k], s.origin));
+                continue;
+            }
+            let spec = TraversalSpec {
+                entry: Anchor {
+                    origin: s.origin,
+                    radius: RUNWAY_TAKEOFF,
+                    stance: Stance::Stand,
+                },
+                exit: anchor(&node, 32.0),
+                action: Action::LongJump { robustness: 1.0 },
+                needs: Needs {
+                    health: 0.0,
+                    longjump: true,
+                    gauss: false,
+                },
+                deadline: 3.0,
+                cost: Cost {
+                    time: v.flight,
+                    wait: 0.0,
+                    damage: hurt,
+                },
+            };
+            self.leap_after = s.now + LEAP_COOLDOWN[b];
+            self.take_shortcut(spec, self.path[k], Some(k), s.now, true);
+            return true;
         }
-        let spec = TraversalSpec {
-            entry: Anchor {
-                origin: s.origin,
-                radius: 128.0,
-                stance: Stance::Stand,
-            },
-            exit: anchor(&node, 32.0),
-            action: Action::LongJump { robustness: 1.0 },
-            needs: Needs {
-                health: 0.0,
-                longjump: true,
-                gauss: false,
-            },
-            deadline: 3.0,
-            cost: Cost {
-                time: v.flight,
-                wait: 0.0,
-                damage: 0.0,
-            },
-        };
-        self.leap_after = s.now + LEAP_COOLDOWN;
-        self.take_shortcut(spec, self.path[k], Some(k), s.now, true);
-        true
+        false
     }
 
     fn fail(&mut self, s: &NavInput, from: NodeId, to: NodeId, reason: FailReason) -> FollowOutput {
@@ -849,6 +941,22 @@ fn missed(kind: TrickKind, s: &NavInput, spec: &TraversalSpec, launch: Option<(f
     );
 }
 
+/// The point `dist` along `path` on from its node `from` (the path's last node when it ends sooner).
+fn along_path(g: &NavGraph, path: &[NodeId], from: usize, dist: f32) -> Vec3 {
+    let mut at = g.node(path[from]).origin;
+    let mut left = dist;
+    for &n in &path[from + 1..] {
+        let next = g.node(n).origin;
+        let len = (next - at).length();
+        if len >= left {
+            return at.lerp(next, left / len.max(1e-3));
+        }
+        left -= len;
+        at = next;
+    }
+    at
+}
+
 /// Heading `dir` at `speed` with `velocity` now: the way to push so the sideways part of the velocity dies out
 /// quicker than friction alone would kill it.
 pub fn steer(dir: Vec2, speed: f32, velocity: Vec3) -> Vec2 {
@@ -968,13 +1076,14 @@ mod tests {
         let g = line_graph(&[LinkKind::Walk, LinkKind::Walk]);
         let mut w = BoxWorld::new();
         let mut f = PathFollower::new(vec![0, 1, 2], 0.0);
-        let out = f.tick(&g, &input(0.0, 0.0), &NoMechs, &mut w);
+        let mut flights = u32::MAX;
+        let out = f.tick(&g, &input(0.0, 0.0), &NoMechs, &mut w, &mut flights);
         assert_eq!(out.step.move_dir, Vec2::X);
         assert_eq!(f.target(), Some(1));
-        f.tick(&g, &input(90.0, 0.3), &NoMechs, &mut w);
+        f.tick(&g, &input(90.0, 0.3), &NoMechs, &mut w, &mut flights);
         assert_eq!(f.target(), Some(2), "within the radius of node 1");
         assert_eq!(
-            f.tick(&g, &input(195.0, 0.6), &NoMechs, &mut w).status,
+            f.tick(&g, &input(195.0, 0.6), &NoMechs, &mut w, &mut flights).status,
             FollowStatus::Arrived
         );
     }
@@ -985,10 +1094,11 @@ mod tests {
         let mut w = BoxWorld::new();
         w.solid(Vec3::new(40.0, -256.0, 0.0), Vec3::new(60.0, 256.0, 200.0));
         let mut f = PathFollower::new(vec![0, 1], 0.0);
+        let mut flights = u32::MAX;
         let mut statuses = Vec::new();
         let mut sidestepped = false;
         for i in 0..100 {
-            let out = f.tick(&g, &input(0.0, i as f64 * 0.1), &NoMechs, &mut w);
+            let out = f.tick(&g, &input(0.0, i as f64 * 0.1), &NoMechs, &mut w, &mut flights);
             sidestepped |= out.step.move_dir.y.abs() > 0.5;
             assert!(!out.step.jump, "no jump without a step to jump onto");
             statuses.push(out.status);

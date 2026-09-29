@@ -10,7 +10,7 @@ use lb_core::rng::Pcg32;
 use lb_game::mechanics::{AltFire, Attack, BODY, Trigger, WeaponClass, spec};
 use lb_game::weapons::WeaponId;
 
-use crate::policy::{Armed, ROCKET_MIN, XBOW_UNZOOM, XBOW_ZOOM_FROM};
+use crate::policy::{Armed, XBOW_UNZOOM, XBOW_ZOOM_FROM};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
@@ -20,7 +20,13 @@ pub struct Shot {
     pub distance: f32,
     pub enemy_faces_me: bool,
     pub weapon: WeaponId,
+    /// Rockets are not fired closer than this (`policy::rocket_min`).
+    pub rocket_min: f32,
 }
+
+/// A rocket's blast makes up for this much of a miss, units: its aim may be off by that much, within these angles.
+const ROCKET_SLACK: f32 = 80.0;
+const ROCKET_AIM: [f32; 2] = [5.7, 10.0];
 
 /// The view is on the target closely enough to fire.
 pub fn on_target(s: &Shot) -> bool {
@@ -30,12 +36,16 @@ pub fn on_target(s: &Shot) -> bool {
     if w.class == WeaponClass::Melee {
         return s.distance < 64.0 && dot > 0.8;
     }
-    if s.distance > w.reach || (s.weapon == WeaponId::Rpg && s.distance < ROCKET_MIN) {
+    if s.distance > w.reach || (s.weapon == WeaponId::Rpg && s.distance < s.rocket_min) {
         return false;
     }
     match s.weapon {
-        // One rocket per reload, aimed at the feet: worth a careful aim.
-        WeaponId::Rpg => return dot > 0.995,
+        // One rocket per reload, aimed at the feet: worth a careful aim far off, and close by the blast makes up for
+        // a miss.
+        WeaponId::Rpg => {
+            let slack = lb_core::dmath::atan2(ROCKET_SLACK, s.distance.max(1.0)).to_degrees();
+            return dot > lb_core::dmath::cos(slack.clamp(ROCKET_AIM[0], ROCKET_AIM[1]).to_radians());
+        }
         WeaponId::Crossbow if s.distance >= XBOW_ZOOM_FROM => return dot > 0.998,
         // The beam sweeps onto the target.
         WeaponId::Egon => return dot > 0.97,
@@ -51,6 +61,18 @@ pub fn on_target(s: &Shot) -> bool {
         return false;
     }
     s.enemy_faces_me || dot > 0.99
+}
+
+/// Why `s` is not on target, for the diagnostics.
+pub fn off_target(s: &Shot) -> &'static str {
+    let w = spec(s.weapon);
+    if w.class != WeaponClass::Melee && s.distance > w.reach {
+        "out of the weapon's reach"
+    } else if s.weapon == WeaponId::Rpg && s.distance < s.rocket_min {
+        "too close for a rocket"
+    } else {
+        "the aim is not on it yet"
+    }
 }
 
 /// Seconds between clicks of a semi-automatic weapon: the weapon's cycle, or a human pause from `pause` when
@@ -141,6 +163,7 @@ mod tests {
             distance: aim.length(),
             enemy_faces_me: faces,
             weapon,
+            rocket_min: 300.0,
         }
     }
 
@@ -158,12 +181,17 @@ mod tests {
         );
         assert!(
             !on_target(&shot(Vec3::new(200.0, 0.0, 0.0), false, WeaponId::Rpg)),
-            "no rockets at point blank"
+            "no rockets into their own blast's reach"
         );
+        let healthy = Shot {
+            rocket_min: 200.0,
+            ..shot(Vec3::new(220.0, 30.0, 0.0), false, WeaponId::Rpg)
+        };
+        assert!(on_target(&healthy), "close by the blast makes up for a miss");
         assert!(on_target(&shot(Vec3::new(800.0, 0.0, 0.0), false, WeaponId::Rpg)));
         assert!(
             !on_target(&shot(off, true, WeaponId::Rpg)),
-            "rockets are aimed with care"
+            "rockets are aimed with care far off"
         );
         assert!(!on_target(&shot(Vec3::new(200.0, 0.0, 0.0), false, WeaponId::Crowbar)));
         assert!(on_target(&shot(Vec3::new(40.0, 0.0, 0.0), false, WeaponId::Crowbar)));

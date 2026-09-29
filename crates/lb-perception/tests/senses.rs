@@ -6,7 +6,7 @@ use lb_core::time::SimTime;
 use lb_game::sounds::{ATTN_NORM, SoundClass, SoundKind};
 use lb_knowledge::*;
 use lb_perception::hearing::gain;
-use lb_perception::vision::{PERIOD, TRACE_BUDGET};
+use lb_perception::vision::{NEWCOMER_TRACES, PERIOD, TRACE_BUDGET};
 use lb_perception::*;
 use lb_raw::{ClientState, RawClient};
 use lb_worldq::{AllVisible, Trace, TraceQuery, Tracer, contents};
@@ -250,17 +250,19 @@ fn frustum_widens_with_the_screen() {
 #[test]
 fn a_running_enemy_in_plain_sight_is_recognized_after_the_drawn_delay() {
     let scene = Scene {
-        clients: vec![player(2, Vec3::new(250.0, -200.0, 0.0), Vec3::new(0.0, 200.0, 0.0))],
+        clients: vec![player(2, Vec3::new(650.0, -200.0, 0.0), Vec3::new(0.0, 200.0, 0.0))],
         ..Scene::default()
     };
-    // 40 ticks: the enemy stays within the view (it ends 38 degrees to the left).
+    // 40 ticks: the enemy stays within the view.
     let r = run(scene, 0.0, 40, 7);
     let (tick, rec) = first_recognition(&r).expect("recognized");
     let contact = r.vision.contacts.iter().find(|c| c.who.slot == 2).unwrap();
     assert!((0.5..=1.0).contains(&contact.delay), "{}", contact.delay);
-    // Full rate (running, close, in the middle band at worst): at most 1/0.7 of the delay, one tick of slack.
+    // Beyond the near range at full rate but for the range (some 0.85) and the middle band at worst (0.7), one tick
+    // of slack.
     assert!(
-        rec.latency >= f64::from(contact.delay) - PERIOD && rec.latency <= f64::from(contact.delay) / 0.7 + PERIOD,
+        rec.latency >= f64::from(contact.delay) - PERIOD
+            && rec.latency <= f64::from(contact.delay) / (0.7 * 0.85) + PERIOD,
         "latency {} delay {}",
         rec.latency,
         contact.delay
@@ -279,6 +281,33 @@ fn a_running_enemy_in_plain_sight_is_recognized_after_the_drawn_delay() {
     let track = r.beliefs.track_by_slot(2).unwrap();
     assert_eq!(track.state, TrackState::Visible);
     assert!(track.vel.y > 120.0, "velocity from sightings: {:?}", track.vel);
+}
+
+#[test]
+fn an_enemy_close_in_front_is_recognized_at_once_standing_or_ducked() {
+    for ducked in [false, true] {
+        let mut enemy = player(2, Vec3::new(180.0, 10.0, 0.0), Vec3::ZERO);
+        if ducked {
+            enemy.flags |= 1 << 14;
+        }
+        let r = run(
+            Scene {
+                clients: vec![enemy],
+                ..Scene::default()
+            },
+            0.0,
+            40,
+            3,
+        );
+        let rec = first_recognition(&r).expect("recognized").1;
+        let contact = r.vision.contacts.iter().find(|c| c.who.slot == 2).unwrap();
+        assert!(
+            rec.latency <= f64::from(contact.delay) / 3.5 + PERIOD,
+            "ducked {ducked}: latency {} delay {}",
+            rec.latency,
+            contact.delay
+        );
+    }
 }
 
 #[test]
@@ -420,7 +449,7 @@ fn the_trace_budget_is_respected() {
         ..Scene::default()
     };
     let r = run(scene, 0.0, 40, 1);
-    assert!(r.vision.stats.traces <= r.vision.stats.ticks * u64::from(TRACE_BUDGET));
+    assert!(r.vision.stats.traces <= r.vision.stats.ticks * u64::from(TRACE_BUDGET + NEWCOMER_TRACES));
     assert!(r.vision.stats.skipped > 0);
 }
 
@@ -545,4 +574,36 @@ fn a_far_player_is_not_starved_by_nearer_hidden_ones() {
         .copied();
     assert!(rec.is_some(), "never recognized");
     assert!(r.ticks.iter().all(|t| t.sightings.iter().all(|s| s.who.slot == 9)));
+}
+
+#[test]
+fn an_enemy_stepping_out_close_in_front_is_looked_at_while_others_far_off_are_followed() {
+    // Three players stand far off in plain sight: noticed at once, recognized only slowly.
+    let mut clients: Vec<RawClient> = [(900.0, -200.0), (950.0, 0.0), (1000.0, 200.0)]
+        .iter()
+        .enumerate()
+        .map(|(i, &(x, y))| player(2 + i as u8, Vec3::new(x, y, 0.0), Vec3::ZERO))
+        .collect();
+    // One walks out from behind a wall 250 units in front after some 0.7 s.
+    clients.push(player(9, Vec3::new(250.0, -200.0, 0.0), Vec3::new(0.0, 150.0, 0.0)));
+    let scene = Scene {
+        walls: vec![Aabb {
+            mins: Vec3::new(150.0, -300.0, -100.0),
+            maxs: Vec3::new(166.0, -60.0, 200.0),
+        }],
+        clients,
+        ..Scene::default()
+    };
+    let r = run(scene, 0.0, 40, 3);
+    let recognized = |slot: u8| {
+        r.ticks
+            .iter()
+            .position(|t| t.recognitions.iter().any(|x| x.who.slot == slot))
+    };
+    assert!(
+        (2..5).all(|s| recognized(s).is_none_or(|t| t > 20)),
+        "the far ones are still being made out"
+    );
+    let rec = recognized(9).expect("never recognized");
+    assert!(rec <= 22, "out about tick 14, recognized at tick {rec}");
 }

@@ -52,6 +52,8 @@ pub struct NavInput {
     pub push: Vec3,
     /// Server gravity (`sv_gravity`); 0 when not known.
     pub gravity: f32,
+    /// A fall hurts by how fast it lands (`mp_falldamage 1`); otherwise any fall past the safe speed takes 10.
+    pub progressive_fall_damage: bool,
     /// What the bot may do on the way besides walking.
     pub tricks: Tricks,
 }
@@ -1137,15 +1139,19 @@ impl PushExec {
 // Long jumps and gauss boosts
 // ---------------------------------------------------------------------------------------------------------------
 
-/// A long jump goes with the view this close to the landing across, degrees: the flight is steered onto it.
-const LEAP_AIM: f32 = 5.0;
+/// A long jump goes with the view this close to the landing across, degrees: the flight is steered onto it. A
+/// link's as its check made it; one along the way a little off too (the air kills the speed across in a few
+/// hundredths of a second).
+const LEAP_AIM: [f32; 2] = [5.0, 10.0];
 /// ... and looking no further up or down than this.
-const LEAP_PITCH: f32 = 5.0;
+const LEAP_PITCH: [f32; 2] = [5.0, 10.0];
 /// A long jump link takes off within this of its entry along the jump, as its check tried (a stretch of the way
 /// taken for speed, anywhere within the entry's radius past it); it runs through the entry aiming this far past.
 const TAKEOFF_BACK: f32 = 12.0;
 const TAKEOFF_FRONT: f32 = 12.0;
 const TAKEOFF_LEAD: f32 = 16.0;
+/// ... and this near its line (a link's, one along the way).
+const TAKEOFF_ACROSS: [f32; 2] = [16.0, 10.0];
 /// A long jump link's run-up starts this far behind the takeoff at most (the check ran up 16 units).
 const RUN_UP: f32 = 32.0;
 /// Seconds a gauss boost charges before it goes: a full charge and a little more.
@@ -1235,7 +1241,9 @@ impl TrickExec {
         }
         step.duck = duck;
         step.mandatory = true;
+        step.free_look = true;
         if !airborne && i.now - self.since > 0.1 {
+            step.free_look = false;
             return self.landed(c, step);
         }
         if i.now - self.since > 4.0 {
@@ -1286,10 +1294,11 @@ impl TrickExec {
                 .clamp(-1.0, 1.0),
         )
         .to_degrees();
-        let aligned = across <= LEAP_AIM && i.view.x.abs() <= LEAP_PITCH;
+        let loose = usize::from(self.once);
+        let aligned = across <= LEAP_AIM[loose] && i.view.x.abs() <= LEAP_PITCH[loose];
         // On the takeoff's own floor: from a floor below the jump meets the ledge's wall.
         let on_floor = self.once || (i.feet() - node_feet(c.from)).abs() < 20.0;
-        let ready = lateral < 16.0
+        let ready = lateral < TAKEOFF_ACROSS[loose]
             && (-TAKEOFF_BACK..front).contains(&along)
             && flat(i.velocity).length() >= LONGJUMP_TAKEOFF
             && aligned

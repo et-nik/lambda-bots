@@ -18,6 +18,10 @@ impl SimTime {
     pub fn max(self, other: SimTime) -> SimTime {
         if other.0 > self.0 { other } else { self }
     }
+
+    pub fn min(self, other: SimTime) -> SimTime {
+        if other.0 < self.0 { other } else { self }
+    }
 }
 
 impl Add<f64> for SimTime {

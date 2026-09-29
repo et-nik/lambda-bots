@@ -32,6 +32,8 @@ const ITEM_LOOK_EVERY: u64 = 2;
 const SPREAD_BEYOND: f32 = 2.0;
 /// Where a lost enemy would come into view is looked for this long after losing it, twice a second.
 const EXPECT_FOR: f64 = 8.0;
+/// Enemies are expected from places in sight this far off when none is known.
+const APPROACH_BAND: [f32; 2] = [350.0, 900.0];
 const EXPECT_PERIOD: f64 = 0.5;
 /// A place this dangerous (of the map's worst) makes a calm bot glance where the damage there came from.
 const DANGER_GLANCE: f32 = 0.25;
@@ -72,6 +74,9 @@ pub struct BotBrain {
     pub watch: Watch,
     /// Where a lost enemy would come into view, worked out twice a second.
     pub expect: Option<(PlayerKey, Vec3)>,
+    /// Where an enemy would come into view when none is known: the busiest way into the bot's sight a few hundred
+    /// units off, worked out twice a second.
+    pub approach: Option<Vec3>,
     /// Where bots at this place were mostly hurt from, when it is a dangerous place (from the map's experience).
     pub danger: Option<Vec3>,
     next_expect: SimTime,
@@ -106,6 +111,7 @@ impl BotBrain {
             last_attention: None,
             watch: Watch::default(),
             expect: None,
+            approach: None,
             danger: None,
             next_expect: SimTime::ZERO,
             item_focus: None,
@@ -296,6 +302,7 @@ impl BotBrain {
         if now >= self.next_expect {
             self.next_expect = now + EXPECT_PERIOD;
             self.expect = self.watch.node.and_then(|at| self.reappear(now, at, map));
+            self.approach = self.watch.node.and_then(|at| approach(at, map));
             self.danger = self.watch.node.and_then(|at| {
                 let from = map.danger_from(at).filter(|_| map.danger(at) >= DANGER_GLANCE)?;
                 map.visible(at, from).then(|| map.node_origin(from) + Vec3::Z * 28.0)
@@ -365,4 +372,24 @@ impl BotBrain {
     pub fn attention(&mut self, now: SimTime, eye: Vec3) -> Option<Attention> {
         attention::pick(self, now, eye)
     }
+}
+
+/// Where an enemy would come into view from `at` when none is known: the busiest place in sight within
+/// `APPROACH_BAND`, one next to places out of sight (a doorway, a corner) counting more.
+fn approach(at: NodeId, map: &dyn MapView) -> Option<Vec3> {
+    let me = map.node_origin(at);
+    let mut best: Option<(NodeId, f32)> = None;
+    map.for_each_visible(at, &mut |n| {
+        let d = map.node_origin(n).distance(me);
+        if !(APPROACH_BAND[0]..=APPROACH_BAND[1]).contains(&d) || map.transit(n) {
+            return;
+        }
+        let mut edge = false;
+        map.for_each_link(n, &mut |m, _| edge |= m != at && !map.visible(at, m));
+        let score = map.flow(n) * if edge { 1.0 } else { 0.3 };
+        if score > 0.0 && best.is_none_or(|(b, s)| score > s || (score == s && n < b)) {
+            best = Some((n, score));
+        }
+    });
+    best.map(|(n, _)| map.node_origin(n))
 }

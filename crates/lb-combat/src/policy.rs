@@ -3,9 +3,10 @@
 //! Every gun is scored by the damage per second it is expected to deal to a standing player there: the server's damage,
 //! the weapon's spread and the shooter's own aim error; for projectiles also the flight time a moving target has to
 //! step aside, and the blast that makes up for part of it. Outside a weapon's band only a third counts. A weapon whose
-//! blast would reach the shooter scores nothing (a rocket under 450 units, a bolt under 160, the egon's beam end under
-//! 128). The crossbow is fired zoomed from 250 units on; the scope's toggling is counted in its rate. The current
-//! weapon gets a margin against flip-flopping, and yapb's order breaks ties.
+//! blast would reach the shooter scores nothing (a bolt under 160 units, the egon's beam end under 128, a rocket
+//! within its blast's reach unless the shooter has health to spare: [`rocket_min`]). The crossbow is fired zoomed
+//! from 250 units on; the scope's toggling is counted in its rate. The current weapon gets a margin against
+//! flip-flopping, and yapb's order breaks ties.
 //! Throwables are not guns: the weapon protocols throw them.
 
 use lb_game::mechanics::{
@@ -89,6 +90,8 @@ pub struct Target {
     /// How fast the target moves, units per second (projectiles must lead it).
     pub speed: f32,
     pub aim_sigma: f32,
+    /// Rockets are not fired at it closer than this ([`rocket_min`]).
+    pub rocket_min: f32,
 }
 
 const OUT_OF_BAND: f32 = 0.35;
@@ -101,13 +104,25 @@ pub const XBOW_ZOOM_FROM: f32 = 250.0;
 const XBOW_SCOPE_CYCLE: f32 = 2.0;
 /// The crossbow's scope comes off with the target closer than this.
 pub const XBOW_UNZOOM: f32 = 200.0;
-/// Rockets are never fired closer than this: the blast would reach the shooter.
-pub const ROCKET_MIN: f32 = 450.0;
+/// With this much health a rocket may be fired into its own blast's edge, taking this much of it: 40 of the 120 at
+/// 200 units with the damage at its default.
+const ROCKET_HURT: [(f32, f32); 2] = [(80.0, 40.0), (60.0, 20.0)];
+
+/// Rockets of `damage` are fired no closer than this by a shooter with `health`: out of the blast's reach, or into
+/// its edge with health to spare (a rocket goes off at the target's feet).
+pub fn rocket_min(health: f32, damage: f32) -> f32 {
+    let allowed = ROCKET_HURT
+        .iter()
+        .find(|(h, _)| health >= *h)
+        .map_or(0.0, |(_, hurt)| *hurt);
+    blast_radius(damage) * (1.0 - allowed / damage.max(1.0)).max(0.0)
+}
 /// Unzoomed bolts and the egon's beam end blow up this close to the shooter.
 const BOLT_MIN: f32 = 160.0;
 const EGON_MIN: f32 = 128.0;
-/// Seconds between rockets: the shot and the reload of the one-rocket clip.
+/// Seconds between rockets: the shot and the reload of the one-rocket clip; a rocket in the clip goes at once.
 const ROCKET_CYCLE: f32 = 3.5;
+const ROCKET_READY: f32 = 1.5;
 /// A homing hornet finds its target this often within `HORNET_SEEK`.
 const HORNET_HIT: f32 = 0.8;
 const HORNET_SEEK: f32 = 1024.0;
@@ -136,8 +151,15 @@ pub fn score(a: &Armed, t: &Target, damages: &Damages) -> f32 {
             let bolt = BOLT_HIT + damages.xbow_bolt;
             bolt * projectile_hit(s, t, BOLT_SPEED, BOLT_BLAST_RADIUS) / s.cycle
         }
-        WeaponId::Rpg if d < ROCKET_MIN => 0.0,
-        WeaponId::Rpg => dmg * projectile_hit(s, t, ROCKET_SPEED, blast_radius(dmg)) / ROCKET_CYCLE,
+        WeaponId::Rpg if d < t.rocket_min => 0.0,
+        WeaponId::Rpg => {
+            let cycle = if a.clip.is_some_and(|c| c > 0) {
+                ROCKET_READY
+            } else {
+                ROCKET_CYCLE
+            };
+            dmg * projectile_hit(s, t, ROCKET_SPEED, blast_radius(dmg)) / cycle
+        }
         WeaponId::Egon if d < EGON_MIN => 0.0,
         // Up close the rapid fire lands more.
         WeaponId::Glock => {
@@ -242,6 +264,7 @@ mod tests {
             distance,
             speed: 250.0,
             aim_sigma,
+            rocket_min: rocket_min(50.0, Damages::default().rpg),
         }
     }
 
@@ -304,7 +327,16 @@ mod tests {
         assert_eq!(
             pick(&rockets, Some(WeaponId::Rpg), at(250.0, 10.0), false),
             Choice::Use(WeaponId::Mp5),
-            "no rockets at point blank"
+            "no rockets into the blast's reach when hurt"
+        );
+        let healthy = Target {
+            rocket_min: rocket_min(100.0, Damages::default().rpg),
+            ..at(250.0, 10.0)
+        };
+        assert_eq!(
+            pick(&rockets, Some(WeaponId::Rpg), healthy, false),
+            Choice::Use(WeaponId::Rpg),
+            "healthy, into its edge"
         );
         let xbow = [armed(WeaponId::Glock, 17, 68), armed(WeaponId::Crossbow, 5, 10)];
         assert_eq!(
@@ -321,6 +353,14 @@ mod tests {
             pick(&dry_gauss, None, at(400.0, 10.0), false),
             Choice::Use(WeaponId::Glock)
         );
+    }
+
+    #[test]
+    fn rockets_come_closer_with_health_to_spare() {
+        let d = Damages::default().rpg;
+        for (health, min) in [(100.0, 200.0), (70.0, 250.0), (40.0, 300.0)] {
+            assert!((rocket_min(health, d) - min).abs() < 0.01, "{health}");
+        }
     }
 
     #[test]

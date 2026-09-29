@@ -15,13 +15,16 @@ use lb_core::{Vec2, Vec3};
 use lb_worldq::{HullKind, Trace, TraceQuery, Tracer, contents};
 
 use crate::physics::Physics;
-use crate::pmove::{Cmd, Ladder, MoveWorld, Player, player_move};
+use crate::pmove::{Cmd, LONGJUMP_SPEED, LONGJUMP_UP, Ladder, MoveWorld, Player, player_move};
 use crate::validate::{
     ARRIVE_DZ, ARRIVE_RADIUS, MoveVerdict, STEP_MS, air_steer, arrived, cmd_toward, flat_dir, settled,
 };
 
 /// A long jump is taken moving at least this fast (the game wants more than 50 units/s).
 pub const LONGJUMP_TAKEOFF: f32 = 100.0;
+/// Ducked in the air, the player's feet come up this far.
+const TUCK: f32 = 18.0;
+
 /// A flight is followed this long at most, seconds.
 const FLIGHT_LIMIT: f32 = 4.0;
 /// Commands a player that came down short on the landing's floor walks the rest in, at most.
@@ -50,6 +53,14 @@ impl MoveWorld for Traced<'_> {
 pub fn hazard(world: &mut dyn MoveWorld, p: &Player) -> bool {
     let c = world.point_contents(Vec3::new(p.origin.x, p.origin.y, p.feet() + 2.0));
     c == contents::LAVA || c == contents::SLIME
+}
+
+/// Lava or slime where a long jump followed by [`longjump_from`] came down (`landing`, the hull centre): the player
+/// lands ducked, holding duck in the air.
+pub fn lands_in_hazard(world: &mut dyn MoveWorld, landing: Vec3) -> bool {
+    let mut p = Player::standing(landing);
+    p.ducked = true;
+    hazard(world, &p)
 }
 
 fn verdict(p: &Player, ok: bool, flight: f32, impact: f32) -> MoveVerdict {
@@ -130,6 +141,21 @@ pub fn longjump_from(
         return verdict(&p, false, 0.0, 0.0);
     }
     fly(world, phys, p, yaw, to, IN_DUCK)
+}
+
+/// How far a long jump taken looking level carries at most onto a floor `dz` units above the takeoff's (below when
+/// negative), ducked in the air; `None` when it cannot get up there.
+pub fn longjump_reach(dz: f32, gravity: f32) -> Option<f32> {
+    let disc = LONGJUMP_UP * LONGJUMP_UP - 2.0 * gravity * (dz - TUCK);
+    (disc >= 0.0).then(|| LONGJUMP_SPEED * (LONGJUMP_UP + disc.sqrt()) / gravity)
+}
+
+/// The top of a long jump: how far along it comes at full speed, and how high over the takeoff its origin gets.
+pub fn longjump_top(gravity: f32) -> (f32, f32) {
+    (
+        LONGJUMP_SPEED * LONGJUMP_UP / gravity,
+        LONGJUMP_UP * LONGJUMP_UP / (2.0 * gravity),
+    )
 }
 
 /// Yaw of looking from `from` at `to`.
@@ -352,6 +378,49 @@ mod tests {
         // Standing still there is no long jump.
         let still = settled(&mut w, &phys, start);
         assert!(!longjump_from(&mut w, &phys, still, 0.0, None).ok);
+        let reach = longjump_reach(0.0, phys.gravity).unwrap();
+        assert!((reach - far).abs() < 16.0, "{reach} {far}");
+    }
+
+    #[test]
+    fn a_long_jump_into_a_shallow_lava_pool_is_seen_to_hurt() {
+        let phys = Physics::default();
+        let mut w = flat();
+        w.volume(
+            Vec3::new(300.0, -256.0, 0.0),
+            Vec3::new(700.0, 256.0, 12.0),
+            contents::LAVA,
+        );
+        let p = running(&mut w, &phys, Vec3::new(0.0, 0.0, 36.0), 270.0);
+        let v = longjump_from(&mut w, &phys, p, 0.0, None);
+        assert!(v.ok && v.landing.x > 300.0, "{:?}", v.landing);
+        assert!(lands_in_hazard(&mut w, v.landing), "{:?}", v.landing);
+        let short = longjump_from(&mut w, &phys, p, 0.0, Some(Vec3::new(260.0, 0.0, 36.0)));
+        assert!(
+            short.ok && !lands_in_hazard(&mut w, short.landing),
+            "{:?}",
+            short.landing
+        );
+    }
+
+    #[test]
+    fn a_long_jump_carries_further_down_and_not_high_up() {
+        let phys = Physics::default();
+        let level = longjump_reach(0.0, phys.gravity).unwrap();
+        // Off a ledge 200 units high onto the floor below.
+        let mut w = BoxWorld::new();
+        w.solid(Vec3::new(-1024.0, -512.0, -512.0), Vec3::new(64.0, 512.0, 200.0));
+        w.floor(0.0, 4096.0);
+        let p = running(&mut w, &phys, Vec3::new(0.0, 0.0, 236.0), 270.0);
+        let free = longjump_from(&mut w, &phys, p, 0.0, None);
+        let down = longjump_reach(-200.0, phys.gravity).unwrap();
+        assert!(
+            free.ok && (free.landing.x - down).abs() < 24.0,
+            "{:?} {down}",
+            free.landing
+        );
+        assert!(down > level + 150.0);
+        assert!(longjump_reach(80.0, phys.gravity).is_none());
     }
 
     #[test]

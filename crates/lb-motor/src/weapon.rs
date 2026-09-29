@@ -10,6 +10,8 @@ use smallvec::SmallVec;
 
 const CONFIRM_TIMEOUT: f64 = 1.0;
 const SELECT_ATTEMPTS: u8 = 3;
+/// A weapon the game would not switch to (no ammo for it, whatever the bot believes) is reported refused this long.
+const REFUSED_FOR: f64 = 8.0;
 const DEPLOY: f64 = 0.5;
 const RELOAD_REPEAT: f64 = 0.5;
 
@@ -52,6 +54,10 @@ pub struct WeaponController {
     last_reload: Option<SimTime>,
     /// Last command with the trigger pulled.
     pub fired_at: Option<SimTime>,
+    /// The weapon the game would not switch to after every attempt, and when it gave up.
+    refused: Option<(WeaponId, SimTime)>,
+    /// Why the last update pressed nothing though its intent asked to fire.
+    pub quiet: Option<&'static str>,
 }
 
 impl WeaponController {
@@ -62,6 +68,13 @@ impl WeaponController {
     /// Weapon switch in progress or the deploy not finished.
     pub fn busy(&self, now: SimTime) -> bool {
         self.pending.is_some() || now < self.deploy_until
+    }
+
+    /// A weapon the game lately would not switch to: the bot fights with another meanwhile.
+    pub fn refused(&self, now: SimTime) -> Option<WeaponId> {
+        self.refused
+            .filter(|(_, at)| now.since(*at) < REFUSED_FOR)
+            .map(|(w, _)| w)
     }
 
     /// Buttons for this frame; select commands go to `commands`. `current` is the weapon `CurWeapon` confirmed.
@@ -82,10 +95,17 @@ impl WeaponController {
                 self.attempts = 0;
             }
         }
+        self.quiet = None;
         let Some(intent) = intent else { return 0 };
+        let asked = |why: &'static str| (intent.fire != Fire::None).then_some(why);
         if let Some(want) = intent.select
             && Some(want) != current
         {
+            if self.refused(now) == Some(want) {
+                self.quiet = asked("the game would not draw the weapon");
+                return 0;
+            }
+            self.quiet = asked("the weapon is being switched to");
             let waiting = self
                 .pending
                 .is_some_and(|(w, t)| w == want && now.since(t) < CONFIRM_TIMEOUT);
@@ -97,12 +117,17 @@ impl WeaponController {
                     commands.push(want.classname().to_string());
                     self.pending = Some((want, now));
                     self.attempts += 1;
+                } else {
+                    self.refused = Some((want, now));
+                    self.pending = None;
+                    self.attempts = 0;
                 }
             }
             return 0;
         }
         self.pending = None;
         if now < self.deploy_until {
+            self.quiet = asked("the weapon deploys");
             return 0;
         }
         let bit = match intent.fire {
@@ -119,6 +144,7 @@ impl WeaponController {
                 self.fired_at = Some(now);
                 return bit;
             }
+            self.quiet = Some("between clicks");
             return 0;
         }
         if intent.reload && self.last_reload.is_none_or(|t| now.since(t) >= RELOAD_REPEAT) {
@@ -189,5 +215,7 @@ mod tests {
             );
         }
         assert_eq!(cmds.len(), 3, "three attempts at a weapon the game does not switch to");
+        assert_eq!(c.refused(SimTime(12.0)), Some(WeaponId::Rpg), "reported refused");
+        assert_eq!(c.refused(SimTime(30.0)), None, "for a while");
     }
 }

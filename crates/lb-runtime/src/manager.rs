@@ -79,6 +79,8 @@ pub struct Bot {
     pub zoomed_at: Option<SimTime>,
     /// Grenades, satchels, snarks and tripmines carried on the last frame of this life, for `lb stats`.
     pub carried: Option<[i32; 4]>,
+    /// Looks for the bot seeming stuck (an enemy in front unseen, a target not fought, standing still).
+    pub stall: crate::stall::StallWatch,
 }
 
 impl Bot {
@@ -126,6 +128,7 @@ impl Bot {
             rounds: None,
             zoomed_at: None,
             carried: None,
+            stall: crate::stall::StallWatch::default(),
         }
     }
 
@@ -192,6 +195,7 @@ impl Bot {
                     self.self_state.on_spawn(now);
                     self.nav.reset();
                     self.brain.on_spawn();
+                    self.stall.reset();
                     self.set_state(BotState::Alive, now);
                 } else if force_respawn && body.deadflag == DEAD_RESPAWNABLE {
                     if self.respawn_at.is_none() {

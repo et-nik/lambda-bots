@@ -14,13 +14,20 @@ A bot looks 20 times a second; bots take turns so they do not all look on the sa
    screen. A zoomed weapon narrows it.
 2. **Line of sight.** Up to six body points are traced from the eye: chest, head, pelvis, both sides and knees.
    Other players block the view; glass does not. A water surface between the eye and the target halves what is
-   visible.
+   visible. A look spends at most 12 traces: players already in sight come first (two points found are enough for
+   one recognized), then the others, least lately looked at first. While one of those is in view, three more are
+   spent on it, so a player stepping out close in front gets a look while others are followed (with two players
+   noticed far off it used to go unlooked at for seconds).
 3. **Recognition.** Evidence builds up at a rate that depends on:
    - how much of the body is visible;
    - where the player is in the view: center, middle band or edge (`peripheral_gain`);
    - how the player moves: running players are noticed sooner than players standing still or crouching;
    - distance;
    - cues: a muzzle flash; a sound or the damage compass pointing there within the last 2 s; being in a fight.
+
+   Close by a player is plain to see: within 200 units fully, fading out by 600, it counts as running however it
+   moves, and it is recognized 3.5 times sooner in the middle of the view, twice in the middle band, 1.5 times at
+   the edge. A normal bot recognizes an enemy standing 200 units in front in 0.15–0.3 s (it took 1–2 s before).
 
    At full rate, recognition takes a delay drawn once per contact from `recognition_delay`. Halfway there the bot
    notices *something* in that direction and may glance at it, without knowing who it is. A player lost for less

@@ -2,11 +2,11 @@
 //! live server's traces: a long jump at an enemy, a long jump along a straight stretch of the path (the follower's
 //! runway), a gauss boost further along the path.
 
-use lb_core::Vec3;
 use lb_core::math::view_angle_vectors;
-use lb_kin::tricks::{BoostQuery, Traced, boost_view, hazard, longjump_from, simulate_boost};
+use lb_core::{Vec2, Vec3};
+use lb_kin::tricks::{BoostQuery, Traced, boost_view, lands_in_hazard, longjump_from, simulate_boost};
 use lb_kin::{Physics, Player};
-use lb_worldq::{TraceQuery, Tracer};
+use lb_worldq::{HullKind, TraceQuery, Tracer};
 
 use crate::classify::{BOOST_HEALTH, BOOST_HEALTH_AFTER, anchor};
 use crate::exec::{BOOST_CHARGE, EYE_HEIGHT, NavInput};
@@ -33,8 +33,32 @@ pub fn physics(input: &NavInput) -> Physics {
     Physics {
         gravity: input.gravity(),
         maxspeed: input.max_speed,
+        progressive_fall_damage: input.progressive_fall_damage,
         ..Physics::default()
     }
+}
+
+/// A quick look before a long jump's flight from where the bot stands onto `to` (a node's standing origin) is
+/// followed: the crouched hull (the legs come up in the air) swept up to the top of the jump at full speed, down half
+/// the fall and on to the landing, straight pieces under the arc the air steering flies. `side` shifts the top and
+/// the middle of the fall across the flight: a takeoff a little off the line, steered back onto the landing, has that
+/// much room too.
+pub fn leap_line_clear(tracer: &mut dyn Tracer, input: &NavInput, to: Vec3, side: f32) -> bool {
+    let from = input.origin;
+    let line = (to - from).truncate();
+    let d = line.length();
+    let dir = line / d.max(1.0);
+    let across = Vec2::new(-dir.y, dir.x) * side;
+    let (top_along, top_up) = lb_kin::tricks::longjump_top(input.gravity());
+    let top_along = top_along.min(0.6 * d);
+    let top = from + (dir * top_along + across).extend(top_up);
+    let landing = Vec3::new(to.x, to.y, to.z - 18.0 + 4.0);
+    let half = top.lerp(landing, 0.5);
+    let mid = Vec3::new(half.x, half.y, top.z - (top.z - landing.z) * 0.25);
+    [from, top, mid, landing].windows(2).all(|w| {
+        let tr = tracer.trace(&TraceQuery::hull(w[0], w[1], HullKind::Crouch));
+        !tr.start_solid && tr.fraction >= 1.0
+    })
 }
 
 /// The bot as the movement code sees it.
@@ -59,9 +83,7 @@ pub fn leap_lands(tracer: &mut dyn Tracer, input: &NavInput, view: Vec3) -> Opti
     if !v.ok || phys.fall_damage(v.impact) > 0.0 {
         return None;
     }
-    let mut landed = Player::standing(v.landing);
-    landed.origin = v.landing;
-    (!hazard(&mut world, &landed)).then_some(v.landing)
+    (!lands_in_hazard(&mut world, v.landing)).then_some(v.landing)
 }
 
 /// A charged gauss beam fired from `eye` along `view` spares its shooter: it meets the wall or floor square enough

@@ -680,3 +680,145 @@ fn a_gauss_jump_on_the_way_lands_nearer_the_goal_and_the_way_goes_on() {
     assert!(phases(&o).contains(&"boost:air"), "{}", describe(&o));
     assert_eq!(bot.nav.tricks.landed[3], 1, "{:?}", bot.nav.tricks);
 }
+
+/// A bot with the module on a course: long jumps along the way, bold ones or not, and the fall damage a bold one
+/// may take; how it went, and how many long jumps it made.
+fn run_leaping(graph: &NavGraph, w: &BoxWorld, from: Vec3, to: Vec3, bold: bool, hurt: f32) -> (Outcome, usize, f32) {
+    let mut c = Course::new(w.clone(), Game::default(), graph.clone());
+    let mut bot = CourseBot::new(from, 100.0);
+    bot.tricks.longjump = true;
+    bot.tricks.runway = true;
+    bot.tricks.runway_bold = bold;
+    bot.tricks.runway_hurt = hurt;
+    c.place(&mut bot);
+    let o = c.run(&mut bot, to, 20.0, 100.0, None);
+    let leaps = phases(&o).iter().filter(|p| **p == "longjump:air").count();
+    (o, leaps, 100.0 - bot.health)
+}
+
+#[test]
+fn bold_long_jumps_follow_one_another_along_a_straight_run() {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    let mut g = Builder::default();
+    let nodes: Vec<NodeId> = (0..=12).map(|i| g.node(i as f32 * 150.0, 0.0, 36.0)).collect();
+    for p in nodes.windows(2) {
+        g.walk(p[0], p[1]);
+    }
+    let graph = g.build();
+    let (from, to) = (Vec3::new(0.0, 0.0, 36.0), Vec3::new(1800.0, 0.0, 36.0));
+    let (plain, plain_leaps, _) = run_leaping(&graph, &w, from, to, false, 0.0);
+    let (bold, bold_leaps, _) = run_leaping(&graph, &w, from, to, true, 0.0);
+    assert!(
+        plain.arrived && bold.arrived && bold.failures.is_empty(),
+        "{}",
+        describe(&bold)
+    );
+    assert!(
+        bold_leaps >= 3 && bold_leaps > plain_leaps,
+        "{plain_leaps} {bold_leaps}: {}",
+        describe(&bold)
+    );
+    assert!(bold.seconds < plain.seconds, "{} {}", bold.seconds, plain.seconds);
+}
+
+#[test]
+fn bold_long_jumps_cut_across_a_winding_way() {
+    // The way zigzags 60 units across an open floor: no straight stretch, a clear line all along.
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    let mut g = Builder::default();
+    let nodes: Vec<NodeId> = (0..=10)
+        .map(|i| g.node(i as f32 * 110.0, if i % 2 == 0 { 0.0 } else { 60.0 }, 36.0))
+        .collect();
+    for p in nodes.windows(2) {
+        g.walk(p[0], p[1]);
+    }
+    let graph = g.build();
+    let (from, to) = (Vec3::new(0.0, 0.0, 36.0), Vec3::new(1100.0, 0.0, 36.0));
+    let (plain, plain_leaps, _) = run_leaping(&graph, &w, from, to, false, 0.0);
+    let (bold, bold_leaps, _) = run_leaping(&graph, &w, from, to, true, 0.0);
+    assert!(
+        plain.arrived && bold.arrived && bold.failures.is_empty(),
+        "{}",
+        describe(&bold)
+    );
+    assert_eq!(plain_leaps, 0, "not straight: {}", describe(&plain));
+    assert!(bold_leaps >= 1, "{}", describe(&bold));
+}
+
+/// A ledge `high` units up with the way off its edge (a drop) and on along the floor below.
+fn ledge_course(high: f32) -> (NavGraph, BoxWorld) {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    w.solid(Vec3::new(-400.0, -256.0, 0.0), Vec3::new(220.0, 256.0, high));
+    let mut g = Builder::default();
+    let top: Vec<NodeId> = (0..=4)
+        .map(|i| g.node(-200.0 + i as f32 * 100.0, 0.0, high + 36.0))
+        .collect();
+    let below: Vec<NodeId> = (0..=6).map(|i| g.node(280.0 + i as f32 * 100.0, 0.0, 36.0)).collect();
+    for p in top.windows(2).chain(below.windows(2)) {
+        g.walk(p[0], p[1]);
+    }
+    g.link(
+        top[4],
+        below[0],
+        LinkKind::Drop,
+        Some(Action::Drop {
+            speed: 150.0,
+            damage: 0.0,
+        }),
+    );
+    (g.build(), w)
+}
+
+#[test]
+fn bold_long_jumps_go_down_drops_and_land_hard_only_with_health_to_spare() {
+    let (from, to) = (Vec3::new(-200.0, 0.0, 0.0), Vec3::new(880.0, 0.0, 36.0));
+    // Off a ledge 120 units up: no harm in it.
+    let (graph, w) = ledge_course(120.0);
+    let start = from + Vec3::Z * 156.0;
+    let (plain, _, _) = run_leaping(&graph, &w, start, to, false, 0.0);
+    let (bold, _, hurt) = run_leaping(&graph, &w, start, to, true, 0.0);
+    assert!(
+        plain.arrived && bold.arrived && bold.failures.is_empty(),
+        "{}",
+        describe(&bold)
+    );
+    let dropped = |o: &Outcome| phases(o).iter().any(|p| p.starts_with("drop"));
+    assert!(dropped(&plain), "walked off the edge: {}", describe(&plain));
+    assert!(!dropped(&bold), "flew down: {}", describe(&bold));
+    assert!(bold.seconds < plain.seconds, "{} {}", bold.seconds, plain.seconds);
+    assert_eq!(hurt, 0.0);
+    // Off one 300 units up the landing hurts: only a bot that may take it long jumps down.
+    let (graph, w) = ledge_course(300.0);
+    let start = from + Vec3::Z * 336.0;
+    let (careful, _, _) = run_leaping(&graph, &w, start, to, true, 0.0);
+    let (hardy, _, hurt) = run_leaping(&graph, &w, start, to, true, 60.0);
+    assert!(careful.arrived && hardy.arrived, "{}", describe(&hardy));
+    assert!(dropped(&careful), "walked off the edge: {}", describe(&careful));
+    assert!(!dropped(&hardy), "flew down: {}", describe(&hardy));
+    assert!(hurt > 0.0 && hurt <= 60.0, "{hurt}");
+}
+
+#[test]
+fn bold_long_jumps_take_short_stretches_to_the_goal() {
+    let mut w = BoxWorld::new();
+    w.floor(0.0, 4096.0);
+    let mut g = Builder::default();
+    let nodes: Vec<NodeId> = (0..=4).map(|i| g.node(i as f32 * 80.0, 0.0, 36.0)).collect();
+    for p in nodes.windows(2) {
+        g.walk(p[0], p[1]);
+    }
+    let graph = g.build();
+    let (from, to) = (Vec3::new(0.0, 0.0, 36.0), Vec3::new(320.0, 0.0, 36.0));
+    let (plain, plain_leaps, _) = run_leaping(&graph, &w, from, to, false, 0.0);
+    let (bold, bold_leaps, _) = run_leaping(&graph, &w, from, to, true, 0.0);
+    assert!(
+        plain.arrived && bold.arrived && bold.failures.is_empty(),
+        "{}",
+        describe(&bold)
+    );
+    assert_eq!(plain_leaps, 0, "a runway is 400 units long at least");
+    assert_eq!(bold_leaps, 1, "{}", describe(&bold));
+}

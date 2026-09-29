@@ -1,15 +1,23 @@
 //! Tricks: what the bot tells navigation it may do on the way, and the tricks it decides on itself.
 //!
+//! How readily a bot long jumps is its skill's `longjump` times how much its style likes it against a balanced bot:
+//! a skilled one gets about by long jumps whenever it has the module.
+//!
 //! - **On the way** ([`BotBrain::nav_tricks`], every frame): the long jump links open with the module, when the
-//!   server allows long jumps. Long jumps along straight stretches of the way as often as the style likes them (a
-//!   roll every 8–12 s). The gauss boost links for skills with tricks and styles that gauss-jump, with a gauss, 40
-//!   uranium and 60 health, no enemy seen for two seconds.
-//! - **A long jump at an enemy** ([`BotBrain::attack_leap`]): in a fight, with the module, at an enemy in sight
-//!   300–900 units away no more than 64 below or 40 above, the will to close in (health × aggression) of 20 at
-//!   least, the view on the enemy (within 18° across, no more than 15° up or down) and moving: every half second,
-//!   as likely as the style likes, when the flight followed through the server's traces comes down safely and
-//!   nearer the enemy, and no snark is about the bot, the enemy or the landing. Then 0.9–1.4 s before the next. The
-//!   aim and the shots go on in the air.
+//!   server allows long jumps. Long jumps along the way as readily as the bot takes them (a roll every 8–12 s);
+//!   skills with bold long jumps take them round corners, down drops, over short stretches and one after another,
+//!   and with more than 60 health a landing that hurts as long as 40 is left. The gauss boost links for skills with
+//!   tricks and styles that gauss-jump, with a gauss, 40 uranium and 60 health, no enemy seen for two seconds.
+//! - **A long jump at an enemy** ([`BotBrain::attack_leap`]): in a fight, with the module, closing in (the weapon in
+//!   hand does poorly this far off, or it is the crowbar), at an enemy in sight 300–900 units away (bold: 250–1000)
+//!   no more than 64 below or 40 above, the will to close in (health × aggression) of 20 at least, the view on the
+//!   enemy (within 18° across, no more than 15° up or down) and moving: every half second (bold: quarter), as
+//!   readily as the bot takes long jumps in a fight, when the flight followed through the server's traces comes down
+//!   safely and nearer the enemy, and no snark is about the bot, the enemy or the landing. Then 0.9–1.4 s (bold:
+//!   0.4–0.7 s) before the next. The aim and the shots go on in the air.
+//! - **A long jump to dodge** ([`BotBrain::dodge_leap`], skills with `longjump_dodge`): for a dodge jump, a long
+//!   jump aside (and in when closing in, back when backing off), and away from a blast about to go off: the view
+//!   turns along it, the keys go, and in the air the view comes back to the enemy while the flight is left alone.
 //! - **A gauss jump on the way** ([`BotBrain::gauss_leap`]): with the gauss in hand, 30 uranium and 60 health, no
 //!   enemy about, on the way somewhere more than 1400 units or 12 nodes off: every 10–18 s, as likely as the style
 //!   likes, navigation looks for a boost that lands further along the way (`NavService::gauss_leap`). Not far
@@ -17,13 +25,14 @@
 //! - The weapons' part of a boost (charge, turn, jump, let go) is the `GaussBoost` protocol, started when
 //!   navigation stops at a boost's takeoff and asks for it.
 
-use lb_core::Vec3;
-use lb_core::math::view_angle_vectors;
+use lb_core::math::{angle_diff, dir_to_view_angles, view_angle_vectors};
 use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
+use lb_core::{Vec2, Vec3};
 use lb_decision::GoalKind;
 use lb_game::entities::ProjectileKind;
 use lb_game::weapons::WeaponId;
+use lb_motor::{LookIntent, MoveIntent, Prio, StanceIntent};
 use lb_nav_api::{NavService, Tricks};
 
 use crate::BotBrain;
@@ -39,17 +48,29 @@ const BOOST_CHARGE_CELLS: i32 = 16;
 const BOOST_HEALTH: f32 = 60.0;
 /// No enemy seen this long: calm enough to stop and charge for a boost.
 const BOOST_CALM: f64 = 2.0;
-/// A long jump at an enemy: how far (horizontally), how far below and above, the least will, how close the view
-/// must be to it (cosine across, degrees up or down), how fast the bot must be moving.
-const LEAP_BAND: [f32; 2] = [300.0, 900.0];
+/// A long jump at an enemy: how far (horizontally; not bold, bold), how far below and above, the least will, how
+/// close the view must be to it (cosine across, degrees up or down), how fast the bot must be moving.
+const LEAP_BAND: [[f32; 2]; 2] = [[300.0, 900.0], [250.0, 1000.0]];
 const LEAP_DZ: [f32; 2] = [-64.0, 40.0];
 const LEAP_WILL: f32 = 20.0;
 const LEAP_FACING: f32 = 0.95;
 const LEAP_PITCH: f32 = 15.0;
 const LEAP_SPEED: f32 = 60.0;
-/// Looked at this often; after a leap, the next no sooner than this.
-const LEAP_CHECK: f64 = 0.5;
-const LEAP_REST: [f32; 2] = [0.9, 1.4];
+/// Looked at this often; after a leap, the next no sooner than this (not bold, bold).
+const LEAP_CHECK: [f64; 2] = [0.5, 0.25];
+const LEAP_REST: [[f32; 2]; 2] = [[0.9, 1.4], [0.4, 0.7]];
+/// A bold long jump along the way may land hard with more than this much health, as long as this much is left.
+const HURT_HEALTH: f32 = 60.0;
+const HURT_LEFT: f32 = 40.0;
+/// A long jump to dodge: the view along it this close (degrees across, up or down) for the keys; the view comes
+/// round within this long or the dodge is off.
+const DODGE_AIM: f32 = 8.0;
+const DODGE_PITCH: f32 = 12.0;
+const DODGE_TURN: f64 = 0.5;
+/// A dodge aside lands at least this far from the enemy, and, not closing in, this far at least and no more than
+/// this much further off than the bot is now.
+const DODGE_NEAR: f32 = 128.0;
+const DODGE_KEEP: [f32; 2] = [200.0, 400.0];
 /// The long jump keys are pressed this long: the motor lets go of duck for a command first when it is held.
 const LEAP_PRESS: f64 = 0.15;
 /// No leap with a snark seen this recently this close to the bot, the enemy or the landing.
@@ -66,8 +87,9 @@ const GAUSS_NEAR_AGAIN: [f32; 2] = [4.0, 6.0];
 /// What the tricks came to, for `lb brain` and the stand statistics.
 #[derive(Clone, Debug, Default)]
 pub struct TrickStats {
-    /// Long jumps taken at an enemy.
+    /// Long jumps taken at an enemy, and to dodge (aside in a fight, away from a blast).
     pub leaps: u32,
+    pub dodges: u32,
     /// Gauss jumps on the way navigation found a boost for, and gauss boosts started (links and those).
     pub gauss_jumps: u32,
     pub boosts: u32,
@@ -98,8 +120,19 @@ pub struct TrickState {
     next_leap: SimTime,
     /// A long jump at an enemy is being pressed until then.
     leap_until: SimTime,
+    /// A long jump to dodge under way.
+    dodge: Option<DodgeLeap>,
     next_gauss: SimTime,
     pub stats: TrickStats,
+}
+
+/// A long jump to dodge: along `dir`, turning the view there since `since`, the keys pressed then, off the ground.
+#[derive(Clone, Copy, Debug)]
+struct DodgeLeap {
+    dir: Vec2,
+    since: SimTime,
+    pressed: Option<SimTime>,
+    off: bool,
 }
 
 impl TrickState {
@@ -113,13 +146,25 @@ impl TrickState {
     }
 }
 
+/// How readily the bot takes a long jump: along the way (`fight` false) or in a fight. The skill's readiness times
+/// how much the style likes it against a balanced bot's liking.
+pub fn leap_chance(ch: &Character, fight: bool) -> f32 {
+    let balanced = lb_styles::StyleId::Balanced.trick_likes();
+    let (like, base) = if fight {
+        (ch.tricks.lj_attack, balanced.lj_attack)
+    } else {
+        (ch.tricks.longjump, balanced.longjump)
+    };
+    (ch.skill.longjump * like / base).clamp(0.0, 1.0)
+}
+
 impl BotBrain {
     /// What navigation may do on the way this frame.
     pub(crate) fn nav_tricks(&mut self, body: &Body, ch: &Character, rng: &mut BotRng) -> Tricks {
         let now = body.now;
         let t = &mut self.mind.tricks;
         if now >= t.runway_until {
-            t.runway = rng.decision.next_f32() < ch.tricks.longjump;
+            t.runway = rng.decision.next_f32() < leap_chance(ch, false);
             t.runway_until = now + f64::from(rng.decision.range_f32(RUNWAY_ROLL[0], RUNWAY_ROLL[1]));
         }
         let longjump = body.has_longjump && body.tricks.longjump;
@@ -133,9 +178,16 @@ impl BotBrain {
             && body.health >= BOOST_HEALTH
             && body.waterlevel < 2
             && calm;
+        let bold = ch.skill.longjump_bold;
         let told = Tricks {
             longjump,
             runway: longjump && self.mind.tricks.runway,
+            runway_bold: bold,
+            runway_hurt: if bold && body.health > HURT_HEALTH {
+                body.health - HURT_LEFT
+            } else {
+                0.0
+            },
             gauss_boost: body.tricks.gauss_boost && ch.tricks.gauss_jump > 0.0 && uranium >= BOOST_URANIUM,
             boost_now,
             gauss_damage: body.damages.gauss_charged,
@@ -146,14 +198,16 @@ impl BotBrain {
         told
     }
 
-    /// A long jump at the enemy fought, at `enemy` (in sight: `visible`): whether to press it this frame (a leap
-    /// decided on is pressed for `LEAP_PRESS`).
+    /// A long jump at the enemy fought, at `enemy` (in sight: `visible`), when the bot is `closing` in: whether to
+    /// press it this frame (a leap decided on is pressed for `LEAP_PRESS`).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn attack_leap(
         &mut self,
         body: &Body,
         ch: &Character,
         enemy: Vec3,
         visible: bool,
+        closing: bool,
         nav: &mut dyn NavService,
         rng: &mut BotRng,
     ) -> bool {
@@ -161,22 +215,24 @@ impl BotBrain {
         if now < self.mind.tricks.leap_until {
             return body.on_ground;
         }
-        let allowed = body.has_longjump && body.tricks.longjump && ch.skill.tricks && ch.tricks.lj_attack > 0.0;
-        if !allowed || now < self.mind.tricks.next_leap || !visible {
+        let chance = leap_chance(ch, true);
+        let allowed = body.has_longjump && body.tricks.longjump && ch.skill.tricks && chance > 0.0;
+        if !allowed || !closing || now < self.mind.tricks.next_leap || !visible {
             return false;
         }
         if !body.on_ground || body.on_ladder || body.waterlevel > 0 || body.velocity.truncate().length() < LEAP_SPEED {
             return false;
         }
         let m = &self.mind;
-        if m.arms.busy() || m.reloading(now) || now < m.arms.hold_until {
+        if m.arms.busy() || m.reloading(now) || now < m.arms.hold_until || m.tricks.dodge.is_some() {
             return false;
         }
+        let b = usize::from(ch.skill.longjump_bold);
         let to = enemy - body.origin;
         let d = to.truncate().length();
         let will = body.health.clamp(0.0, 100.0) * ch.aggression;
-        if !(LEAP_BAND[0]..=LEAP_BAND[1]).contains(&d) || !(LEAP_DZ[0]..=LEAP_DZ[1]).contains(&to.z) || will < LEAP_WILL
-        {
+        let band = LEAP_BAND[b];
+        if !(band[0]..=band[1]).contains(&d) || !(LEAP_DZ[0]..=LEAP_DZ[1]).contains(&to.z) || will < LEAP_WILL {
             return false;
         }
         let view = self.motor.view;
@@ -185,36 +241,207 @@ impl BotBrain {
         if facing < LEAP_FACING || view.x.abs() > LEAP_PITCH {
             return false;
         }
-        self.mind.tricks.next_leap = now + LEAP_CHECK;
-        if rng.combat.next_f32() >= ch.tricks.lj_attack {
+        self.mind.tricks.next_leap = now + LEAP_CHECK[b];
+        if rng.combat.next_f32() >= chance {
             return false;
         }
-        // Not into snarks, the bot's own or anyone's: they bite whoever comes down among them.
-        let snarks_by = |p: Vec3| {
-            self.explosives.flying.iter().any(|f| {
-                f.kind == ProjectileKind::Snark
-                    && now.since(f.seen) <= LEAP_SNARKS_SEEN
-                    && f.pos.distance(p) < LEAP_SNARKS
-            })
-        };
-        if snarks_by(enemy) || snarks_by(body.origin) {
+        if self.snarks_by(now, enemy) || self.snarks_by(now, body.origin) {
             return false;
         }
         let Some(landing) = nav.leap_lands(view) else {
             return false;
         };
-        if landing.distance(enemy) >= d || snarks_by(landing) {
+        if landing.distance(enemy) >= d || self.snarks_by(now, landing) {
             return false;
         }
         let tricks = &mut self.mind.tricks;
         tricks.leap_until = now + LEAP_PRESS;
-        tricks.next_leap = now + LEAP_PRESS + f64::from(rng.combat.range_f32(LEAP_REST[0], LEAP_REST[1]));
+        let rest = LEAP_REST[b];
+        tricks.next_leap = now + LEAP_PRESS + f64::from(rng.combat.range_f32(rest[0], rest[1]));
         tricks.stats.leaps += 1;
         tracing::debug!(
             "long jump at an enemy {d:.0} units away, landing {:.0} from it",
             landing.distance(enemy)
         );
         true
+    }
+
+    /// The keys of a long jump at an enemy, over whatever the fight asks of the stance.
+    pub(crate) fn leap_stance(&mut self) {
+        self.intents.stance(
+            Prio::Threat,
+            StanceIntent {
+                jump: false,
+                duck: false,
+                longjump: true,
+            },
+        );
+    }
+
+    /// Snarks, the bot's own or anyone's, seen a moment ago near `p`: they bite whoever comes down among them.
+    fn snarks_by(&self, now: SimTime, p: Vec3) -> bool {
+        self.explosives.flying.iter().any(|f| {
+            f.kind == ProjectileKind::Snark && now.since(f.seen) <= LEAP_SNARKS_SEEN && f.pos.distance(p) < LEAP_SNARKS
+        })
+    }
+
+    /// A long jump to dodge, instead of a dodge jump in a fight with the enemy at `enemy`: aside the way the bot
+    /// strafes (`moving`, the fight's move), in a little when it closes in, back when it backs off, or the other
+    /// side; landing out of the enemy's way. Whether one was started.
+    pub(crate) fn dodge_aside(
+        &mut self,
+        body: &Body,
+        ch: &Character,
+        enemy: Vec3,
+        moving: Vec2,
+        nav: &mut dyn NavService,
+        rng: &mut BotRng,
+    ) -> bool {
+        let to = (enemy - body.origin).truncate();
+        let distance = to.length();
+        let to = to / distance.max(1.0);
+        let right = Vec2::new(to.y, -to.x);
+        let side = if moving.dot(right).abs() > 1.0 {
+            moving.dot(right).signum()
+        } else if rng.combat.next_f32() < 0.5 {
+            1.0
+        } else {
+            -1.0
+        };
+        let toward = moving.dot(to);
+        let ahead = if toward > 1.0 {
+            0.8
+        } else if toward < -1.0 {
+            -0.6
+        } else {
+            0.35
+        };
+        let dirs = [
+            (right * side + to * ahead).normalize(),
+            (right * -side + to * ahead).normalize(),
+        ];
+        let keep = |landing: Vec3| {
+            let d = landing.truncate().distance(enemy.truncate());
+            d >= DODGE_NEAR
+                && if toward > 1.0 {
+                    d < distance
+                } else {
+                    (DODGE_KEEP[0]..=distance + DODGE_KEEP[1]).contains(&d)
+                }
+        };
+        self.dodge_leap(body, ch, &dirs, &keep, nav, rng)
+    }
+
+    /// Starts a long jump to dodge along the first of `dirs` whose landing (followed through the server's traces,
+    /// coming down safely) `keep` takes, when the bot may dodge by long jumps and nothing else holds it.
+    pub(crate) fn dodge_leap(
+        &mut self,
+        body: &Body,
+        ch: &Character,
+        dirs: &[Vec2],
+        keep: &dyn Fn(Vec3) -> bool,
+        nav: &mut dyn NavService,
+        rng: &mut BotRng,
+    ) -> bool {
+        let now = body.now;
+        let t = &self.mind.tricks;
+        let allowed = body.has_longjump && body.tricks.longjump && ch.skill.tricks && ch.skill.longjump_dodge;
+        if !allowed || t.dodge.is_some() || now < t.leap_until {
+            return false;
+        }
+        // A traversal navigation cannot interrupt (a long jump of the way taking off, a flight) has the stance.
+        let traversing = self.intents.stance.is_some_and(|(p, _)| p >= Prio::Traversal);
+        if !body.on_ground || body.on_ladder || body.waterlevel > 0 || self.mind.arms.busy() || traversing {
+            return false;
+        }
+        if rng.combat.next_f32() >= leap_chance(ch, true) || self.snarks_by(now, body.origin) {
+            return false;
+        }
+        for &dir in dirs {
+            let view = Vec3::new(0.0, dir_to_view_angles(dir.extend(0.0)).y, 0.0);
+            let Some(landing) = nav.leap_lands(view) else {
+                continue;
+            };
+            if !keep(landing) || self.snarks_by(now, landing) {
+                continue;
+            }
+            self.mind.tricks.dodge = Some(DodgeLeap {
+                dir,
+                since: now,
+                pressed: None,
+                off: false,
+            });
+            self.mind.tricks.stats.dodges += 1;
+            tracing::debug!("long jump to dodge, landing {:.0} away", landing.distance(body.origin));
+            return true;
+        }
+        false
+    }
+
+    /// Every frame: the long jump to dodge under way. The view turns along it and the bot runs that way; lined up
+    /// on the ground, the keys go; in the air the legs stay tucked and no key brakes the flight, while the view is
+    /// free for the aim.
+    pub(crate) fn dodge_leap_tick(&mut self, body: &Body) {
+        let Some(mut d) = self.mind.tricks.dodge else {
+            return;
+        };
+        let now = body.now;
+        let airborne = !body.on_ground && !body.on_ladder && body.waterlevel < 2;
+        d.off |= d.pressed.is_some() && airborne;
+        if d.off {
+            if !airborne {
+                self.mind.tricks.dodge = None;
+                return;
+            }
+            self.intents.movement(
+                Prio::Protocol,
+                MoveIntent {
+                    dir: Vec2::ZERO,
+                    speed: 0.0,
+                },
+            );
+            self.intents.stance(
+                Prio::Protocol,
+                StanceIntent {
+                    jump: false,
+                    duck: true,
+                    longjump: false,
+                },
+            );
+            self.mind.tricks.dodge = Some(d);
+            return;
+        }
+        let late = d
+            .pressed
+            .map_or(now.since(d.since) > DODGE_TURN, |p| now.since(p) > LEAP_PRESS + 0.2);
+        if late || body.on_ladder || body.waterlevel > 0 {
+            self.mind.tricks.dodge = None;
+            return;
+        }
+        let yaw = dir_to_view_angles(d.dir.extend(0.0)).y;
+        self.intents
+            .look(Prio::Protocol, LookIntent::Angles(Vec3::new(0.0, yaw, 0.0)));
+        self.intents.movement(
+            Prio::Protocol,
+            MoveIntent {
+                dir: d.dir,
+                speed: body.maxspeed,
+            },
+        );
+        let view = self.motor.view;
+        let lined_up = angle_diff(view.y, yaw).abs() <= DODGE_AIM && view.x.abs() <= DODGE_PITCH;
+        if d.pressed.is_some() || (lined_up && body.on_ground && body.velocity.truncate().length() > LEAP_SPEED) {
+            d.pressed.get_or_insert(now);
+            self.intents.stance(
+                Prio::Protocol,
+                StanceIntent {
+                    jump: false,
+                    duck: false,
+                    longjump: true,
+                },
+            );
+        }
+        self.mind.tricks.dodge = Some(d);
     }
 
     /// A gauss jump on the way somewhere far, when it is time for one: asks navigation for a boost that lands
@@ -473,27 +700,86 @@ mod tests {
     }
 
     #[test]
-    fn a_bot_with_the_module_long_jumps_at_an_enemy_in_its_band() {
+    fn a_bot_with_the_module_long_jumps_at_an_enemy_it_closes_in_on() {
         let rusher = lb_styles::StyleId::Rusher.trick_likes();
-        let run = |level: u8, enemy: Vec3, module: bool| {
+        // Long jumps at the enemy, long jumps of any kind.
+        let run = |level: u8, enemy: Vec3, module: bool, weapon: WeaponId| {
             let mut brain = new_brain();
             let mut nav = Nav::new();
             nav.lands = Some(enemy * 0.6);
             let ch = character(level, rusher);
             let buttons = frames(&mut brain, &ch, &mut nav, Some(enemy), 3.0, &mut |_, b, _| {
-                b.has_longjump = module
+                b.has_longjump = module;
+                b.weapon = Some(weapon);
+                b.arsenal = [Armed::new(weapon, Some(8), Some(40))].into_iter().collect();
             });
-            (leapt(&buttons), brain.mind.tricks.stats.leaps)
+            (brain.mind.tricks.stats.leaps, leapt(&buttons))
         };
-        let (leapt_at, leaps) = run(75, Vec3::new(600.0, 0.0, 0.0), true);
-        assert!(leapt_at && leaps >= 1, "{leaps}");
-        assert!(!run(75, Vec3::new(600.0, 0.0, 0.0), false).0, "no module");
-        assert!(
-            !run(10, Vec3::new(600.0, 0.0, 0.0), true).0,
-            "a beginner does no tricks"
+        let at = Vec3::new(600.0, 0.0, 0.0);
+        let (leaps, pressed) = run(75, at, true, WeaponId::Shotgun);
+        assert!(pressed && leaps >= 1, "{leaps}");
+        assert!(!run(75, at, false, WeaponId::Shotgun).1, "no module");
+        assert!(!run(10, at, true, WeaponId::Shotgun).1, "a beginner does no tricks");
+        assert_eq!(
+            run(75, Vec3::new(1300.0, 0.0, 0.0), true, WeaponId::Shotgun).0,
+            0,
+            "too far"
         );
-        assert!(!run(75, Vec3::new(1300.0, 0.0, 0.0), true).0, "too far");
-        assert!(!run(75, Vec3::new(600.0, 0.0, 120.0), true).0, "too high above");
+        assert_eq!(
+            run(75, Vec3::new(600.0, 0.0, 120.0), true, WeaponId::Shotgun).0,
+            0,
+            "too high above"
+        );
+        assert_eq!(
+            run(75, at, true, WeaponId::Mp5).0,
+            0,
+            "the MP5 does well this far off: no need to close in"
+        );
+    }
+
+    #[test]
+    fn a_skilled_bot_dodges_by_a_long_jump_aside_and_looks_back_in_the_air() {
+        let balanced = lb_styles::StyleId::Balanced.trick_likes();
+        let enemy = Vec3::new(500.0, 0.0, 0.0);
+        let run = |level: u8| {
+            let mut brain = new_brain();
+            let mut nav = Nav::new();
+            // In and aside: the shotgun wants the bot closer.
+            nav.lands = Some(Vec3::new(300.0, 250.0, 0.0));
+            let ch = character(level, balanced);
+            let mut rng = BotRng::new(3, 3);
+            // The enemy aims at the bot; it takes off when the keys go, and is in the air for half a second.
+            let mut took_off: Option<f64> = None;
+            let mut pressed_view = None;
+            let mut air_views = Vec::new();
+            let mut t = 1.0;
+            while t < 6.0 {
+                brain.beliefs.on_sighting(&seen(t, enemy));
+                brain.update(SimTime(t), &PARAMS, None, None);
+                let mut b = body(t);
+                b.weapon = Some(WeaponId::Shotgun);
+                b.arsenal = [Armed::new(WeaponId::Shotgun, Some(8), Some(40))].into_iter().collect();
+                let flying = took_off.is_some_and(|at| t - at < 0.5);
+                b.on_ground = !flying;
+                let cmd = brain.act(&b, &ch, &mut nav, None, &mut rng);
+                brain.motor.sent(cmd.buttons);
+                if flying {
+                    air_views.push(brain.motor.view);
+                } else if cmd.buttons & (IN_JUMP | IN_DUCK) == IN_JUMP | IN_DUCK && took_off.is_none() {
+                    took_off = Some(t);
+                    pressed_view = Some(brain.motor.view);
+                }
+                t += 0.01;
+            }
+            (brain.mind.tricks.stats.dodges, pressed_view, air_views)
+        };
+        let (dodges, pressed, air) = run(100);
+        assert!(dodges >= 1, "an expert dodges by long jumps");
+        let yaw = pressed.expect("the keys went").y;
+        assert!(yaw.abs() > 30.0, "the view turned aside for the jump: {yaw}");
+        let back = air.last().expect("in the air").y;
+        assert!(back.abs() < 10.0, "back on the enemy in the air: {back}");
+        assert_eq!(run(50).0, 0, "no long jump dodges below hard");
     }
 
     #[test]

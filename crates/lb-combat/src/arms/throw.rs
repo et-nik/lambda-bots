@@ -125,6 +125,8 @@ pub struct Thrower {
     pub learned: Option<Attack>,
     /// A press set the satchels out off instead of throwing another.
     pub set_off: bool,
+    /// When a grenade's pin came out, by the game's clock.
+    pin: Option<f64>,
 }
 
 impl Thrower {
@@ -146,6 +148,7 @@ impl Thrower {
             pressed_out: false,
             learned: None,
             set_off: false,
+            pin: None,
         }
     }
 
@@ -176,6 +179,11 @@ impl Thrower {
             sv_gravity * lb_game::mechanics::PROJECTILE_GRAVITY,
             t.flight,
         )
+    }
+
+    /// When the grenade goes off, once its pin is out.
+    pub fn goes_off(&self) -> Option<SimTime> {
+        self.pin.map(|pin| SimTime(pin + f64::from(GRENADE_FUSE)))
     }
 
     /// The pin is out: the grenade must be thrown whatever else comes up.
@@ -212,6 +220,7 @@ impl Thrower {
         match self.phase {
             Phase::Draw => {
                 if let Some(pin) = pin {
+                    self.pin = Some(pin);
                     self.phase = Phase::Cook { pin };
                 } else if now.since(self.started) > DRAW_TIMEOUT || (h.weapon == Some(w) && h.reserve(w) <= 0) {
                     return Status::Failed("no grenade in hand");

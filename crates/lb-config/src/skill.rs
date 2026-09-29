@@ -224,8 +224,19 @@ skill_params! {
     scope_settle: [f32; 2],
     /// How readily grenades, satchels and snarks are thrown, 1 = as the normal preset.
     throw_rate: f32,
+    /// Grenades are thrown one after another until none is left, at the enemy or where one is expected.
+    throw_series: bool,
     /// Gauss jump, satchel jump and attacking long jumps are allowed.
     tricks: bool,
+    /// How readily long jumps are taken, 0..1, times the style's liking: the share of the time the bot long jumps
+    /// along its way, and the chance it takes one in a fight when one fits.
+    longjump: f32,
+    /// Long jumps along the way round corners, down drops, over short stretches and one after another, and onto a
+    /// hard landing with health to spare.
+    longjump_bold: bool,
+    /// Long jumps aside or away in a fight (for a dodge jump, away from a blast), the view back on the enemy in the
+    /// air.
+    longjump_dodge: bool,
     /// Charged gauss shots through thin walls at an enemy lost behind one a moment ago.
     gauss_walls: bool,
     /// Bunny hop speed limit as a multiple of maxspeed; none = no bunny hopping.
@@ -337,7 +348,11 @@ impl Default for Presets {
             gauss_charge: 0.0,
             scope_settle: [0.0, 0.0],
             throw_rate: 1.0,
+            throw_series: false,
             tricks,
+            longjump: 0.0,
+            longjump_bold: false,
+            longjump_dodge: false,
             gauss_walls: false,
             bhop_speed,
         };
@@ -434,14 +449,14 @@ impl Default for Presets {
                 Some(1.7),
             ),
         };
-        // (gauss_charge, scope_settle, throw_rate): skilled players fight the gauss charged and snap the crossbow's
-        // scope on only for the shot.
+        // (gauss_charge, scope_settle, throw_rate, longjump): skilled players fight the gauss charged, snap the
+        // crossbow's scope on only for the shot, and get about by long jumps whenever they have the module.
         let extra = [
-            (0.2, [1.0, 1.4], 0.5),
-            (0.45, [0.6, 0.9], 0.75),
-            (0.75, [0.35, 0.55], 1.0),
-            (0.85, [0.2, 0.3], 1.2),
-            (0.9, [0.1, 0.15], 1.4),
+            (0.2, [1.0, 1.4], 0.5, 0.15),
+            (0.45, [0.6, 0.9], 0.75, 0.35),
+            (0.75, [0.35, 0.55], 1.0, 0.6),
+            (0.85, [0.2, 0.3], 1.2, 0.9),
+            (0.9, [0.1, 0.15], 1.4, 1.0),
         ];
         let all = [
             &mut presets.noob,
@@ -450,13 +465,18 @@ impl Default for Presets {
             &mut presets.hard,
             &mut presets.expert,
         ];
-        for (params, (charge, settle, throws)) in all.into_iter().zip(extra) {
+        for (params, (charge, settle, throws, longjump)) in all.into_iter().zip(extra) {
             params.gauss_charge = charge;
             params.scope_settle = settle;
             params.throw_rate = throws;
+            params.longjump = longjump;
         }
-        presets.hard.gauss_walls = true;
-        presets.expert.gauss_walls = true;
+        for p in [&mut presets.hard, &mut presets.expert] {
+            p.gauss_walls = true;
+            p.longjump_bold = true;
+            p.longjump_dodge = true;
+            p.throw_series = true;
+        }
         presets
     }
 }
@@ -501,6 +521,7 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
         ("peripheral_gain", p.peripheral_gain),
         ("gauss_precharge", p.gauss_precharge),
         ("gauss_charge", p.gauss_charge),
+        ("longjump", p.longjump),
     ] {
         if !unit(v) {
             return Err(bad(name, "must be in 0..=1"));
@@ -569,6 +590,8 @@ mod tests {
         assert_eq!(p.at(10).dodge_hop_cooldown, None, "no dodge jumps until easy");
         assert!(!p.at(30).tricks);
         assert!(p.at(50).tricks);
+        assert!(p.at(62).longjump > p.normal.longjump && p.at(62).longjump < p.hard.longjump);
+        assert!(!p.at(74).longjump_bold && p.at(75).longjump_bold && p.at(100).longjump_dodge);
     }
 
     #[test]

@@ -186,15 +186,31 @@ validates is one a bot can make:
   side, 2° up or down and 8 units along must land too, and the unsteered flight must come down safely (a fight may take
   the bot's mind off the steering).
 - **On the way.** Two tricks are taken off the graph's links, as shortcuts of the follower:
-  - a long jump along a straight, level stretch of the path at least 400 units long (yapb's runway), onto the node
-    300–470 units ahead, when the bot runs faster than 150 along it and the flight, followed through the server's
-    traces, comes down there without fall damage; looked for every half second, 1.1 s apart at least;
+  - a long jump along the path, onto the node furthest along it that the flight, followed through the server's
+    traces, comes down on, out of lava and slime, where the path goes on walking (not onto the start of a jump, a
+    ladder or another link with an executor). The bot runs within 21° of the jump (bold: 30°) at 150 units/s at least
+    (bold: 100). Not bold: along a straight, level stretch of the path at least 400 units long (yapb's runway), the
+    nodes it passes over within 24 units of its line, onto a node 300–470 units ahead, no more than 64 below or 40
+    above, without fall damage; looked for every half second, 1.1 s apart at least. Bold (the brain's
+    `runway_bold`, skills from hard up): from 250 units off as far as the jump carries onto that floor
+    (`longjump_reach`: some 450 units on the level, 600 off a 120-unit drop), round corners onto the path past them
+    when the line is clear, over walks, drops and jumps of the path down to 400 units below, onto a landing that
+    hurts no more than the brain allows (`runway_hurt`); looked for every 0.05 s and taken one after another. Before
+    a flight is followed three crouched-hull sweeps under its arc, 8 units to either side, make sure a takeoff a
+    little off the line still gets through, and a landing that did not come down right is not tried again from
+    within 48 units. The bot takes off within 32 units of where the check stood and 10 of its line, the view within
+    10° of the landing (the air kills the speed across in a few hundredths of a second), or not at all; in the air it
+    looks along the way on from the landing, lined up for the next one. At most two flights are followed per look,
+    and all the bots together follow 300 a second at most, two in one frame (`NavCtx::flights`; some dozens of
+    microseconds each on the stand's cores, a few hundred at worst);
   - a gauss boost the brain asks for (`NavService::gauss_leap`): along the next few nodes and toward the goal the
     unsteered flights are followed, and the node along a flight's line (from 40% of its reach on) the planner reckons
     most seconds nearer the goal, two at least, is steered for. Off the path, the way on is planned again after the
     landing.
 - **In the air** a trick's flight is flown to its end: the path is not replaced until the bot lands, and when the
-  brain does something else meanwhile (a fight) it still gets the steering (`NavService::flight`).
+  brain does something else meanwhile (a fight) it still gets the steering (`NavService::flight`). The movement keys
+  alone steer, so the flight's look yields to any other (`NavStep::free_look`): a bot in the air shoots at an enemy
+  in sight.
 
 ## When a link fails
 
@@ -253,12 +269,20 @@ failed on the way: the planner goes around a failed link, so arriving alone prov
 - a gauss boost onto a ledge (the course plays the weapons' part: charging, turning, the jump, the recoil on the
   command after leaving the ground), and none without the gun;
 - long jumps along a straight run, and how much time they save;
+- bold long jumps: one after another along a straight run, across a winding way with no straight stretch, down off
+  a ledge (over the drop, and off a high one only with the fall damage allowed), onto the goal 320 units off;
 - a gauss boost toward a far goal over a wall, landing off the path, and the way on planned after.
 
 Failures tested (the other traversals have none yet):
 - a use door that never opens, reported as `WaitingForInteraction` and walked around;
 - a jump too far, reported as `ControllerFailure` and walked around;
 - a walled-up passage, reported as `GeometryInvalid`.
+
+**Long jumps along the way** (`cargo test --release -p lb-testkit --test longjumps -- --ignored --nocapture`,
+`LB_MAPS=dm_snow,crossfire LB_ROUTES=40`, `LB_LOG=1` for the misses and failures). Routes between random places at
+least 1000 units apart run by a bot without the module, with long jumps and with bold ones: arrivals, time, long jumps
+a minute, time lining up and in the air, health lost. `debug_route_long_jumps` (`LB_MAP`, `LB_FROM`, `LB_TO`) prints
+one route frame by frame while long jumping.
 
 **Generated graphs** (`cargo test -p lb-testkit --test generated_course -- --ignored`). On every standard map, a
 sample of each kind of special link (up to 40) is carried out from its entry (the bot with the long jump module and a

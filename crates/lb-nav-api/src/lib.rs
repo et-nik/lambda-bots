@@ -127,6 +127,9 @@ pub struct NavStep {
     pub longjump: bool,
     /// A gauss boost the traversal waits for, the bot standing at its takeoff.
     pub boost: Option<BoostCall>,
+    /// In the air on a long jump or a boost: the movement keys alone steer the flight, so a mandatory step's look
+    /// is only the way the bot flies and yields to any other (an enemy to shoot at).
+    pub free_look: bool,
 }
 
 /// A gauss boost a traversal needs now: the weapons are to charge the gauss fully, turn the view to `view`, jump and
@@ -146,6 +149,10 @@ pub struct Tricks {
     pub longjump: bool,
     /// Long jumps along straight stretches of the way, for speed.
     pub runway: bool,
+    /// Long jumps along the way also round corners, down drops, over short stretches and one after another.
+    pub runway_bold: bool,
+    /// Fall damage a long jump along the way may take on landing (none when 0).
+    pub runway_hurt: f32,
     /// Paths may take the links a gauss boost makes.
     pub gauss_boost: bool,
     /// A gauss boost can be made now: a gauss, a full charge's uranium, the health, no enemy about.
@@ -172,6 +179,7 @@ impl NavStep {
             mandatory: false,
             longjump: false,
             boost: None,
+            free_look: false,
         }
     }
 }

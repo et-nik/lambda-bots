@@ -673,6 +673,7 @@ impl<W: SimWorld> Course<W> {
             health: bot.health,
             push: p.field,
             gravity: self.phys.gravity,
+            progressive_fall_damage: self.phys.progressive_fall_damage,
             tricks: bot.tricks,
         }
     }
@@ -687,6 +688,7 @@ impl<W: SimWorld> Course<W> {
             health: Some(&mut self.health),
             bot: 1,
             budget: None,
+            flights: None,
         };
         bot.nav.gauss_leap(&mut ctx, &input)
     }
@@ -709,6 +711,7 @@ impl<W: SimWorld> Course<W> {
             health: bot.health,
             push: p.field,
             gravity: self.phys.gravity,
+            progressive_fall_damage: self.phys.progressive_fall_damage,
             tricks: bot.tricks,
         };
         bot.player.longjump = bot.tricks.longjump;
@@ -719,6 +722,7 @@ impl<W: SimWorld> Course<W> {
             health: Some(&mut self.health),
             bot: 1,
             budget: None,
+            flights: None,
         };
         let (status, step) = bot.nav.go_to(&mut ctx, &input, dest);
         bot.stuck = bot.nav.stuck_for(p.origin, now);
@@ -971,6 +975,6 @@ pub fn apply(intents: &mut Intents, step: &NavStep, input: &NavInput) {
             engaged: false,
         },
     };
-    intents.look(prio, look);
+    intents.look(if step.free_look { Prio::Goal } else { prio }, look);
     let _ = Vec2::ZERO;
 }

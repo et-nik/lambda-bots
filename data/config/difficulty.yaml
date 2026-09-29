@@ -26,7 +26,15 @@ schema: lambdabots/difficulty@1
 #   gauss_charge          share of gauss shots fired charged rather than with the plain primary attack
 #   scope_settle          seconds from putting the crossbow's scope on to the shot [min, max]
 #   throw_rate            how readily grenades, satchels and snarks are thrown, 1 = the normal preset
+#   throw_series          grenades thrown one after another until none is left, at the enemy or where one is
+#                         expected
 #   tricks                gauss jump, satchel jump and attacking long jumps
+#   longjump              how readily long jumps are taken, 0..1, times the style's liking: the share of the time
+#                         a bot long jumps along its way, and the chance it takes one in a fight when one fits
+#   longjump_bold         long jumps along the way round corners, down drops, over short stretches and one after
+#                         another, and onto a hard landing with more than 60 health
+#   longjump_dodge        long jumps aside or away in a fight (for a dodge jump, away from a blast), the view back
+#                         on the enemy in the air
 #   gauss_walls           charged gauss shots through thin walls at an enemy lost behind one a moment ago
 #   bhop_speed            bunny hop speed limit, multiple of maxspeed; ~ = no bunny hopping
 
@@ -53,7 +61,11 @@ presets:
     gauss_charge: 0.2
     scope_settle: [1.0, 1.4]
     throw_rate: 0.5
+    throw_series: false
     tricks: false
+    longjump: 0.15
+    longjump_bold: false
+    longjump_dodge: false
     gauss_walls: false
     bhop_speed: ~
   easy:
@@ -78,7 +90,11 @@ presets:
     gauss_charge: 0.45
     scope_settle: [0.6, 0.9]
     throw_rate: 0.75
+    throw_series: false
     tricks: false
+    longjump: 0.35
+    longjump_bold: false
+    longjump_dodge: false
     gauss_walls: false
     bhop_speed: ~
   normal:
@@ -103,7 +119,11 @@ presets:
     gauss_charge: 0.75
     scope_settle: [0.35, 0.55]
     throw_rate: 1.0
+    throw_series: false
     tricks: true
+    longjump: 0.6
+    longjump_bold: false
+    longjump_dodge: false
     gauss_walls: false
     bhop_speed: 1.25
   hard:
@@ -128,7 +148,11 @@ presets:
     gauss_charge: 0.85
     scope_settle: [0.2, 0.3]
     throw_rate: 1.2
+    throw_series: true
     tricks: true
+    longjump: 0.9
+    longjump_bold: true
+    longjump_dodge: true
     gauss_walls: true
     bhop_speed: 1.5
   expert:
@@ -153,6 +177,10 @@ presets:
     gauss_charge: 0.9
     scope_settle: [0.1, 0.15]
     throw_rate: 1.4
+    throw_series: true
     tricks: true
+    longjump: 1.0
+    longjump_bold: true
+    longjump_dodge: true
     gauss_walls: true
     bhop_speed: 1.7

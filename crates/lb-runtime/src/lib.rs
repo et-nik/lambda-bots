@@ -19,6 +19,7 @@ pub mod perf;
 pub mod record;
 pub mod roster;
 pub mod selftest;
+pub mod stall;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -230,6 +231,8 @@ pub struct Runtime {
     pub nav_status: String,
     /// Path search expansions saved up (`PLAN_RATE`, at most `PLAN_BURST`).
     plan_tokens: f64,
+    /// Long jump flights to check saved up (`FLIGHT_RATE`, at most `FLIGHT_BURST`).
+    flight_tokens: f64,
     /// The in-game editor, when a player has it on (`lb edit on`, needs `lb_editor 1`).
     pub editor: Option<editor::Editor>,
     pub editor_allowed: bool,
@@ -280,8 +283,8 @@ pub struct Runtime {
     pub items_give: Vec<String>,
     /// Rounds, damage, kills and suicides per weapon (`lb stats`).
     pub arms_stats: arms_stats::ArmsStats,
-    /// The bots' tricks when the statistics were last reset.
-    pub tricks_base: commands::TrickTotals,
+    /// Each bot's tricks when the statistics were last reset.
+    pub tricks_base: Vec<(BotId, commands::TrickTotals)>,
     /// Inputs from outside the engine (the navigation loader, the command channel), kept while recording and fed
     /// from the recording in a replay.
     pub outside: record::OutsideMode,
@@ -386,6 +389,7 @@ impl Runtime {
             live_check: lb_nav::probe::LiveCheck::default(),
             nav_status: "no map".into(),
             plan_tokens: 0.0,
+            flight_tokens: 0.0,
             editor: None,
             editor_allowed: false,
             command_slot: None,
@@ -414,7 +418,7 @@ impl Runtime {
             weapons_give: Vec::new(),
             items_give: Vec::new(),
             arms_stats: arms_stats::ArmsStats::default(),
-            tricks_base: commands::TrickTotals::default(),
+            tricks_base: Vec::new(),
             outside: record::OutsideMode::Live,
             record_request: None,
             record_status: "not recording".into(),
@@ -1225,9 +1229,28 @@ impl Runtime {
                 .min_by(|a, b| a.origin.distance(source).total_cmp(&b.origin.distance(source)))
                 .map(|l| l.first);
             if let Some((at, from)) = first {
+                // What the bot believed of its grenades then, and what moved it.
+                let bot = self.bots.iter().find(|b| u16::from(b.id.slot) == owner);
+                let known = bot
+                    .and_then(|b| {
+                        b.brain
+                            .explosives
+                            .own_grenades
+                            .iter()
+                            .map(|g| g.at.distance(source))
+                            .min_by(f32::total_cmp)
+                    })
+                    .map_or("none of its grenades known".to_string(), |d| {
+                        format!("its grenade believed {d:.0} u off the blast")
+                    });
+                let moving = bot
+                    .and_then(|b| b.brain.intents.movement.map(|(p, mv)| (p, mv.speed, b.nav.phase())))
+                    .map_or("no move".to_string(), |(p, speed, phase)| {
+                        format!("moved by {p:?} at {speed:.0}, navigation {phase}")
+                    });
                 tracing::info!(
                     "own blast: slot {owner} took {damage:.0} from its {row:?} {:.0} u away; fired {:.1} s before from \
-                     {:.0} u off the blast, {:.0} u from where the bot is now",
+                     {:.0} u off the blast, {:.0} u from where the bot is now; {known}; {moving}",
                     victim.1.distance(source),
                     now.since(at),
                     from.distance(source),
@@ -2288,10 +2311,15 @@ impl Runtime {
         let mechs = &self.mechs;
         let link_health = &mut self.link_health;
         let mut tracer = nav::LiveTracer { host, count: 0 };
-        // Path search expansions this frame, shared by the bots: a steady rate with a cap per frame.
+        // Path search expansions and long jump flights checked this frame, shared by the bots: steady rates with
+        // caps per frame.
         self.plan_tokens = (self.plan_tokens + PLAN_RATE * frame_ms / 1000.0).min(PLAN_BURST);
-        let mut plan_budget = self.plan_tokens as u32;
-        let budget_start = plan_budget;
+        self.flight_tokens = (self.flight_tokens + FLIGHT_RATE * frame_ms / 1000.0).min(FLIGHT_BURST);
+        let mut budgets = nav::Budgets {
+            plan: self.plan_tokens as u32,
+            flights: self.flight_tokens as u32,
+        };
+        let start = budgets;
         for (i, bot) in self.bots.iter_mut().enumerate() {
             if matches!(bot.state, BotState::Leaving | BotState::Faulted) {
                 continue;
@@ -2313,10 +2341,13 @@ impl Runtime {
                     dll,
                     allowed,
                     selfgauss: self.game.rules.selfgauss,
+                    falldamage_progressive: self.game.rules.falldamage_progressive,
                     tricks: self.config.tricks,
                     projectiles: &self.projectile_entities,
                 };
-                drive_one(bot, &ctx, &mut tracer, link_health, &mut plan_budget)
+                let cmd = drive_one(bot, &ctx, &mut tracer, link_health, &mut budgets);
+                watch_stalls(bot, now, cmd.as_ref(), &subjects, &teams, &mut tracer);
+                cmd
             }));
             match result {
                 Ok(Some(cmd)) => self.cmds.push(cmd),
@@ -2328,7 +2359,8 @@ impl Runtime {
                 }
             }
         }
-        self.plan_tokens -= f64::from(budget_start - plan_budget);
+        self.plan_tokens -= f64::from(start.plan - budgets.plan);
+        self.flight_tokens -= f64::from(start.flights - budgets.flights);
         let host = tracer.host;
         for (bot, r) in recognized {
             let name = self.clients.get(r.who.slot).map(|c| c.name.clone()).unwrap_or_default();
@@ -2563,13 +2595,48 @@ impl Runtime {
     }
 }
 
+/// The stall watch's look at a bot that plays (not one on a test course).
+fn watch_stalls(
+    bot: &mut Bot,
+    now: SimTime,
+    cmd: Option<&LbBotCommand>,
+    subjects: &[Subject<'_>],
+    teams: &[u8],
+    tracer: &mut nav::LiveTracer<'_>,
+) {
+    if bot.state != BotState::Alive || bot.nav_test.is_some() || bot.test.is_some() || bot.selftest.is_some() {
+        return;
+    }
+    let body = &bot.self_state.body;
+    let sample = stall::Sample {
+        now,
+        name: &bot.persona.name,
+        key: PlayerKey {
+            slot: bot.id.slot,
+            userid: bot.userid,
+        },
+        team: teams.get(bot.id.slot as usize).copied().unwrap_or(0),
+        origin: body.origin,
+        ducked: body.flags & lb_game::self_state::FL_DUCKING != 0,
+        eye: body.origin + body.view_ofs,
+        view: bot.view,
+        fov: body.fov,
+        speed: body.velocity.truncate().length(),
+        weapon: bot.self_state.current_weapon.get(),
+        fired: cmd.is_some_and(|c| c.buttons & (lb_core::input::IN_ATTACK | lb_core::input::IN_ATTACK2) != 0),
+        brain: &bot.brain,
+        nav_phase: bot.nav.phase(),
+    };
+    bot.stall.tick(&sample, subjects, tracer);
+}
+
 /// Produces the command for one bot this frame, or `None` if nothing is due.
 fn drive_one(
     bot: &mut Bot,
     ctx: &DriveCtx<'_>,
     tracer: &mut nav::LiveTracer<'_>,
     link_health: &mut LinkHealth,
-    plan_budget: &mut u32,
+    budgets: &mut nav::Budgets,
 ) -> Option<LbBotCommand> {
     if bot.fault_on_next_frame {
         bot.fault_on_next_frame = false;
@@ -2625,7 +2692,7 @@ fn drive_one(
                 side = out.side;
                 buttons |= out.buttons;
             } else {
-                let out = behave(bot, ctx, tracer, link_health, plan_budget);
+                let out = behave(bot, ctx, tracer, link_health, budgets);
                 forward = out.forward;
                 side = out.side;
                 buttons |= out.buttons;
@@ -2796,6 +2863,7 @@ fn nav_input(bot: &Bot, ctx: &DriveCtx<'_>, body: &lb_brain::Body) -> lb_nav::ex
             Vec3::ZERO
         },
         gravity: ctx.gravity,
+        progressive_fall_damage: ctx.falldamage_progressive,
         // The long jump links open with the module; the brain says what else the bot may do (`set_tricks`).
         tricks: lb_nav_api::Tricks {
             longjump: body.has_longjump,
@@ -2835,6 +2903,7 @@ fn drive_nav_test(
             health: Some(link_health),
             bot: u32::from(bot.id.slot),
             budget: None,
+            flights: None,
         };
         let step = test.step(&mut bot.nav, &mut nctx, &input);
         if std::mem::take(&mut test.refill) {
@@ -2957,6 +3026,10 @@ const CALM_BEFORE_KILL: f64 = 5.0;
 /// Path search node expansions per second shared by all bots, and the most one frame may spend.
 const PLAN_RATE: f64 = 200_000.0;
 const PLAN_BURST: f64 = 2000.0;
+/// Long jump flights checks may follow through the traces per second, shared by all bots, and the most one frame
+/// may: some dozens of microseconds each, a few hundred worst.
+const FLIGHT_RATE: f64 = 300.0;
+const FLIGHT_BURST: f64 = 2.0;
 
 /// Runs the brain for one frame: senses have run already; this decides, fights and walks.
 fn behave(
@@ -2964,7 +3037,7 @@ fn behave(
     ctx: &DriveCtx<'_>,
     tracer: &mut nav::LiveTracer<'_>,
     link_health: &mut LinkHealth,
-    plan_budget: &mut u32,
+    budgets: &mut nav::Budgets,
 ) -> lb_motor::MotorOut {
     let body = body_of(bot, ctx);
     let input = nav_input(bot, ctx, &body);
@@ -2983,7 +3056,7 @@ fn behave(
         stuck_kill: ctx.stuck_kill,
         calm,
         kill: false,
-        plan_budget,
+        budgets,
     };
     let map = ctx.map.as_ref().map(|m| m as &dyn lb_nav_api::MapView);
     let out = bot.brain.act(&body, &bot.character, &mut service, map, &mut bot.rng);
@@ -3030,6 +3103,8 @@ struct DriveCtx<'a> {
     mechs: &'a nav::LiveMechs,
     /// `sv_gravity`.
     gravity: f32,
+    /// `mp_falldamage 1`: falls hurt by how fast they land.
+    falldamage_progressive: bool,
     damages: lb_game::mechanics::Damages,
     dll: DllProfile,
     /// Weapons bots may use (`lb weapons`).

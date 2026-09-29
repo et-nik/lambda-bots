@@ -58,11 +58,14 @@ bots:
 ## Skill
 
 Skill is a 0–100 scale with five presets at 0, 25, 50, 75 and 100. `config/difficulty.yaml` sets the parameters at
-these points: recognition time, aim latency and error, turn speed, hearing, memory, tricks, shooting the gauss
-through walls (`gauss_walls`, hard and expert) and so on. Between two
-presets numbers are mixed linearly, so skill 62 is about halfway between normal and hard. Switches (aim model,
-tricks, dodge jumps, bunny hopping) keep the lower preset's value until the next point. `overrides` in a
-personality then change single parameters.
+these points: recognition time, aim latency and error, turn speed, hearing, memory, tricks, how readily long jumps
+are taken (`longjump`: 0.15, 0.35, 0.6, 0.9, 1.0) and whether they are bold and dodge (`longjump_bold`,
+`longjump_dodge`, hard and expert), throwing grenades one after another until none is left (`throw_series`, hard and
+expert), shooting the gauss through walls (`gauss_walls`, hard and expert) and so on.
+Between two presets numbers are mixed linearly, so skill 62 is about halfway between normal and hard. Switches (aim
+model, tricks, bold long jumps, grenade series, dodge jumps, bunny hopping) keep the lower preset's value until the
+next point.
+`overrides` in a personality then change single parameters.
 
 `lb profile <name>` prints the resulting parameters of a personality.
 
@@ -75,9 +78,11 @@ A style is data in `config/styles/<style>.yaml`:
 - `weapons`: `guns`, multipliers of how good the style finds each gun (by its classname without `weapon_`; 1 = as
   good as its damage says; a list given replaces the built-in one), and `throwables`, how readily it throws grenades,
   satchels and snarks.
-- `tricks`: chances 0..1 of long jumps along straight stretches of the way (with the module), long jumps at an
-  enemy, gauss jumps on the way somewhere far, and satchels thrown from a jump. Below the normal preset's skill only
-  the long jumps on the way are done (see `docs/behavior.md`, *Tricks*).
+- `tricks`: chances 0..1 of long jumps along the way (with the module), long jumps in a fight (at an enemy, and to
+  dodge), gauss jumps on the way somewhere far, and satchels thrown from a jump. The long jump chances are the
+  style's liking: how readily a bot takes long jumps is the skill's `longjump` times the style's chance over the
+  balanced one's, no more than 1. Below the normal preset's skill only the long jumps on the way are done (see
+  `docs/behavior.md`, *Tricks*).
 
 The goals are (see `docs/behavior.md` for what each does):
 

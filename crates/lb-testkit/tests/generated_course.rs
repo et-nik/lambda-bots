@@ -45,6 +45,7 @@ fn run_link(c: &mut Course<BspWorld>, a: NodeId, b: NodeId) -> Outcome {
         boost_now: true,
         gauss_damage: 200.0,
         selfgauss: true,
+        ..Default::default()
     };
     c.place(&mut bot);
     bot.nav.follower = Some(PathFollower::new(vec![a, b], c.now));
@@ -291,6 +292,7 @@ fn debug_link() {
         boost_now: true,
         gauss_damage: 200.0,
         selfgauss: true,
+        ..Default::default()
     };
     c.place(&mut bot);
     bot.nav.follower = Some(PathFollower::new(vec![a, b], c.now));

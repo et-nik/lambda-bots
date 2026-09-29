@@ -30,6 +30,9 @@ pub struct NavCtx<'a> {
     pub bot: u32,
     /// Node expansions path searches may still spend this frame (shared by the bots); `None` = no limit.
     pub budget: Option<&'a mut u32>,
+    /// Long jump flights checks may still follow through the traces this frame (shared by the bots, some dozens of
+    /// microseconds each); `None` = no limit.
+    pub flights: Option<&'a mut u32>,
 }
 
 /// The last link that failed, for diagnostics.
@@ -287,7 +290,9 @@ impl Navigator {
         let Some(follower) = self.follower.as_mut() else {
             return (NavStatus::Moving, None);
         };
-        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer);
+        let mut spare = u32::MAX;
+        let flights = ctx.flights.as_deref_mut().unwrap_or(&mut spare);
+        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer, flights);
         if let Some((kind, landed)) = follower.take_event() {
             self.tricks.record(kind, landed);
         }
@@ -352,7 +357,9 @@ impl Navigator {
             return Some(step);
         }
         let follower = self.follower.as_mut().filter(|f| f.flying())?;
-        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer);
+        let mut spare = u32::MAX;
+        let flights = ctx.flights.as_deref_mut().unwrap_or(&mut spare);
+        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer, flights);
         if let Some((kind, landed)) = follower.take_event() {
             self.tricks.record(kind, landed);
         }
@@ -440,7 +447,9 @@ impl Navigator {
             }
         }
         let follower = self.follower.as_mut()?;
-        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer);
+        let mut spare = u32::MAX;
+        let flights = ctx.flights.as_deref_mut().unwrap_or(&mut spare);
+        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer, flights);
         if let Some((kind, landed)) = follower.take_event() {
             self.tricks.record(kind, landed);
         }
