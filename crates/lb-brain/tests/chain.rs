@@ -172,6 +172,7 @@ fn character(skill: u8) -> Character {
         fear: 0.5,
         affinity: StyleId::Balanced.goal_affinity(),
         weapons: lb_brain::WeaponLike::default(),
+        tricks: StyleId::Balanced.trick_likes(),
     }
 }
 
@@ -216,6 +217,7 @@ fn body(now: SimTime, weapon: Option<WeaponId>) -> Body {
         gravity: 800.0,
         allowed: u32::MAX,
         selfgauss: 0,
+        tricks: lb_config::main_config::TricksConfig::default(),
     }
 }
 

@@ -9,6 +9,7 @@
 //! - **trap:** a tripmine put on a wall across a busy way, or satchels thrown at a chokepoint from close by and
 //!   watched from an ambush spot out of their blast until someone comes by them.
 
+use lb_combat::fight::FightInput;
 use lb_core::Vec3;
 use lb_core::math::view_angle_vectors;
 use lb_core::rng::BotRng;
@@ -55,6 +56,11 @@ const RADIO_WATCH: f64 = 0.3;
 const TRAP_THROW_FOR: f64 = 3.0;
 /// Satchels are thrown at a chokepoint from this close (a satchel flies some 200 units).
 const SATCHEL_THROW: f32 = 160.0;
+/// Satchels where an enemy is expected: this many, watched for this long from this far off (out of their blast,
+/// in sight of them).
+const LURE_PILE: [u32; 2] = [1, 2];
+const LURE_WATCH: [f32; 2] = [15.0, 25.0];
+const LURE_WATCH_FROM: [f32; 2] = [350.0, 700.0];
 /// An item is waited for this close to it, out of the way.
 const CONTROL_NEAR: f32 = 250.0;
 /// An item not back this long after its window is given up.
@@ -98,6 +104,51 @@ pub enum Task {
         started: Option<SimTime>,
         until: Option<SimTime>,
     },
+    /// Satchels where an enemy is expected (`Trap::Loose`): the spot, when they were thrown, where they are watched
+    /// from and until when.
+    Lure {
+        spot: Vec3,
+        thrown: Option<SimTime>,
+        watch: Option<Vec3>,
+        until: Option<SimTime>,
+    },
+}
+
+impl Task {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Task::Search { .. } => "search",
+            Task::Investigate { .. } => "investigate",
+            Task::Hide { arrived: true, .. } => "hide, there",
+            Task::Hide { .. } => "hide, on the way",
+            Task::Camp { until: Some(_), .. } => "camp, holding",
+            Task::Camp { .. } => "camp, on the way",
+            Task::Control { waited: true, .. } => "control, waiting",
+            Task::Control { .. } => "control, on the way",
+            Task::Trap { .. } => "trap",
+            Task::Lure { until: Some(_), .. } => "lure, watching",
+            Task::Lure { thrown: Some(_), .. } => "lure, thrown",
+            Task::Lure { .. } => "lure, on the way",
+        }
+    }
+}
+
+/// Where satchels at `spot` are watched from: a place that sees it from out of their blast, the nearest to `me`.
+fn watch_spot(map: &dyn MapView, spot: Vec3, me: Vec3) -> Option<Vec3> {
+    let at = map.nearest_node(spot, 256.0)?;
+    let mut best: Option<(Vec3, f32)> = None;
+    map.for_each_visible(at, &mut |n| {
+        let p = map.node_origin(n);
+        let off = p.distance(spot);
+        if !(LURE_WATCH_FROM[0]..=LURE_WATCH_FROM[1]).contains(&off) || map.transit(n) {
+            return;
+        }
+        let d = p.distance(me);
+        if best.is_none_or(|(_, b)| d < b) {
+            best = Some((p, d));
+        }
+    });
+    best.map(|(p, _)| p)
 }
 
 fn at_spot(body: &Body, p: Vec3) -> bool {
@@ -303,7 +354,7 @@ impl BotBrain {
         }
     }
 
-    pub(crate) fn retreat(&mut self, body: &Body, nav: &mut dyn NavService, rng: &mut BotRng) {
+    pub(crate) fn retreat(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
         let threat = self
             .beliefs
@@ -358,9 +409,34 @@ impl BotBrain {
         let Some(Task::Hide { dest, arrived, .. }) = self.mind.task.clone() else {
             return;
         };
-        if arrived || at_spot(body, dest) {
+        let there = at_spot(body, dest);
+        if arrived || there {
             if let Some(Task::Hide { arrived, .. }) = self.mind.task.as_mut() {
                 *arrived = true;
+            }
+            // Found in its cover: it fights back from there (strafing, backing off, never closing in) rather than
+            // stand and take it, and goes back to the spot once the enemy is out of sight.
+            let found = self
+                .beliefs
+                .enemies()
+                .filter(|t| t.state == TrackState::Visible)
+                .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)));
+            if let Some(t) = found {
+                let input = FightInput {
+                    approach: 0.0,
+                    ..crate::mind::fight_input(&self.mind, t, body, ch)
+                };
+                let enemy = t.pos;
+                let mv = self
+                    .mind
+                    .fight
+                    .update(&input, &crate::mind::fight_skill(ch), nav, &mut rng.combat);
+                self.fight_step(mv, enemy, body, ch, nav, rng);
+                return;
+            }
+            if !there {
+                self.walk(dest, body, nav);
+                return;
             }
             self.stand_still();
             // Watch the way the threat would come.
@@ -447,6 +523,7 @@ impl BotBrain {
                 StanceIntent {
                     jump: false,
                     duck: true,
+                    longjump: false,
                 },
             );
         }
@@ -547,6 +624,10 @@ impl BotBrain {
         rng: &mut BotRng,
     ) {
         let now = body.now;
+        if trap == Trap::Loose {
+            let fond = ch.affinity.trap >= FOND;
+            return self.lure(body, map, nav, rng, if fond { FOND_TRAP_REST } else { TRAP_REST });
+        }
         if !matches!(&self.mind.task, Some(Task::Trap { trap: t, .. }) if *t == trap) {
             self.mind.task = Some(Task::Trap {
                 trap,
@@ -598,6 +679,7 @@ impl BotBrain {
                     *started = Some(now);
                 }
             }
+            Trap::Loose => {}
             Trap::Satchels(i) => {
                 let Some((spot, choke)) = map
                     .camp_spots()
@@ -625,6 +707,7 @@ impl BotBrain {
                         StanceIntent {
                             jump: false,
                             duck: true,
+                            longjump: false,
                         },
                     );
                     self.look_at(choke);
@@ -658,12 +741,97 @@ impl BotBrain {
                 }
                 self.stand_still();
                 let floor = choke - Vec3::Z * 32.0;
-                if self.trap_satchels(body, nav, floor, rng)
+                if self.trap_satchels(body, nav, floor, crate::arms::SATCHEL_PILE, rng)
                     && let Some(Task::Trap { started, .. }) = self.mind.task.as_mut()
                 {
                     *started = Some(now);
                 }
             }
+        }
+    }
+
+    /// Satchels where an enemy is expected: up to within a throw of the spot (where a lost enemy would come into
+    /// view, else the busiest way into the bot's sight), one or two thrown there, then off to a place in sight of
+    /// them out of their blast, crouched with the radio up for 15–25 s. The charges stay after.
+    fn lure(&mut self, body: &Body, map: &dyn MapView, nav: &mut dyn NavService, rng: &mut BotRng, rest: [f32; 2]) {
+        let now = body.now;
+        if !matches!(self.mind.task, Some(Task::Lure { .. })) {
+            let Some(spot) = self.expect.map(|(_, p)| p).or(self.approach) else {
+                self.done();
+                return;
+            };
+            self.mind.task = Some(Task::Lure {
+                spot,
+                thrown: None,
+                watch: None,
+                until: None,
+            });
+        }
+        let Some(Task::Lure {
+            spot,
+            thrown,
+            watch,
+            until,
+        }) = self.mind.task.clone()
+        else {
+            return;
+        };
+        // Watching them: an enemy by them is set off at once.
+        if let (Some(u), Some(from)) = (until, watch) {
+            if now >= u || self.explosives.charges.is_empty() {
+                self.done();
+                return;
+            }
+            if !at_spot(body, from) {
+                if self.walk(from, body, nav) == NavStatus::NoPath {
+                    self.done();
+                }
+                return;
+            }
+            self.stand_still();
+            self.intents.stance(
+                Prio::Goal,
+                StanceIntent {
+                    jump: false,
+                    duck: true,
+                    longjump: false,
+                },
+            );
+            self.look_at(spot);
+            self.mind.arms.radio_until = self.mind.arms.radio_until.max(now + RADIO_WATCH);
+            return;
+        }
+        // Thrown: once the charges lie there, off to watch them.
+        if let Some(at) = thrown {
+            if !self.explosives.charges.is_empty() && self.mind.arms.active.is_none() {
+                self.mind.stats.traps += 1;
+                let from = watch_spot(map, spot, body.origin);
+                let guard = now + f64::from(rng.decision.range_f32(LURE_WATCH[0], LURE_WATCH[1]));
+                self.mind.trap_rest_until = guard + f64::from(rng.decision.range_f32(rest[0], rest[1]));
+                if let Some(Task::Lure { watch, until, .. }) = self.mind.task.as_mut() {
+                    *watch = Some(from.unwrap_or(body.origin));
+                    *until = Some(guard);
+                }
+            } else if now.since(at) > TRAP_THROW_FOR && self.mind.arms.active.is_none() {
+                self.mind.trap_rest_until = now + TRAP_GIVE_UP_REST;
+                self.give_up(now, rng);
+            }
+            return;
+        }
+        let near = (body.origin - spot).truncate().length() <= SATCHEL_THROW
+            && nav.trace(&lb_worldq::TraceQuery::line(body.eye, spot)).fraction >= 0.95;
+        if !near {
+            if self.walk(spot, body, nav) == NavStatus::NoPath {
+                self.give_up(now, rng);
+            }
+            return;
+        }
+        self.stand_still();
+        let floor = spot - Vec3::Z * 32.0;
+        if self.trap_satchels(body, nav, floor, LURE_PILE, rng)
+            && let Some(Task::Lure { thrown, .. }) = self.mind.task.as_mut()
+        {
+            *thrown = Some(now);
         }
     }
 

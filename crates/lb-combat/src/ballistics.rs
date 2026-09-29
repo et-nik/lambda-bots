@@ -46,6 +46,8 @@ impl Tracer for Unchecked {
 
 /// Segments an arc is checked in.
 const ARC_CHECKS: usize = 8;
+/// A throw's arc must be clear this far off it on every side.
+const ARC_MARGIN: f32 = 8.0;
 /// The pitch search: every degree, then bisection to this precision.
 const PITCH_PRECISION: f32 = 0.05;
 
@@ -72,16 +74,24 @@ pub fn time_to_height(start: Vec3, velocity: Vec3, gravity: f32, z: f32) -> Opti
 /// The arc from `start` at `velocity` is clear of walls for `flight` seconds (the last segment may end in the
 /// target's floor).
 pub fn arc_clear(tracer: &mut dyn Tracer, start: Vec3, velocity: Vec3, gravity: f32, flight: f32) -> bool {
-    let mut from = start;
-    for i in 1..=ARC_CHECKS {
-        let to = position_at(start, velocity, gravity, flight * i as f32 / ARC_CHECKS as f32);
-        let tr = tracer.trace(&TraceQuery::line(from, to));
-        if tr.start_solid || (tr.fraction < 1.0 && (i < ARC_CHECKS || tr.end.distance(to) > 24.0)) {
-            return false;
+    // A little off the arc on every side as well: a throw a degree or so off would meet an edge it grazes, and
+    // bounce back.
+    let across = velocity.truncate().normalize_or_zero().perp().extend(0.0) * ARC_MARGIN;
+    let up = Vec3::Z * ARC_MARGIN;
+    [Vec3::ZERO, across, -across, up, -up].into_iter().all(|off| {
+        let mut from = start;
+        for i in 1..=ARC_CHECKS {
+            let to = position_at(start, velocity, gravity, flight * i as f32 / ARC_CHECKS as f32);
+            // The margin fades toward the landing, which is on the floor.
+            let fade = if i == ARC_CHECKS { 0.0 } else { 1.0 };
+            let tr = tracer.trace(&TraceQuery::line(from + off * fade, to + off * fade));
+            if tr.start_solid || (tr.fraction < 1.0 && (i < ARC_CHECKS || tr.end.distance(to) > 24.0)) {
+                return false;
+            }
+            from = to;
         }
-        from = to;
-    }
-    true
+        true
+    })
 }
 
 /// Throw pitch and speed of the hand grenade for view pitch `p`.

@@ -7,6 +7,8 @@
 //!   forgotten when an explosion goes off at the mine.
 //! - **Projectiles** in flight or lying about that it sees: where they are and how they move, and for grenades,
 //!   rockets and satchels where they are going to blow up.
+//! - **Its own hand grenades:** where each should come down and when it goes off (the bot pulled the pin), seen or
+//!   not, until then.
 
 use lb_core::Vec3;
 use lb_core::time::SimTime;
@@ -101,6 +103,10 @@ const BLOWN_WITH: f32 = 64.0;
 /// Faster than this when first seen: an MP5 grenade.
 const CONTACT_GRENADE: f32 = 650.0;
 const GRENADE_RADIUS: f32 = 250.0;
+/// An own grenade is kept this long past when it should have gone off (the game's fuse is its own); a sighting of it
+/// this soon after the throw (still at the hand) says nothing of where it goes.
+const OWN_GRENADE_LATE: f64 = 0.3;
+const OWN_GRENADE_SETTLE: f64 = 0.2;
 const ROCKET_RADIUS: f32 = 300.0;
 const SATCHEL_RADIUS: f32 = 300.0;
 /// A rocket passing this close is coming for the bot.
@@ -111,6 +117,18 @@ pub struct Explosives {
     pub charges: Vec<Charge>,
     pub mines: Vec<Mine>,
     pub flying: Vec<Flying>,
+    pub own_grenades: Vec<OwnGrenade>,
+}
+
+/// A hand grenade the bot threw: where it should come down (where it was seen going when it was), and when it goes
+/// off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnGrenade {
+    pub at: Vec3,
+    pub goes_off: SimTime,
+    thrown: SimTime,
+    /// The fall of projectiles, for where a sighting of it says it is going.
+    gravity: f32,
 }
 
 impl Explosives {
@@ -131,6 +149,17 @@ impl Explosives {
             index: None,
             vel: Vec3::ZERO,
             seen: None,
+        });
+    }
+
+    /// The bot let a grenade go at `now` that should come down at `at` and goes off at `goes_off`; `sv_gravity` for its
+    /// fall.
+    pub fn thrown_grenade(&mut self, at: Vec3, goes_off: SimTime, now: SimTime, sv_gravity: f32) {
+        self.own_grenades.push(OwnGrenade {
+            at,
+            goes_off,
+            thrown: now,
+            gravity: sv_gravity * PROJECTILE_GRAVITY,
         });
     }
 
@@ -211,22 +240,48 @@ impl Explosives {
                     }),
                 }
             }
-            _ => match self.flying.iter_mut().find(|f| f.index == s.index && f.kind == s.kind) {
-                Some(f) => {
-                    f.pos = s.pos;
-                    f.vel = s.vel;
-                    f.seen = s.t;
-                }
-                None => self.flying.push(Flying {
+            _ if s.own && s.kind == ProjectileKind::Grenade => {
+                // Where it is going, as it is seen: a throw that met an edge may come back.
+                let seen = Flying {
                     kind: s.kind,
                     index: s.index,
                     pos: s.pos,
                     vel: s.vel,
-                    own: s.own,
+                    own: true,
                     seen: s.t,
-                    launch_speed: s.vel.length(),
-                }),
-            },
+                    launch_speed: 0.0,
+                };
+                if let Some(g) = self
+                    .own_grenades
+                    .iter_mut()
+                    .filter(|g| s.t.since(g.thrown) >= OWN_GRENADE_SETTLE && s.t < g.goes_off)
+                    .min_by(|a, b| a.at.distance(s.pos).total_cmp(&b.at.distance(s.pos)))
+                    && let Some(b) = predict(&seen, s.t, g.gravity, g.at.z.min(s.pos.z))
+                {
+                    g.at = b.at;
+                }
+                self.track_flying(s);
+            }
+            _ => self.track_flying(s),
+        }
+    }
+
+    fn track_flying(&mut self, s: &ProjectileSighting) {
+        match self.flying.iter_mut().find(|f| f.index == s.index && f.kind == s.kind) {
+            Some(f) => {
+                f.pos = s.pos;
+                f.vel = s.vel;
+                f.seen = s.t;
+            }
+            None => self.flying.push(Flying {
+                kind: s.kind,
+                index: s.index,
+                pos: s.pos,
+                vel: s.vel,
+                own: s.own,
+                seen: s.t,
+                launch_speed: s.vel.length(),
+            }),
         }
     }
 
@@ -241,9 +296,11 @@ impl Explosives {
     pub fn on_own_death(&mut self) {
         self.charges.clear();
         self.flying.clear();
+        self.own_grenades.clear();
     }
 
     pub fn update(&mut self, now: SimTime) {
+        self.own_grenades.retain(|g| now.since(g.goes_off) <= OWN_GRENADE_LATE);
         self.flying.retain(|f| {
             let memory = match f.kind {
                 ProjectileKind::Satchel | ProjectileKind::Snark => LYING_MEMORY,
@@ -260,6 +317,11 @@ impl Explosives {
             .iter()
             .filter(|f| !f.own || f.kind == ProjectileKind::Grenade)
             .filter_map(move |f| predict(f, now, sv_gravity * PROJECTILE_GRAVITY, floor))
+            .chain(self.own_grenades.iter().map(|g| Blast {
+                at: g.at,
+                radius: GRENADE_RADIUS,
+                kind: ProjectileKind::Grenade,
+            }))
     }
 
     /// A rocket seen flying at `me` passes this close; `None` when none comes near.
@@ -415,6 +477,39 @@ mod tests {
         assert_eq!(e.mines.len(), 1, "mines stay where they are");
         e.on_explosion(Vec3::new(10.0, 100.0, 0.0));
         assert!(e.mines.is_empty());
+    }
+
+    #[test]
+    fn its_own_grenade_is_kept_away_from_until_it_goes_off_seen_or_not() {
+        let mut e = Explosives::default();
+        e.thrown_grenade(Vec3::new(500.0, 0.0, 0.0), SimTime(4.0), SimTime(1.0), 800.0);
+        e.update(SimTime(2.0));
+        let blasts: Vec<Blast> = e.blasts(SimTime(2.0), 800.0, 0.0).collect();
+        assert_eq!(blasts.len(), 1);
+        assert_eq!(blasts[0].at, Vec3::new(500.0, 0.0, 0.0));
+        e.update(SimTime(4.5));
+        assert_eq!(e.blasts(SimTime(4.5), 800.0, 0.0).count(), 0, "gone off");
+        // One that met an edge and comes back is kept away from where it is seen going.
+        let mut e = Explosives::default();
+        e.thrown_grenade(Vec3::new(500.0, 0.0, 0.0), SimTime(4.0), SimTime(1.0), 800.0);
+        e.on_sighting(&seen(
+            ProjectileKind::Grenade,
+            40,
+            Vec3::new(150.0, 0.0, 30.0),
+            Vec3::new(-200.0, 0.0, 0.0),
+            true,
+            1.1,
+        ));
+        assert_eq!(e.own_grenades[0].at.x, 500.0, "still at the hand: nothing said");
+        e.on_sighting(&seen(
+            ProjectileKind::Grenade,
+            40,
+            Vec3::new(150.0, 0.0, 30.0),
+            Vec3::new(-200.0, 0.0, 0.0),
+            true,
+            1.5,
+        ));
+        assert!(e.own_grenades[0].at.x < 150.0, "{:?}", e.own_grenades[0].at);
     }
 
     #[test]

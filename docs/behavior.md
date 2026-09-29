@@ -105,8 +105,9 @@ one being seen about adds to it rather than starting over; a sound seen about is
 ## Backing off
 
 A retreating bot heads for cover from the nearest threat (see *Knowing the map*), or just away from it when the map
-has none within 4 s of running. There it stops and watches the way the threat would come, shooting at anyone in
-sight, until the retreat no longer wins.
+has none within 4 s of running. There it stops and watches the way the threat would come until the retreat no longer
+wins. Found there by an enemy in sight, it fights back from where it is (strafing, backing off when close, never
+closing in) instead of standing to take it, and goes back to the spot once the enemy is out of sight.
 
 ## Holding spots
 
@@ -131,6 +132,12 @@ away watches (a satchel flies some 200 units), throws two to four at it, and wat
 12–20 s, out of their blast, with the satchel radio in hand: they go off the moment an enemy is in their blast, and
 after 60–90 s with nobody by them. Trappers lay traps every 10–18 s; others at most every 20–30 s and rarely.
 
+With a satchel or more and nothing better to do (calm for 5 s, its satchels not out), any bot also lays one where an
+enemy is expected (the weight 0.45 × (0.6 + 0.2 × the style's `trap`), fading with the way there): where a lost enemy
+would come into view, else the busiest way into its sight. It goes up to within a throw of the spot, throws one or
+two there, then watches them crouched for 15–25 s from the nearest place 350–700 units off that sees them, the radio
+in hand. The charges stay after, and go off like any others.
+
 ## Moods
 
 Aggression and fear sway around the personality's own (at most 0.3 either way): an enemy in sight makes a bot bolder
@@ -144,15 +151,22 @@ Ten times a second the bot picks the enemy to fight: the nearest counts most. An
 counts more, and the current target keeps a bonus. Through the crossbow's scope the bot keeps to its target until the
 kill, or until the target has been out of sight for a second.
 
-**Weapon.** Every gun is scored by the damage per second it is expected to deal at the target's distance: the
-server's damage (BugfixedHL's `mp_dmg_*` cvars, their defaults elsewhere), the weapon's spread and the bot's own aim
-error, times how much the bot likes it: its style's likes (snipers favour the crossbow and the 357, rushers the
-shotgun and the MP5, controllers the big guns) and its personality's favourites (the first one ×1.2, the others ×1.1). Projectiles (rockets, crossbow bolts, hornet darts) also lose what a moving target can step aside from
-during their flight, and win back part of it with their blast. Outside a weapon's good range only a third counts.
-A weapon whose blast would reach the bot is not taken: no rocket under 450 units, no crossbow bolt under 160, no
-egon under 128. So the egon and the gauss lead up close, rockets and the zoomed crossbow far away, much as yapb's
-fixed order had it. When all guns are empty the bot reloads; with nothing left it takes the crowbar. Grenades,
-satchels, snarks and tripmines are not guns: see *Explosives*.
+**Weapon.** Every gun is scored by the damage per second it is expected to deal at the target's distance: the server's
+damage (BugfixedHL's `mp_dmg_*` cvars, their defaults elsewhere), the weapon's spread and the bot's own aim error,
+times how much the bot likes it: its style's likes (snipers favour the crossbow and the 357, rushers the shotgun and
+the MP5, controllers the big guns) and its personality's favourites (the first one ×1.2, the others ×1.1). Projectiles
+(rockets, crossbow bolts, hornet darts) also lose what a moving target can step aside from during their flight, and
+win back part of it with their blast. Outside a weapon's good range only a third counts. A weapon whose blast would
+reach the bot is not taken: no crossbow bolt under 160 units, no egon under 128, no rocket into its own blast's reach
+(300 units) unless the bot has health to spare: from 200 units with 80 health, from 250 with 60, taking up to 40 or 20
+of the blast. A rocket in the clip counts as ready to go (a shot takes 1.5 s, the reload 2 s more), so a bot with the
+RPG in hand fires it rather than switching away close by, and one without it takes the launcher up only 100 units
+beyond that least distance, which moves with the enemy's pace (not to switch back and forth at its edge). The egon
+and the gauss lead up close, rockets and the zoomed
+crossbow far away, much as yapb's fixed order had it. When all guns are empty the bot reloads; with nothing left it
+takes the crowbar. A gun the game will not draw after three tries (it has no ammo for it, whatever the bot believed)
+is left alone for 8 s: the bot fights on with the one in hand. Grenades, satchels, snarks and tripmines are not guns:
+see *Explosives*.
 
 **Secondary attack** where it pays:
 - the glock's rapid fire (held down, five shots a second in a cone ten times wider) where it lands more bullets a
@@ -189,16 +203,18 @@ the shot.
   - under 90 units: always;
   - under 128 units: within about 37°;
   - further away: within 8°, or within 26° when the enemy is looking at it.
-- Rockets wait until the view is right on the aim point; the egon's beam sweeps onto the target from 14° off.
+- Rockets wait until the view is on the aim point: within 5.7° far off, and closer by as far off as the blast makes
+  up for (80 units), up to 10°; the egon's beam sweeps onto the target from 14° off.
 - An explosive is not fired when it would burst close to the bot, looked at along the line it takes from where the
-  game launches it (a rocket leaves below and to the right of the eye): a rocket with a wall less than 450 units along
-  it, a bolt with one under 160, the egon's beam end under 128, and a rocket or a bolt with someone else standing near
-  the first 350 units of it. An MP5 grenade's arc is looked along again from where the bot is when it fires, and the
+  game launches it (a rocket leaves below and to the right of the eye): a rocket with a wall closer along it than it
+  may be fired (200–300 units, as above), a bolt with one under 160, the egon's beam end under 128, and a rocket or a
+  bolt with someone else standing near the first 350 units of it. An MP5 grenade's arc is looked along again from where the bot is when it fires, and the
   shot is called off if a wall, a player or the target itself (closer than 300 units) came in the way.
 - Automatic weapons are held down. Others are clicked, with a pause from `semi_auto_delay`.
 - After a weapon switch it waits for the game to confirm it and 0.5 s more for the deploy.
 - **Rockets are guided:** the RPG's rocket follows the laser spot, which is where the bot looks, so after a shot the
-  view stays on the target until the rocket gets there (6 s at most): on the target it was fired at, and only while
+  view stays on the target until the rocket should get there, and 0.4 s more (6 s at most; the rocket crawls at 250
+  units/s for its first 0.4 s): on the target it was fired at, and only while
   that stays 450 units away or more (a new target close by, or this one come close, would bring the rocket back);
   otherwise on the point it was fired at. While its rocket or launched grenade is on the way, the bot does not close
   in on the target.
@@ -256,10 +272,16 @@ away (550 for a bot under 40 health), with nobody near the first stretch of the 
 - **Style.** Every 1–3 s the bot decides between strafing and standing still. Closer than 768 units it strafes.
   Further away it stands with the skill's `stay_mid` / `stay_far` chance (not while closing in).
 - **Strafe side.** It strafes away from the side the enemy aims at, swaps sides now and then, and turns around at
-  walls.
+  walls. With walls close on both sides it strafes toward the farther one, stopping short of it; only in a corridor
+  too narrow for that does it go back and forth instead (unskilled bots used to stand still there).
 - **Distance.** Otherwise skilled bots drift in when strong and back off when weak. All bots back off under 96 units
   and while reloading. With the crowbar they charge.
-- **Extras.** Crouch taps and dodge jumps come with skill.
+- **Stuck.** A move on the ground that hardly gets anywhere for a third of a second (a box the wall checks pass over,
+  a player, the wall behind a ledge it turned from) is backed out of for 0.3 s, and the strafe goes the other way.
+  A bot keeping away from the enemy (its own blast on the way, a reload) backs out aside, never toward it.
+- **Extras.** Crouch taps and dodge jumps come with skill; from hard up a bot with the module dodges by a long jump
+  aside instead of a hop.
+- **Long jump at the enemy** when closing in (with the module; see *Tricks*).
 - **Ledges.** A move that would drop off a ledge is reversed.
 
 Whatever the goal, an enemy in sight is shot at: a bot running for health or backing off fires back. When nothing
@@ -269,13 +291,23 @@ is in sight for 2 s, a low clip is reloaded, of the gun the bot would like in ha
 
 **Throws.** Three times a second a bot with grenades, satchels or snarks weighs a throw at the nearest enemy: one in
 sight, or one lost up to 3 s ago whose position is still known to within 400 units. Each kind that fits the distance
-has its chance per weighing: 0.5 for a grenade, 0.35 for satchels and 0.6 for snarks at an enemy out of sight, and
-0.12, 0.15 and 0.6 at one in sight. The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for
+has its chance per weighing: 0.9 for a grenade, 0.35 for satchels and 0.6 for snarks at an enemy out of sight, and
+0.9, 0.15 and 0.6 at one in sight. The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for
 experts) and the style's liking for throws, a little more for bold bots and a little less for careful ones, is the
-chance to throw at all (0.9 at most); which kind goes is drawn as likely as its own chance. After a throw the next is
-weighed 3–6 s later, after snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the crowbar,
-throws are the weapon: twice as likely, and grenades from 220 units (yapb's grenade war).
-- **Hand grenade**, 300–800 units away: the throw is solved for the target with the game's own rule (the view's pitch
+chance to throw at all (0.95 at most); which kind goes is drawn as likely as its own chance. So a grenade that fits is
+thrown almost always. After a grenade the next throw is weighed about a second later, after satchels 3–6 s later,
+after snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the crowbar, throws are the weapon:
+twice as likely, and grenades from 220 units (yapb's grenade war).
+- **Grenades with no enemy known.** Now and then (a chance of 0.03 per weighing, times `throw_rate` and the style's
+  liking: about every 10 s for a normal bot) one goes where an enemy is expected, 350–1000 units away and up to 48
+  units off the spot: where a lost enemy would come into view, else a sound heard in the last 4 s, else the busiest
+  place in sight at the edge of what the bot sees (a doorway, a corner: where players come into view from). Cooked,
+  so it goes off soon after landing.
+- **A series** (skills with `throw_series`: hard and expert). Once a grenade goes, the rest follow one after another,
+  0.3 s after each other as the game hands over the next grenade, at the enemy or where one is expected, until none
+  is left; the grenade stays in hand between them. An enemy in sight within 250 units ends the series for the gun, as
+  does a grenade that finds nowhere to go.
+- **Hand grenade**, 300–1000 units away: the throw is solved for the target with the game's own rule (the view's pitch
   sets the throw's angle and speed, the bot's own velocity is added) and checked for walls along the arc; its blast
   must land 300 units or more from the bot. The bot pulls the pin (holds the primary attack; the game's own clock
   tells when the pin came out), cooks it so it goes off soon after landing, turns to the throw, stops for the last
@@ -284,7 +316,8 @@ throws are the weapon: twice as likely, and grenades from 220 units (yapb's gren
 - **A pile of satchels**, 150–400 units away with a clear line to the spot, at an enemy out of sight or one in sight
   coming this way: two to four of them (as many as the bot carries) thrown one after another at the spot, as fast as
   the game allows (a second apart); then the bot backs off out of their blast.
-- **A satchel from a jump**, at an enemy in sight 350–550 units away: the bot runs at the enemy, jumps and throws it a
+- **A satchel from a jump** (a trick: skills from normal up, as often as the style likes it; the balanced style's
+  0.4 is the base chance), at an enemy in sight 350–550 units away: the bot runs at the enemy, jumps and throws it a
   moment after its feet leave the ground, so the run and the jump's lift carry it on. The satchel radio stays in
   hand, and the satchel goes off as it comes within 150 units of the enemy (the game lets the radio work half a
   second after a throw), like a grenade that goes off when told. Rather than let it pass, a bot with 70 health or
@@ -331,7 +364,10 @@ enemy's mine ahead of a quiet bot is shot to clear the way. Shooting a mine cred
 
 **Dodging.** A grenade the bot sees coming down near it (its own too), an MP5 grenade about to land, a rocket passing
 within 160 units or an enemy satchel lying close make it run from the blast for half a second (away from it: yapb's
-sign was wrong), checking the ground for ledges and taking a side when straight away is a drop.
+sign was wrong), checking the ground for ledges and taking a side when straight away is a drop. It does not walk into
+one either: any move that would take it deeper into the reach of a grenade about to go off (its own above all, thrown
+where it goes next to look for the enemy) or of where its own rocket in flight is going keeps only its part along the
+edge, whatever asked for it (a path, a fight, an item), until it has gone off.
 
 **Snarks.** Someone else's snark within 300 units, or the bot's own coming back at it within 250 (a snark bites its
 owner too), is run from: shooting at a small hopping snark wastes time, a bot on the run outpaces it, and its life is
@@ -357,13 +393,96 @@ In a game, the bots check the satchel buttons as they use them, and what one bot
 
 What was found is kept over map changes; `lb compat` shows the buttons, where they come from and who checked them.
 
+## Tricks
+
+How often a bot does each trick is up to its style (`tricks` in `config/styles/*.yaml`, chances 0..1), whether it
+does the fighting ones at all is up to its skill (the difficulty's `tricks` switch: from the normal preset, skill 50,
+up; between presets a switch keeps the lower one's value), and the server can turn each off (`tricks` in
+`config/lambdabots.yaml`).
+
+| Style      | Long jumps on the way | Long jumps in a fight | Gauss jump on the way | Satchel from a jump |
+|------------|-----------------------|-----------------------|-----------------------|---------------------|
+| balanced   | 0.8                   | 0.6                   | 0.33                  | 0.4                 |
+| rusher     | 0.8                   | 1.0                   | 0.33                  | 0.6                 |
+| sniper     | 0.8                   | 0.6                   | 0.33                  | 0.2                 |
+| controller | 1.0                   | 0.6                   | 0.5                   | 0.4                 |
+| trapper    | 0.8                   | 0.6                   | 0.33                  | 0.7                 |
+
+Long jumps go by skill as well, the way good players get about by them whenever they have the module. How readily a
+bot takes one is the difficulty's `longjump` times its style's liking against a balanced bot's (the long jump columns
+over 0.8 and 0.6), no more than 1: a controller takes them on the way 1.25 times as readily, a rusher in a fight 1.67
+times. From hard up the long jumps on the way are bold (`longjump_bold`) and the bot dodges by long jumps in a fight
+(`longjump_dodge`).
+
+| Skill  | Long jumps taken (balanced) | Bold, to dodge |
+|--------|-----------------------------|----------------|
+| noob   | 15%                         | no             |
+| easy   | 35%                         | no             |
+| normal | 60%                         | no             |
+| hard   | 90%                         | yes            |
+| expert | 100%                        | yes            |
+
+- **What navigation may do** is told every frame (`NavService::set_tricks`):
+  - long jump links, with the module (any skill);
+  - long jumps along the way, as readily as the bot takes them: a roll every 8–12 s. Along straight, level
+    stretches; bold ones also round corners, down drops, over short stretches and one after another, and with more
+    than 60 health onto a landing that hurts, as long as 40 are left (see `docs/navigation.md`);
+  - gauss boost links, for styles that gauss-jump, with 40 uranium, when a boost can be made now: the skill does
+    tricks, the gauss is allowed and there are 16 uranium for a full charge, 60 health, no enemy seen for 2 s, out of
+    the water.
+- **A long jump at the enemy** fought, with the module, when the bot closes in: the weapon in hand does poorly this
+  far off (see *Fighting*), or it is the crowbar (then also on the way there). At an enemy in sight 300–900 units away
+  (bold: 250–1000), no more than 64 below or 40 above, the will to close in (health × aggression) of 20 at least, the
+  view on it (within 18° across, no more than 15° up or down), moving, no weapon protocol running, not reloading and
+  no rocket of its own on the way. Every half second (bold: a quarter) the chance is rolled; the flight, followed
+  through the server's traces from where the bot is, must come down on a floor (or in water) without fall damage, out
+  of lava and slime, and nearer the enemy, and no snark (the bot's own or anyone's) may have been seen in the last
+  second within 300 units of the bot, the enemy or the landing: they bite whoever comes down among them.
+  Then 0.9–1.4 s (bold: 0.4–0.7 s) before the next. The keys are pressed for 0.15 s (the motor lets go of duck for a
+  command first when it is held); the aim and the shots go on in the air. yapb leaped at 400–750 units with a will of
+  30.
+- **A long jump to dodge**, from hard up with the module: instead of a dodge jump (see *Fighting*), a long jump aside
+  the way the bot strafes, turned 40° from straight aside toward the enemy when it closes in, 30° away when it backs
+  off, 20° toward otherwise; the other side when that one lands no good. Away from a blast about to go off (see
+  *Explosives*) the same way, along the way it runs. The landing, followed through the server's traces, comes down
+  safely: aside 128 units from the enemy at least, and when not closing in 200 at least and no more than 400 further off
+  than now; away from a blast 150 further from it. The chance is the one of long jumps in a fight. The view turns along
+  the jump (`Protocol` priority, half a second at most), the bot runs that way and the keys go on the ground; in the air
+  no key brakes the flight and the legs stay tucked, while the view goes back to the enemy. Not while a traversal of the
+  way has the stance (a long jump taking off, a flight).
+- **In the air** on any long jump or boost the movement keys alone steer the flight, so the view is free: a bot that
+  sees an enemy aims and shoots at it, one that does not looks along the way on from the landing, lined up for the
+  next long jump.
+- **A gauss jump on the way** somewhere more than 1400 units or 12 nodes off (any goal but a fight), with the gauss
+  in hand and ready, 30 uranium and 60 health, no enemy about, on the ground: every 10–18 s the style's chance is
+  rolled (4–6 s when the destination is near), and navigation looks for a boost that lands nearer the goal
+  (`docs/navigation.md`).
+- **The boost itself** (`GaussBoost` protocol, `Protocol` priority): when navigation stands at a boost's takeoff and
+  asks for it, and no other protocol runs, the bot draws the gauss, charges it 1.6 s (a full charge), turns back and
+  down to the boost's view (2° close, or on after 1.2 s more), jumps and lets the charge go as it leaves the ground
+  (at the latest 0.25 s after the jump), then holds the view for the 0.2 s the game takes to fire. The weapon, the
+  look, the movement and the jump are the protocol's all the while, so a fight that starts does not fire the charge
+  the wrong way: an enemy in sight ends the boost before the jump (navigation stops asking), and the charge already
+  building goes on in the gauss's own protocol, held ready for the enemy or dumped safely. The gauss's own charges
+  wait while a boost runs.
+- **Dumping a charge** (any, not only a boost's) goes straight up, the recoil pressing the bot to the floor, when no
+  level way is clear of the beam's burst on the nearest wall and the sky or a high ceiling is farther than every
+  wall around.
+
+`lb brain` shows each bot's tricks: whether it has the module, how readily it takes long jumps on the way and in a
+fight and whether they are bold and dodge, what navigation may do (and the fall damage a long jump on the way may
+take), its uranium, why the last look for a gauss jump came to nothing, how the tricks that left the ground went
+(landed where they should or not, by kind), the long jumps at enemies and to dodge, the gauss jumps found and the
+boosts started and fired. `lb stats` sums them over the bots since the last reset. A missed trick is logged with
+where it left the ground, how fast, and where it came down.
+
 ## Priorities
 
 Behavior asks for what it wants on five channels (look, movement, stance, weapon, use key), and the highest
 priority on each wins:
-- **Traversal (90):** jumps and ladders on the path.
-- **Protocol (85):** a weapon's own sequence: a charging gauss, a pulled pin, a throw, a mine placed, satchels set
-  off, a rocket guided. A shot at an enemy never breaks it.
+- **Traversal (90):** jumps, long jumps, boost flights and ladders on the path.
+- **Protocol (85):** a weapon's own sequence: a charging gauss, a gauss boost, a pulled pin, a throw, a mine placed,
+  satchels set off, a rocket guided; a long jump to dodge. A shot at an enemy never breaks it.
 - **Threat (70):** aiming and firing at an enemy in sight, turning toward damage, dodging a blast.
 - **Goal (50):** the goal's movement.
 - **Optional (20):** looking along the path and glancing at sounds.
@@ -404,8 +523,25 @@ priority on each wins:
 - the target and the weapon choice;
 - the weapon protocols: what runs now, throws, launched grenades, mines, detonations, gauss charges fired and dumped,
   dodges, and failures by reason;
+- the tricks (see *Tricks*);
 - which priority owns each channel;
-- reaction times: from the first glimpse of an enemy, and from recognizing it, to the first shot at it.
+- reaction times: from the first glimpse of an enemy, and from recognizing it, to the first shot at it;
+- its stalls (below).
+
+**Stalls.** The server watches every bot for seeming stuck, for the log (`stall:` in `logs/lambdabots.*.log`), `lb
+brain` and `lb stats`; it looks at where every player really is, which the bots never do, and nothing of it reaches
+their decisions:
+- an enemy within 500 units, 30° or less off the bot's view (inside the scope when zoomed) and in its line of sight
+  with no other player in between, that the bot has not seen for 0.6 s: why (still recognizing it, with the evidence
+  so far; no contact at all; recognized but not believed in sight);
+- an enemy in sight the bot neither shoots nor throws at for a second (longer for a slow gun: its cycle, a click's
+  pause, and the reload of a one-round clip): why it held fire over the last 5 s, each reason with its time, with the
+  weapon in hand and the one chosen. The fight's own reasons come first (its weapon not out yet, the game refusing
+  to draw it, reloading, the aim not on it, a blast that would reach it, the scope, the gauss charging); with none,
+  who has the weapon channel (a weapon protocol, a traversal) or why the trigger stayed off though the fight asked
+  for it (the switch still going, the weapon deploying, between clicks);
+- standing still for 2 s: the goal or weapon protocol, who asked for the movement and whether the way it asked for is
+  open, a step up or blocked (by a player, the world or a brush entity), what navigation does, the target.
 
 `lb map [spots|mines|danger]` prints what the bots know of the map: how many places see each other, the chokepoints,
 the spots to hold, the walls for tripmines and where the bots got hurt most.
@@ -420,6 +556,9 @@ For weapon tests on a stand server started with `sv_cheats 1`:
 - `lb stats [reset]` counts, per weapon, the rounds fired and the damage they did by distance (the hit rate):
   bullets are credited to the bot standing where the damage came from, bolts, rockets, grenades, satchels, mines,
   snarks and hornets to whoever threw or fired the one seen there. The crossbow's zoomed shots and the MP5's grenades
-  have rows of their own. It also counts what the bots' own explosives did to them, and kills and suicides from the
-  kill feed.
+  have rows of their own. It also counts what the bots' own explosives did to them, kills and suicides from the kill
+  feed, the tricks, and the stalls by cause.
 - `lb selftest` checks the game DLL's weapon rules with one bot while the others stand still.
+- `lb items <item>…` hands items out on every spawn (`lb items longjump`; `lb items none` stops it).
+  `scripts/stand/tricks-scenarios.sh` runs the tricks this way (the long jump module with the map's weapons, the
+  gauss alone, both, and the map's weapons alone as the control), with hard bots.

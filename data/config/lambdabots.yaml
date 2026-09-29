@@ -79,6 +79,17 @@ logging:
 game:
   dll: auto
 
+# Tricks the bots may use; how often each happens is up to a bot's style and skill (beginners leave all but the
+# long jumps on the way alone). longjump: with the module, long jumps across gaps, along straight stretches of the
+# way and at enemies; gauss_jump: gauss jumps on the way somewhere far, the gauss in hand; gauss_boost: the gauss
+# boost links of the navigation graph, onto ledges and across; satchel_jump: satchels thrown from a jump and set off
+# in flight.
+tricks:
+  longjump: true
+  gauss_jump: true
+  gauss_boost: true
+  satchel_jump: true
+
 gungame:
   mode: auto              # auto | on | off
   detect_cvar: gg_enabled

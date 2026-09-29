@@ -1,9 +1,11 @@
-# M4 acceptance: the arsenal (M4.1), knowledge, goals and styles (M4.2)
+# M4 acceptance: the arsenal (M4.1), knowledge, goals and styles (M4.2), tricks (M4.3)
 
-State as of 2026-09-28, after sub-stages M4.1, the arsenal, and M4.2, knowledge, goals and styles. Still to come:
-the tricks (M4.3) and the M4 acceptance runs. Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS + hlsdk-portable,
-macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61); the feedback round after M4.2 ran on dm_snow, a
-small map where a run takes a minute or two. The ReHLDS server with BugfixedHL has run neither sub-stage yet.
+State as of 2026-09-29, after sub-stages M4.1, the arsenal, M4.2, knowledge, goals and styles, and M4.3, the tricks,
+with long jumps by skill after its feedback.
+Still to come: the M4 acceptance runs (the 60-minute soak). Test stand: Xash3D FWGS 0.21 (arm64) + Metamod-FWGS +
+hlsdk-portable, macOS, crossfire at 1000 fps, bots of the normal preset (skill 43–61); the feedback round after M4.2
+and the tricks ran on dm_snow, a small map where a run takes a minute or two, and stalkyard. The ReHLDS server with
+BugfixedHL has run none of the sub-stages yet.
 
 ## Results against the plan's criteria
 
@@ -14,7 +16,8 @@ small map where a run takes a minute or two. The ReHLDS server with BugfixedHL h
 | Accuracy tables                          | yes    | `lb stats`: hit rate by distance for every weapon and fire mode             |
 | The game DLL's weapon rules              | partly | `lb selftest` on hlsdk-portable; the classic SDK in tests, not run live     |
 | Target switches ≤ 6 a minute             | yes    | M4.2's last mixed game: 1.2–3.3 a minute a bot (7.8 before the fix below)   |
-| Tricks, the 60-minute run                | later  | M4.3 and the M4 acceptance runs                                             |
+| Tricks succeed in ≥ 90% of scenarios     | yes    | long jumps 41/42 and boosts 349/352 offline, 52/52 boosts live; see M4.3    |
+| The 60-minute run                        | later  | the M4 acceptance runs                                                      |
 
 The plan leaves the limit on deaths by own hand open. Here it is set at one per bot-hour in a mixed game. The mixed
 games of the day came to 0.75 and 1.5 a bot-hour (two grenades and one charged gauss shot), then 2.25 (three snarks,
@@ -378,6 +381,274 @@ personalities are drawn afresh for each game; nobody picked up snarks or grenade
 - **A wider snark barrage** (300 units, 40 health) turned the swarms on their owners: 19 deaths by own hand in a snark
   set. Back to 200 units and 50 health.
 
+## Tricks (M4.3)
+
+What the bots do and how is in `docs/behavior.md` (*Tricks*) and `docs/navigation.md` (*Long jumps and gauss
+boosts*). The owner's choices for this sub-stage:
+- **Long jump:** links across gaps in the graph (only for a bot with the module), and long jumps along straight
+  stretches of the way for speed, as yapb did, the landing checked by following the flight.
+- **Gauss jump:** on the way somewhere far (the gauss in hand, as yapb), and gauss boost links in the graph onto
+  ledges and across (the bot draws the gauss for one).
+- **Long jump at the enemy:** wider and more often than yapb: 300–900 units, a will to close in of 20.
+- **Skill and styles** as the plan says: from the normal preset up (long jumps on the way for everyone), with the
+  styles' chances; the satchel from a jump goes by the same switch.
+- **Health:** 60 to start a gauss jump, 40 left after its landing.
+- **Switches:** `tricks` in `config/lambdabots.yaml` (`longjump`, `gauss_jump`, `gauss_boost`, `satchel_jump`).
+- **Stand:** dm_snow with the module and the gauss given on spawn, plus the offline courses.
+
+**The graphs.** Long jump links are made only where every takeoff of the check lands (a long jump near its full reach
+falls short when it takes off a little early): dm_snow has 1, crossfire 3, stalkyard 8. Gauss boosts go onto ledges
+the graph reaches only by a way at least 1.3 times as costly: dm_snow 248 (its snowy rises are 88–192 units high),
+crossfire 68, stalkyard 74. Both stages together take 90–120 ms of the generator's time on these maps (crossfire in
+0.46 s all told).
+
+**Offline** (`generated_course`, 12 standard maps, the bot with the module and a gauss; `obstacles`):
+
+| Traversal                          | Result                                                          |
+|------------------------------------|-----------------------------------------------------------------|
+| long jump links                    | 41/42 (bounce: one lands short)                                 |
+| gauss boost links                  | 349/352                                                         |
+| a long jump across a gap           | made with the module; without it the bot goes round             |
+| a gauss boost onto a 200-unit rise | made; without the gun there is no way                           |
+| long jumps along a straight run    | 1800 units 15% faster at least than running                     |
+| a gauss jump over a wall           | lands off the path nearer the goal, the way on is planned again |
+
+**Live `lb nav test`** (one hard bot, the module and the gauss given, health and uranium topped up before each link):
+
+| Map       | Links           | Result                                                                          |
+|-----------|-----------------|---------------------------------------------------------------------------------|
+| dm_snow   | 40 gauss boosts | 40/40, 3.0 s each                                                               |
+| stalkyard | 20 gauss boosts | 12/12; 8 entries not reached (the way there fails on the map's jumps)           |
+| stalkyard | 8 long jumps    | 6/7, 1 entry not reached; the failure (a run-up start a step below) fixed after |
+| dm_snow   | 2 long jumps    | 1/2 before the run-up was reworked (see below)                                  |
+
+**Live games on dm_snow**, 8 hard bots (a normal bot below skill 50 does no fighting tricks), 150 s a set
+(`scripts/stand/tricks-scenarios.sh`; `longjump`: the module and the map's weapons; `plain`: the same without the
+module):
+
+| Set                       | Kills | Deaths by own hand | Long jumps on the way landed | Long jumps at enemies |
+|---------------------------|-------|--------------------|------------------------------|-----------------------|
+| longjump                  | 93    | 0                  | 25/26                        | 278                   |
+| plain                     | 102   | 0                  | —                            | —                     |
+| longjump                  | 93    | 0                  | 24/26                        | 254                   |
+| plain                     | 90    | 1                  | —                            | —                     |
+| longjump, snark rule      | 73    | 0                  | 25/25                        | 249                   |
+| both (module, gauss only) | 121   | 0                  | 23/27                        | 145                   |
+
+The long jumps that missed left the ground at full speed and were stopped in the air: by another bot in the way or,
+in the gauss set, by the knock of a gauss hit. With the gauss alone and 8 bots, boosts hardly happen: the uranium
+goes on the fight (a boost link wants 40, a gauss jump 30) and there are never two calm seconds; with one bot
+alone the gauss jump on the way came 1 of 1 landed, and in the `both` set one was started and called off when an
+enemy came into sight (its charge was held on for the enemy).
+
+**A mixed game** on dm_snow, 5 minutes, 8 normal bots, no cheats (dm_snow has no long jump module, so the tricks there
+are the gauss's), the build before M4.3 and after it:
+
+| In the game                                        | Before | After  |
+|----------------------------------------------------|--------|--------|
+| Kills a minute                                     | 24.0   | 23.4   |
+| Deaths by own hand                                 | 0      | 0      |
+| Share of the time a bot stood still, out of fights | 16%    | 13%    |
+| Share of the time a bot stood still, in fights     | 10%    | 7%     |
+| Core time p99                                      | 158 µs | 179 µs |
+
+### Found on the stand and fixed
+
+- **A long jump link's bot walked off the ledge** while its view was still turning to the landing (the entry is
+  often at the edge), or took off from a floor below the entry into the ledge's wall: 51/83 links offline. Now it
+  stops at the start of the run-up behind the takeoff (only as far back as there is floor), turns there, runs and
+  takes off within the window the check tried, on the entry's floor; a link is made only when every takeoff of the
+  check lands: 41/42.
+- **A trick's flight was lost** when the goal changed in the air (the path was replaced) or a fight began (nobody
+  steered): it is flown to its end now whatever the brain does.
+- **A gauss jump on the way was hardly ever found**: its landing had to be by a node of the path, and paths bend.
+  Now any node along the flight's line the planner reckons two seconds nearer the goal will do; the way on is planned
+  again after the landing.
+- **A dumped charge killed its bot**: no level way was clear of the beam's burst on a wall (372 units off, the burst
+  reaching 382). A dump goes straight up now when the sky or a high ceiling is farther than every wall around.
+- **Snarks and leaps**: a leap at the enemy is not taken with a snark seen by the bot, the enemy or the landing.
+- **Giving every weapon and its ammo** on every spawn filled dm_snow with ammo the bots could not take until the
+  server ran out of entities; the trick sets use the map's weapons.
+
+## Long jumps by skill (feedback after M4.3)
+
+The owner's feedback: skilled bots long jumped too rarely; at the high levels they should long jump on straight
+stretches almost always, on the way and at enemies, as good players get about by long jumps whenever they have the
+module. On the stand a hard bot long jumped along its way about once in 46 seconds. The owner's choices:
+- **A smooth scale:** a skill parameter `longjump` (noob 0.15, easy 0.35, normal 0.6, hard 0.9, expert 1.0), times
+  the style's liking against a balanced bot's.
+- **Bold long jumps on the way** from hard up: one after another, round corners, down drops, over short stretches
+  (250–400 units), and onto a landing that hurts with more than 60 health (40 left after it).
+- **In a fight:** at the enemy when closing in, and to dodge (aside or away, the view back on the enemy in the air).
+
+What held long jumps on the way back: a roll of the style's chance every 8–12 s, a look every half second and 1.1 s
+between long jumps, and a straight stretch whose every leg ran within 20° of the jump; the first leg, from the bot to
+the next node, often did not. The stretch is now a corridor (the nodes within 24 units of the jump's line), and bold
+long jumps look every 0.05 s for the node furthest along the path the flight comes down on (`docs/navigation.md`).
+
+**Offline** (`longjumps`, 60 routes a map between random places at least 1000 units apart by the way, a bot without the
+module, with long jumps (not bold) and with bold ones; long jumps a minute of the way, the share of the time in the
+air, the route's time against running):
+
+| Map       | Before: a minute | Not bold: a minute, time | Bold: a minute, in the air, time | Bold: missed |
+|-----------|------------------|--------------------------|----------------------------------|--------------|
+| dm_snow   | 11.2             | 11.0, 89%                | 29.5, 43%, 86%                   | 0/194        |
+| crossfire | 3.5              | 4.2, 97%                 | 17.9, 27%, 88%                   | 2/189        |
+| stalkyard | 2.0              | 4.1, 96%                 | 17.4, 25%, 88%                   | 8/182        |
+| datacore  | —                | 5.9, 95%                 | 24.1, 37%, 87%                   | 4/264        |
+| frenzy    | —                | 10.0, 92%                | 29.7, 43%, 84%                   | 1/240        |
+
+A long jump flies about 0.8 s whatever its length (its rise is fixed), so a short one saves nothing over running; the
+time saved comes from the long ones and from lining up quickly: 0.04–0.09 s from the check to the takeoff.
+
+**Live games on dm_snow**, 8 bots, the module and the map's weapons, 150 s a set (`tricks-scenarios.sh --difficulty`;
+`lb_difficulty hard` lets in skills 63–87, of which only 75 and up long jump boldly and dodge):
+
+| Set               | Kills | Deaths by own hand | Long jumps on the way | At enemies | To dodge |
+|-------------------|-------|--------------------|-----------------------|------------|----------|
+| M4.3, hard        | 73–93 | 0                  | 25/26                 | 249–278    | —        |
+| hard              | 73    | 1 (a rocket)       | 64/65                 | 57         | 88       |
+| hard, no module   | 84    | 0                  | —                     | —          | —        |
+| expert            | 93    | 0                  | 109/112               | 46         | 277      |
+| expert, no module | 122   | 0                  | —                     | —          | —        |
+
+A bold hard bot long jumped along its way 12–19 times in 150 s and dodged by a long jump 19–26 times, one below hard
+1–3 times; an expert 10–20 times and 29–49. Fewer long jumps at enemies than before: a bot now leaps only when it
+closes in (the weapon in hand does poorly this far off), not with a gun that does well where it is. With every bot
+long jumping the games have fewer kills: a bot in the air is harder to hit, and one turning to dodge does not shoot.
+
+Whether dodging by long jumps pays was checked head to head: 8 expert bots of one style and the same traits, all with
+the module and bold long jumps on the way, four of them with `longjump_dodge` off in their personality's overrides,
+10.5 minutes on dm_snow (kills and deaths from the server's log):
+
+| Bots        | Long jumps on the way (a bot) | To dodge (a bot) | Kills | Deaths | Kills a death |
+|-------------|-------------------------------|------------------|-------|--------|---------------|
+| dodging     | 31–42 in the first 5.5 min    | 77–99            | 230   | 228    | 1.01          |
+| not dodging | 19–35 in the first 5.5 min    | 0                | 258   | 260    | 0.99          |
+
+Even: a bot dodging by long jumps dies about 12% less and kills about 11% less (it does not shoot while its view turns
+along the jump). After the first 5.5 minutes the dodging bots were ahead, 1.11 to 0.92; the second half evened it out.
+
+### Found on the stand and fixed
+
+- **A long jump along the way that took off late overshot a near landing** or met what the flight had cleared from
+  where the check stood (the takeoff was allowed 128 units on): 5–7% of bold long jumps missed offline. It takes off
+  within 32 units of the check and 10 of its line now, or not at all; the view may be 10° off the landing (the air
+  kills the speed across in a few hundredths of a second), and in the air it turns along the way on, lined up for the
+  next one: lining up went from 0.27 s to under 0.1 s.
+- **Doorways threaded with a few units to spare** were missed by a takeoff a little off the line: the flight must have
+  8 units on either side now.
+- **A long jump onto the start of a ladder or a jump** of the path left its executor a bot coming in at speed: those
+  nodes are no landings.
+- **Lava and slime under a landing** went unseen: the check looked for them at a standing player's feet, 18 units into
+  the floor under a bot that comes down ducked (the leaps at enemies had the same fault).
+- **`lb stats` counted the tricks since a reset against the sums of the bots there then**: after bots were kicked and
+  others joined, 28 dodges showed instead of some 350. Each bot's are counted from its own at the reset now.
+
+## Grenades, rockets and sight (feedback after M4.3)
+
+The owner's feedback: bots at times look stuck: one with a grenade stands or walks with an enemy right in front and
+throws nothing; rockets are fired too carefully, not at an enemy close by though out of the blast; bots now and
+then do not see an enemy right in front of them, maybe decisions in conflict. Grenades should go much more often, at
+the high levels all of them in a row, and with no enemy chosen too, where one is expected; satchels the same way.
+The owner's choices:
+- **Grenades:** almost always when a throw fits (it lands there and the blast spares the bot), about a second apart;
+  hard and expert throw them all in a series (an enemy in sight within 250 units ends it); with no enemy known,
+  where one is expected (where a lost one would come into view, a sound heard, the busiest way into sight), a little
+  off the spot.
+- **Satchels:** thrown where an enemy is expected, watched from cover nearby with the radio up, set off when one
+  comes by; after 15–25 s the bot moves on and the charges stay.
+- **Rockets:** from 200 units, taking up to 40 of the blast with 80 health.
+- **Sight:** an enemy within some 500 units in the middle of the view recognized 3–4 times sooner, standing or ducked
+  as noticeable as running.
+
+**The stall watch** (new, `lb stats`, `lb brain`, `stall:` in the log) looked at a normal game first: dm_snow, 8
+normal bots, the map's weapons, 5 minutes (40 bot-minutes). It uses where every player really is, for the log only.
+Games differ by who joins: a fearful lot hides more and kills less (20–21 kills a minute with 14–17 stands in cover,
+23–25 with 1–10), so the counts below are two games of one lot.
+
+| Stall                                      | Before    | After (two games)  | What is left                                        |
+|--------------------------------------------|-----------|--------------------|-----------------------------------------------------|
+| An enemy close in front not seen for 0.6 s | 26, 19 s  | 2, 1.4 s; 0        | still recognizing it                                |
+| A target in sight not fought for a second  | 88, 169 s | 41, 68 s; 41, 79 s | reloading with every gun empty (half), aim, deploys |
+| Standing still for 2 s                     | 16, 56 s  | 18, 53 s; 14, 43 s | hiding in cover with nobody in sight (all but one)  |
+
+What it showed and what was done:
+- **A weapon the game would not draw.** A bot believing its gauss loaded (the uranium not known) chose it; the game
+  refused the switch (no ammo), the motor tried three times and then neither switched nor fired: the bot held its
+  MP5 at an enemy in sight and did nothing, again and again. A weapon refused after three tries is now left alone
+  for 8 s and the bot fights with the one in hand: 13 such stalls (43 s) came down to 1.
+- **The aim with a throwable in hand** waited for the gun to come out, so after every throw the bot looked
+  elsewhere for half a second or more. It stays on the enemy now (a throw's own look still comes first).
+- **Recognition close by** took 1–2 s for a normal bot at an enemy standing 200 units in front (3.3 s ducked, up to
+  4 s at the edge of the view); now 0.15–0.3 s (see `docs/perception.md`).
+- **No look at all.** The few enemies close in front left unseen had no contact at all: a look's 12 traces went to
+  players already noticed (up to six each), and one stepping out close by waited behind them (at hard a look left
+  0.15–0.37 players out on average). A player in view not in contact yet now gets three traces on top of the 12.
+- **Pressed against a wall in a fight.** The strafe looks for walls with a line at chest height; a box lower than
+  that, a player, or the wall behind a ledge the move had turned from held the bot where it stood for seconds (the
+  watch's probe: the strafe asked 270 units/s, "the world in the way 0 units ahead"). A move on the ground that gets
+  under a quarter of its speed for a third of a second is now backed out of, and the strafe turned.
+- **Standing in corridors.** With walls within 134 units on both sides an unskilled bot stood still in a fight
+  (yapb's rule); it now strafes toward the farther wall while there is room, and only in a narrow corridor goes
+  back and forth instead.
+- **Standing in a cover it was found in.** A retreating bot at its cover stood still with an enemy 80 units off; it
+  now fights back from there (strafing, backing off, never closing in) and goes back to the spot once the enemy is
+  out of sight.
+- **The launcher and the MP5 in turn.** Near the least distance for a rocket, which moves with the enemy's pace, the
+  bot switched between the two, half a second's deploy each time; the launcher is taken up again only 100 units over
+  it.
+- **"The weapon channel is someone else's"** turned out to be weapon deploys and the pause between clicks; the watch
+  now tells the motor's reason, and no longer counts an enemy behind another player or outside a zoomed scope as
+  unseen.
+
+**Weapon sets** (`weapon-scenarios.sh`, dm_snow, 8 bots, the weapon and the MP5 given on spawn, 150 s; the build
+before this round, the first cut of it, and the last run of each set with the fixes below; two runs of rockets at
+hard):
+
+| Set                     | Before: thrown, damage, own, suicides | First cut         | Now                                |
+|-------------------------|---------------------------------------|-------------------|------------------------------------|
+| grenades, normal        | 71, 791, 130, 2                       | 272, 1738, 68, 1  | 273, 1616, 89, 0                   |
+| grenades, hard (series) | —                                     | 289, 2032, 250, 3 | 266, 1766, 31, 0                   |
+| rockets, normal         | 53, 2039, 72, 1                       | 109, 4092, 663, 3 | 109, 3857, 125, 1                  |
+| rockets, hard           | —                                     | —                 | 106, 4640, 0, 0; 101, 3900, 121, 0 |
+| satchels, normal        | 113, 1724, 439, 4                     | 106, 1088, 313, 3 | 100, 1066, 195, 0                  |
+
+The grenade sets kill less than before (61 kills against 91 at normal): a grenade thrown almost every time one fits
+takes the MP5 out of the bot's hands for a second or so each time. Satchels hurt their throwers less than half as
+much as before, and none killed its thrower.
+
+### Found on the stand and fixed
+
+- **Rockets at close range hurt their shooters nine times as much** in the first cut (663 against 72): a rocket
+  flies 250 units/s for 0.4 s before it ignites, and an enemy running at the bot meanwhile meets it 100–150 units
+  off instead of 200–300. The least distance now counts the enemy's and the bot's closing speed over the rocket's
+  flight (about 400 units at an enemy charging in, 200 at one strafing), and the bot backs off while its rocket
+  flies at a target within 450 units. Later runs at hard still found 212–351 own damage and 2–3 suicides in 150 s,
+  from three things: the hold on closing in ended before slow close rockets got there (it was reckoned at 1500
+  units/s: now the rocket's own pace and 0.4 s more); backing out of a wall went straight at the enemy (now aside);
+  and a bot on its way to an item or a hunt fired at an enemy it passed and walked on into the blast (its rocket's
+  spot is now kept out of like a grenade's, whatever the goal). Two runs at hard after that: 0 and 121 own damage, no
+  suicide.
+- **Grenades followed by their throwers.** A bot threw at an enemy 300–600 units off, then chased it into its own
+  blast 1–2.6 s later; a throw that grazed an edge came back and went off 80–260 units from the thrower. The bot now
+  knows where each of its grenades goes and when it goes off, seen or not (where it is seen going when it is: one
+  coming back is run from), does not close in on the target until it has gone off, ends a series with one down
+  within 350 units, and throws only along arcs clear by 8 units on every side; grenades where an enemy is expected
+  go uncooked. Its own grenades still hurt it (374 damage and 3 suicides at hard in 150 s) until the last step: any
+  move deeper into the reach of a grenade about to go off (the hunt for the enemy leads right to where it was
+  thrown) keeps only its part along the edge. At hard 98 damage and 1 suicide are left.
+
+### Left
+
+- **A grenade that comes back unseen** (off a wall, below the view) is believed where it was meant to land: 4 of the
+  6 own grenades that hurt their throwers in the last runs were believed 490–1540 units from where they went off. A
+  player hears the grenade bounce close by; hearing the bounces would close this.
+- **A gun chosen with no ammo** (the gauss, its uranium not known) is given up only after the game refused the
+  switch three times, up to 3 s. The wait for the switch cannot be shorter: the launcher stays in hand while its
+  rocket flies.
+- Most of what is left of "not fought" is reloading with every gun empty.
+
 ## Tools
 
 - `lb weapons <weapon>… give`, `lb weapons all`: a scenario's weapons, handed out on every spawn (needs
@@ -393,14 +664,25 @@ personalities are drawn afresh for each game; nobody picked up snarks or grenade
   - the explosives it carries.
 - `scripts/stand/weapon-scenarios.sh [--seconds 150] [set…]`: the per-weapon runs above, reports in
   `stand-runs/current/weapons/`.
-- Own blast incidents are logged with the distances involved (`own blast:` in `logs/lambdabots.*.log`), and a death
-  by the bot's own gauss with its last charge (`killed itself with the gauss`).
+- Own blast incidents are logged with the distances involved, where the bot believed its grenades and what moved
+  it then (`own blast:` in `logs/lambdabots.*.log`), and a death by the bot's own gauss with its last charge (`killed
+  itself with the gauss`).
 - `lb map [spots|mines|danger]`: the map's tactics and where the bots got hurt.
 - `lb brain` also shows each bot's goal task, mood, goals taken, goal and target changes, what came of the new
   goals, and the share of the time it stood still out of fights and in them; `lb profile <name>` shows a personality's goal weights, favourite weapons and whether it shoots the gauss
   through walls.
 - `scripts/stand/style-scenarios.sh [--seconds 180] [--bots 8] [style…]`: the per-style runs above, reports in
   `stand-runs/current/styles/`.
+- `lb items <item>…` hands items out on every spawn (`longjump`), `scripts/stand/tricks-scenarios.sh [--seconds 150]
+  [--bots 8] [--difficulty hard] [set…]` runs the trick sets, reports in `stand-runs/current/tricks/`.
+- `cargo test --release -p lb-testkit --test longjumps -- --ignored --nocapture`: routes on the maps with and without
+  long jumps along the way (see `docs/navigation.md`).
+- The stall watch: `lb stats` (by cause, since the reset), `lb brain` (per bot), `stall:` lines in the log with the
+  details (see `docs/behavior.md`, *Inspecting*).
+- `lb brain` shows each bot's tricks, `lb stats` their sums; missed tricks are logged (`missed:`) with how fast they
+  left the ground and where they came down, gauss boosts when thrown and when given up.
+- `lb nav test longjump|gauss_boost [count]` runs the trick links live; `cargo run -p lb-nav --example tricks_debug
+  <graph.lbnav>` lists a graph's trick links and how often random plans take them.
 
 ## Not done yet
 
@@ -419,3 +701,13 @@ personalities are drawn afresh for each game; nobody picked up snarks or grenade
   hand); whether they hit is not counted yet.
 - **Game DLLs:** BugfixedHL on ReHLDS and the classic SDK's rules have not run live; the classic satchel buttons are
   checked against a model of the three DLLs in the tests.
+- **Gauss boosts in a fight-heavy game** are rare: the uranium goes on the fight and a boost wants two calm seconds.
+- **A long jump at the enemy** is checked before it is taken, but whether it helped (a kill, a hit) is not counted.
+- **Tricks and GunGame** (twice the leaps in warmup, gauss jumps only at 80 health with descore) come with M5.
+- **The long jump links are few** (1–8 a map): only those every checked takeoff makes; the rest of the gaps are
+  walked round.
+- **Other players** are not in a long jump's check (it follows the flight through the map only): one on the way stops
+  a flight in the air, most of the few misses on the stand.
+- **Bold long jumps and dodging** come at skill 75 (switches keep the lower preset's value): of the bots `lb_difficulty
+  hard` lets in (63–87), those below 75 long jump along the way only on straight stretches, 1–3 times in 150 s of a
+  crowded game.

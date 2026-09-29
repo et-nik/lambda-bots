@@ -19,7 +19,7 @@ use lb_nav::NavGraph;
 use lb_nav::exec::{HitKind, MechView, MoverState, NavInput};
 use lb_nav::known::LinkHealth;
 use lb_nav::navigator::{Failure, NavCtx, Navigator};
-use lb_nav_api::{NavStatus, NavStep};
+use lb_nav_api::{NavStatus, NavStep, Tricks};
 use lb_worldq::HullKind;
 
 /// A world the course can move brushes in.
@@ -556,7 +556,22 @@ pub struct CourseBot {
     pub worst_stuck: f64,
     pub phases: Vec<(f64, &'static str)>,
     pub gait: Gait,
+    /// What the bot may do on the way; with `longjump` it has the module.
+    pub tricks: Tricks,
+    /// A gauss boost the course plays the weapons' part of.
+    boost: Option<CourseBoost>,
     last_fire: f64,
+}
+
+/// The weapons' part of a gauss boost: charging while the view turns to the boost's, the jump, and the recoil on
+/// the command after the bot leaves the ground (the button comes up then, and the game fires after that move).
+#[derive(Clone, Copy, Debug)]
+struct CourseBoost {
+    since: f64,
+    view: Vec3,
+    jumped: bool,
+    /// Off the ground after the jump: the charge goes on the next command.
+    armed: bool,
 }
 
 /// How a bot walked: time on plain walks, time of it spent against a wall, time looking steeply up or down, and
@@ -591,6 +606,8 @@ impl CourseBot {
             worst_stuck: 0.0,
             phases: Vec::new(),
             gait: Gait::default(),
+            tricks: Tricks::default(),
+            boost: None,
             last_fire: 0.0,
         }
     }
@@ -639,6 +656,43 @@ impl<W: SimWorld> Course<W> {
         }
     }
 
+    /// The bot's own state as navigation sees it now.
+    fn input(&self, bot: &CourseBot) -> NavInput {
+        let p = bot.player;
+        NavInput {
+            now: self.now,
+            origin: p.origin,
+            velocity: p.velocity,
+            view: bot.motor.view,
+            on_ground: p.on_ground(),
+            on_ladder: p.on_ladder,
+            ducked: p.ducked,
+            waterlevel: p.waterlevel,
+            ground_model: p.ground.map_or(0, |g| g as u16),
+            max_speed: self.phys.maxspeed,
+            health: bot.health,
+            push: p.field,
+            gravity: self.phys.gravity,
+            progressive_fall_damage: self.phys.progressive_fall_damage,
+            tricks: bot.tricks,
+        }
+    }
+
+    /// Asks the bot's navigation for a gauss boost toward its goal (`Navigator::gauss_leap`).
+    pub fn gauss_leap(&mut self, bot: &mut CourseBot) -> bool {
+        let input = self.input(bot);
+        let mut ctx = NavCtx {
+            graph: &self.graph,
+            tracer: &mut self.world,
+            mech: &self.game,
+            health: Some(&mut self.health),
+            bot: 1,
+            budget: None,
+            flights: None,
+        };
+        bot.nav.gauss_leap(&mut ctx, &input)
+    }
+
     /// One server frame for one bot heading to `dest`; `frame_ms` of game time passes.
     pub fn frame(&mut self, bot: &mut CourseBot, dest: Vec3, frame_ms: f64) -> NavStatus {
         let now = self.now;
@@ -657,7 +711,10 @@ impl<W: SimWorld> Course<W> {
             health: bot.health,
             push: p.field,
             gravity: self.phys.gravity,
+            progressive_fall_damage: self.phys.progressive_fall_damage,
+            tricks: bot.tricks,
         };
+        bot.player.longjump = bot.tricks.longjump;
         let mut ctx = NavCtx {
             graph: &self.graph,
             tracer: &mut self.world,
@@ -665,6 +722,7 @@ impl<W: SimWorld> Course<W> {
             health: Some(&mut self.health),
             bot: 1,
             budget: None,
+            flights: None,
         };
         let (status, step) = bot.nav.go_to(&mut ctx, &input, dest);
         bot.stuck = bot.nav.stuck_for(p.origin, now);
@@ -679,6 +737,40 @@ impl<W: SimWorld> Course<W> {
             if let Some(at) = step.fire_at {
                 self.fire(bot, &input, at, step.melee);
             }
+        }
+        match step.and_then(|s| s.boost) {
+            Some(call) => {
+                let b = bot.boost.get_or_insert(CourseBoost {
+                    since: now,
+                    view: call.view,
+                    jumped: false,
+                    armed: false,
+                });
+                intents.look(Prio::Protocol, LookIntent::Angles(call.view));
+                intents.movement(
+                    Prio::Protocol,
+                    MoveIntent {
+                        dir: Vec2::ZERO,
+                        speed: 0.0,
+                    },
+                );
+                let v = bot.motor.view;
+                let settled =
+                    lb_core::math::angle_diff(v.y, call.view.y).abs() <= 2.0 && (v.x - call.view.x).abs() <= 2.0;
+                if (now - b.since >= f64::from(call.charge) && settled && p.on_ground()) || b.jumped {
+                    b.jumped = true;
+                    intents.stance(
+                        Prio::Protocol,
+                        StanceIntent {
+                            jump: true,
+                            duck: false,
+                            longjump: false,
+                        },
+                    );
+                }
+            }
+            None if bot.boost.is_some_and(|b| !b.jumped) => bot.boost = None,
+            None => {}
         }
         let eye = p.eye();
         let view_before = bot.motor.view;
@@ -709,6 +801,15 @@ impl<W: SimWorld> Course<W> {
             let ev = player_move(&mut self.world, &self.phys, &mut bot.player, &cmd);
             if let Some(v) = ev.landed {
                 bot.health -= self.phys.fall_damage(v);
+            }
+            if let Some(b) = bot.boost.as_mut().filter(|b| b.jumped) {
+                if b.armed {
+                    let (forward, _, _) = view_angle_vectors(b.view);
+                    bot.player.velocity -= forward * 5.0 * bot.tricks.gauss_damage;
+                    bot.boost = None;
+                } else if !bot.player.on_ground() {
+                    b.armed = true;
+                }
             }
             if phase == "walk" && ev.walled {
                 bot.gait.walled += f64::from(sent.msec) / 1000.0;
@@ -857,6 +958,7 @@ pub fn apply(intents: &mut Intents, step: &NavStep, input: &NavInput) {
         StanceIntent {
             jump: step.jump,
             duck: step.duck,
+            longjump: step.longjump,
         },
     );
     if step.use_key {
@@ -873,6 +975,6 @@ pub fn apply(intents: &mut Intents, step: &NavStep, input: &NavInput) {
             engaged: false,
         },
     };
-    intents.look(prio, look);
+    intents.look(if step.free_look { Prio::Goal } else { prio }, look);
     let _ = Vec2::ZERO;
 }

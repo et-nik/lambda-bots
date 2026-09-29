@@ -37,6 +37,16 @@ fn run_link(c: &mut Course<BspWorld>, a: NodeId, b: NodeId) -> Outcome {
     c.settle(10.0);
     let (start, dest) = (c.graph.node(a).origin, c.graph.node(b).origin);
     let mut bot = CourseBot::new(start, 100.0);
+    // Tricks the links need: the long jump module, a gauss with its uranium.
+    bot.tricks = lb_nav_api::Tricks {
+        longjump: true,
+        runway: false,
+        gauss_boost: true,
+        boost_now: true,
+        gauss_damage: 200.0,
+        selfgauss: true,
+        ..Default::default()
+    };
     c.place(&mut bot);
     bot.nav.follower = Some(PathFollower::new(vec![a, b], c.now));
     bot.nav.goal = Some(b);
@@ -275,24 +285,85 @@ fn debug_link() {
     eprintln!("{l:?}\n{:?}", c.graph.spec(l));
     let dest = c.graph.node(b).origin;
     let mut bot = CourseBot::new(c.graph.node(a).origin, 100.0);
+    bot.tricks = lb_nav_api::Tricks {
+        longjump: true,
+        runway: false,
+        gauss_boost: true,
+        boost_now: true,
+        gauss_damage: 200.0,
+        selfgauss: true,
+        ..Default::default()
+    };
     c.place(&mut bot);
     bot.nav.follower = Some(PathFollower::new(vec![a, b], c.now));
     bot.nav.goal = Some(b);
+    let every: usize = std::env::var("LB_EVERY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
     for i in 0..1500 {
         let st = c.frame(&mut bot, dest, 10.0);
-        if i % 10 == 0 {
+        if i % every == 0 {
             eprintln!(
-                "{:.2} {st:?} at {:?} v {:?} ground {:?} {} view {:?}",
+                "{:.2} {st:?} at {:?} v {:?} ground {:?} {} view {:?} buttons {:#x} ducked {}",
                 c.now,
                 bot.player.origin,
                 bot.player.velocity,
                 bot.player.ground,
                 bot.nav.phase(),
-                bot.motor.view
+                bot.motor.view,
+                bot.player.oldbuttons,
+                bot.player.ducked
             );
         }
         if st == lb_nav_api::NavStatus::Arrived {
             break;
         }
+    }
+}
+
+/// A long jump link's check replayed: `LB_MAP`, `LB_LINK=from,to`.
+#[test]
+#[ignore]
+fn debug_longjump_check() {
+    let Ok(map) = std::env::var("LB_MAP") else { return };
+    let ab: Vec<u32> = std::env::var("LB_LINK")
+        .unwrap()
+        .split(',')
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let maps = lb_bsp::test_maps_dir().unwrap();
+    let mut world = BspWorld::load(&std::fs::read(maps.join(format!("{map}.bsp"))).unwrap()).unwrap();
+    let mech = Mechanisms::from_world(&world);
+    let generated = generate(&mut world, &mech, &GenOptions::default(), &map);
+    let g = generated.graph;
+    let (a, b) = (g.node(ab[0]).origin, g.node(ab[1]).origin);
+    let phys = lb_kin::Physics::default();
+    if std::env::var("LB_GAME").is_ok() {
+        let _game = Game::from_map(&mut world, &mech);
+        eprintln!("mechanisms placed as on the course");
+    }
+    let dir = (b - a).truncate().normalize().extend(0.0);
+    if let (Ok(x), Ok(y), Ok(vx), Ok(vy)) = (
+        std::env::var("LB_X").map(|v| v.parse::<f32>().unwrap()),
+        std::env::var("LB_Y").map(|v| v.parse::<f32>().unwrap()),
+        std::env::var("LB_VX").map(|v| v.parse::<f32>().unwrap()),
+        std::env::var("LB_VY").map(|v| v.parse::<f32>().unwrap()),
+    ) {
+        let mut p = lb_kin::Player::standing(lb_core::Vec3::new(x, y, a.z));
+        p.velocity = lb_core::Vec3::new(vx, vy, 0.0);
+        let yaw = lb_core::math::dir_to_view_angles((b - p.origin).truncate().extend(0.0)).y;
+        let v = lb_kin::tricks::longjump_from(&mut world, &phys, p, yaw, Some(b));
+        eprintln!(
+            "from the given state: ok {} landing {:?} flight {:.2}",
+            v.ok, v.landing, v.flight
+        );
+    }
+    for (along, side) in [(0.0f32, 0.0f32), (-12.0, 0.0), (12.0, 0.0), (0.0, -8.0), (0.0, 8.0)] {
+        let v = lb_kin::tricks::simulate_longjump(&mut world, &phys, a + dir * along, b + dir * along, side);
+        eprintln!(
+            "along {along} side {side}: ok {} landing {:?} flight {:.2} impact {:.0}",
+            v.ok, v.landing, v.flight, v.impact
+        );
     }
 }

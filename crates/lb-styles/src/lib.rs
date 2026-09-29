@@ -8,4 +8,4 @@ pub mod style;
 
 pub use emotions::Emotions;
 pub use persona::{Persona, PersonaSource, generate, name_seed};
-pub use style::{GoalAffinity, StyleId, StyleTable, TraitRanges, WeaponLikes};
+pub use style::{GoalAffinity, StyleId, StyleTable, TraitRanges, TrickLikes, WeaponLikes};

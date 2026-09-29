@@ -89,13 +89,25 @@ pub struct WeaponLikes {
     pub throwables: f32,
 }
 
-/// Trait ranges, goal weights and weapon likes of every style: the built-in values with `config/styles/*.yaml`
-/// applied.
+/// How readily a style takes tricks, as chances: long jumps along straight stretches of the way (with the module),
+/// long jumps at an enemy, gauss jumps on the way, satchels thrown from a jump. The difficulty's `tricks` switch
+/// lets the last three happen at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrickLikes {
+    pub longjump: f32,
+    pub lj_attack: f32,
+    pub gauss_jump: f32,
+    pub satchel_jump: f32,
+}
+
+/// Trait ranges, goal weights, weapon likes and tricks of every style: the built-in values with
+/// `config/styles/*.yaml` applied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyleTable {
     traits: [TraitRanges; 5],
     goals: [GoalAffinity; 5],
     weapons: [WeaponLikes; 5],
+    tricks: [TrickLikes; 5],
 }
 
 impl Default for StyleTable {
@@ -104,6 +116,7 @@ impl Default for StyleTable {
             traits: StyleId::ALL.map(StyleId::trait_ranges),
             goals: StyleId::ALL.map(StyleId::goal_affinity),
             weapons: StyleId::ALL.map(StyleId::weapon_likes),
+            tricks: StyleId::ALL.map(StyleId::trick_likes),
         }
     }
 }
@@ -126,6 +139,10 @@ impl StyleTable {
 
     pub fn weapons(&self, style: StyleId) -> &WeaponLikes {
         &self.weapons[Self::index(style)]
+    }
+
+    pub fn tricks(&self, style: StyleId) -> TrickLikes {
+        self.tricks[Self::index(style)]
     }
 
     /// Takes the values a style file sets.
@@ -152,6 +169,12 @@ impl StyleTable {
             w.guns = guns.iter().map(|(n, v)| (n.clone(), *v)).collect();
         }
         w.throwables = f.weapons.throwables.unwrap_or(w.throwables);
+        let k = &mut self.tricks[i];
+        let tricks = &f.tricks;
+        k.longjump = tricks.longjump.unwrap_or(k.longjump);
+        k.lj_attack = tricks.lj_attack.unwrap_or(k.lj_attack);
+        k.gauss_jump = tricks.gauss_jump.unwrap_or(k.gauss_jump);
+        k.satchel_jump = tricks.satchel_jump.unwrap_or(k.satchel_jump);
     }
 }
 
@@ -169,6 +192,22 @@ impl StyleId {
             StyleId::Sniper =>     a(1.0, 0.3, 1.4, 1.0, 0.6, 2.0, 1.2, 0.6, 0.5),
             StyleId::Controller => a(1.0, 1.0, 1.0, 1.3, 0.9, 0.3, 0.4, 2.0, 0.4),
             StyleId::Trapper =>    a(1.0, 0.8, 1.2, 1.0, 0.8, 0.4, 1.2, 0.6, 2.0),
+        }
+    }
+}
+
+impl StyleId {
+    /// Tricks of the style (design §8): rushers leap at enemies, controllers gauss-jump and long jump about the map,
+    /// trappers and rushers throw satchels from a jump, snipers hardly ever.
+    #[rustfmt::skip]
+    pub fn trick_likes(self) -> TrickLikes {
+        let t = |longjump, lj_attack, gauss_jump, satchel_jump| TrickLikes { longjump, lj_attack, gauss_jump, satchel_jump };
+        match self {
+            StyleId::Balanced =>   t(0.8, 0.6, 0.33, 0.4),
+            StyleId::Rusher =>     t(0.8, 1.0, 0.33, 0.6),
+            StyleId::Sniper =>     t(0.8, 0.6, 0.33, 0.2),
+            StyleId::Controller => t(1.0, 0.6, 0.5, 0.4),
+            StyleId::Trapper =>    t(0.8, 0.6, 0.33, 0.7),
         }
     }
 }

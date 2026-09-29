@@ -65,10 +65,14 @@ pub enum LinkKind {
     Teleport,
     Breakable,
     Push,
+    /// A long jump across a gap (only with the module).
+    LongJump,
+    /// A gauss jump: the recoil of a charged shot throws the bot (only with a gauss and its uranium).
+    GaussBoost,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 11] = [
+    pub const ALL: [LinkKind; 13] = [
         LinkKind::Walk,
         LinkKind::Crouch,
         LinkKind::Jump,
@@ -80,6 +84,8 @@ impl LinkKind {
         LinkKind::Teleport,
         LinkKind::Breakable,
         LinkKind::Push,
+        LinkKind::LongJump,
+        LinkKind::GaussBoost,
     ];
 
     /// Movement speed along the link relative to running.
@@ -87,6 +93,8 @@ impl LinkKind {
         match self {
             LinkKind::Walk | LinkKind::Drop | LinkKind::Door | LinkKind::Lift | LinkKind::Teleport => 1.0,
             LinkKind::Breakable | LinkKind::Push => 1.0,
+            LinkKind::LongJump => 2.0,
+            LinkKind::GaussBoost => 0.5,
             LinkKind::Jump => 0.8,
             LinkKind::Crouch => 1.0 / 3.0,
             LinkKind::Ladder => 0.5,
@@ -107,6 +115,8 @@ impl LinkKind {
             LinkKind::Teleport => "teleport",
             LinkKind::Breakable => "breakable",
             LinkKind::Push => "push",
+            LinkKind::LongJump => "longjump",
+            LinkKind::GaussBoost => "gauss_boost",
         }
     }
 
@@ -117,6 +127,11 @@ impl LinkKind {
     /// Links that just walk (crouched or not) between nodes.
     pub fn is_walk(self) -> bool {
         matches!(self, LinkKind::Walk | LinkKind::Crouch)
+    }
+
+    /// Links only some bots can take: a long jump needs the module, a gauss boost the gun and its uranium.
+    pub fn is_trick(self) -> bool {
+        matches!(self, LinkKind::LongJump | LinkKind::GaussBoost)
     }
 }
 
@@ -149,6 +164,11 @@ impl NavLink {
     pub fn valid(&self) -> bool {
         self.flags.contains(LinkFlags::VALID) && !self.flags.contains(LinkFlags::LIVE_MISMATCH)
     }
+
+    /// A valid link any bot can take: a way players go.
+    pub fn plain(&self) -> bool {
+        self.valid() && !self.kind.is_trick()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -156,7 +176,7 @@ pub struct GraphStats {
     pub nodes: usize,
     pub links: usize,
     pub invalid: usize,
-    pub by_kind: [usize; 11],
+    pub by_kind: [usize; 13],
     pub unsettled: usize,
     /// Links added from the map's mechanisms.
     pub added: usize,
@@ -188,6 +208,10 @@ pub struct NavGraph {
     /// Landmarks for the planner's heuristic (`with_landmarks`), computed after loading.
     #[serde(skip)]
     pub alt: Option<std::sync::Arc<crate::plan::Alt>>,
+    /// The most units any link covers per second of its cost (long jumps beat running), for the planner's
+    /// straight-line bound; computed after loading, 0 until then.
+    #[serde(skip)]
+    pub fastest: f32,
 }
 
 impl NavGraph {
@@ -250,7 +274,7 @@ impl NavGraph {
         let mut links = Vec::with_capacity(out.iter().map(Vec::len).sum());
         stats.links = 0;
         stats.invalid = 0;
-        stats.by_kind = [0; 11];
+        stats.by_kind = [0; 13];
         for (i, list) in out.into_iter().enumerate() {
             nodes[i].first_link = links.len() as u32;
             nodes[i].link_count = list.len() as u16;
@@ -264,7 +288,7 @@ impl NavGraph {
             }
         }
         stats.nodes = nodes.len();
-        NavGraph {
+        let mut g = NavGraph {
             nodes,
             links,
             specs,
@@ -272,13 +296,27 @@ impl NavGraph {
             source: source.to_string(),
             stats,
             alt: None,
-        }
+            fastest: 0.0,
+        };
+        g.fastest = g.measure_fastest();
+        g
     }
 
     /// Landmarks spread every few hundred nodes (8 at least, 16 at most) for the planner's heuristic.
     pub fn with_landmarks(mut self) -> NavGraph {
         let count = (self.len() / 250).clamp(8, 16);
+        self.fastest = self.measure_fastest();
         self.alt = Some(std::sync::Arc::new(crate::plan::Alt::build(&self, count)));
         self
+    }
+
+    pub(crate) fn measure_fastest(&self) -> f32 {
+        let mut fastest = 0.0f32;
+        for (i, n) in self.nodes.iter().enumerate() {
+            for l in self.links(i as NodeId).iter().filter(|l| l.cost > 0.0) {
+                fastest = fastest.max(n.origin.distance(self.node(l.to).origin) / l.cost);
+            }
+        }
+        fastest
     }
 }

@@ -5,8 +5,9 @@
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3};
 use lb_kin::Physics;
+use lb_kin::tricks::{LONGJUMP_TAKEOFF, boost_view};
 use lb_kin::validate::{DROP_OVERRUN, DROP_SLACK, LIFTING, air_steer, hover, run_up_room, swim_jump, takeoff};
-use lb_nav_api::NavStep;
+use lb_nav_api::{BoostCall, NavStep, Tricks};
 use lb_worldq::Tracer;
 
 use crate::graph::{NavNode, NodeFlags};
@@ -51,6 +52,10 @@ pub struct NavInput {
     pub push: Vec3,
     /// Server gravity (`sv_gravity`); 0 when not known.
     pub gravity: f32,
+    /// A fall hurts by how fast it lands (`mp_falldamage 1`); otherwise any fall past the safe speed takes 10.
+    pub progressive_fall_damage: bool,
+    /// What the bot may do on the way besides walking.
+    pub tricks: Tricks,
 }
 
 impl NavInput {
@@ -1131,6 +1136,338 @@ impl PushExec {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Long jumps and gauss boosts
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A long jump goes with the view this close to the landing across, degrees: the flight is steered onto it. A
+/// link's as its check made it; one along the way a little off too (the air kills the speed across in a few
+/// hundredths of a second).
+const LEAP_AIM: [f32; 2] = [5.0, 10.0];
+/// ... and looking no further up or down than this.
+const LEAP_PITCH: [f32; 2] = [5.0, 10.0];
+/// A long jump link takes off within this of its entry along the jump, as its check tried (a stretch of the way
+/// taken for speed, anywhere within the entry's radius past it); it runs through the entry aiming this far past.
+const TAKEOFF_BACK: f32 = 12.0;
+const TAKEOFF_FRONT: f32 = 12.0;
+const TAKEOFF_LEAD: f32 = 16.0;
+/// ... and this near its line (a link's, one along the way).
+const TAKEOFF_ACROSS: [f32; 2] = [16.0, 10.0];
+/// A long jump link's run-up starts this far behind the takeoff at most (the check ran up 16 units).
+const RUN_UP: f32 = 32.0;
+/// Seconds a gauss boost charges before it goes: a full charge and a little more.
+pub const BOOST_CHARGE: f32 = 1.6;
+/// A boost has thrown the bot once it flies up and along faster than these.
+const BOOST_UP: f32 = 250.0;
+const BOOST_ALONG: f32 = 300.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrickPhase {
+    Approach,
+    /// A long jump's run at its takeoff.
+    Back,
+    /// Long jump: pressing duck and jump. Boost: standing at the takeoff while the weapons charge and let go.
+    Takeoff,
+    Air,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrickExec {
+    phase: TrickPhase,
+    since: f64,
+    attempts: u8,
+    /// When the bot first left the ground at a boost's takeoff.
+    at_entry: Option<f64>,
+    /// One try only: a long jump along a stretch of the way, not a link.
+    pub once: bool,
+    /// Room behind a long jump link's takeoff for its run-up, once measured.
+    room: Option<f32>,
+    /// Horizontal and upward speed on the first moment in the air, for the log when the flight misses.
+    pub launch: Option<(f32, f32)>,
+}
+
+impl TrickExec {
+    fn new(now: f64) -> TrickExec {
+        TrickExec {
+            phase: TrickPhase::Approach,
+            since: now,
+            attempts: 0,
+            at_entry: None,
+            once: false,
+            room: None,
+            launch: None,
+        }
+    }
+
+    fn set(&mut self, phase: TrickPhase, now: f64) {
+        self.phase = phase;
+        self.since = now;
+        self.at_entry = None;
+    }
+
+    /// Down again after the flight: done at the exit; on its floor and nearer it than the takeoff, the rest is
+    /// walked; back where it took off, tried again.
+    fn landed(&mut self, c: &ExecCtx<'_>, step: NavStep) -> (NavStep, ExecStatus) {
+        let i = c.input;
+        let (a, b) = (c.spec.entry.origin, c.spec.exit.origin);
+        let look = b + Vec3::Z * EYE_HEIGHT;
+        if at_node(i, c.to, c.spec.exit.radius + 16.0) {
+            return (step, ExecStatus::Done);
+        }
+        let left = flat(b - i.origin).length();
+        let same_floor = (i.feet() - node_feet(c.to)).abs() < 20.0;
+        if same_floor && left < flat(b - a).length() - 8.0 && left < 160.0 && i.now - self.since < 3.0 {
+            let mut s = toward(i, b, i.max_speed);
+            s.look_at = look;
+            return (s, ExecStatus::Running);
+        }
+        if flat(a - i.origin).length() < 48.0 && (i.feet() - node_feet(c.from)).abs() < 20.0 && self.attempts < 3 {
+            self.attempts += 1;
+            self.set(TrickPhase::Approach, i.now);
+            return (toward(i, a, i.max_speed), ExecStatus::Running);
+        }
+        (step, ExecStatus::Failed(FailReason::ControllerFailure))
+    }
+
+    /// In the air: steering onto the exit (the air brakes what would carry the bot past it), looking at it.
+    fn fly(&mut self, c: &ExecCtx<'_>, duck: bool) -> (NavStep, ExecStatus) {
+        let i = c.input;
+        self.launch.get_or_insert((flat(i.velocity).length(), i.velocity.z));
+        let b = c.spec.exit.origin;
+        let airborne = !i.on_ground && !i.on_ladder && i.waterlevel < 2;
+        let mut step = NavStep::hold(b + Vec3::Z * EYE_HEIGHT);
+        if let Some(d) = air_steer(i.origin, i.velocity, b, i.gravity()) {
+            step.move_dir = d;
+            step.speed = i.max_speed;
+        }
+        step.duck = duck;
+        step.mandatory = true;
+        step.free_look = true;
+        if !airborne && i.now - self.since > 0.1 {
+            step.free_look = false;
+            return self.landed(c, step);
+        }
+        if i.now - self.since > 4.0 {
+            return (step, ExecStatus::Failed(FailReason::ControllerFailure));
+        }
+        (step, ExecStatus::Running)
+    }
+
+    /// A long jump from the entry onto the exit, the way its check made it: to the start of the run-up behind the
+    /// takeoff (as far back as there is floor, up to `RUN_UP`), stopping there with the view level on the exit; the
+    /// run at the takeoff; duck and jump pressed together inside the takeoff window; duck held and the flight
+    /// steered onto the exit. Arriving at the window fast with the view on the exit, it jumps at once. A stretch of
+    /// the way taken for speed (`once`) starts running and gives up when the window passes.
+    fn longjump(&mut self, c: &mut ExecCtx<'_>) -> (NavStep, ExecStatus) {
+        let i = c.input;
+        let now = i.now;
+        let (a, b) = (c.spec.entry.origin, c.spec.exit.origin);
+        let dir = c.spec.dir();
+        let airborne = !i.on_ground && !i.on_ladder && i.waterlevel < 2;
+        // Level with the eyes: looking up or down shortens the jump.
+        let level = Vec3::new(b.x, b.y, i.eye().z);
+        let aimed = |step: &mut NavStep| {
+            step.look_at = level;
+            step.pitch = Some(0.0);
+            step.mandatory = true;
+        };
+        if !i.tricks.longjump && self.phase != TrickPhase::Air {
+            return (NavStep::hold(level), ExecStatus::Failed(FailReason::MissingCapability));
+        }
+        if self.once && self.phase == TrickPhase::Approach {
+            self.set(TrickPhase::Back, now);
+        }
+        let rel = flat(i.origin - a);
+        let along = rel.dot(dir);
+        let lateral = (rel - dir * along).length();
+        // A link's entry is often at a ledge: past the checked window the bot would run off it.
+        let (front, lead) = if self.once {
+            (c.spec.entry.radius, 64.0)
+        } else {
+            (TAKEOFF_FRONT, TAKEOFF_LEAD)
+        };
+        let (forward, _, _) = view_angle_vectors(i.view);
+        let across = lb_core::dmath::acos(
+            forward
+                .truncate()
+                .normalize_or_zero()
+                .dot(flat(b - i.origin).normalize_or_zero())
+                .clamp(-1.0, 1.0),
+        )
+        .to_degrees();
+        let loose = usize::from(self.once);
+        let aligned = across <= LEAP_AIM[loose] && i.view.x.abs() <= LEAP_PITCH[loose];
+        // On the takeoff's own floor: from a floor below the jump meets the ledge's wall.
+        let on_floor = self.once || (i.feet() - node_feet(c.from)).abs() < 20.0;
+        let ready = lateral < TAKEOFF_ACROSS[loose]
+            && (-TAKEOFF_BACK..front).contains(&along)
+            && flat(i.velocity).length() >= LONGJUMP_TAKEOFF
+            && aligned
+            && i.on_ground
+            && on_floor;
+        // Off the edge the jump leaves from before taking off: falling, not jumping.
+        let fell = airborne && along > -TAKEOFF_BACK && i.velocity.z < -100.0;
+        for _ in 0..3 {
+            match self.phase {
+                TrickPhase::Approach => {
+                    if ready {
+                        self.set(TrickPhase::Takeoff, now);
+                        continue;
+                    }
+                    if fell {
+                        return (NavStep::hold(level), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    let room = *self
+                        .room
+                        .get_or_insert_with(|| run_up_room(c.tracer, a, dir, RUN_UP * 2.0).min(RUN_UP));
+                    let start = a - dir.extend(0.0) * room;
+                    let left = flat(start - i.origin).length();
+                    if left < 12.0 && flat(i.velocity).length() < 40.0 && i.on_ground && aligned {
+                        self.set(TrickPhase::Back, now);
+                        continue;
+                    }
+                    if now - self.since > 8.0 {
+                        return (NavStep::hold(level), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    let mut step = toward(i, start, i.max_speed);
+                    aimed(&mut step);
+                    return (step, ExecStatus::Running);
+                }
+                // The run at the takeoff.
+                TrickPhase::Back => {
+                    if ready {
+                        self.set(TrickPhase::Takeoff, now);
+                        continue;
+                    }
+                    if fell {
+                        return (NavStep::hold(level), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    if (along >= front && lateral < 32.0) || now - self.since > 2.0 {
+                        self.attempts += 1;
+                        if self.once || self.attempts > 3 {
+                            return (NavStep::hold(level), ExecStatus::Failed(FailReason::ControllerFailure));
+                        }
+                        self.set(TrickPhase::Approach, now);
+                        continue;
+                    }
+                    let mut step = toward(i, a + dir.extend(0.0) * lead, i.max_speed);
+                    step.speed = i.max_speed;
+                    aimed(&mut step);
+                    return (step, ExecStatus::Running);
+                }
+                TrickPhase::Takeoff => {
+                    if airborne {
+                        self.set(TrickPhase::Air, now);
+                        continue;
+                    }
+                    let mut step = toward(i, a + dir.extend(0.0) * lead, i.max_speed);
+                    step.speed = step.speed.max(LONGJUMP_TAKEOFF);
+                    step.longjump = true;
+                    aimed(&mut step);
+                    if now - self.since > 0.3 {
+                        self.attempts += 1;
+                        if self.once || self.attempts > 3 {
+                            return (step, ExecStatus::Failed(FailReason::ControllerFailure));
+                        }
+                        self.set(TrickPhase::Approach, now);
+                    }
+                    return (step, ExecStatus::Running);
+                }
+                TrickPhase::Air => return self.fly(c, true),
+            }
+        }
+        (NavStep::hold(level), ExecStatus::Running)
+    }
+
+    /// A gauss boost: stop at the entry, stand there while the weapons draw the gauss, charge it, turn round and
+    /// jump letting the charge go; then steer the flight onto the exit.
+    fn boost(&mut self, c: &mut ExecCtx<'_>, pitch: f32) -> (NavStep, ExecStatus) {
+        let i = c.input;
+        let now = i.now;
+        let a = c.spec.entry.origin;
+        let dir = c.spec.dir();
+        let airborne = !i.on_ground && !i.on_ladder && i.waterlevel < 2;
+        let ahead = i.eye() + dir.extend(0.0) * 128.0;
+        if self.phase != TrickPhase::Air && (!i.tricks.boost_now || i.health < c.spec.needs.health) {
+            return (NavStep::hold(ahead), ExecStatus::Failed(FailReason::MissingCapability));
+        }
+        for _ in 0..3 {
+            match self.phase {
+                TrickPhase::Approach | TrickPhase::Back => {
+                    let left = flat(a - i.origin).length();
+                    if left < 12.0 && flat(i.velocity).length() < 60.0 && i.on_ground {
+                        self.set(TrickPhase::Takeoff, now);
+                        continue;
+                    }
+                    if now - self.since > 8.0 {
+                        return (NavStep::hold(ahead), ExecStatus::Failed(FailReason::ControllerFailure));
+                    }
+                    let mut step = toward(i, a, i.max_speed);
+                    step.look_at = ahead;
+                    return (step, ExecStatus::Running);
+                }
+                TrickPhase::Takeoff => {
+                    let launched = airborne && i.velocity.z > BOOST_UP && flat(i.velocity).dot(dir) > BOOST_ALONG;
+                    if launched {
+                        tracing::info!(
+                            "gauss boost thrown from {:.0} {:.0} {:.0} at {:.0} up, {:.0} along, for {:.0} {:.0} {:.0}",
+                            i.origin.x,
+                            i.origin.y,
+                            i.origin.z,
+                            i.velocity.z,
+                            flat(i.velocity).dot(dir),
+                            c.spec.exit.origin.x,
+                            c.spec.exit.origin.y,
+                            c.spec.exit.origin.z
+                        );
+                        self.set(TrickPhase::Air, now);
+                        continue;
+                    }
+                    if airborne && self.at_entry.is_none() {
+                        self.at_entry = Some(now);
+                    }
+                    let jumped_only = self.at_entry.is_some_and(|t| now - t > 0.4);
+                    let pushed_off = i.on_ground && flat(a - i.origin).length() > 32.0;
+                    if jumped_only || pushed_off {
+                        tracing::info!(
+                            "gauss boost: {} (velocity {:.0} up, {:.0} along)",
+                            if jumped_only {
+                                "a jump and no throw"
+                            } else {
+                                "pushed off the takeoff"
+                            },
+                            i.velocity.z,
+                            flat(i.velocity).dot(dir)
+                        );
+                        self.attempts += 1;
+                        if self.attempts > 1 {
+                            return (NavStep::hold(ahead), ExecStatus::Failed(FailReason::ControllerFailure));
+                        }
+                        self.set(TrickPhase::Approach, now);
+                        continue;
+                    }
+                    if now - self.since > 8.0 {
+                        return (
+                            NavStep::hold(ahead),
+                            ExecStatus::Failed(FailReason::WaitingForInteraction),
+                        );
+                    }
+                    // The weapons protocol has the look, the stance and the gun now; the bot holds still.
+                    let view = boost_view(dir, pitch);
+                    let mut step = NavStep::hold(ahead);
+                    step.boost = Some(BoostCall {
+                        view,
+                        charge: BOOST_CHARGE,
+                    });
+                    return (step, ExecStatus::Waiting);
+                }
+                TrickPhase::Air => return self.fly(c, false),
+            }
+        }
+        (NavStep::hold(ahead), ExecStatus::Running)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 
 /// An executor running one special link.
 #[derive(Clone, Debug)]
@@ -1144,6 +1481,8 @@ pub enum Exec {
     Teleport(TeleportExec),
     Breakable(BreakExec),
     Push(PushExec),
+    LongJump(TrickExec),
+    GaussBoost(TrickExec),
 }
 
 impl Exec {
@@ -1182,6 +1521,8 @@ impl Exec {
                 best: f32::INFINITY,
                 best_at: now,
             }),
+            Action::LongJump { .. } => Exec::LongJump(TrickExec::new(now)),
+            Action::GaussBoost { .. } => Exec::GaussBoost(TrickExec::new(now)),
         }
     }
 
@@ -1201,6 +1542,8 @@ impl Exec {
                 },
             ) => e.tick(c, model, aim, crowbar),
             (Exec::Push(e), Action::Push { dir, jump_at, hold, .. }) => e.tick(c, dir, jump_at, hold),
+            (Exec::LongJump(e), Action::LongJump { .. }) => e.longjump(c),
+            (Exec::GaussBoost(e), Action::GaussBoost { pitch, .. }) => e.boost(c, pitch),
             _ => (
                 NavStep::hold(c.to.origin),
                 ExecStatus::Failed(FailReason::ControllerFailure),
@@ -1254,6 +1597,30 @@ impl Exec {
                 PushPhase::Flight => "push:flight",
                 PushPhase::Landed => "push:landed",
             },
+            Exec::LongJump(e) => match e.phase {
+                TrickPhase::Approach => "longjump:approach",
+                TrickPhase::Back => "longjump:run",
+                TrickPhase::Takeoff => "longjump:takeoff",
+                TrickPhase::Air => "longjump:air",
+            },
+            Exec::GaussBoost(e) => match e.phase {
+                TrickPhase::Approach | TrickPhase::Back => "boost:approach",
+                TrickPhase::Takeoff => "boost:charge",
+                TrickPhase::Air => "boost:air",
+            },
         }
+    }
+
+    /// Horizontal and upward speed a trick left the ground with.
+    pub fn launch(&self) -> Option<(f32, f32)> {
+        match self {
+            Exec::LongJump(e) | Exec::GaussBoost(e) => e.launch,
+            _ => None,
+        }
+    }
+
+    /// In the air on a long jump or a boost: the bot is off the path until it lands.
+    pub fn flying(&self) -> bool {
+        matches!(self, Exec::LongJump(e) | Exec::GaussBoost(e) if e.phase == TrickPhase::Air)
     }
 }

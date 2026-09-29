@@ -4,8 +4,10 @@
 //! some corner of its box (or its center) projects into the view frustum. Up to six body points are then traced for
 //! line of sight; other players block, glass does not. The weighted share of visible points, where the player is
 //! in the view, how it moves, how far it is and what drew attention to it set the rate at which evidence
-//! accumulates. A contact is recognized when the evidence reaches 1; the time that takes at full rate is drawn once
-//! per contact. Nothing here consumes randomness before there is evidence, so hidden players change nothing.
+//! accumulates; a player within 200–600 units is plain to see however it moves, and up to 3.5 times sooner in the
+//! middle of the view. A contact is recognized when the evidence reaches 1; the time that takes at full rate is
+//! drawn once per contact. Nothing here consumes randomness before there is evidence, so hidden players change
+//! nothing.
 
 use lb_core::Vec3;
 use lb_core::math::view_angle_vectors;
@@ -22,8 +24,9 @@ use lb_core::dmath;
 
 pub const PERIOD: f64 = 0.05;
 pub const VIEW_RANGE: f32 = 4096.0;
-/// Line-of-sight traces per bot and tick.
+/// Line-of-sight traces per bot and tick, and on top of them for a first look at a player in view not in contact.
 pub const TRACE_BUDGET: u32 = 12;
+pub const NEWCOMER_TRACES: u32 = FIRST_LOOK_POINTS as u32;
 /// Field of view the HL client uses when `fov` is 0 (degrees, 4:3).
 pub const DEFAULT_FOV: f32 = 90.0;
 /// Screen shape the view is built for; wider screens see more to the sides (Hor+).
@@ -35,6 +38,10 @@ const SIGHT_HOLD: f64 = 0.1;
 const CUE_EVIDENCE: f32 = 0.4;
 /// Firing seen: a weapon event of the player this recent.
 const SHOT_SEEN_FOR: f64 = 0.2;
+/// Players this close are plain to see (fully within the first, not at all beyond the second): recognized
+/// `CLOSE_GAIN` times sooner in the middle of the view, its middle band and at its edge, however they move.
+const NEAR: [f32; 2] = [200.0, 600.0];
+const CLOSE_GAIN: [f32; 3] = [3.5, 2.0, 1.5];
 /// A player not in contact starts one only if one of the first three body points (chest, head, pelvis) is in
 /// sight; the rest is not traced when all three are blocked.
 const FIRST_LOOK_POINTS: usize = 3;
@@ -333,9 +340,18 @@ impl Vision {
                 .partial_cmp(&(b.0, b.1, b.2))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // A player in view not in contact yet gets a first look on top of the budget, so that one stepping out close
+        // in front is looked at while others are followed.
+        let newcomer = order
+            .iter()
+            .any(|&(rank, _, distance, i)| rank == 2 && in_view(viewer, &frustum, &subjects[i], distance, vis));
+        let mut kept = if newcomer { NEWCOMER_TRACES } else { 0 };
         let mut budget = TRACE_BUDGET;
         let mut touched: SmallVec<[PlayerKey; 32]> = SmallVec::new();
         for &(rank, _, distance, i) in &order {
+            if rank == 2 {
+                budget += std::mem::take(&mut kept);
+            }
             let s = &subjects[i];
             let look = self.look(viewer, &frustum, s, distance, rank, vis, tracer, &mut budget);
             if rank == 2 && !matches!(look, Look::Skipped) {
@@ -384,8 +400,7 @@ impl Vision {
         budget: &mut u32,
     ) -> Look {
         let raw = s.raw;
-        let (mins, maxs) = (raw.origin + raw.mins, raw.origin + raw.maxs);
-        if distance > VIEW_RANGE || !vis.box_in_pvs(viewer.eye, mins, maxs) || !frustum.contains_box(mins, maxs) {
+        if !in_view(viewer, frustum, s, distance, vis) {
             return Look::Hidden;
         }
         let crouched = raw.flags & FL_DUCKING != 0;
@@ -477,9 +492,14 @@ impl Vision {
         let first = !c.recognized;
         if first {
             let chest = raw.origin + Vec3::Z * 8.0;
+            let eccentricity = frustum.eccentricity(chest);
+            // Close by, standing still or ducked hides nobody.
+            let near = nearness(distance);
+            let motion = motion_gain(raw) + (1.0 - motion_gain(raw)) * near;
             let rate = visibility
-                * fov_gain(frustum.eccentricity(chest), params.peripheral_gain)
-                * motion_gain(raw)
+                * fov_gain(eccentricity, params.peripheral_gain)
+                * close_gain(eccentricity, near)
+                * motion
                 * range_gain(distance)
                 * cue_gain(firing, bearing(viewer.eye, raw.origin), beliefs, now);
             c.evidence += rate * dt / c.delay;
@@ -582,6 +602,31 @@ pub fn motion_gain(raw: &RawClient) -> f32 {
     } else {
         0.5
     }
+}
+
+/// The player's box is within sight range, in the PVS of the eye and inside the view frustum: worth a look.
+fn in_view(viewer: &Viewer, frustum: &Frustum, s: &Subject<'_>, distance: f32, vis: &dyn VisSets) -> bool {
+    let raw = s.raw;
+    let (mins, maxs) = (raw.origin + raw.mins, raw.origin + raw.maxs);
+    distance <= VIEW_RANGE && vis.box_in_pvs(viewer.eye, mins, maxs) && frustum.contains_box(mins, maxs)
+}
+
+/// How close a player is for being plain to see: 1 within `NEAR[0]`, down to 0 at `NEAR[1]`.
+pub fn nearness(distance: f32) -> f32 {
+    ((NEAR[1] - distance) / (NEAR[1] - NEAR[0])).clamp(0.0, 1.0)
+}
+
+/// A player close in front is recognized several times sooner: in the middle of the view `CLOSE_GAIN[0]` times at
+/// full nearness, in the middle band and at the edge less.
+pub fn close_gain(eccentricity: f32, near: f32) -> f32 {
+    let top = if eccentricity <= 0.35 {
+        CLOSE_GAIN[0]
+    } else if eccentricity <= 0.8 {
+        CLOSE_GAIN[1]
+    } else {
+        CLOSE_GAIN[2]
+    };
+    1.0 + (top - 1.0) * near
 }
 
 pub fn range_gain(distance: f32) -> f32 {

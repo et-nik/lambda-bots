@@ -593,8 +593,17 @@ pub struct BotNavService<'a, 'h> {
     pub calm: bool,
     /// Stuck beyond recovery: the bot should `kill` itself.
     pub kill: bool,
-    /// Path search expansions left this frame for all bots.
-    pub plan_budget: &'a mut u32,
+    /// What path searches and long jump checks may still spend this frame, for all bots.
+    pub budgets: &'a mut Budgets,
+}
+
+/// What the bots' navigation may still spend this frame, all of them together.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Budgets {
+    /// Path search node expansions.
+    pub plan: u32,
+    /// Long jump flights followed through the traces by checks.
+    pub flights: u32,
 }
 
 impl BotNavService<'_, '_> {
@@ -635,7 +644,8 @@ impl NavService for BotNavService<'_, '_> {
             mech: self.mechs,
             health: Some(&mut *self.health),
             bot: self.bot,
-            budget: Some(&mut *self.plan_budget),
+            budget: Some(&mut self.budgets.plan),
+            flights: Some(&mut self.budgets.flights),
         };
         self.nav.go_to(&mut ctx, &self.input, dest)
     }
@@ -651,7 +661,8 @@ impl NavService for BotNavService<'_, '_> {
             mech: self.mechs,
             health: Some(&mut *self.health),
             bot: self.bot,
-            budget: Some(&mut *self.plan_budget),
+            budget: Some(&mut self.budgets.plan),
+            flights: Some(&mut self.budgets.flights),
         };
         self.nav.roam(&mut ctx, &self.input, rng)
     }
@@ -665,6 +676,7 @@ impl NavService for BotNavService<'_, '_> {
             health: None,
             bot: self.bot,
             budget: None,
+            flights: None,
         };
         Navigator::away_from(&ctx, self.input.origin, threat)
     }
@@ -696,5 +708,51 @@ impl NavService for BotNavService<'_, '_> {
             let now = self.input.now;
             self.nav.avoid_line(graph, a, b, now, now + f64::from(seconds));
         }
+    }
+
+    fn set_tricks(&mut self, tricks: lb_nav_api::Tricks) {
+        self.input.tricks = tricks;
+    }
+
+    fn leap_lands(&mut self, view: Vec3) -> Option<Vec3> {
+        if self.budgets.flights == 0 {
+            return None;
+        }
+        self.budgets.flights -= 1;
+        lb_nav::tricks::leap_lands(&mut *self.tracer, &self.input, view)
+    }
+
+    fn gauss_leap(&mut self) -> bool {
+        let Some(graph) = self.graph else {
+            return false;
+        };
+        let mut ctx = NavCtx {
+            graph,
+            tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: None,
+            bot: self.bot,
+            budget: None,
+            flights: None,
+        };
+        self.nav.gauss_leap(&mut ctx, &self.input)
+    }
+
+    fn way_left(&self) -> Option<(f32, usize)> {
+        self.nav.way_left(self.graph?, self.input.origin)
+    }
+
+    fn flight(&mut self) -> Option<NavStep> {
+        let graph = self.graph?;
+        let mut ctx = NavCtx {
+            graph,
+            tracer: &mut *self.tracer,
+            mech: self.mechs,
+            health: Some(&mut *self.health),
+            bot: self.bot,
+            budget: None,
+            flights: None,
+        };
+        self.nav.fly_on(&mut ctx, &self.input)
     }
 }

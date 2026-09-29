@@ -168,7 +168,7 @@ pub const SPECS: [WeaponSpec; 14] = [
     spec_row(WeaponId::Crossbow,    Sniper,         5,   Tap,    0.75, 120.0, 1, [0.0, 0.0],             true,  [400.0, 4000.0],   8192.0, 4.5,   8,  Zoom { fov: 20.0, toggle: 1.0 }),
     spec_row(WeaponId::Shotgun,     WeaponClass::Shotgun, 8, Tap, 0.75, 20.0, 4, [0.087_16, 0.043_62],   false, [0.0, 750.0],      2048.0, 4.0,   9,  Double { pellets: 8, spread: DOUBLE_SPREAD, cycle: 1.5 }),
     spec_row(WeaponId::Mp5,         Smg,            50,  Hold,   0.1,  12.0,  1, [0.052_34, 0.052_34],   false, [0.0, 2000.0],     8192.0, 1.5,   10, Launcher { cycle: 1.0 }),
-    spec_row(WeaponId::Rpg,         Launcher,       1,   Tap,    1.5,  120.0, 1, [0.0, 0.0],             true,  [300.0, 5000.0],   8192.0, 2.0,   11, Laser),
+    spec_row(WeaponId::Rpg,         Launcher,       1,   Tap,    1.5,  120.0, 1, [0.0, 0.0],             true,  [200.0, 5000.0],   8192.0, 2.0,   11, Laser),
     spec_row(WeaponId::Gauss,       Heavy,          -1,  Hold,   0.2,  20.0,  1, [0.0, 0.0],             false, [0.0, 3000.0],     8192.0, 0.0,   12, Charge),
     spec_row(WeaponId::Egon,        Heavy,          -1,  Hold,   0.1,  20.0,  1, [0.0, 0.0],             false, [128.0, 2000.0],   2048.0, 0.0,   13, AltFire::None),
 ];

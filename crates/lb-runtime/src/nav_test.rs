@@ -45,6 +45,11 @@ enum Phase {
 
 #[derive(Clone, Debug)]
 pub struct NavTest {
+    /// The weapons' part of a gauss boost under way, as the brain plays it.
+    pub boost: Option<lb_combat::arms::boost::GaussBoost>,
+    /// A link was just started: health and uranium are topped up for it (`give`, with `sv_cheats 1`), so a run of
+    /// boosts or falls tests the links, not what the bot has left.
+    pub refill: bool,
     queue: VecDeque<(NodeId, NodeId)>,
     current: Option<(NodeId, NodeId, Phase, f64)>,
     phases: Vec<String>,
@@ -73,6 +78,8 @@ pub fn pick_links(g: &NavGraph, kind: Option<LinkKind>, count: usize) -> Vec<(No
 impl NavTest {
     pub fn new(links: Vec<(NodeId, NodeId)>) -> NavTest {
         NavTest {
+            boost: None,
+            refill: false,
             total: links.len(),
             queue: links.into(),
             current: None,
@@ -118,6 +125,7 @@ impl NavTest {
                     nav.clear();
                     self.failures_seen = nav.failures_total;
                     self.current = Some((a, b, Phase::Approach, now));
+                    self.refill = true;
                 }
                 None => {
                     self.finished = true;

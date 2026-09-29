@@ -10,7 +10,7 @@ use crate::graph::NavGraph;
 
 pub const MAGIC: &[u8; 8] = b"LBNAV\0\r\n";
 /// Bumped when the layout or the graph types change.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// What a graph was made from; a graph is reused only for exactly the same key.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -139,7 +139,8 @@ pub fn read(bytes: &[u8]) -> Result<(GraphKey, NavGraph), StoreError> {
     let len = c.u32()? as usize;
     let packed = c.take(len)?;
     let raw = lz4_flex::decompress_size_prepended(packed).map_err(|e| StoreError::Decode(e.to_string()))?;
-    let graph: NavGraph = postcard::from_bytes(&raw).map_err(|e| StoreError::Decode(e.to_string()))?;
+    let mut graph: NavGraph = postcard::from_bytes(&raw).map_err(|e| StoreError::Decode(e.to_string()))?;
+    graph.fastest = graph.measure_fastest();
     Ok((key, graph))
 }
 

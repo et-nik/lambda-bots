@@ -932,6 +932,7 @@ dependencies = [
  "lb-navgen",
  "lb-worldq",
  "smallvec",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -60,6 +60,9 @@ pub struct MoveIntent {
 pub struct StanceIntent {
     pub jump: bool,
     pub duck: bool,
+    /// A long jump: duck and jump pressed together, both afresh (a command with neither goes out first when
+    /// either is held).
+    pub longjump: bool,
 }
 
 /// This frame's requests, one winner per channel.
@@ -206,12 +209,18 @@ impl Motor {
             out.side = side;
         }
         if let Some((_, s)) = intents.stance {
-            // A jump needs a fresh press, and on a ladder it would let go.
-            if s.jump && self.last_sent & IN_JUMP == 0 && !input.on_ladder {
-                out.buttons |= IN_JUMP;
-            }
-            if s.duck {
-                out.buttons |= IN_DUCK;
+            if s.longjump {
+                if self.last_sent & (IN_JUMP | IN_DUCK) == 0 && !input.on_ladder {
+                    out.buttons |= IN_JUMP | IN_DUCK;
+                }
+            } else {
+                // A jump needs a fresh press, and on a ladder it would let go.
+                if s.jump && self.last_sent & IN_JUMP == 0 && !input.on_ladder {
+                    out.buttons |= IN_JUMP;
+                }
+                if s.duck {
+                    out.buttons |= IN_DUCK;
+                }
             }
         }
         // Use acts on the press: a held key is released for a command first, unless it is meant to be held.
@@ -262,6 +271,7 @@ mod tests {
             StanceIntent {
                 jump: true,
                 duck: false,
+                longjump: false,
             },
         );
         let input = MotorInput {
@@ -298,5 +308,42 @@ mod tests {
         m.sent(out.buttons);
         let again = m.run(&intents, &input, &params, &mut rng);
         assert_eq!(again.buttons & IN_JUMP, 0, "held jump is not a new press");
+    }
+
+    #[test]
+    fn a_long_jump_presses_duck_and_jump_afresh_together() {
+        let mut m = Motor::default();
+        let mut intents = Intents::default();
+        let stance = |longjump, duck| StanceIntent {
+            jump: false,
+            duck,
+            longjump,
+        };
+        let input = MotorInput {
+            now: SimTime(0.0),
+            dt: 0.01,
+            eye: Vec3::ZERO,
+            velocity: Vec3::X * 270.0,
+            maxspeed: 300.0,
+            on_ladder: false,
+            weapon: None,
+        };
+        let params = LookParams {
+            model: AimModel::Spring,
+            turn_speed: 900.0,
+            skill: 50,
+        };
+        let mut rng = Pcg32::new(2, 2);
+        // Crouching before: the long jump lets go of duck for a command first.
+        intents.stance(Prio::Goal, stance(false, true));
+        let out = m.run(&intents, &input, &params, &mut rng);
+        m.sent(out.buttons);
+        intents.clear();
+        intents.stance(Prio::Threat, stance(true, false));
+        let out = m.run(&intents, &input, &params, &mut rng);
+        assert_eq!(out.buttons & (IN_JUMP | IN_DUCK), 0, "{:#x}", out.buttons);
+        m.sent(out.buttons);
+        let out = m.run(&intents, &input, &params, &mut rng);
+        assert_eq!(out.buttons & (IN_JUMP | IN_DUCK), IN_JUMP | IN_DUCK);
     }
 }

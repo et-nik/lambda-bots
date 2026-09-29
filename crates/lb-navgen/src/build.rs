@@ -3,7 +3,9 @@
 //! - walk links between nodes whose floor areas touch, and longer ones where the graph would otherwise make a bot
 //!   go more than 15% out of its way (a greedy spanner);
 //! - special links the classifier checks: drops, ladders, lifts, teleports, doors and breakables in the way, and
-//!   jumps where walking around is more than twice as long.
+//!   jumps where walking around is more than twice as long;
+//! - tricks: long jumps across gaps a jump does not clear where walking around is more than twice as long, and gauss
+//!   boosts onto places the graph reaches only by a way costlier than the boost (or not at all).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -14,8 +16,13 @@ use lb_bsp::mech::{Mechanisms, MoverKind};
 use lb_bsp::world::WorldView;
 use lb_core::{Vec2, Vec3};
 use lb_kin::Physics;
+use lb_kin::tricks::{
+    BOOST_PITCHES, BoostQuery, FULL_PUSH, TrickPlan, boost_view, plan_boost, plan_longjump, simulate_boost,
+};
 use lb_kin::validate::{JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_push, simulate_swim};
-use lb_nav::classify::{Classified, Classifier, DROP_SPEED, crouch_origin, is_water, stand_origin};
+use lb_nav::classify::{
+    BOOST_PRICE, BOOST_SETUP, Classified, Classifier, DROP_SPEED, LONGJUMP_SETUP, crouch_origin, is_water, stand_origin,
+};
 use lb_nav::graph::{GraphStats, LinkFlags, LinkKind, NavGraph, NavLink, NavNode, NodeFlags, NodeId};
 use lb_nav::plan::RUN_SPEED;
 use lb_nav::validate::{WalkCheck, walk_straight};
@@ -37,6 +44,8 @@ pub struct GenOptions {
     pub max_out: usize,
     /// Plan jumps across gaps and onto ledges.
     pub jumps: bool,
+    /// Plan long jumps and gauss boosts.
+    pub tricks: bool,
     pub spacing: Spacing,
 }
 
@@ -48,6 +57,7 @@ impl Default for GenOptions {
             stretch: 1.15,
             max_out: 12,
             jumps: true,
+            tricks: true,
             spacing: Spacing::default(),
         }
     }
@@ -60,8 +70,10 @@ pub struct Generated {
     pub owner: Vec<u32>,
     /// Milliseconds per stage.
     pub timings: Vec<(&'static str, u128)>,
-    /// Jumps planned, and how many of them made it.
+    /// Jumps planned, and how many of them made it; the same of long jumps and gauss boosts.
     pub jumps: (usize, usize),
+    pub longjumps: (usize, usize),
+    pub boosts: (usize, usize),
     /// Nodes at spawn points and at items.
     pub spawns: Vec<u32>,
     pub items: Vec<u32>,
@@ -85,6 +97,23 @@ const SWIM_REACH: f32 = 192.0;
 const SWIMS_PER_NODE: usize = 8;
 /// A swimmer climbs out onto floor at most this far above the water's surface.
 const CLIMB_OUT: f32 = 48.0;
+
+/// Long jumps are looked for from nodes this close to an edge, to nodes this far away (horizontally), up and down.
+const LONGJUMP_EDGE: f32 = 96.0;
+const LONGJUMP_REACH: [f32; 2] = [160.0, 560.0];
+const LONGJUMP_UP: f32 = 48.0;
+const LONGJUMP_DOWN: f32 = -240.0;
+/// Long jumps tried from one node.
+const LONGJUMPS_PER_NODE: usize = 3;
+/// A long jump link, and a gauss boost's, is made where the way round takes this many times as long at least.
+const LONGJUMP_GAIN: f32 = 1.5;
+const BOOST_GAIN: f32 = 1.3;
+/// Gauss boosts are tried along this many ways from nodes with this much room overhead; the node a flight comes
+/// down within `BOOST_NEAR` of is steered for, a few from each node.
+const BOOST_WAYS: usize = 12;
+const BOOST_HEADROOM: f32 = 128.0;
+const BOOST_NEAR: f32 = 96.0;
+const BOOSTS_PER_NODE: usize = 2;
 
 /// Flights are steered at nodes this far from a field at least (farther where free flights land farther).
 const PUSH_RANGE: f32 = 384.0;
@@ -1066,6 +1095,16 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
     }
     lap("pushes", &mut t);
 
+    let (longjumps, boosts) = if opts.tricks {
+        let longjumps = longjump_links(&mut cls, &mut links, &placement, &field, &opts.physics);
+        lap("long jumps", &mut t);
+        let boosts = boost_links(&mut cls, &mut links, &placement, &opts.physics);
+        lap("boosts", &mut t);
+        (longjumps, boosts)
+    } else {
+        ((0, 0), (0, 0))
+    };
+
     let probes = cls.probes(&links.out);
     let traces = cls.world.traces - traces_before + extra_traces;
     let Classifier { nodes, specs, .. } = cls;
@@ -1086,7 +1125,193 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         owner: placement.owner,
         timings,
         jumps,
+        longjumps,
+        boosts,
         spawns,
         items,
     }
+}
+
+/// Long jumps across gaps: pairs of standing nodes 160–560 units apart, the first near an edge, that the graph joins
+/// only by a way more than twice as long or not at all; nearest first, a few from each node. Returns how many were
+/// planned and how many made it.
+fn longjump_links(
+    cls: &mut Classifier<'_>,
+    links: &mut Links,
+    placement: &crate::place::Placement,
+    field: &FloorField,
+    phys: &Physics,
+) -> (usize, usize) {
+    let unfit = NodeFlags::LADDER | NodeFlags::AIRBORNE | NodeFlags::WATER | NodeFlags::ON_MOVER | NodeFlags::CROUCH;
+    let mut cands: Vec<(u32, u32)> = Vec::new();
+    for a in 0..cls.nodes.len() as u32 {
+        let na = cls.nodes[a as usize];
+        let span = placement.spots[a as usize].span;
+        if na.flags.intersects(unfit) || span == NONE || room(field, span) > LONGJUMP_EDGE {
+            continue;
+        }
+        let mut near: Vec<(f32, u32)> = placement
+            .around(na.origin, LONGJUMP_REACH[1])
+            .filter(|&b| b != a)
+            .filter_map(|b| {
+                let nb = &cls.nodes[b as usize];
+                let dz = nb.origin.z - na.origin.z;
+                let d = (nb.origin - na.origin).truncate().length();
+                (!nb.flags.intersects(unfit) && (LONGJUMP_DOWN..=LONGJUMP_UP).contains(&dz) && d >= LONGJUMP_REACH[0])
+                    .then_some((d, b))
+            })
+            .collect();
+        near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        let mut taken = 0;
+        for (d, b) in near {
+            if taken >= LONGJUMPS_PER_NODE {
+                break;
+            }
+            if links.has(a, b) || links.within(a, b, 2.0 * d / RUN_SPEED) {
+                continue;
+            }
+            cands.push((a, b));
+            taken += 1;
+        }
+    }
+    let plans: Vec<Option<TrickPlan>> = {
+        let (w, nodes) = (&*cls.world, &cls.nodes);
+        cands
+            .par_iter()
+            .map(|&(a, b)| {
+                let mut v = WorldView::new(w);
+                plan_longjump(
+                    &mut v,
+                    phys,
+                    stand_origin(&nodes[a as usize]),
+                    stand_origin(&nodes[b as usize]),
+                )
+            })
+            .collect()
+    };
+    let mut made = 0;
+    for (&(a, b), plan) in cands.iter().zip(plans) {
+        // Worth it: no fall damage, and a second and a third of the way round saved at least.
+        let Some(plan) = plan.filter(|p| phys.fall_damage(p.impact) == 0.0) else {
+            continue;
+        };
+        let cost = LONGJUMP_SETUP + plan.flight + (1.0 - plan.robustness);
+        if links.within(a, b, (cost * LONGJUMP_GAIN).max(cost + 1.0)) {
+            continue;
+        }
+        made += 1;
+        let (na, nb) = (cls.nodes[a as usize], cls.nodes[b as usize]);
+        let c = cls.longjump_from_plan(&na, &nb, &plan);
+        let link = cls.link(a as usize, b as usize, c, LinkFlags::empty());
+        links.out[a as usize].push(link);
+    }
+    (cands.len(), made)
+}
+
+/// Gauss boosts: from standing nodes with room overhead, the flight along each of twelve ways is followed to where
+/// it comes down; a node there that the graph gets to only by a way costlier than the boost (or not at all) gets a
+/// boost steered onto it, when that is sure, comes down safely unsteered too, and the beam into the floor behind
+/// spares the bot (it neither glances off nor, too thick to punch through, comes back). Returns how many were
+/// planned and how many made it.
+fn boost_links(
+    cls: &mut Classifier<'_>,
+    links: &mut Links,
+    placement: &crate::place::Placement,
+    phys: &Physics,
+) -> (usize, usize) {
+    let unfit = NodeFlags::LADDER | NodeFlags::AIRBORNE | NodeFlags::WATER | NodeFlags::ON_MOVER | NodeFlags::CROUCH;
+    let sources: Vec<u32> = (0..cls.nodes.len() as u32)
+        .filter(|&a| !cls.nodes[a as usize].flags.intersects(unfit) && placement.spots[a as usize].span != NONE)
+        .collect();
+    let flights: Vec<(u32, MoveVerdict)> = {
+        let (w, nodes) = (&*cls.world, &cls.nodes);
+        sources
+            .par_iter()
+            .map(|&a| {
+                let mut v = WorldView::new(w);
+                let from = stand_origin(&nodes[a as usize]);
+                let up = v.trace(&TraceQuery::hull(
+                    from,
+                    from + Vec3::Z * BOOST_HEADROOM,
+                    HullKind::Stand,
+                ));
+                if up.start_solid || up.fraction < 1.0 {
+                    return Vec::new();
+                }
+                (0..BOOST_WAYS)
+                    .map(|k| {
+                        let yaw = (k as f32 * 360.0 / BOOST_WAYS as f32).to_radians();
+                        let (s, c) = lb_core::dmath::sin_cos(yaw);
+                        let q = BoostQuery {
+                            from,
+                            dir: Vec2::new(c, s),
+                            pitch: BOOST_PITCHES[0],
+                            push: FULL_PUSH,
+                            to: None,
+                        };
+                        (a, simulate_boost(&mut v, phys, &q))
+                    })
+                    .collect()
+            })
+            .collect::<Vec<Vec<_>>>()
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut cands: Vec<(u32, u32)> = Vec::new();
+    for (a, v) in flights {
+        if !v.ok || v.in_water {
+            continue;
+        }
+        let feet = v.landing.z - 36.0;
+        let found = placement
+            .around(v.landing, BOOST_NEAR)
+            .filter(|&b| {
+                let nb = &cls.nodes[b as usize];
+                b != a && !nb.flags.intersects(unfit) && (nb.origin.z - 36.0 - feet).abs() < 24.0
+            })
+            .min_by(|&x, &y| {
+                let dx = (cls.nodes[x as usize].origin - v.landing).truncate().length();
+                let dy = (cls.nodes[y as usize].origin - v.landing).truncate().length();
+                dx.total_cmp(&dy).then(x.cmp(&y))
+            });
+        let Some(b) = found else { continue };
+        let cost = (BOOST_SETUP + v.flight + BOOST_PRICE) * BOOST_GAIN;
+        if seen.contains(&(a, b)) || links.has(a, b) || links.within(a, b, cost) {
+            continue;
+        }
+        seen.insert((a, b));
+        cands.push((a, b));
+    }
+    let plans: Vec<Option<TrickPlan>> = {
+        let (w, nodes) = (&*cls.world, &cls.nodes);
+        cands
+            .par_iter()
+            .map(|&(a, b)| {
+                let mut v = WorldView::new(w);
+                let (from, to) = (stand_origin(&nodes[a as usize]), stand_origin(&nodes[b as usize]));
+                let plan = plan_boost(&mut v, phys, from, to, FULL_PUSH)?;
+                let view = boost_view((to - from).truncate().normalize_or_zero(), plan.pitch);
+                let full = FULL_PUSH / 5.0;
+                lb_nav::tricks::beam_safe(&mut v, lb_nav::tricks::boost_eye(from), view, full, true).then_some(plan)
+            })
+            .collect()
+    };
+    let mut made = 0;
+    let mut per_node: rustc_hash::FxHashMap<u32, usize> = rustc_hash::FxHashMap::default();
+    for (&(a, b), plan) in cands.iter().zip(plans) {
+        let Some(plan) = plan else { continue };
+        let count = per_node.entry(a).or_default();
+        if *count >= BOOSTS_PER_NODE {
+            continue;
+        }
+        *count += 1;
+        made += 1;
+        let (na, nb) = (cls.nodes[a as usize], cls.nodes[b as usize]);
+        let c = cls.boost_from_plan(&na, &nb, &plan);
+        let link = cls.link(a as usize, b as usize, c, LinkFlags::empty());
+        links.out[a as usize].push(link);
+    }
+    (cands.len(), made)
 }

@@ -4,7 +4,8 @@
 //!   stands with the skill's `stay_mid` / `stay_far` chance. A low will to approach (health × aggression below
 //!   30), or a pistol or shotgun against an enemy facing the bot, makes it strafe.
 //! - **Strafe side:** away from the side the enemy aims at, swapped 30% of the time, re-decided every 0.3–0.8 s.
-//!   Walls within 134 units on a side turn it around.
+//!   Walls within 134 units on a side turn it around; with walls that close on both sides it strafes toward the one
+//!   farther off while there is room, and only in a corridor too narrow for that does it go back and forth instead.
 //! - **Distance:** further off than the weapon in hand does well at ([`close_in`]), a bot with the will to (health ×
 //!   aggression 30 or more) closes in at a run, along the way there when navigation gives one, strafing as it goes;
 //!   it does not stand then. Otherwise skilled bots drift in when they feel strong and far, back off when weak and
@@ -12,6 +13,9 @@
 //!   closes in while its own rocket or launched grenade is on the way to the target.
 //! - **Extras:** crouch taps and dodge jumps by skill.
 //! - **Ledges:** a move that would drop more than 160 units is reversed.
+//! - **Stuck:** a move on the ground that hardly gets anywhere for a third of a second (a box the wall traces pass
+//!   over, a player, the wall behind a ledge turned from) is backed out of for a moment, and the strafe goes the other
+//!   way; aside rather than at the enemy while keeping away from it.
 
 use lb_core::dmath;
 use lb_core::rng::Pcg32;
@@ -28,6 +32,16 @@ pub const PUSH_WILL: f32 = 30.0;
 const PUSH_STRAFE: f32 = 0.6;
 const SAFE_DROP: f32 = 160.0;
 const CHECK_PERIOD: f64 = 0.1;
+/// With walls close on both sides, a strafe toward the farther one needs this much room, and stops this short of it.
+const ROOM_MIN: f32 = 64.0;
+const ROOM_KEEP: f32 = 24.0;
+/// A move asked this fast that gets less than this share of it, this long, is stuck; it is backed out of this long.
+const STUCK_ASK: f32 = 100.0;
+const STUCK_SHARE: f32 = 0.25;
+const STUCK_FOR: f64 = 0.35;
+const ESCAPE_FOR: f64 = 0.3;
+/// Backing out while keeping away from the enemy goes no more toward it than this (a cosine).
+const KEEP_OFF_TOWARD: f32 = 0.2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FightSkill {
@@ -53,7 +67,11 @@ pub struct FightInput {
     pub reloading: bool,
     /// The bot's own explosive is on its way to the target: closing in would take the bot into the blast.
     pub hold_ground: bool,
+    /// ... and the target is close: backing off keeps the bot out of the blast.
+    pub back_off: bool,
     pub on_ground: bool,
+    /// How the bot moves now, horizontally.
+    pub velocity: Vec2,
     pub maxspeed: f32,
     /// Further off than this the weapon in hand does poorly ([`close_in`]).
     pub close_in: f32,
@@ -106,11 +124,17 @@ pub struct Fight {
     /// +1 right, -1 left, 0 none.
     side: f32,
     side_until: SimTime,
-    walls: (bool, bool),
+    /// Clear room to the left and to the right at the last look, up to `WALL_DISTANCE`.
+    room: (f32, f32),
     duck_until: SimTime,
     hop_after: SimTime,
     next_check: SimTime,
     reverse: bool,
+    /// The move asked last, and since when it has hardly got anywhere.
+    asked: Vec2,
+    stuck_since: Option<SimTime>,
+    /// Backing out of a stuck move: until when, and which way.
+    escape: Option<(SimTime, Vec2)>,
 }
 
 impl Fight {
@@ -126,6 +150,9 @@ impl Fight {
         let melee = i.weapon == WeaponClass::Melee;
         let skilled = s.skill >= 50;
         let push = i.wants_closer(distance);
+        if let Some(out) = self.unstick(i, tracer, rng) {
+            return out;
+        }
         if i.now >= self.style_until {
             self.style = if melee || distance < 768.0 {
                 Style::Strafe
@@ -161,16 +188,28 @@ impl Fight {
                     self.side = -self.side;
                 }
                 self.side_until = i.now + f64::from(rng.range_f32(0.3, 0.8));
-                let wall = |t: &mut dyn Tracer, dir: Vec2| {
+                let room = |t: &mut dyn Tracer, dir: Vec2| {
                     let end = i.origin + (dir * WALL_DISTANCE).extend(0.0);
-                    t.trace(&TraceQuery::line(i.origin, end)).fraction < 1.0
+                    t.trace(&TraceQuery::line(i.origin, end)).fraction * WALL_DISTANCE
                 };
-                self.walls = (wall(tracer, -right), wall(tracer, right));
+                self.room = (room(tracer, -right), room(tracer, right));
+                let (left, right) = self.room;
+                let walled = |room: f32| room < WALL_DISTANCE;
+                if walled(left) && walled(right) && left.max(right) >= ROOM_MIN {
+                    // Toward the farther wall, stopping short of it.
+                    self.side = if right >= left { 1.0 } else { -1.0 };
+                    let secs = (left.max(right) - ROOM_KEEP) / i.maxspeed.max(1.0);
+                    self.side_until = self.side_until.min(i.now + f64::from(secs));
+                }
             }
-            let (left_wall, right_wall) = self.walls;
-            if self.side < 0.0 && left_wall || self.side > 0.0 && right_wall {
+            let (left, right) = self.room;
+            let (left_wall, right_wall) = (left < WALL_DISTANCE, right < WALL_DISTANCE);
+            let cornered = left_wall && right_wall && left.max(right) < ROOM_MIN;
+            if !cornered && (self.side < 0.0 && left_wall || self.side > 0.0 && right_wall) {
                 let other = if self.side < 0.0 { right_wall } else { left_wall };
-                self.side = if other { 0.0 } else { -self.side };
+                if !other {
+                    self.side = -self.side;
+                }
             }
             sideways = self.side * i.maxspeed;
             if !melee {
@@ -182,14 +221,14 @@ impl Fight {
                 } else if skilled && i.approach < 60.0 && distance < 300.0 {
                     ahead = -0.5 * i.maxspeed;
                 }
-                if left_wall && right_wall {
+                if cornered {
                     sideways = 0.0;
                     ahead = if push {
                         i.maxspeed
                     } else if skilled {
                         -i.maxspeed
                     } else {
-                        0.0
+                        -0.5 * i.maxspeed
                     };
                 }
             }
@@ -214,6 +253,9 @@ impl Fight {
         if i.hold_ground {
             ahead = ahead.min(0.0);
         }
+        if i.back_off {
+            ahead = -i.maxspeed;
+        }
         if i.reloading {
             ahead = -i.maxspeed;
             self.duck_until = i.now;
@@ -233,7 +275,45 @@ impl Fight {
         }
         out.velocity = if self.reverse { -velocity } else { velocity };
         out.duck = i.now < self.duck_until;
+        self.asked = out.velocity;
         out
+    }
+
+    /// A move stuck on the ground is backed out of (sideways where straight back is a drop), and the strafe turns
+    /// the other way; `Some` while backing out.
+    fn unstick(&mut self, i: &FightInput, tracer: &mut dyn Tracer, rng: &mut Pcg32) -> Option<FightMove> {
+        if let Some((until, dir)) = self.escape {
+            if i.now < until {
+                self.asked = dir * i.maxspeed;
+                return Some(FightMove {
+                    velocity: self.asked,
+                    ..FightMove::default()
+                });
+            }
+            self.escape = None;
+        }
+        let asked = self.asked.length();
+        if !i.on_ground || asked < STUCK_ASK || i.velocity.length() >= STUCK_SHARE * asked {
+            self.stuck_since = None;
+            return None;
+        }
+        let since = *self.stuck_since.get_or_insert(i.now);
+        if i.now.since(since) < STUCK_FOR {
+            return None;
+        }
+        self.stuck_since = None;
+        self.side = -self.side;
+        self.side_until = i.now + f64::from(rng.range_f32(0.5, 1.0));
+        let back = -self.asked / asked;
+        // Not at the enemy while keeping away from it (its own blast on the way, a reload): aside then.
+        let toward = (i.enemy - i.origin).truncate().normalize_or_zero();
+        let keep_off = i.hold_ground || i.back_off || i.reloading;
+        let way = [back, Vec2::new(-back.y, back.x), Vec2::new(back.y, -back.x)]
+            .into_iter()
+            .filter(|d| !keep_off || d.dot(toward) <= KEEP_OFF_TOWARD)
+            .find(|d| !drops(tracer, i.origin, *d * i.maxspeed))?;
+        self.escape = Some((i.now + ESCAPE_FOR, way));
+        self.unstick(i, tracer, rng)
     }
 }
 
@@ -284,10 +364,34 @@ mod tests {
             weapon: WeaponClass::Smg,
             reloading: false,
             hold_ground: false,
+            back_off: false,
             on_ground: true,
+            velocity: Vec2::ZERO,
             maxspeed: 300.0,
             close_in: f32::INFINITY,
             path: None,
+        }
+    }
+
+    /// Flat floor at z = -36, walls along the x axis at the given y, traced to where a line meets them.
+    struct Walls(Vec<f32>);
+
+    impl Tracer for Walls {
+        fn trace(&mut self, q: &TraceQuery) -> Trace {
+            let mut t = Trace::clear(q.end);
+            for &y in &self.0 {
+                if (q.start.y - y) * (q.end.y - y) < 0.0 {
+                    t.fraction = t.fraction.min((y - q.start.y) / (q.end.y - q.start.y));
+                }
+            }
+            if q.end.z < -36.0 {
+                t.fraction = t.fraction.min(0.1);
+            }
+            t
+        }
+
+        fn point_contents(&mut self, _p: Vec3) -> i32 {
+            contents::EMPTY
         }
     }
 
@@ -351,6 +455,12 @@ mod tests {
         let mut f = Fight::default();
         let m = f.update(&strong(true), &SKILL, &mut open, &mut Pcg32::new(5, 5));
         assert!(m.velocity.x <= 0.0, "not while its rocket flies: {m:?}");
+        let close = FightInput {
+            back_off: true,
+            ..strong(true)
+        };
+        let m = f.update(&close, &SKILL, &mut open, &mut Pcg32::new(5, 5));
+        assert!(m.velocity.x < -200.0, "away from its rocket's blast close by: {m:?}");
     }
 
     #[test]
@@ -405,5 +515,102 @@ mod tests {
         let mut rng = Pcg32::new(3, 3);
         let m = f.update(&input(0.0, 80.0), &SKILL, &mut Cliff, &mut rng);
         assert!(m.velocity.x > 0.0, "reversed at the edge: {m:?}");
+    }
+
+    #[test]
+    fn in_a_corridor_it_strafes_toward_the_farther_wall_and_only_goes_back_and_forth_in_a_narrow_one() {
+        // The enemy ahead along x: the bot's left is +y. Walls 100 units to the left and 60 to the right.
+        let mut f = Fight::default();
+        let m = f.update(
+            &input(0.0, 400.0),
+            &SKILL,
+            &mut Walls(vec![100.0, -60.0]),
+            &mut Pcg32::new(1, 1),
+        );
+        assert!(m.velocity.y > 250.0 && m.velocity.x.abs() < 1.0, "{m:?}");
+        assert!(
+            f.side_until <= SimTime((100.0 - f64::from(ROOM_KEEP)) / 300.0 + 1e-6),
+            "stops short of the wall"
+        );
+        // Too narrow to strafe: a skilled bot backs off, an unskilled one too, slower (it used to stand).
+        let narrow = |skill: u8| {
+            let mut f = Fight::default();
+            let s = FightSkill { skill, ..SKILL };
+            f.update(
+                &input(0.0, 400.0),
+                &s,
+                &mut Walls(vec![50.0, -50.0]),
+                &mut Pcg32::new(1, 1),
+            )
+        };
+        let (skilled, unskilled) = (narrow(50), narrow(30));
+        assert!(
+            skilled.velocity.x < -250.0 && skilled.velocity.y.abs() < 1.0,
+            "{skilled:?}"
+        );
+        assert!(
+            unskilled.velocity.x < -100.0 && unskilled.velocity.y.abs() < 1.0,
+            "{unskilled:?}"
+        );
+    }
+
+    #[test]
+    fn a_strafe_that_gets_nowhere_is_backed_out_of_and_turned() {
+        let mut f = Fight::default();
+        let mut rng = Pcg32::new(1, 1);
+        let mut open = Floor { wall_y: None };
+        let first = f.update(&input(0.0, 400.0), &SKILL, &mut open, &mut rng);
+        let side = first.velocity.y.signum();
+        assert!(first.velocity.y.abs() > 250.0, "{first:?}");
+        // Held where it is (a box the wall traces pass over): out the other way within half a second.
+        let mut out = None;
+        for k in 1..=6 {
+            let m = f.update(&input(f64::from(k) * 0.1, 400.0), &SKILL, &mut open, &mut rng);
+            if m.velocity.y * side < -250.0 {
+                out = Some(k);
+                break;
+            }
+        }
+        assert!(out.is_some_and(|k| k <= 5), "{out:?}");
+        // Moving freely again after backing out, it strafes on that way.
+        let free = FightInput {
+            velocity: Vec2::new(0.0, -side * 300.0),
+            ..input(1.0, 400.0)
+        };
+        let m = f.update(&free, &SKILL, &mut open, &mut rng);
+        assert!(m.velocity.y * side < -250.0, "{m:?}");
+        // In the air a slow move is no sign of being stuck.
+        let mut f = Fight::default();
+        let first = f.update(&input(0.0, 400.0), &SKILL, &mut open, &mut rng);
+        for k in 1..=6 {
+            let flying = FightInput {
+                on_ground: false,
+                ..input(f64::from(k) * 0.1, 400.0)
+            };
+            let m = f.update(&flying, &SKILL, &mut open, &mut rng);
+            assert!(m.velocity.dot(first.velocity) > -1.0 || f.escape.is_none(), "{m:?}");
+        }
+        assert!(f.escape.is_none());
+    }
+
+    #[test]
+    fn backing_off_from_its_own_blast_it_never_backs_out_toward_the_enemy() {
+        let mut f = Fight::default();
+        let mut rng = Pcg32::new(1, 1);
+        let mut open = Floor { wall_y: None };
+        let away = |now: f64| FightInput {
+            back_off: true,
+            ..input(now, 300.0)
+        };
+        let first = f.update(&away(0.0), &SKILL, &mut open, &mut rng);
+        assert!(first.velocity.x < -250.0, "{first:?}");
+        // A wall behind: held where it is, it gets out sideways, not back at the enemy and its rocket's blast.
+        let mut backed_out = false;
+        for k in 1..=8 {
+            let m = f.update(&away(f64::from(k) * 0.1), &SKILL, &mut open, &mut rng);
+            assert!(m.velocity.x <= 0.2 * 300.0 + 1.0, "{k}: {m:?}");
+            backed_out |= f.escape.is_some();
+        }
+        assert!(backed_out);
     }
 }

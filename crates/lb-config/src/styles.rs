@@ -1,5 +1,5 @@
-//! `config/styles/<style>.yaml`: a play style's trait ranges and goal weights. Anything a file leaves out keeps
-//! the style's built-in value.
+//! `config/styles/<style>.yaml`: a play style's trait ranges, goal weights, weapons and tricks. Anything a file
+//! leaves out keeps the style's built-in value.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,21 @@ pub struct StyleWeapons {
     pub throwables: Option<f32>,
 }
 
+/// How readily the style takes tricks, as chances 0..1: long jumps along straight stretches of the way, long jumps
+/// at an enemy, gauss jumps on the way, satchels thrown from a jump.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct StyleTricks {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longjump: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lj_attack: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gauss_jump: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub satchel_jump: Option<f32>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StyleFile {
@@ -69,6 +84,8 @@ pub struct StyleFile {
     pub goals: StyleGoals,
     #[serde(default)]
     pub weapons: StyleWeapons,
+    #[serde(default)]
+    pub tricks: StyleTricks,
 }
 
 impl StyleFile {
@@ -124,6 +141,17 @@ impl StyleFile {
                 return Err(bad(&name, "must be in 0..=10".into()));
             }
         }
+        let t = &f.tricks;
+        for (name, v) in [
+            ("tricks.longjump", t.longjump),
+            ("tricks.lj_attack", t.lj_attack),
+            ("tricks.gauss_jump", t.gauss_jump),
+            ("tricks.satchel_jump", t.satchel_jump),
+        ] {
+            if v.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+                return Err(bad(name, "must be a chance in 0..=1".into()));
+            }
+        }
         Ok(f)
     }
 }
@@ -151,5 +179,18 @@ mod tests {
         );
         assert!(StyleFile::parse("schema: lambdabots/style@1\nid: sniper\ngoals:\n  sniping: 2\n", "x").is_err());
         assert!(StyleFile::parse("schema: lambdabots/style@1\nid: sniper\ngoals:\n  camp: 11\n", "x").is_err());
+        let f = StyleFile::parse(
+            "schema: lambdabots/style@1\nid: rusher\ntricks:\n  lj_attack: 1.0\n",
+            "x",
+        )
+        .unwrap();
+        assert_eq!(f.tricks.lj_attack, Some(1.0));
+        assert!(
+            StyleFile::parse(
+                "schema: lambdabots/style@1\nid: rusher\ntricks:\n  lj_attack: 1.5\n",
+                "x"
+            )
+            .is_err()
+        );
     }
 }

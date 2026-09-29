@@ -2,6 +2,7 @@
 //!
 //! - [`gauss`]: charging the gauss and letting it go when the view is on the target, or dumping a charge that has
 //!   been held too long.
+//! - [`boost`]: a gauss boost, the charge let go looking back and down as the bot jumps.
 //! - [`throw`]: hand grenades (pin, cook, aim, release), satchels (one, a pile, or from a jump) and snarks (one, or
 //!   all of them at an enemy close by).
 //! - [`mine`]: placing a tripmine on a wall.
@@ -14,6 +15,7 @@
 //! interrupted by a shot. Phases move on what the game reports back (the weapon in hand, the prediction data, the
 //! ammo count), never on what was asked.
 
+pub mod boost;
 pub mod detonate;
 pub mod gauss;
 pub mod launcher;

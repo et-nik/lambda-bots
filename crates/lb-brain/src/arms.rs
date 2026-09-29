@@ -2,10 +2,15 @@
 //! it (ten times a second, from what the bot believes), and dodging what it sees about to blow up.
 //!
 //! - **Throws:** three times a second at the nearest enemy in sight, or lost up to 3 s ago with its position still
-//!   tight: a grenade 300–800 units away when a throw lands there and the blast spares the bot, a satchel at 150–400
-//!   with a clear line to the spot, a snark at 150–800 likewise. Out of sight a grenade comes first (a satchel when
-//!   close), in sight a snark; the chance per look is the kind's base times the skill's `throw_rate`, and a throw rests
-//!   the arm 3–6 s. With no gun but the crowbar, throws are the weapon (yapb's grenade war).
+//!   tight: a grenade 300–1000 units away when a throw lands there and the blast spares the bot, a satchel at 150–400
+//!   with a clear line to the spot, a snark at 150–800 likewise. A grenade that fits is thrown almost always, a
+//!   satchel or a snark more rarely (the chance per look is the kind's base times the skill's `throw_rate`); a grenade
+//!   rests the arm about a second, a satchel 3–6 s. With no gun but the crowbar, throws are the weapon (yapb's grenade
+//!   war).
+//! - **Grenades with no enemy known:** now and then one where an enemy is expected: where a lost one would come into
+//!   view, a sound heard lately, the busiest way into the bot's sight. Skills with `throw_series` throw one after
+//!   another until none is left, the grenade kept in hand between them; an enemy in sight within 250 units ends the
+//!   series for the gun.
 //! - **The MP5's grenade** at a target in sight 300–700 units away, every 2.5–4 s, when the lob is clear; the bot does
 //!   not close in on the target while its grenade or rocket is on the way.
 //! - **Satchels** go off when an enemy is within 160 units of one and closer to it than the bot; a bot too close to
@@ -17,6 +22,7 @@
 //!   run away from the blast (yapb ran toward it), checking for ledges.
 //! - **Gauss:** its charge runs whenever the gauss is in hand; nothing else starts while it charges.
 
+use lb_combat::arms::boost::GaussBoost;
 use lb_combat::arms::detonate::{Airburst, Burst, MineShot, SatchelTrigger};
 use lb_combat::arms::gauss::{Gauss, GaussInput};
 use lb_combat::arms::launcher::Lob;
@@ -26,7 +32,7 @@ use lb_combat::arms::throw::{Barrage, Kind, Thrower};
 use lb_combat::arms::{Hands, Request, Status};
 use lb_combat::ballistics;
 use lb_combat::fight::drops;
-use lb_combat::policy::{ROCKET_MIN, XBOW_UNZOOM};
+use lb_combat::policy::XBOW_UNZOOM;
 use lb_core::math::view_angle_vectors;
 use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
@@ -44,7 +50,7 @@ use crate::BotBrain;
 use crate::mind::{Body, Character};
 
 /// Throw windows (horizontal distance).
-const GRENADE_BAND: [f32; 2] = [300.0, 800.0];
+const GRENADE_BAND: [f32; 2] = [300.0, 1000.0];
 const SATCHEL_BAND: [f32; 2] = [150.0, 400.0];
 const SNARK_BAND: [f32; 2] = [200.0, 1000.0];
 const LOB_BAND: [f32; 2] = [300.0, 700.0];
@@ -66,15 +72,29 @@ const THROW_TRACK_SIGMA: f32 = 400.0;
 /// Throws are weighed this often.
 const THROW_CHECK: f64 = 0.3;
 /// Chance per check to take a throw (times the skill's `throw_rate`): at an enemy out of sight and in sight.
-const UNSEEN_GRENADE: f32 = 0.5;
+const UNSEEN_GRENADE: f32 = 0.9;
 const UNSEEN_SATCHEL: f32 = 0.35;
 const UNSEEN_SNARK: f32 = 0.6;
-const SEEN_GRENADE: f32 = 0.12;
+const SEEN_GRENADE: f32 = 0.9;
 const SEEN_SATCHEL: f32 = 0.15;
 const SEEN_SNARK: f32 = 0.6;
-/// Seconds before the next throw is weighed after one; after snarks, which cost nothing to let go.
+/// The chance per check at most.
+const THROW_CHANCE_MAX: f32 = 0.95;
+/// Seconds before the next throw is weighed after one: a grenade, satchels, snarks (which cost nothing to let go).
+const GRENADE_REST: [f32; 2] = [0.8, 1.2];
 const THROW_REST: [f32; 2] = [3.0, 6.0];
 const SNARK_REST: [f32; 2] = [1.0, 2.5];
+/// A grenade where an enemy is expected, none known: the chance per check (times the skill's `throw_rate` and the
+/// style's liking), how far off, how far from the spot it may land, and how recent a sound it goes at.
+const BLIND_GRENADE: f32 = 0.03;
+const BLIND_BAND: [f32; 2] = [350.0, 1000.0];
+const BLIND_SCATTER: f32 = 48.0;
+const BLIND_HEARD: f64 = 4.0;
+/// Seconds between the grenades of a series; an enemy in sight this close ends it (the gun), and so does one of its
+/// grenades coming down this close.
+const SERIES_GAP: f64 = 0.3;
+const SERIES_CLOSE: f32 = 250.0;
+const SERIES_SAFE: f32 = 350.0;
 /// At an enemy in sight, snarks go in a stream of this many (as many as the bot carries).
 const SNARK_STREAM: [u32; 2] = [1, 3];
 /// An enemy this far above is out of throwing reach.
@@ -108,9 +128,11 @@ const SATCHEL_LOST_WAIT: [f32; 2] = [1.0, 2.5];
 const SATCHEL_LOST_NEAR: f64 = 6.0;
 const SATCHEL_LIE: [f32; 2] = [8.0, 15.0];
 /// A pile is this many satchels (as many as the bot carries).
-const SATCHEL_PILE: [u32; 2] = [2, 4];
+pub(crate) const SATCHEL_PILE: [u32; 2] = [2, 4];
 /// At an enemy in sight this far away, a satchel is thrown from a jump and set off as it comes by.
 const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
+/// The balanced style's liking for satchels thrown from a jump, which the base chance is for.
+const BALANCED_SATCHEL_JUMP: f32 = 0.4;
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
 const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
@@ -156,6 +178,8 @@ const SPAWN_CLEAR: f32 = 256.0;
 const QUIET: f64 = 5.0;
 /// A dodge lasts this long once started; a run from a snark is renewed while it is near.
 const DODGE_FOR: f64 = 0.5;
+/// A long jump away from a blast lands this much further off it than the bot stands.
+const LEAP_AWAY: f32 = 150.0;
 const SNARK_RUN_FOR: f64 = 0.3;
 /// Someone else's snark this close is run from (or burnt with the egon); the bot's own when it comes back this close.
 const SNARK_NEAR: f32 = 300.0;
@@ -178,6 +202,7 @@ pub enum Active {
     Barrage(Barrage),
     Shoot(MineShot),
     Scope(Scope),
+    GaussBoost(GaussBoost),
 }
 
 impl Active {
@@ -192,6 +217,7 @@ impl Active {
             Active::Barrage(_) => "snark barrage",
             Active::Shoot(_) => "shoot a mine",
             Active::Scope(_) => "scope",
+            Active::GaussBoost(_) => "gauss boost",
         }
     }
 }
@@ -200,6 +226,9 @@ impl Active {
 #[derive(Clone, Debug, Default)]
 pub struct ArmsStats {
     pub grenades: u32,
+    /// Of them, thrown where an enemy was expected (none known), and in series.
+    pub blind: u32,
+    pub series: u32,
     pub satchels: u32,
     pub snarks: u32,
     pub mines: u32,
@@ -276,6 +305,8 @@ pub struct Arms {
     pub zoom_flip: SimTime,
     zoomed: bool,
     next_throw: SimTime,
+    /// Grenades go one after another until none is left.
+    pub series: bool,
     next_lob: SimTime,
     next_mine: SimTime,
     /// How far back the bot may be thrown before it would drop further than is safe.
@@ -354,8 +385,9 @@ pub(crate) fn on_target(view: Vec3, eye: Vec3, aim: Vec3) -> bool {
 const ON_TARGET_HALF_WIDTH: f32 = 12.0;
 const ON_TARGET_MIN: f32 = 0.4;
 
-/// A move is checked this far ahead against known beams.
+/// A move is checked this far ahead against known beams and blasts, seconds.
 const BEAM_LOOKAHEAD: f32 = 0.3;
+const BLAST_LOOKAHEAD: f32 = 0.3;
 
 /// A player standing at `p` touches the beam from `a` to `b`.
 fn near_beam(p: Vec3, a: Vec3, b: Vec3) -> bool {
@@ -476,6 +508,19 @@ fn backfire(tracer: &mut dyn Tracer, eye: Vec3, dir: Vec3, hit: &Trace) -> f32 {
     }
     let out = tracer.trace(&TraceQuery::line(on.end, hit.end)).end;
     out.distance(hit.end).max(1.0)
+}
+
+/// How many of the throwable `w` the bot carries and may use.
+fn carried(body: &Body, w: WeaponId) -> i32 {
+    if body.allows(w) {
+        body.arsenal
+            .iter()
+            .find(|a| a.id == w)
+            .and_then(|a| a.reserve)
+            .unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 fn clear_line(tracer: &mut dyn Tracer, from: Vec3, to: Vec3) -> bool {
@@ -905,6 +950,19 @@ impl BotBrain {
             return false;
         }
         self.mind.arms.next_throw = now + THROW_CHECK;
+        // A series ends with an enemy in sight close by (the gun then), or with one of its grenades come down near
+        // the bot (off an edge on the way).
+        let series = self.mind.arms.series
+            && !self
+                .beliefs
+                .visible_enemies()
+                .any(|t| t.pos.distance(body.origin) < SERIES_CLOSE)
+            && !self
+                .explosives
+                .own_grenades
+                .iter()
+                .any(|g| g.at.distance(body.origin) < SERIES_SAFE);
+        self.mind.arms.series = series;
         // With no gun but the crowbar, throws are the weapon (yapb's grenade war).
         let war = !body.arsenal.iter().any(|a| {
             let class = spec(a.id).class;
@@ -921,7 +979,7 @@ impl BotBrain {
             })
             .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)))
         else {
-            return false;
+            return self.throw_blind(body, ch, nav, rng);
         };
         let seen = t.state == TrackState::Visible;
         let above = t.pos.z - body.origin.z;
@@ -929,17 +987,7 @@ impl BotBrain {
             return false;
         }
         let d = (t.pos - body.origin).truncate().length();
-        let count = |w: WeaponId| {
-            if body.allows(w) {
-                body.arsenal
-                    .iter()
-                    .find(|a| a.id == w)
-                    .and_then(|a| a.reserve)
-                    .unwrap_or(0)
-            } else {
-                0
-            }
-        };
+        let count = |w: WeaponId| carried(body, w);
         let coming = t.velocity_known(now) && t.vel.truncate().dot((body.origin - t.pos).truncate()) > 0.0;
         let grenade_band = if war {
             [WAR_GRENADE_MIN, GRENADE_BAND[1]]
@@ -952,37 +1000,48 @@ impl BotBrain {
         let satchels = count(WeaponId::Satchel);
         let free = self.explosives.charges.is_empty();
         let mut ways: smallvec::SmallVec<[(Way, f32); 4]> = smallvec::SmallVec::new();
-        if count(WeaponId::HandGrenade) > 0 && in_band(grenade_band) {
+        let grenade = count(WeaponId::HandGrenade) > 0 && in_band(grenade_band);
+        if grenade {
             ways.push((Way::Grenade, if seen { SEEN_GRENADE } else { UNSEEN_GRENADE }));
         }
         if satchels > 0 && free && in_band(SATCHEL_BAND) && (!seen || coming || war) {
             ways.push((Way::Pile, if seen { SEEN_SATCHEL } else { UNSEEN_SATCHEL }));
         }
-        if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) {
-            ways.push((Way::Airburst, SEEN_SATCHEL));
+        // From a jump: a trick, for skills that do tricks, as often as the style likes (the balanced style's the base).
+        let jump_throw = ch.skill.tricks && body.tricks.satchel_jump;
+        if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) && jump_throw {
+            ways.push((
+                Way::Airburst,
+                SEEN_SATCHEL * ch.tricks.satchel_jump / BALANCED_SATCHEL_JUMP,
+            ));
         }
         if count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND) {
             ways.push((Way::Snark, if seen { SEEN_SNARK } else { UNSEEN_SNARK }));
         }
-        let Some(best) = ways.iter().map(|w| w.1).max_by(f32::total_cmp) else {
-            return false;
+        let way = if series && grenade {
+            // The grenades of a series go without a second thought.
+            Way::Grenade
+        } else {
+            let Some(best) = ways.iter().map(|w| w.1).max_by(f32::total_cmp) else {
+                self.mind.arms.series = false;
+                return false;
+            };
+            let bold = if ch.aggression > ch.fear { 1.1 } else { 0.9 };
+            let rate = ch.skill.throw_rate * ch.weapons.throwables;
+            let chance = (best * rate * bold * if war { 2.0 } else { 1.0 }).min(THROW_CHANCE_MAX);
+            if rng.combat.next_f32() >= chance {
+                return false;
+            }
+            // One of them, as likely as its chance.
+            let mut pick = rng.combat.next_f32() * ways.iter().map(|w| w.1).sum::<f32>();
+            ways.iter()
+                .find(|w| {
+                    pick -= w.1;
+                    pick <= 0.0
+                })
+                .or(ways.last())
+                .map_or(Way::Grenade, |w| w.0)
         };
-        let bold = if ch.aggression > ch.fear { 1.1 } else { 0.9 };
-        let rate = ch.skill.throw_rate * ch.weapons.throwables;
-        let chance = (best * rate * bold * if war { 2.0 } else { 1.0 }).min(0.9);
-        if rng.combat.next_f32() >= chance {
-            return false;
-        }
-        // One of them, as likely as its chance.
-        let mut pick = rng.combat.next_f32() * ways.iter().map(|w| w.1).sum::<f32>();
-        let way = ways
-            .iter()
-            .find(|w| {
-                pick -= w.1;
-                pick <= 0.0
-            })
-            .or(ways.last())
-            .map_or(Way::Grenade, |w| w.0);
         if way == Way::Snark && seen {
             // A stream of snarks at an enemy in sight: held down, the game lets one go every 0.3 s.
             let carried = count(WeaponId::Snark).max(1) as u32;
@@ -1007,7 +1066,10 @@ impl BotBrain {
                 let clear = if war { WAR_SELF_CLEAR } else { SELF_CLEAR };
                 match solved {
                     Some(s) if floor.distance(body.origin) >= clear => (Kind::Grenade, s),
-                    _ => return false,
+                    _ => {
+                        self.mind.arms.series = false;
+                        return false;
+                    }
                 }
             }
             Way::Pile | Way::Airburst | Way::Snark => {
@@ -1041,9 +1103,66 @@ impl BotBrain {
             matches!(way, Way::Pile | Way::Airburst).then_some((Some(t.who), way == Way::Airburst));
         self.mind.arms.landed = 0;
         self.mind.arms.active = Some(Active::Throw(thrower));
-        let rest = if kind == Kind::Snark { SNARK_REST } else { THROW_REST };
+        let rest = match kind {
+            Kind::Grenade => {
+                self.mind.arms.series = ch.skill.throw_series && count(WeaponId::HandGrenade) > 1;
+                GRENADE_REST
+            }
+            Kind::Satchel => THROW_REST,
+            Kind::Snark => SNARK_REST,
+        };
         self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(rest[0], rest[1]));
         true
+    }
+
+    /// A grenade where an enemy is expected when none is in sight or lost a moment ago: where a lost one would come
+    /// into view, a sound heard lately, the busiest way into the bot's sight, a little off the spot. Now and then,
+    /// or one after another in a series.
+    fn throw_blind(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) -> bool {
+        let now = body.now;
+        let grenades = carried(body, WeaponId::HandGrenade);
+        if grenades == 0 || body.waterlevel >= 2 {
+            self.mind.arms.series = false;
+            return false;
+        }
+        if !self.mind.arms.series {
+            let chance = BLIND_GRENADE * ch.skill.throw_rate * ch.weapons.throwables;
+            if rng.combat.next_f32() >= chance {
+                return false;
+            }
+        }
+        let heard = self
+            .beliefs
+            .hypotheses
+            .iter()
+            .filter(|h| matches!(h.kind, HypothesisKind::Sound(_)) && now.since(h.t) <= BLIND_HEARD)
+            .max_by(|a, b| a.t.0.total_cmp(&b.t.0))
+            .and_then(|h| h.pos);
+        let spots = [self.expect.map(|(_, p)| p), heard, self.approach];
+        for spot in spots.into_iter().flatten() {
+            if !(BLIND_BAND[0]..=BLIND_BAND[1]).contains(&(spot - body.origin).truncate().length()) {
+                continue;
+            }
+            let off = Vec2::new(rng.combat.range_f32(-1.0, 1.0), rng.combat.range_f32(-1.0, 1.0)) * BLIND_SCATTER;
+            let floor = spot + off.extend(0.0) - Vec3::Z * 32.0;
+            if floor.distance(body.origin) < SELF_CLEAR {
+                continue;
+            }
+            let Some(throw) = ballistics::grenade(nav, body.eye, body.velocity, floor, body.gravity, body.dll, 2.4)
+            else {
+                continue;
+            };
+            self.mind.arms.throw_aim = None;
+            self.mind.arms.landed = 0;
+            // Uncooked: it lies there a while for whoever comes, and a throw that came back leaves time to run.
+            self.mind.arms.active = Some(Active::Throw(Thrower::new(Kind::Grenade, floor, throw, now).quick()));
+            self.mind.arms.series = ch.skill.throw_series && grenades > 1;
+            self.mind.arms.stats.blind += 1;
+            self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(GRENADE_REST[0], GRENADE_REST[1]));
+            return true;
+        }
+        self.mind.arms.series = false;
+        false
     }
 
     /// Puts a tripmine on the wall at `wall` (the trap goal brought the bot where it reaches it).
@@ -1058,16 +1177,22 @@ impl BotBrain {
 
     /// Throws a pile of satchels at `at` (a chokepoint the trap goal watches); they lie long before going off with
     /// nobody by them.
-    pub(crate) fn trap_satchels(&mut self, body: &Body, nav: &mut dyn NavService, at: Vec3, rng: &mut BotRng) -> bool {
+    /// Throws a pile of `pile` satchels (as many as it carries) at `at` for a trap: they lie long.
+    pub(crate) fn trap_satchels(
+        &mut self,
+        body: &Body,
+        nav: &mut dyn NavService,
+        at: Vec3,
+        pile: [u32; 2],
+        rng: &mut BotRng,
+    ) -> bool {
         let carried = body.armed(WeaponId::Satchel).and_then(|a| a.reserve).unwrap_or(0);
-        if self.mind.arms.busy() || carried < 2 || !body.allows(WeaponId::Satchel) {
+        if self.mind.arms.busy() || carried < pile[0] as i32 || !body.allows(WeaponId::Satchel) {
             return false;
         }
         let now = body.now;
         let throw = ballistics::satchel(nav, body.origin, body.velocity, at, body.gravity);
-        let pile = rng
-            .combat
-            .range_f32(SATCHEL_PILE[0] as f32, SATCHEL_PILE[1] as f32 + 0.99) as u32;
+        let pile = rng.combat.range_f32(pile[0] as f32, pile[1] as f32 + 0.99) as u32;
         let thrower = Thrower::new(Kind::Satchel, at, throw, now).pile(pile.min(carried as u32));
         self.mind.arms.throw_aim = Some((None, false));
         self.mind.arms.trap_throw = true;
@@ -1140,7 +1265,15 @@ impl BotBrain {
         self.mind.arms.watch_zoom(body.zoomed(), now);
         let hands = self.hands(body);
         let mut requests: smallvec::SmallVec<[Request; 2]> = smallvec::SmallVec::new();
-        if body.weapon == Some(WeaponId::Gauss) || self.mind.arms.gauss.active() {
+        // Navigation stands at a boost's takeoff and asks for it: the boost starts when nothing else runs.
+        if let Some(call) = self.mind.nav_boost
+            && !self.mind.arms.busy()
+        {
+            self.mind.arms.active = Some(Active::GaussBoost(GaussBoost::new(now, call.view, call.charge)));
+            self.mind.tricks.stats.boosts += 1;
+        }
+        let boosting = matches!(self.mind.arms.active, Some(Active::GaussBoost(_)));
+        if !boosting && (body.weapon == Some(WeaponId::Gauss) || self.mind.arms.gauss.active()) {
             let seen = self
                 .mind
                 .target
@@ -1260,6 +1393,10 @@ impl BotBrain {
                             .is_some_and(|aim| on_target(self.motor.view, body.eye, aim));
                     sc.update(&hands, Sight { on_target, seen, done })
                 }
+                Active::GaussBoost(b) => {
+                    let call = self.mind.nav_boost;
+                    b.update(&hands, call.is_some(), call.map(|c| c.view))
+                }
                 Active::Shoot(s) => {
                     if self.explosives.mines.iter().any(|m| m.pos.distance(s.mine) < 24.0) {
                         s.update(&hands, self.mind.click_interval.max(spec(s.weapon).cycle))
@@ -1277,6 +1414,25 @@ impl BotBrain {
                 Status::Failed(why) => {
                     self.mind.arms.throw_aim = None;
                     self.mind.arms.trap_throw = false;
+                    if matches!(&active, Active::Throw(t) if t.kind == Kind::Grenade) {
+                        self.mind.arms.series = false;
+                    }
+                    if let Active::GaussBoost(b) = &active {
+                        // A charge already building is the gauss protocol's now: fired at a target or dumped.
+                        if let Some(started) = b.held {
+                            self.mind.arms.gauss.adopt(started, now);
+                        }
+                        self.mind.tricks.stats.boost_failed(why);
+                        tracing::info!(
+                            "gauss boost given up in its {} phase: {why}{}",
+                            b.phase(),
+                            if b.held.is_some() {
+                                "; the charge is held on"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
                     if let Active::Airburst(a) = &active {
                         tracing::info!(
                             "satchel in flight not set off: {why}; it came within {:?} of the enemy",
@@ -1289,25 +1445,23 @@ impl BotBrain {
                 }
             }
         }
-        if let Some((until, at, target)) = self.mind.arms.guide {
-            if now < until {
-                // The rocket follows the view: kept on the target it was fired at while that stays far enough (a
-                // new target close by, or this one come close, would bring the rocket back to the bot).
-                let point = self
-                    .mind
-                    .last_aim
-                    .filter(|p| self.mind.target == Some(target) && p.distance(body.eye) >= ROCKET_MIN)
-                    .unwrap_or(at);
-                self.intents.look(
+        // The rocket follows the view.
+        if self.mind.arms.guide.is_some() {
+            match self.rocket_spot(body) {
+                Some(point) => self.intents.look(
                     Prio::Protocol,
                     LookIntent::Point {
                         at: point,
                         engaged: true,
                     },
-                );
-            } else {
-                self.mind.arms.guide = None;
+                ),
+                None => self.mind.arms.guide = None,
             }
+        }
+        // Between the grenades of a series the grenade stays in hand.
+        if self.mind.arms.active.is_none() && self.mind.arms.series && body.weapon == Some(WeaponId::HandGrenade) {
+            self.intents
+                .weapon(Prio::Protocol, WeaponIntent::hold(WeaponId::HandGrenade));
         }
         for r in requests {
             if let Some(w) = r.weapon {
@@ -1325,6 +1479,7 @@ impl BotBrain {
                     StanceIntent {
                         jump: true,
                         duck: false,
+                        longjump: false,
                     },
                 );
             }
@@ -1432,8 +1587,9 @@ impl BotBrain {
     }
 
     /// Where to dump a gauss charge the bot must let go of with no target: level, along the one of eight ways whose
-    /// first wall is farthest (its burst must spare the bot) with no drop behind within the throw of the recoil.
-    /// Looked for four times a second while charging.
+    /// first wall is farthest (its burst must spare the bot) with no drop behind within the throw of the recoil; or
+    /// straight up (the recoil presses the bot to the floor) when the sky or a high ceiling is farther than every
+    /// wall around. Looked for four times a second while charging.
     fn safe_dump(&mut self, body: &Body, tracer: &mut dyn Tracer) -> Option<Vec3> {
         const PERIOD: f64 = 0.25;
         // Looked for only once a dump draws near: some eighty traces each time.
@@ -1475,7 +1631,21 @@ impl BotBrain {
                     .total_cmp(&clear(b.2))
                     .then(a.1.dot(back).total_cmp(&b.1.dot(back)))
             })
-            .map(|(yaw, ..)| Vec3::new(0.0, lb_core::math::normalize_angle(yaw), 0.0));
+            .map(|(yaw, _, wall, _)| (Vec3::new(0.0, lb_core::math::normalize_angle(yaw), 0.0), wall));
+        let way = match way {
+            Some((_, wall)) if wall >= reach => way.map(|w| w.0),
+            _ => {
+                let up = tracer.trace(&TraceQuery::line(body.eye, body.eye + Vec3::Z * BEAM_REACH));
+                let high = (up.fraction * BEAM_REACH).min(reach);
+                let backfires = body.selfgauss == 1 && backfire(tracer, body.eye, Vec3::Z, &up) >= full;
+                // In the air the push down would slam the bot into the floor.
+                if body.on_ground && !backfires && way.is_none_or(|(_, wall)| high > wall) {
+                    Some(Vec3::new(-89.0, self.motor.view.y, 0.0))
+                } else {
+                    way.map(|w| w.0)
+                }
+            }
+        };
         self.mind.arms.dump_way = Some((body.now, way));
         way
     }
@@ -1486,7 +1656,20 @@ impl BotBrain {
         let stats = &mut self.mind.arms.stats;
         match active {
             Active::Throw(t) => match t.kind {
-                Kind::Grenade => stats.grenades += 1,
+                Kind::Grenade => {
+                    stats.grenades += 1;
+                    // Its blast is kept away from until it goes off, seen or not, and the target is not closed in on.
+                    if let Some(goes_off) = t.goes_off() {
+                        self.explosives
+                            .thrown_grenade(t.landing(body.gravity), goes_off, now, body.gravity);
+                        self.mind.arms.hold_until = self.mind.arms.hold_until.max(goes_off);
+                    }
+                    if self.mind.arms.series {
+                        stats.series += 1;
+                        // The next of the series as soon as the game hands over another grenade.
+                        self.mind.arms.next_throw = now + SERIES_GAP;
+                    }
+                }
                 Kind::Satchel => {
                     stats.satchels += t.landings.len() as u32;
                     let (target, airburst) = aim.unwrap_or((None, false));
@@ -1560,6 +1743,7 @@ impl BotBrain {
                 }
             }
             Active::Shoot(_) => stats.mine_shots += 1,
+            Active::GaussBoost(_) => self.mind.tricks.stats.boosts_fired += 1,
             Active::Scope(sc) => {
                 stats.scoped += sc.shots;
                 stats.zooms += 1;
@@ -1654,6 +1838,23 @@ impl BotBrain {
         }
     }
 
+    /// Where the bot's rocket in flight is guided to, and so goes off: the target it was fired at while that stays far
+    /// enough (a new target close by, or this one come close, would bring the rocket back to the bot), else the point
+    /// it was fired at.
+    fn rocket_spot(&self, body: &Body) -> Option<Vec3> {
+        let (until, at, target) = self.mind.arms.guide?;
+        if body.now >= until {
+            return None;
+        }
+        let near = crate::mind::rocket_min(body);
+        Some(
+            self.mind
+                .last_aim
+                .filter(|p| self.mind.target == Some(target) && p.distance(body.eye) >= near)
+                .unwrap_or(at),
+        )
+    }
+
     /// Every frame, after everything else asked to move: a move that would take the bot into the beam of an armed
     /// tripmine it knows of (its own included) is stopped. Paths keep off beams; this also covers strafing and
     /// dodging, which do not follow paths.
@@ -1678,8 +1879,51 @@ impl BotBrain {
         }
     }
 
-    /// Every frame: run from a blast about to go off near the bot, and out of the beam of a mine it just laid.
-    pub(crate) fn dodge(&mut self, body: &Body, nav: &mut dyn NavService) {
+    /// Every frame, after everything else asked to move: a move that would take the bot deeper into the reach of a
+    /// grenade about to go off (its own ones above all: it follows them to where it expects the enemy) or of where
+    /// its rocket in flight is going keeps only its part along the edge, whatever the goal (a bot on its way to an
+    /// item fires at an enemy on the way and walks on into the blast). The dodge runs from a blast the bot finds
+    /// itself in; this keeps it from walking in.
+    pub(crate) fn blast_guard(&mut self, body: &Body) {
+        let Some((prio, mv)) = self.intents.movement else {
+            return;
+        };
+        if prio >= Prio::Traversal || mv.speed <= 0.0 || mv.dir == Vec2::ZERO {
+            return;
+        }
+        let floor = body.origin.z - 36.0;
+        let asked = mv.dir.normalize() * mv.speed;
+        let mut velocity = asked;
+        let rocket = self
+            .rocket_spot(body)
+            .map(|at| (at, blast_radius(body.damages.primary(WeaponId::Rpg))));
+        let grenades = self
+            .explosives
+            .blasts(body.now, body.gravity, floor)
+            .filter(|b| b.kind == lb_game::entities::ProjectileKind::Grenade)
+            .map(|b| (b.at, b.radius));
+        for (at, radius) in grenades.chain(rocket) {
+            let off = (body.origin - at).truncate();
+            if (off + velocity * BLAST_LOOKAHEAD).length() >= radius + DODGE_MARGIN {
+                continue;
+            }
+            let out = off.normalize_or_zero();
+            velocity -= out * velocity.dot(out).min(0.0);
+        }
+        if velocity != asked {
+            self.intents.movement(
+                Prio::Protocol,
+                MoveIntent {
+                    dir: velocity,
+                    speed: velocity.length(),
+                },
+            );
+        }
+    }
+
+    /// Every frame: run from a blast about to go off near the bot (a skilled one with the module long jumps away),
+    /// and out of the beam of a mine it just laid.
+    pub(crate) fn dodge(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
         if let Some(normal) = self.mind.arms.step_off.take() {
             // Along the wall, the way the bot faces, or back the other way from a drop.
@@ -1719,6 +1963,9 @@ impl BotBrain {
             {
                 if self.mind.arms.dodge.is_none_or(|(until, _)| now >= until) {
                     self.mind.arms.stats.dodges += 1;
+                    let (at, off) = (b.at, body.origin.distance(b.at));
+                    let away = move |landing: Vec3| landing.distance(at) > off + LEAP_AWAY;
+                    self.dodge_leap(body, ch, &[safe], &away, nav, rng);
                 }
                 self.mind.arms.dodge = Some((now + DODGE_FOR, safe));
             }
@@ -1790,6 +2037,7 @@ mod tests {
             fear: 0.2,
             affinity: lb_styles::StyleId::Balanced.goal_affinity(),
             weapons: crate::WeaponLike::default(),
+            tricks: lb_styles::StyleId::Balanced.trick_likes(),
         }
     }
 
@@ -1824,6 +2072,7 @@ mod tests {
             gravity: 800.0,
             allowed: u32::MAX,
             selfgauss: 0,
+            tricks: lb_config::main_config::TricksConfig::default(),
         }
     }
 
@@ -2175,7 +2424,7 @@ mod tests {
     }
 
     #[test]
-    fn a_throwable_in_hand_is_not_aimed_at_the_enemy() {
+    fn a_throwable_in_hand_still_looks_at_the_enemy() {
         let enemy = Vec3::new(400.0, 100.0, 0.0);
         let aimed = |weapon: WeaponId| {
             let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
@@ -2201,7 +2450,7 @@ mod tests {
             )
         };
         assert!(aimed(WeaponId::Glock));
-        assert!(!aimed(WeaponId::Snark), "the snarks in hand, the glock coming out");
+        assert!(aimed(WeaponId::Snark), "the snarks in hand, the glock coming out");
     }
 
     #[test]
@@ -2258,7 +2507,8 @@ mod tests {
             Some("grenade"),
             "lost a second ago, 500 units away"
         );
-        // In sight, grenades and snarks both fit: each as likely as its chance, snarks more often.
+        // In sight, grenades and snarks both fit: each as likely as its chance, grenades (almost always taken) more
+        // often.
         let (mut snarks, mut grenades) = (0, 0);
         for seed in 0..20u64 {
             let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
@@ -2279,9 +2529,122 @@ mod tests {
                 break;
             }
         }
+        assert!(grenades > snarks && snarks > 0, "{snarks} snarks, {grenades} grenades");
+    }
+
+    #[test]
+    fn skilled_bots_throw_their_grenades_in_a_series_until_an_enemy_comes_close() {
+        let lost = Vec3::new(500.0, 150.0, 0.0);
+        let start = |level: u8| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            brain.beliefs.on_sighting(&seen(0.0, lost));
+            let mut ch = character();
+            ch.skill = Presets::default().at(level);
+            let mut rng = BotRng::new(7, 7);
+            for i in 0..20 {
+                let t = 1.0 + f64::from(i) * 0.1;
+                brain.update(SimTime(t), &params(), None, None);
+                brain.weapon_options(&body(t), &ch, &mut Open, &mut rng);
+                if brain.mind.arms.active.is_some() {
+                    break;
+                }
+            }
+            brain
+        };
+        let expert = start(100);
+        assert_eq!(expert.mind.arms.active.as_ref().map(Active::name), Some("grenade"));
+        assert!(expert.mind.arms.series, "an expert throws them all");
+        assert!(!start(50).mind.arms.series, "a normal bot one at a time");
+        // An enemy in sight close by ends the series: the gun then.
+        let mut brain = start(100);
+        brain.mind.arms.active = None;
+        brain.mind.arms.next_throw = SimTime::ZERO;
+        brain.beliefs.on_sighting(&seen(3.0, Vec3::new(200.0, 0.0, 0.0)));
+        brain.update(SimTime(3.0), &params(), None, None);
+        brain.weapon_options(&body(3.0), &character(), &mut Open, &mut BotRng::new(7, 7));
+        assert!(!brain.mind.arms.series && brain.mind.arms.active.is_none());
+    }
+
+    #[test]
+    fn a_grenade_goes_where_an_enemy_is_expected_with_none_known() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.approach = Some(Vec3::new(600.0, 100.0, 0.0));
+        // In a series every look throws; out of one, now and then.
+        brain.mind.arms.series = true;
+        assert_eq!(considered(&mut brain, 1.0, &[]), Some("grenade"));
+        assert_eq!(brain.mind.arms.stats.blind, 1);
+        let mut none = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        none.mind.arms.series = true;
+        assert_eq!(considered(&mut none, 1.0, &[]), None, "nowhere an enemy is expected");
+        assert!(!none.mind.arms.series);
+    }
+
+    #[test]
+    fn a_bot_keeps_out_of_its_own_grenade_about_to_go_off() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .thrown_grenade(Vec3::new(320.0, 0.0, -36.0), SimTime(3.0), SimTime(1.0), 800.0);
+        let going = |brain: &mut BotBrain, dir: Vec2, now: f64| {
+            brain.explosives.update(SimTime(now));
+            brain.intents.clear();
+            brain.intents.movement(Prio::Goal, MoveIntent { dir, speed: 300.0 });
+            brain.blast_guard(&body(now));
+            let (_, mv) = brain.intents.movement.expect("a move");
+            mv.dir.normalize_or_zero() * mv.speed
+        };
+        // Straight at it nothing is left of the move; across and at it, the part across.
+        assert!(going(&mut brain, Vec2::X, 1.5).length() < 1.0);
+        let v = going(&mut brain, Vec2::new(1.0, 1.0).normalize(), 1.5);
+        assert!(v.x.abs() < 1.0 && v.y > 200.0, "{v:?}");
+        assert_eq!(going(&mut brain, -Vec2::X, 1.5), -Vec2::X * 300.0, "away from it");
+        // Once it has gone off the way is free again.
+        assert_eq!(going(&mut brain, Vec2::X, 3.5), Vec2::X * 300.0);
+    }
+
+    #[test]
+    fn a_bot_found_in_its_cover_fights_back_instead_of_standing() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        // Hidden from an enemy last known 200 units off.
+        let hide = |brain: &mut BotBrain| {
+            brain.mind.task = Some(crate::goals::Task::Hide {
+                dest: Vec3::ZERO,
+                threat: Vec3::new(200.0, 0.0, 0.0),
+                at: SimTime(0.5),
+                arrived: true,
+            });
+            brain.intents.clear();
+            brain.retreat(&body(1.0), &character(), &mut Open, &mut BotRng::new(3, 3));
+            brain.intents.movement.map(|(_, mv)| mv.speed)
+        };
+        // Nobody in sight: it stands and watches the way the threat would come.
+        brain.beliefs.on_sighting(&seen(0.2, Vec3::new(200.0, 0.0, 0.0)));
+        brain.update(SimTime(1.0), &params(), None, None);
+        assert_eq!(hide(&mut brain), Some(0.0));
+        // Found there, an enemy in sight 150 units off: it strafes and backs off rather than stand.
+        brain.beliefs.on_sighting(&seen(1.0, Vec3::new(150.0, 0.0, 0.0)));
+        brain.update(SimTime(1.0), &params(), None, None);
+        assert!(hide(&mut brain).is_some_and(|speed| speed > 100.0));
+    }
+
+    #[test]
+    fn a_bot_keeps_out_of_where_its_rocket_is_going_whatever_its_goal() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        let enemy = PlayerKey { slot: 5, userid: 50 };
+        // Fired at an enemy 250 units off, the rocket guided there until 2 s.
+        brain.mind.arms.guide = Some((SimTime(2.0), Vec3::new(250.0, 0.0, 0.0), enemy));
+        let going = |brain: &mut BotBrain, dir: Vec2, now: f64| {
+            brain.intents.clear();
+            brain.intents.movement(Prio::Goal, MoveIntent { dir, speed: 300.0 });
+            brain.blast_guard(&body(now));
+            let (_, mv) = brain.intents.movement.expect("a move");
+            mv.dir.normalize_or_zero() * mv.speed
+        };
         assert!(
-            snarks > grenades && grenades > 0,
-            "{snarks} snarks, {grenades} grenades"
+            going(&mut brain, Vec2::X, 1.0).length() < 1.0,
+            "not on toward the blast"
         );
+        assert_eq!(going(&mut brain, Vec2::Y, 1.0), Vec2::Y * 300.0, "aside is free");
+        assert_eq!(going(&mut brain, Vec2::X, 2.5), Vec2::X * 300.0, "once it has gone off");
     }
 }

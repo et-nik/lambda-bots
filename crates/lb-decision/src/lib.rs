@@ -26,12 +26,13 @@ use lb_nav_api::{CampKind, MapView};
 use lb_styles::GoalAffinity;
 use smallvec::SmallVec;
 
-/// A trap to lay: a tripmine on one of the map's mine spots, or a pile of satchels at the chokepoint an ambush spot
-/// watches.
+/// A trap to lay: a tripmine on one of the map's mine spots, a pile of satchels at the chokepoint an ambush spot
+/// watches, or a satchel or two where an enemy is expected (`Situation::lure`), watched from out of their blast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
     Mine(u16),
     Satchels(u16),
+    Loose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,6 +117,8 @@ pub struct Situation<'a> {
     pub mines: &'a [Vec3],
     /// Its own satchels lie somewhere.
     pub charges_out: bool,
+    /// Where an enemy is expected, for satchels to wait for it by.
+    pub lure: Option<Vec3>,
 }
 
 impl Situation<'_> {
@@ -190,6 +193,10 @@ const TRAP_RANGE: f32 = 2000.0;
 const TRAP_SPACING: f32 = 128.0;
 /// Satchels at a chokepoint are watched from an ambush spot at least this far, out of their blast.
 const SATCHEL_WATCH: f32 = 350.0;
+/// Satchels where an enemy is expected: the weight for a balanced bot (a trapper's is higher), and how far the spot
+/// may be.
+const LURE_WEIGHT: f32 = 0.45;
+const LURE_RANGE: f32 = 1200.0;
 /// Weapons to hold a spot with: long sightlines, close by a chokepoint.
 const LONG_GUNS: [WeaponId; 4] = [WeaponId::Crossbow, WeaponId::Python, WeaponId::Gauss, WeaponId::Rpg];
 const CLOSE_GUNS: [WeaponId; 4] = [WeaponId::Shotgun, WeaponId::Mp5, WeaponId::Egon, WeaponId::Gauss];
@@ -454,6 +461,21 @@ fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     }
     if !s.trap_ready || !s.calm(TRAP_CALM) || s.affinity.trap <= 0.0 {
         return;
+    }
+    if s.carried(WeaponId::Satchel) >= 1
+        && !s.charges_out
+        && let Some(at) = s.lure.filter(|p| p.distance(s.origin) <= LURE_RANGE)
+    {
+        let eta = s.eta(at);
+        let w = LURE_WEIGHT * (0.6 + 0.2 * s.affinity.trap) * dmath::exp(-eta / 10.0);
+        if w >= TRAP_THRESHOLD {
+            out.push(Goal {
+                kind: GoalKind::PlantTrap(Trap::Loose),
+                rank: 1,
+                weight: w.min(1.0),
+                hold: 1.5 * eta + 30.0,
+            });
+        }
     }
     let free = |p: Vec3| s.mines.iter().all(|m| m.distance(p) >= TRAP_SPACING);
     if s.carried(WeaponId::Tripmine) > 0 {
@@ -842,6 +864,7 @@ mod tests {
             trap_under_way: false,
             mines: &[],
             charges_out: false,
+            lure: None,
         }
     }
 
@@ -1087,6 +1110,51 @@ mod tests {
         s.now = SimTime(12.0);
         let mut d = Decider::default();
         assert_eq!(d.decide(&s, &mut rng).kind, GoalKind::Roam, "28 s is too long to wait");
+    }
+
+    #[test]
+    fn satchels_go_where_an_enemy_is_expected() {
+        let map = OneSpot([lb_nav_api::CampSpot {
+            node: 0,
+            pos: Vec3::new(600.0, 0.0, 0.0),
+            kind: CampKind::Overwatch,
+            watch: [0.0, 90.0],
+            pitch: 0.0,
+            range: 400.0,
+            score: 0.0,
+            guards: None,
+        }]);
+        let kit = [
+            KIT[0],
+            KIT[1],
+            Armed {
+                id: WeaponId::Satchel,
+                clip: None,
+                reserve: Some(1),
+                reserve2: None,
+            },
+        ];
+        let calm = Beliefs::default();
+        let none = |_| 0.0;
+        let mut rng = Pcg32::new(13, 13);
+        let mut s = situation(30.0, &calm, None, &kit, 100.0, None, &none);
+        s.map = Some(&map);
+        s.lure = Some(Vec3::new(500.0, 0.0, 0.0));
+        let lure = GoalKind::PlantTrap(Trap::Loose);
+        assert_eq!(Decider::default().decide(&s, &mut rng).kind, lure);
+        s.charges_out = true;
+        assert_ne!(
+            Decider::default().decide(&s, &mut rng).kind,
+            lure,
+            "its satchels out already"
+        );
+        s.charges_out = false;
+        s.lure = None;
+        assert_ne!(
+            Decider::default().decide(&s, &mut rng).kind,
+            lure,
+            "nowhere an enemy is expected"
+        );
     }
 
     #[test]

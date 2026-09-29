@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::graph::{NavGraph, NodeId};
+use crate::graph::{NavGraph, NavLink, NodeId};
 
 /// Running speed used to turn distances into seconds; the heuristic stays admissible because every link is at
 /// least as slow as running.
@@ -171,12 +171,12 @@ impl Search {
     }
 
     /// Expands nodes until the path is found, there is none, or `budget` (decreased as it goes) runs out.
-    /// `penalty(a, b)` adds seconds to the link a→b; `f32::INFINITY` removes it.
+    /// `penalty(a, link)` adds seconds to the link out of `a`; `f32::INFINITY` removes it.
     pub fn run(
         &mut self,
         graph: &NavGraph,
         alt: Option<&Alt>,
-        penalty: &dyn Fn(NodeId, NodeId) -> f32,
+        penalty: &dyn Fn(NodeId, &NavLink) -> f32,
         budget: &mut u32,
     ) -> SearchStep {
         while let Some(&Open { f, node }) = self.open.peek() {
@@ -203,7 +203,7 @@ impl Search {
                 if !link.valid() {
                     continue;
                 }
-                let extra = penalty(node, link.to);
+                let extra = penalty(node, link);
                 if !extra.is_finite() {
                     continue;
                 }
@@ -222,11 +222,16 @@ impl Search {
     }
 }
 
+/// A lower bound of the seconds from `n` to `goal`, as the planner reckons it.
+pub fn estimate(graph: &NavGraph, n: NodeId, goal: NodeId) -> f32 {
+    heuristic(graph, graph.alt.as_deref(), n, goal)
+}
+
 fn heuristic(graph: &NavGraph, alt: Option<&Alt>, n: NodeId, goal: NodeId) -> f32 {
     let straight = if graph.has_teleports() {
         0.0
     } else {
-        graph.node(n).origin.distance(graph.node(goal).origin) / RUN_SPEED
+        graph.node(n).origin.distance(graph.node(goal).origin) / RUN_SPEED.max(graph.fastest)
     };
     alt.map_or(straight, |a| straight.max(a.bound(n, goal)))
 }
@@ -236,12 +241,17 @@ pub fn plan(
     graph: &NavGraph,
     from: NodeId,
     to: NodeId,
-    penalty: &dyn Fn(NodeId, NodeId) -> f32,
+    penalty: &dyn Fn(NodeId, &NavLink) -> f32,
 ) -> Option<Vec<NodeId>> {
     match Search::new(graph, None, from, to).run(graph, None, penalty, &mut u32::MAX.clone()) {
         SearchStep::Found(path) => Some(path),
         _ => None,
     }
+}
+
+/// No penalty, but no tricks either: a way any bot can go.
+pub fn plain(_from: NodeId, link: &NavLink) -> f32 {
+    if link.kind.is_trick() { f32::INFINITY } else { 0.0 }
 }
 
 /// Travel time of a path in seconds (same costs as `plan`, without penalties).
@@ -298,7 +308,7 @@ pub(crate) mod tests {
             ],
         );
         assert_eq!(plan(&g, 0, 3, &|_, _| 0.0).unwrap(), vec![0, 1, 3]);
-        let blocked = |a: NodeId, b: NodeId| if (a, b) == (1, 3) { f32::INFINITY } else { 0.0 };
+        let blocked = |a: NodeId, l: &NavLink| if (a, l.to) == (1, 3) { f32::INFINITY } else { 0.0 };
         assert_eq!(plan(&g, 0, 3, &blocked).unwrap(), vec![0, 2, 3]);
         assert_eq!(plan(&g, 3, 0, &|_, _| 0.0), None, "links are directed");
         assert!((path_time(&g, &[0, 1, 3]) - 200.0 / RUN_SPEED).abs() < 1e-6);

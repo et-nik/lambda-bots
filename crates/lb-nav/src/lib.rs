@@ -14,6 +14,7 @@ pub mod plan;
 pub mod probe;
 pub mod spec;
 pub mod store;
+pub mod tricks;
 pub mod validate;
 pub mod yapb;
 
