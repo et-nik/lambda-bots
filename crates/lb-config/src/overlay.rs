@@ -71,7 +71,9 @@ pub enum Patch {
     AddLink {
         from: [f32; 3],
         to: [f32; 3],
-        /// `jump` makes the check try a jump first.
+        /// `jump` makes the check try a jump first; `crouch` checks walking crouched; `longjump` and `gauss_boost`
+        /// plan that trick (only bots with the module, or the gauss and its uranium, take them). Other kinds, or none:
+        /// the check finds what the link is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
         #[serde(default)]
@@ -87,6 +89,13 @@ pub enum Patch {
         to: [f32; 3],
         #[serde(default)]
         both: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+    },
+    /// A node where the generator put none (a ledge, a crate top): set down on the floor under `at` and linked both
+    /// ways to the nodes around it, every link checked like a generated one. Patches after it may use it.
+    AddNode {
+        at: [f32; 3],
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
@@ -150,6 +159,7 @@ impl OverlayFile {
 /// Link kinds an added link may name.
 pub const LINK_KINDS: &[&str] = &[
     "walk",
+    "crouch",
     "jump",
     "drop",
     "ladder",
@@ -158,6 +168,8 @@ pub const LINK_KINDS: &[&str] = &[
     "lift",
     "teleport",
     "breakable",
+    "longjump",
+    "gauss_boost",
 ];
 
 #[cfg(test)]
@@ -185,13 +197,23 @@ nav:
     - op: remove_link
       from: [1, 2, 3]
       to: [7, 8, 9]
+    - op: add_node
+      at: [10, 20, 30]
+      note: the crate top
 ";
 
     #[test]
     fn a_sample_overlay_reads_and_writes_back() {
         let f = OverlayFile::parse(SAMPLE, "overlay.yaml").unwrap();
         assert_eq!(f.places[0].name, "bunker");
-        assert_eq!(f.nav.patches.len(), 3);
+        assert_eq!(f.nav.patches.len(), 4);
+        assert!(matches!(
+            f.nav.patches[3],
+            Patch::AddNode {
+                at: [10.0, 20.0, 30.0],
+                ..
+            }
+        ));
         assert!(matches!(
             f.nav.patches[1],
             Patch::AddLink {

@@ -44,6 +44,35 @@ jobs:
           path: build/release-linux-i386/lambdabots_mm_i386.so
           if-no-files-found: error
 
+  editor:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            flags: --linux
+            artifact: lb-editor-linux-x86_64
+            path: build/editor/x86_64-unknown-linux-musl/lb-editor
+          - os: macos-14
+            flags: ''
+            artifact: lb-editor-macos-arm64
+            path: build/editor/host/lb-editor
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/editor/package-lock.json
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: The page, then lb-editor with it
+        run: scripts/build-editor.sh ${{ matrix.flags }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+
   windows-x86:
     runs-on: windows-2022
     steps:

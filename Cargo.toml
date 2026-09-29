@@ -39,6 +39,7 @@ lb-ext = { path = "crates/lb-ext" }
 lb-runtime = { path = "crates/lb-runtime" }
 lb-plugin = { path = "crates/lb-plugin" }
 lb-testkit = { path = "crates/lb-testkit" }
+lb-mapmesh = { path = "crates/lb-mapmesh" }
 
 thiserror = "2"
 anyhow = "1"
@@ -76,6 +77,11 @@ insta = "1"
 criterion = "0.8"
 cbindgen = "0.29"
 cargo_metadata = "0.23"
+png = "0.18"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "signal", "time"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tower-http = { version = "0.7", default-features = false, features = ["compression-gzip"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

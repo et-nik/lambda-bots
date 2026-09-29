@@ -33,6 +33,9 @@ pub struct Editor {
     pub mark: Option<NodeId>,
     /// `maps/<map>/editor.yaml` as it will be saved.
     pub file: OverlayFile,
+    /// The file as it was read when editing started: the web editor saves the same file, and a save over its
+    /// changes would lose them.
+    loaded: Option<String>,
     /// Changes since the last save, newest last, for undo.
     changes: Vec<Change>,
     next_draw: f64,
@@ -112,15 +115,17 @@ impl Editor {
     /// Starts editing `map` for the player in `slot`, from the editor file as saved.
     pub fn open(slot: u8, install: &Path, map: &str) -> Result<Editor, String> {
         let path = editor_path(install, map);
-        let file = match std::fs::read_to_string(&path) {
-            Ok(text) => OverlayFile::parse(&text, &path.display().to_string()).map_err(|e| e.to_string())?,
-            Err(_) => OverlayFile::new(map),
+        let loaded = std::fs::read_to_string(&path).ok();
+        let file = match &loaded {
+            Some(text) => OverlayFile::parse(text, &path.display().to_string()).map_err(|e| e.to_string())?,
+            None => OverlayFile::new(map),
         };
         Ok(Editor {
             slot,
             show: Show::Links,
             mark: None,
             file,
+            loaded,
             changes: Vec::new(),
             next_draw: 0.0,
         })
@@ -258,23 +263,32 @@ impl Editor {
                 out
             }
             _ => vec![
-                "lb edit on|off | show nodes|links|off | mark | link [jump] [both] [trust] | unlink [both] | \
+                "lb edit on|off | show nodes|links|off | mark | link [kind] [both] [trust] | unlink [both] | \
                  forbid [radius] | place <name> [radius] [tags...] | info | undo | save"
                     .into(),
             ],
         }
     }
 
-    /// Writes `maps/<map>/editor.yaml`.
+    /// Writes `maps/<map>/editor.yaml`, unless someone else saved it since editing started.
     pub fn save(&mut self, install: &Path) -> Result<PathBuf, String> {
         let path = editor_path(install, &self.file.map);
+        if std::fs::read_to_string(&path).ok() != self.loaded {
+            return Err(format!(
+                "{} changed since `lb edit on` (saved from the web editor?): not saved; `lb edit off`, `lb edit on` \
+                 and make the {} changes again",
+                path.display(),
+                self.changes.len()
+            ));
+        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let text = self.file.to_yaml().map_err(|e| e.to_string())?;
         let tmp = path.with_extension("yaml.tmp");
-        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::write(&tmp, &text).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.loaded = Some(text);
         self.changes.clear();
         Ok(path)
     }
@@ -374,6 +388,33 @@ mod tests {
         let drawn = ed.draw(1.0, &g, Vec3::new(0.0, 0.0, 64.0)).unwrap();
         assert!(!drawn.is_empty() && drawn.len() <= BEAMS);
         assert!(ed.draw(1.1, &g, Vec3::ZERO).is_none(), "not due yet");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_saved_by_another_editor_is_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("lb-editor-conflict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = line();
+        let here = Vec3::new(100.0, 0.0, 36.0);
+        let mut ed = Editor::open(1, &dir, "crossfire").unwrap();
+        ed.command(&["forbid"], Some(&g), here);
+        let mut web = OverlayFile::new("crossfire");
+        web.places.push(Place {
+            name: "roof".into(),
+            at: [0.0, 0.0, 0.0],
+            radius: 64.0,
+            tags: Vec::new(),
+        });
+        let path = editor_path(&dir, "crossfire");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, web.to_yaml().unwrap()).unwrap();
+        assert!(ed.save(&dir).unwrap_err().contains("changed since"));
+        let mut ed = Editor::open(1, &dir, "crossfire").unwrap();
+        ed.command(&["forbid"], Some(&g), here);
+        ed.save(&dir).unwrap();
+        let saved = Editor::open(1, &dir, "crossfire").unwrap().file;
+        assert_eq!((saved.places.len(), saved.nav.patches.len()), (1, 1));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -4,14 +4,20 @@ use lb_core::Vec3;
 
 pub const VERSION: i32 = 30;
 const LUMPS: usize = 15;
-const LUMP_ENTITIES: usize = 0;
-const LUMP_PLANES: usize = 1;
-const LUMP_TEXTURES: usize = 2;
-const LUMP_VISIBILITY: usize = 4;
-const LUMP_NODES: usize = 5;
-const LUMP_CLIPNODES: usize = 9;
-const LUMP_LEAFS: usize = 10;
-const LUMP_MODELS: usize = 14;
+pub const LUMP_ENTITIES: usize = 0;
+pub const LUMP_PLANES: usize = 1;
+pub const LUMP_TEXTURES: usize = 2;
+pub const LUMP_VERTICES: usize = 3;
+pub const LUMP_VISIBILITY: usize = 4;
+pub const LUMP_NODES: usize = 5;
+pub const LUMP_TEXINFO: usize = 6;
+pub const LUMP_FACES: usize = 7;
+pub const LUMP_LIGHTING: usize = 8;
+pub const LUMP_CLIPNODES: usize = 9;
+pub const LUMP_LEAFS: usize = 10;
+pub const LUMP_EDGES: usize = 12;
+pub const LUMP_SURFEDGES: usize = 13;
+pub const LUMP_MODELS: usize = 14;
 pub const MAX_HULLS: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -99,27 +105,36 @@ impl Reader<'_> {
     }
 }
 
+/// Offset and length of lump `i` of a BSP v30 file, checked against the file and, when `record` is not 0, against
+/// the size of its records.
+pub fn lump_range(bytes: &[u8], i: usize, record: usize) -> Result<(usize, usize), BspError> {
+    if bytes.len() < 4 + LUMPS * 8 {
+        return Err(BspError::Truncated);
+    }
+    let r = Reader { bytes };
+    let version = r.i32(0);
+    if version != VERSION {
+        return Err(BspError::Version(version));
+    }
+    if i >= LUMPS {
+        return Err(BspError::BadLump { lump: i });
+    }
+    let ofs = r.i32(4 + i * 8);
+    let len = r.i32(8 + i * 8);
+    if ofs < 0 || len < 0 || (ofs as usize).saturating_add(len as usize) > bytes.len() {
+        return Err(BspError::BadLump { lump: i });
+    }
+    if record > 0 && !(len as usize).is_multiple_of(record) {
+        return Err(BspError::BadLump { lump: i });
+    }
+    Ok((ofs as usize, len as usize))
+}
+
 impl Bsp {
     pub fn parse(bytes: &[u8]) -> Result<Bsp, BspError> {
-        if bytes.len() < 4 + LUMPS * 8 {
-            return Err(BspError::Truncated);
-        }
         let r = Reader { bytes };
-        let version = r.i32(0);
-        if version != VERSION {
-            return Err(BspError::Version(version));
-        }
-        let lump = |i: usize, record: usize| -> Result<(usize, usize), BspError> {
-            let ofs = r.i32(4 + i * 8);
-            let len = r.i32(8 + i * 8);
-            if ofs < 0 || len < 0 || (ofs as usize).saturating_add(len as usize) > bytes.len() {
-                return Err(BspError::BadLump { lump: i });
-            }
-            if record > 0 && !(len as usize).is_multiple_of(record) {
-                return Err(BspError::BadLump { lump: i });
-            }
-            Ok((ofs as usize, len as usize))
-        };
+        let lump = |i: usize, record: usize| lump_range(bytes, i, record);
+        lump(LUMP_ENTITIES, 0)?;
 
         let (ofs, len) = lump(LUMP_PLANES, 20)?;
         let planes: Vec<Plane> = (0..len / 20)

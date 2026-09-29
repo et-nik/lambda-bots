@@ -1,8 +1,9 @@
-//! GunGame as a player sees it. The plugin writes every player's level to the scoreboard as frags (level × 100, set on
-//! each level change; kills on the level add to it between), so the scoreboard tells everyone's level, and its first
-//! line (most frags, then fewest deaths) is the leader. What a level gave the bot is what it carries: one gun, or
-//! a throwable, or tripmines with a glock that only sets them off, or on the last level the crowbar. The order of
-//! the levels is not needed: a player on the last level shows the crowbar in its hands.
+//! GunGame as a player sees it. The plugin writes every player's level to the scoreboard as frags (level × 100 plus
+//! the kills on the level, set on each spawn; until the next one the game takes a frag off for a death by the world,
+//! a door, say), so the hundreds tell everyone's level, and the scoreboard's first line (most frags, then fewest
+//! deaths) is the leader. What a level gave the bot is what it carries: one gun, or a throwable, or tripmines
+//! with a glock that only sets them off, or on the last level the crowbar. The order of the levels is not needed: a
+//! player on the last level shows the crowbar in its hands.
 
 use crate::weapons::{WeaponId, weapons_in_mask};
 
@@ -106,7 +107,10 @@ impl Board {
             let Some(level) = levels.get_mut(slot as usize) else {
                 continue;
             };
-            *level = Some(frags.div_euclid(per_level.max(1)).clamp(0, i32::from(i16::MAX)) as i16);
+            let per_level = per_level.max(1);
+            // A few frags short of the level are deaths by the world since the spawn, not a level down.
+            let short = per_level / 10;
+            *level = Some((frags + short).div_euclid(per_level).clamp(0, i32::from(i16::MAX)) as i16);
             // As the scoreboard sorts: frags down, then deaths up, then by slot.
             let ahead = first.is_none_or(|(s, f, d)| (frags, -deaths, -i32::from(slot)) > (f, -d, -i32::from(s)));
             if ahead {
@@ -235,6 +239,14 @@ mod tests {
         );
         assert_eq!(b.level(5), None);
         assert_eq!(b.top(), 3);
+        let crushed = Board::new([(1, 999, 7), (2, 1004, 3), (3, 1087, 0)], 100, true);
+        assert_eq!(
+            crushed.level(1),
+            Some(10),
+            "a death by a door takes a frag off, not the level"
+        );
+        assert_eq!(crushed.level(2), Some(10));
+        assert_eq!(crushed.level(3), Some(10), "kills on the level are not the next one");
         let tie = Board::new([(5, 100, 1), (2, 100, 1)], 100, true);
         assert_eq!(tie.leader, Some(2), "a full tie goes to the lower slot");
     }

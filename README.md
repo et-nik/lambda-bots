@@ -74,6 +74,7 @@ checked with a port of the engine's player movement, and every special link (jum
 teleport, breakable, push) carries a contract that an executor carries out the way a player would, with fresh presses
 of use and jump. Failed links are avoided for a while, by reason; a bot stuck for good uses `kill`. Details and the
 obstacle courses: `docs/navigation.md`. Places and graph patches per map, and the in-game editor: `docs/overlays.md`.
+The map in 3D in the browser, next to any server: `docs/editor.md`.
 
 ## Recording and replay
 
@@ -142,6 +143,9 @@ scripts/build-windows.ps1
 
 # module check: exactly 5 exports, GLIBC <= 2.27, no dynamic C++ runtime
 scripts/check-binary.sh build/release-linux-i386/lambdabots_mm_i386.so
+
+# the map editor with its page (needs Node 22); --linux: a static Linux x86_64 build
+scripts/build-editor.sh [--linux]
 ```
 
 Rust checks: `cargo test --workspace`, `cargo clippy --workspace --all-targets`,
@@ -174,6 +178,8 @@ scripts/stand/lbcmd.sh --stop
 | `crates/lb-kin`        | player movement (port of `PM_PlayerMove`), traversal checks                     |
 | `crates/lb-nav`        | graph and `.lbnav`, yapb import, classifier, planner, path following, executors |
 | `crates/lb-navgen`     | graph generator, coverage report, graph cache, overlay patches                  |
+| `crates/lb-mapmesh`    | the map as the editor draws it: triangles, textures, WADs, lightmap pages       |
+| `crates/lb-editor`     | the map editor's server                                                         |
 | `crates/lb-perception` | vision, hearing, damage compass                                                 |
 | `crates/lb-knowledge`  | beliefs: tracks of players, hypotheses from sounds and damage                   |
 | `crates/lb-brain`      | per-bot senses, beliefs and attention                                           |
@@ -182,6 +188,7 @@ scripts/stand/lbcmd.sh --stop
 | `crates/lb-cli`        | `config check`, `replay`, `nav gen/coverage/path/validate-overlay/tracecheck`   |
 | `crates/lb-testkit`    | simulated server for the obstacle courses                                       |
 | `data/`                | config, name lists; installed into `addons/lambdabots/`                         |
+| `tools/editor`         | the map editor's page (Vue 3, three.js)                                         |
 | `docs/design/`         | design notes (platform, AI, navigation, yapb analysis)                          |
 | `scripts/`             | builds, binary checks, test stands                                              |
 

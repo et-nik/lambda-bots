@@ -237,6 +237,8 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
             }
         },
     };
+    // Patches are checked in the world the generator leaves, a graph read from the cache or not.
+    lb_navgen::mapload::prepare_world(&mut world, &mech);
     let patches: Vec<Patch> = overlays.iter().flat_map(|o| o.nav.patches.iter().cloned()).collect();
     let (graph, patches) = match graph {
         Ok(g) if !patches.is_empty() => {
@@ -292,35 +294,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     })
 }
 
-/// A map's overlay files under `maps/<map>/`, in the order they apply: the in-game editor's, then the hand-written one.
-pub const OVERLAYS: [&str; 2] = ["editor.yaml", "overlay.yaml"];
-
-/// The map's overlays (`OVERLAYS`) in the order they apply. A file that does not read is left out with a warning.
-pub fn read_overlays(install: &Path, map: &str, bsp_size: u64) -> Vec<OverlayFile> {
-    let dir = install.join("maps").join(map);
-    OVERLAYS
-        .iter()
-        .filter_map(|name| {
-            let path = dir.join(name);
-            let text = std::fs::read_to_string(&path).ok()?;
-            match OverlayFile::parse(&text, &path.display().to_string()) {
-                Ok(o) if o.bsp_size.is_some_and(|s| s != bsp_size) => {
-                    tracing::warn!(
-                        "{}: made for a {}-byte {map}.bsp, this one has {bsp_size} bytes; not applied",
-                        path.display(),
-                        o.bsp_size.unwrap_or(0)
-                    );
-                    None
-                }
-                Ok(o) => Some(o),
-                Err(e) => {
-                    tracing::warn!("{e}; not applied");
-                    None
-                }
-            }
-        })
-        .collect()
-}
+pub use lb_navgen::mapload::{OVERLAYS, read_overlays};
 
 /// Generator settings for the server's physics.
 pub fn gen_options(opts: &LoadOptions) -> GenOptions {
