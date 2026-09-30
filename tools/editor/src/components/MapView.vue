@@ -47,14 +47,23 @@ async function load() {
 function syncNav() {
   if (!viewer) return
   viewer.nav.setVisible(nav.show)
-  viewer.nav.setGraph(nav.model, nav.forbidden, new Set(nav.hiddenKinds), nav.hideOff)
+  viewer.nav.setGraph(nav.model, nav.forbidden, new Set(nav.hiddenKinds), nav.hideOff, nav.focusNodes, !gizmo.value)
   viewer.nav.setMarkup(nav.draft, nav.info?.overlay.file ?? null)
   viewer.nav.setHighlight(highlight.value)
   viewer.setFocusTarget(focusBox.value)
 }
 
+/** The node the move gizmo stands on: the Move tool's selection, when it can be moved. */
+const gizmo = computed(() => {
+  const n = nav.selNode
+  const m = nav.model
+  if (nav.tool !== 'move' || n === null || !m || n >= m.nodes || nav.unmovable(n)) return null
+  return { node: n, at: m.origin(n) }
+})
+
 const highlight = computed<Highlight>(() => ({
-  node: nav.selNode,
+  // The gizmo marks the node it stands on.
+  node: gizmo.value ? null : nav.selNode,
   link: nav.selLink,
   hover: nav.hover,
   pending: nav.pending,
@@ -89,7 +98,9 @@ onMounted(() => {
       hover: (p) => nav.onHover(p),
       camera: (p) => (store.camera = p),
       grab: (p) => nav.grab(p),
-      drop: (n, to) => nav.moveNode(n, to),
+      moveStart: (n) => nav.moveStart(n),
+      moveLive: (n, to) => nav.moveLive(n, to),
+      drop: (n, to) => nav.moveEnd(n, to),
     },
     store.layers,
   )
@@ -98,6 +109,8 @@ onMounted(() => {
   }
   void load()
   syncNav()
+  viewer.setSnap(nav.snapStep)
+  viewer.setGizmo(gizmo.value)
 })
 
 onBeforeUnmount(() => viewer?.dispose())
@@ -123,8 +136,13 @@ watch(() => store.brightness, (b) => viewer?.setBrightness(b))
 watch(() => store.wireframe, (w) => viewer?.setWireframe(w))
 
 watch(() => nav.show, (s) => viewer?.nav.setVisible(s))
-watch([() => nav.model, () => nav.forbidden, () => nav.hiddenKinds, () => nav.hideOff], ([m, f, hidden, off]) =>
-  viewer?.nav.setGraph(m, f, new Set(hidden), off),
+watch(
+  [() => nav.model, () => nav.forbidden, () => nav.hiddenKinds, () => nav.hideOff, () => nav.focusNodes, () => !gizmo.value],
+  ([m, f, hidden, off, focus, arrows]) => {
+    viewer?.nav.setGraph(m, f, new Set(hidden), off, focus, arrows)
+    // What is lit up stands where the nodes stand now.
+    viewer?.nav.setHighlight(highlight.value)
+  },
 )
 watch([() => nav.draft, () => nav.info], () => viewer?.nav.setMarkup(nav.draft, nav.info?.overlay.file ?? null))
 watch(highlight, (h) => viewer?.nav.setHighlight(h))
@@ -133,6 +151,18 @@ watch(
   () => nav.focusRequest,
   () => {
     if (focusBox.value) viewer?.show(focusBox.value)
+  },
+)
+watch(gizmo, (g) => viewer?.setGizmo(g))
+watch(
+  () => nav.snapStep,
+  (s) => viewer?.setSnap(s),
+)
+watch(
+  () => nav.ghost,
+  (g) => {
+    const m = nav.model
+    viewer?.nav.setDrag(g && m && g.node < m.nodes ? { from: m.origin(g.node), to: g.to, marker: true } : null)
   },
 )
 watch(

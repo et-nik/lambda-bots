@@ -6,6 +6,7 @@ import { useNav } from '../stores/nav'
 import { LINK, type Link, linkValid, nodeFlagNames } from '../viewer/graph'
 import CardHead from './CardHead.vue'
 import LinkSeg from './LinkSeg.vue'
+import PositionFields from './PositionFields.vue'
 
 const props = defineProps<{ n: number }>()
 const nav = useNav()
@@ -80,9 +81,9 @@ onBeforeUnmount(() => (nav.peek = null))
     >
       <span v-for="f in flags" :key="f" class="tag">{{ f }}</span>
     </CardHead>
+    <PositionFields :n="n" />
     <p class="sub">
-      {{ spot(model.origin(n)) }}<template v-if="movedFrom"> · moved from {{ spot(movedFrom) }}</template> ·
-      {{ counts.out }} out · {{ counts.in }} in
+      <template v-if="movedFrom">moved from {{ spot(movedFrom) }} · </template>{{ counts.out }} out · {{ counts.in }} in
     </p>
     <p v-if="shut !== null" class="note warn">
       Shut off by <button class="linkish" @click="nav.goPatch(shut)">change {{ shut + 1 }}</button>: bots never plan

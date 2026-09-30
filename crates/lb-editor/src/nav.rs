@@ -48,6 +48,14 @@ pub struct Patched {
     pub graph: NavGraph,
     pub editor: Vec<Outcome>,
     pub overlay: Vec<Outcome>,
+    /// The graph with the planner's landmarks, made the first time a route asks: previews do without.
+    routable: std::sync::OnceLock<NavGraph>,
+}
+
+impl Patched {
+    pub fn routable(&self) -> &NavGraph {
+        self.routable.get_or_init(|| self.graph.clone().with_landmarks())
+    }
 }
 
 impl NavMap {
@@ -83,6 +91,11 @@ impl NavMap {
         })
     }
 
+    /// The player physics changes are checked with: the server's, the graph was made with; else the defaults.
+    pub fn physics(&self) -> Physics {
+        self.base_key.as_ref().map_or_else(Physics::default, |k| k.movement)
+    }
+
     /// The graph with `editor` (the editor file as the page has it) and the hand-written overlay applied, in the
     /// server's order. The last result is kept: the page asks again for routes on the same changes.
     pub fn patched(&self, editor: &OverlayFile, overlay: Option<&OverlayFile>) -> Arc<Patched> {
@@ -96,12 +109,13 @@ impl NavMap {
         let split = editor.nav.patches.len();
         let (graph, report) = {
             let mut world = self.world.lock().expect("no panics while locked");
-            patch::apply(self.base.clone(), &patches, &mut world, &self.mech, Physics::default())
+            patch::apply(self.base.clone(), &patches, &mut world, &self.mech, self.physics())
         };
         let mut editor_out = report.outcomes;
         let overlay_out = editor_out.split_off(split);
         let p = Arc::new(Patched {
-            graph: graph.with_landmarks(),
+            graph,
+            routable: std::sync::OnceLock::new(),
             editor: editor_out,
             overlay: overlay_out,
         });
@@ -121,8 +135,22 @@ fn all_patches(editor: &OverlayFile, overlay: Option<&OverlayFile>) -> Vec<Patch
         .collect()
 }
 
-/// A map's navigation kept, with the BSP file and its modification time it was loaded from.
-type Kept = (PathBuf, Option<std::time::SystemTime>, Arc<NavMap>);
+/// A map's navigation kept, with the BSP file and its modification time it was loaded from, and the server's graph
+/// files of the map then.
+type Kept = (PathBuf, Option<std::time::SystemTime>, Vec<String>, Arc<NavMap>);
+
+/// The server's kept graph files of `map`, by name: another set of them may hold another graph of it.
+fn graph_files(install: &Path, map: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(install.join("nav").join(map))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".lbnav"))
+        .collect();
+    names.sort();
+    names
+}
 
 /// Navigation of the maps opened last.
 #[derive(Default)]
@@ -133,13 +161,18 @@ pub struct NavMaps {
 }
 
 impl NavMaps {
-    pub fn get(&self, map: &str, bsp: &Path, install: &Path) -> Result<Arc<NavMap>, String> {
+    /// The map's navigation, loaded again when its BSP changed, or (`fresh`: a page opening the map) when the server's
+    /// graphs of it did. A page keeps the graph it opened (its nodes' numbers) until it opens the map again.
+    pub fn get(&self, map: &str, bsp: &Path, install: &Path, fresh: bool) -> Result<Arc<NavMap>, String> {
         let stamp = std::fs::metadata(bsp).and_then(|m| m.modified()).ok();
+        let graphs = fresh.then(|| graph_files(install, map));
         let find = || {
             let mut kept = self.kept.lock().expect("no panics while locked");
-            let i = kept.iter().position(|(p, s, _)| p == bsp && *s == stamp)?;
+            let i = kept
+                .iter()
+                .position(|(p, s, g, _)| p == bsp && *s == stamp && graphs.as_ref().is_none_or(|now| now == g))?;
             let k = kept.remove(i);
-            let nav = k.2.clone();
+            let nav = k.3.clone();
             kept.insert(0, k);
             Some(nav)
         };
@@ -150,10 +183,11 @@ impl NavMaps {
         if let Some(nav) = find() {
             return Ok(nav);
         }
+        let files = graphs.clone().unwrap_or_else(|| graph_files(install, map));
         let nav = Arc::new(NavMap::load(map, bsp, install)?);
         let mut kept = self.kept.lock().expect("no panics while locked");
-        kept.retain(|(p, _, _)| p != bsp);
-        kept.insert(0, (bsp.to_path_buf(), stamp, nav.clone()));
+        kept.retain(|(p, _, _, _)| p != bsp);
+        kept.insert(0, (bsp.to_path_buf(), stamp, files, nav.clone()));
         kept.truncate(KEEP);
         Ok(nav)
     }
@@ -366,9 +400,9 @@ pub struct EditedGraph {
     pub detail: String,
 }
 
-/// Writes the server's graph with the map's overlays applied as the server reads them, for the server to play on
-/// as it is (`mapload::EDITED`). Only on the server's own graph checked with its physics: otherwise, and without
-/// changes, the server applies the overlays itself and one written before is removed.
+/// Writes the server's graph with the map's overlays applied as the server reads them (checked with its physics), for
+/// the server to play on as it is (`mapload::EDITED`). Only on the server's own graph: otherwise, and without changes,
+/// the server applies the overlays itself and one written before is removed.
 pub fn save_edited(nav: &NavMap, install: &Path) -> EditedGraph {
     let map = nav.map.as_str();
     let not = |why: &str| EditedGraph {
@@ -380,11 +414,11 @@ pub fn save_edited(nav: &NavMap, install: &Path) -> EditedGraph {
         },
     };
     let Some(base) = &nav.base_key else {
-        return not("the server has not made a graph of this build of the map: it applies the changes itself");
+        return not(
+            "the server has not made a graph of this build of the map with this version of the bots yet (it makes one \
+             when it loads the map; open the map here again then): it applies the changes itself",
+        );
     };
-    if base.physics != lb_navgen::cache::physics_hash(&lb_navgen::GenOptions::default()) {
-        return not("the server plays with other physics than the editor checks with: it applies the changes itself");
-    }
     let files = mapload::read_overlay_files(install, map, nav.bsp_size);
     let file = |name: &str| files.iter().find(|(n, _)| *n == name).map(|(_, f)| f);
     let empty = OverlayFile::new(map);
@@ -550,6 +584,66 @@ mod tests {
     }
 
     #[test]
+    fn changes_are_checked_and_saved_with_the_physics_of_the_servers_graph() {
+        let Some(bsp) = stand() else { return };
+        let install = std::env::temp_dir().join(format!("lb-editor-physics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&install);
+        let mut world = BspWorld::load(&std::fs::read(&bsp).unwrap()).unwrap();
+        let mech = Mechanisms::from_world(&world);
+        let opts = lb_navgen::GenOptions {
+            physics: Physics {
+                maxspeed: 300.0,
+                ..Physics::default()
+            },
+            ..lb_navgen::GenOptions::default()
+        };
+        let made = lb_navgen::generate(&mut world, &mech, &opts, "server").graph;
+        let key = lb_navgen::cache::key(&world, &opts, 0, 0);
+        lb_navgen::cache::GraphCache::new(&install.join("nav"), "crossfire")
+            .store(&key, &made)
+            .unwrap();
+        let nav = NavMap::load("crossfire", &bsp, &install).expect("crossfire loads");
+        assert_eq!((nav.origin, nav.physics().maxspeed), (Origin::Server, 300.0));
+        let (a, b) = (0 as NodeId, made.links(0)[0].to);
+        let mut f = OverlayFile::new("crossfire");
+        f.nav.patches.push(Patch::RemoveLink {
+            from: made.node(a).origin.to_array(),
+            to: made.node(b).origin.to_array(),
+            both: true,
+            note: String::new(),
+        });
+        save_editor(&install, "crossfire", &f, "none").ok().expect("saved");
+        let e = save_edited(&nav, &install);
+        assert!(e.written, "{e:?}");
+        // The server with that physics plays on it.
+        assert!(mapload::edited_graph(&install, "crossfire", &key, &f.nav.patches).is_some());
+        let _ = std::fs::remove_dir_all(&install);
+    }
+
+    #[test]
+    fn opening_the_map_again_takes_the_graph_the_server_made_since() {
+        let Some(bsp) = stand() else { return };
+        let install = std::env::temp_dir().join(format!("lb-editor-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&install);
+        let maps = NavMaps::default();
+        let made = maps.get("crossfire", &bsp, &install, true).expect("crossfire loads");
+        assert_eq!(made.origin, Origin::Made);
+        let world = BspWorld::load(&std::fs::read(&bsp).unwrap()).unwrap();
+        let key = lb_navgen::cache::key(&world, &lb_navgen::GenOptions::default(), 0, 0);
+        lb_navgen::cache::GraphCache::new(&install.join("nav"), "crossfire")
+            .store(&key, &made.base)
+            .unwrap();
+        let same = maps.get("crossfire", &bsp, &install, false).unwrap();
+        assert!(
+            Arc::ptr_eq(&made, &same),
+            "a page's graph stays until the map is opened again"
+        );
+        let server = maps.get("crossfire", &bsp, &install, true).unwrap();
+        assert_eq!(server.origin, Origin::Server);
+        let _ = std::fs::remove_dir_all(&install);
+    }
+
+    #[test]
     fn a_preview_shows_what_the_changes_do_and_routes_take_them() {
         let Some(bsp) = stand() else { return };
         let install = std::env::temp_dir().join(format!("lb-editor-nav-{}", std::process::id()));
@@ -606,7 +700,7 @@ mod tests {
                     .total_cmp(&g.node(y).origin.distance(g.node(a).origin))
             })
             .unwrap();
-        let r = route(&p.graph, g.node(a).origin, g.node(far).origin, false, false).expect("a way across the map");
+        let r = route(p.routable(), g.node(a).origin, g.node(far).origin, false, false).expect("a way across the map");
         assert_eq!((r.start, *r.nodes.last().unwrap()), (a, far));
         assert!(r.time > 0.0 && r.legs.len() + 1 == r.nodes.len());
         assert!(r.legs.iter().all(|l| l.kind != "longjump" && l.kind != "gauss_boost"));

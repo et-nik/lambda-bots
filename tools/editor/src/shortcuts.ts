@@ -7,7 +7,10 @@ export const MOD = MAC ? '⌘' : 'Ctrl+'
 /** Ctrl held longer than this before the key is flying down, not a shortcut (ms). */
 const CTRL_SHORTCUT = 600
 
-/** The editor's keys: tools, undo and redo, save, Esc and Delete. Returns what takes them away. */
+/**
+ * The editor's keys: tools, undo and redo, save, Esc, Delete, the grid's step and the links of the selection alone.
+ * Returns what takes them away.
+ */
 export function installShortcuts(): () => void {
   const nav = useNav()
   let ctrlAt = 0
@@ -42,6 +45,10 @@ export function installShortcuts(): () => void {
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       if (nav.selPatch !== null) nav.removePatch(nav.selPatch)
       else if (nav.selLink) nav.unlink(nav.selLink)
+    } else if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
+      nav.snapBy(e.code === 'BracketLeft' ? -1 : 1)
+    } else if (e.code === 'KeyI') {
+      nav.onlySelected = !nav.onlySelected
     } else {
       const tool = TOOLS.find((x) => x.code === e.code)
       if (tool) nav.setTool(tool.id)

@@ -9,21 +9,24 @@ use serde::{Deserialize, Serialize};
 use crate::graph::NavGraph;
 
 pub const MAGIC: &[u8; 8] = b"LBNAV\0\r\n";
-/// Bumped when the layout or the graph types change.
-pub const FORMAT: u32 = 2;
+/// Bumped when the layout, the key or the graph types change.
+pub const FORMAT: u32 = 3;
 
 /// What a graph was made from; a graph is reused only for exactly the same key.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphKey {
     /// BLAKE3 of the BSP file and its size.
     pub bsp: [u8; 32],
     pub bsp_size: u64,
     /// Version of the generator: one that makes other graphs from the same map bumps it.
     pub generator: u32,
-    /// Hashes of the player physics, the server rules that change links (fall damage) and the map's overlay.
+    /// Hashes of the generator's settings (the player physics among them), the server rules that change links (fall
+    /// damage) and the map's overlay.
     pub physics: u64,
     pub rules: u64,
     pub overlay: u64,
+    /// The player physics the graph was made and checked with, which changes to it are checked with too.
+    pub movement: lb_kin::Physics,
 }
 
 impl GraphKey {
@@ -158,6 +161,7 @@ mod tests {
             physics: 5,
             rules: 6,
             overlay: 0,
+            movement: lb_kin::Physics::default(),
         }
     }
 
@@ -209,6 +213,13 @@ mod tests {
             GraphKey { rules: 1, ..key() },
             GraphKey { overlay: 1, ..key() },
             GraphKey { bsp: [8; 32], ..key() },
+            GraphKey {
+                movement: lb_kin::Physics {
+                    maxspeed: 300.0,
+                    ..lb_kin::Physics::default()
+                },
+                ..key()
+            },
         ];
         for v in variants {
             assert_ne!(v.file_name(), base, "{v:?}");

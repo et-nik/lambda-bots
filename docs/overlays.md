@@ -79,10 +79,11 @@ Places are named spots for behavior (shelters, sniper nests) and for people read
 ## The map editor's graph
 
 Saving in the web editor (`docs/editor.md`) also writes `maps/<map>/editor.lbnav`: the server's graph with both files
-applied. The server plays on it as it is (`lb nav` says `editor`) while its key is the one of the graph the server
-would load with the overlays on disk: the same build of the map, generator and physics, and exactly the same patches.
-Otherwise it is left alone and the overlays are applied as above. `lb edit save` and `lb nav regen` remove it. To take
-the changes to another server, copy the overlay files: the graph there is its own.
+applied, checked with the player physics that graph was made with (graph files keep it). The server plays on it as it
+is (`lb nav` says `editor`) while its key is the one of the graph the server would load with the overlays on disk: the
+same build of the map, generator and physics, and exactly the same patches. Otherwise it is left alone and the
+overlays are applied as above. `lb edit save` and `lb nav regen` remove it. To take the changes to another server,
+copy the overlay files: the graph there is its own.
 
 ## Checking an overlay offline
 

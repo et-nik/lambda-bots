@@ -26,6 +26,7 @@ pub fn key(world: &BspWorld, opts: &GenOptions, rules: u64, overlay: u64) -> Gra
         physics: physics_hash(opts),
         rules,
         overlay,
+        movement: opts.physics,
     }
 }
 

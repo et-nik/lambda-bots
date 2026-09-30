@@ -992,6 +992,7 @@ dependencies = [
  "lb-bsp",
  "lb-core",
  "lb-worldq",
+ "serde",
  "smallvec",
 ]
 

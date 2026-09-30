@@ -13,6 +13,7 @@ lb-core.workspace = true
 lb-worldq.workspace = true
 lb-bsp.workspace = true
 smallvec.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

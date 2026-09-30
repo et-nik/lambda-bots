@@ -34,6 +34,15 @@ const graphTitle = computed(() => {
     </button>
     <template v-if="nav.show">
       <button
+        class="only"
+        :class="{ on: nav.onlySelected }"
+        :aria-pressed="nav.onlySelected"
+        title="Only the links of what is selected (I); with nothing selected, all of them"
+        @click="nav.onlySelected = !nav.onlySelected"
+      >
+        Selected only
+      </button>
+      <button
         v-for="k in legend.kinds"
         :key="k.kind"
         :class="{ hidden: nav.hiddenKinds.includes(k.kind) }"
@@ -82,6 +91,11 @@ button {
 }
 .graph {
   font-weight: 600;
+  color: var(--text-strong);
+}
+.only.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
   color: var(--text-strong);
 }
 button.hidden {

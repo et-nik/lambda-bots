@@ -2,13 +2,16 @@ import { defineStore } from 'pinia'
 import { markRaw } from 'vue'
 
 import { ApiError, applyOnServer, navInfo, navPreview, navRoute, saveEditor } from '../api'
-import type { NavInfo, OnDisk, OverlayFile, PatchOp, Pick, Preview, Route, Tool, Vec3 } from '../types'
+import type { EditedGraph, NavInfo, OnDisk, Outcome, OverlayFile, PatchOp, Pick, Preview, Route, Tool, Vec3 } from '../types'
 import { GraphModel, STAND } from '../viewer/graph'
 import { forbiddenNodes } from '../viewer/navlayer'
 import { useEditor } from './editor'
 
 /** Milliseconds a preview waits for more changes. */
 const PREVIEW_DELAY = 120
+
+/** Grid steps moves snap to, units. */
+export const SNAP_STEPS = [1, 2, 4, 8, 16, 32, 64]
 
 export type LinkKindChoice = 'auto' | 'jump' | 'crouch' | 'longjump' | 'gauss_boost'
 
@@ -83,6 +86,50 @@ function storeDraft(map: string, version: string, file: OverlayFile | null) {
 
 let previewTimer = 0
 let previewSeq = 0
+/** A preview is on its way; `again` asks for another once it is back (the draft changed meanwhile). */
+let inFlight = false
+let again = false
+/** What the last change was part of (`change`'s `key`): one step of undo for them all. */
+let lastKey: string | null = null
+/** A node being set down elsewhere: the file and outcomes it started from, and where the node stands in the base. */
+let moving: { node: number; file: OverlayFile; outcomes: Outcome[]; from: Vec3; key: string } | null = null
+let moves = 0
+
+/** The last change in `list` that put node `n` in or moved it (by `outcomes`), and so says where it stands. */
+function placedIn(list: PatchOp[], outcomes: Outcome[], n: number): number | null {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const op = list[i].op
+    if ((op === 'add_node' || op === 'move_node') && outcomes[i]?.nodes[0] === n) return i
+  }
+  return null
+}
+
+/**
+ * `file` with node `n` set down at `to`: the change that put it in or moved it last takes the new spot, and the links
+ * changed after it that name the node follow it; a node no change placed gets a move from `from`.
+ */
+function withMove(file: OverlayFile, outcomes: Outcome[], n: number, from: Vec3, to: Vec3): OverlayFile {
+  const next = copy(file)
+  const list = next.nav?.patches ?? []
+  const spot = at(to)
+  const i = placedIn(list, outcomes, n)
+  if (i === null) {
+    next.nav = { patches: [...list, { op: 'move_node', from: at(from), to: spot }] }
+    return next
+  }
+  const p = list[i]
+  if (p.op === 'add_node') list[i] = { ...p, at: spot }
+  else if (p.op === 'move_node') list[i] = { ...p, to: spot }
+  for (let j = i + 1; j < list.length; j++) {
+    const q = list[j]
+    const ends = outcomes[j]?.nodes ?? []
+    if ((q.op === 'add_link' || q.op === 'remove_link') && ends.length === 2) {
+      if (ends[0] === n) q.from = spot
+      if (ends[1] === n) q.to = spot
+    }
+  }
+  return next
+}
 
 export const useNav = defineStore('nav', {
   state: () => ({
@@ -124,6 +171,8 @@ export const useNav = defineStore('nav', {
     trail: [] as Selected[],
     /** The file on disk when a save found it changed. */
     conflict: null as OnDisk | null,
+    /** What the last save did with `editor.lbnav`. */
+    savedGraph: null as EditedGraph | null,
     notice: null as string | null,
     /** Bumped with every notice, so the same words show again. */
     noticeSeq: 0,
@@ -133,10 +182,18 @@ export const useNav = defineStore('nav', {
     /** Link kinds not drawn, and whether links that are off are hidden. */
     hiddenKinds: [] as string[],
     hideOff: false,
+    /** Only the links of what is selected are drawn. */
+    onlySelected: false,
     /** Bumped when the panel asks the view to bring the selection close. */
     focusRequest: 0,
     /** Bumped when the panel asks the view to show the selection if it is out of sight. */
     revealRequest: 0,
+    /** Grid step moves snap to (units). */
+    snapStep: 8,
+    /** Where a node set down from the position fields would stand, drawn as a ghost. */
+    ghost: null as { node: number; to: Vec3 } | null,
+    /** The file a drag is previewing: not a change until the node is let go. */
+    transient: null as OverlayFile | null,
   }),
   getters: {
     model(): GraphModel | null {
@@ -144,6 +201,19 @@ export const useNav = defineStore('nav', {
     },
     forbidden(): Set<number> {
       return forbiddenNodes(this.preview?.editor ?? [], this.draft)
+    },
+    /**
+     * With `onlySelected`, the nodes whose links alone are drawn: the node selected, the ends of the link, the nodes
+     * of the change, the node a link is being drawn from. Null for all of them (nothing selected, or the option off).
+     */
+    focusNodes(): Set<number> | null {
+      if (!this.onlySelected) return null
+      const nodes = new Set<number>()
+      if (this.selNode !== null) nodes.add(this.selNode)
+      for (const n of this.selLink ?? []) nodes.add(n)
+      if (this.selPatch !== null) for (const n of this.preview?.editor[this.selPatch]?.nodes ?? []) nodes.add(n)
+      if (this.pending !== null) nodes.add(this.pending)
+      return nodes.size ? nodes : null
     },
     dirty(): boolean {
       return text(this.draft) !== this.savedText
@@ -172,6 +242,7 @@ export const useNav = defineStore('nav', {
       this.clearSelection()
       this.route = null
       this.conflict = null
+      this.savedGraph = null
       this.notice = null
       this.loading = true
       try {
@@ -203,22 +274,37 @@ export const useNav = defineStore('nav', {
       this.savedText = text(file)
       this.history = []
       this.future = []
+      lastKey = null
     },
 
-    change(mutate: (f: OverlayFile) => void) {
-      if (!this.draft || !this.map) return
-      this.history.push(JSON.stringify(this.draft))
-      this.future = []
+    change(mutate: (f: OverlayFile) => void, opts: { key?: string; now?: boolean } = {}) {
+      if (!this.draft) return
       const next = copy(this.draft)
       mutate(next)
+      this.commit(next, opts)
+    },
+
+    /**
+     * Makes `next` the draft: a step of undo, unless `key` names the same editing as the change before; previewed
+     * after a pause, or at once with `now`.
+     */
+    commit(next: OverlayFile, opts: { key?: string; now?: boolean } = {}) {
+      if (!this.draft || !this.map) return
+      if (!opts.key || opts.key !== lastKey) {
+        this.history.push(JSON.stringify(this.draft))
+        this.future = []
+      }
+      lastKey = opts.key ?? null
       this.draft = next
       storeDraft(this.map, this.version, this.dirty ? next : null)
-      this.schedule()
+      if (opts.now) void this.refresh()
+      else this.schedule()
     },
 
     undo() {
       const prev = this.history.pop()
       if (prev === undefined || !this.draft) return
+      lastKey = null
       this.future.push(JSON.stringify(this.draft))
       this.draft = JSON.parse(prev)
       this.selPatch = null
@@ -229,6 +315,7 @@ export const useNav = defineStore('nav', {
     redo() {
       const next = this.future.pop()
       if (next === undefined || !this.draft) return
+      lastKey = null
       this.history.push(JSON.stringify(this.draft))
       this.draft = JSON.parse(next)
       if (this.map) storeDraft(this.map, this.version, this.dirty ? this.draft : null)
@@ -240,22 +327,42 @@ export const useNav = defineStore('nav', {
       previewTimer = window.setTimeout(() => void this.refresh(), PREVIEW_DELAY)
     },
 
+    /**
+     * Previews the draft (or the drag's file). One preview at a time: asked again while one is on its way, the next
+     * goes as soon as it is back, with the file as it is then.
+     */
     async refresh() {
       if (!this.map || !this.draft) return
-      const seq = ++previewSeq
+      if (inFlight) {
+        again = true
+        return
+      }
+      inFlight = true
       try {
-        const p = await navPreview(this.map, normal(this.draft))
-        if (seq === previewSeq) {
-          this.preview = markRaw(p)
-          this.error = null
-          const i = this.reportPatch
-          if (i !== null && p.editor[i]) {
-            this.reportPatch = null
-            this.notify(`Change ${i + 1}: ${p.editor[i].message}`)
+        do {
+          again = false
+          clearTimeout(previewTimer)
+          const map: string | null = this.map
+          const file: OverlayFile | null = this.transient ?? this.draft
+          if (!map || !file) break
+          const seq = ++previewSeq
+          try {
+            const p = await navPreview(map, normal(file))
+            if (seq === previewSeq && this.map === map) {
+              this.preview = markRaw(p)
+              this.error = null
+              const i = this.reportPatch
+              if (i !== null && p.editor[i]) {
+                this.reportPatch = null
+                this.notify(`Change ${i + 1}: ${p.editor[i].message}`)
+              }
+            }
+          } catch (e) {
+            if (seq === previewSeq) this.error = e instanceof Error ? e.message : String(e)
           }
-        }
-      } catch (e) {
-        if (seq === previewSeq) this.error = e instanceof Error ? e.message : String(e)
+        } while (again)
+      } finally {
+        inFlight = false
       }
     },
 
@@ -417,63 +524,78 @@ export const useNav = defineStore('nav', {
 
     /** The last change of the editor file that put node `n` in or moved it (and so says where it stands). */
     placedBy(n: number): number | null {
-      const outcomes = this.preview?.editor ?? []
-      for (let i = this.patches.length - 1; i >= 0; i--) {
-        const op = this.patches[i].op
-        if ((op === 'add_node' || op === 'move_node') && outcomes[i]?.nodes[0] === n) return i
-      }
+      return placedIn(this.patches, this.preview?.editor ?? [], n)
+    },
+
+    /** Why node `n` cannot be moved from the editor file, if it cannot. */
+    unmovable(n: number): string | null {
+      const m = this.model
+      if (!m) return 'no graph'
+      if (this.forbidden.has(n)) return `Node ${n} is shut off by a forbidden zone: take the zone out to move it.`
+      if (n >= m.baseNodes && this.placedBy(n) === null) return `Node ${n} is put in by overlay.yaml: move it there.`
       return null
     },
 
-    /** Whether node `n` under a press can be dragged (the Move tool); says why not when it cannot. */
+    /** Whether the node under a press is picked up to drag (the Move tool); says why not when it cannot. */
     grab(p: Pick): boolean {
+      if (this.tool !== 'move' || p.node === null) return false
+      this.selectNode(p.node)
+      return this.moveStart(p.node)
+    },
+
+    /** Starts setting node `n` down elsewhere, from the draft as it is now; says why not when it cannot. */
+    moveStart(n: number): boolean {
       const m = this.model
-      if (this.tool !== 'move' || p.node === null || !m) return false
-      const n = p.node
-      this.selectNode(n)
-      if (this.forbidden.has(n)) {
-        this.notify(`Node ${n} is shut off by a forbidden zone: take the zone out to move it.`)
+      const why = this.unmovable(n)
+      if (why || !m || !this.draft) {
+        if (why) this.notify(why)
         return false
       }
-      if (n >= m.baseNodes && this.placedBy(n) === null) {
-        this.notify(`Node ${n} is put in by overlay.yaml: move it there.`)
-        return false
-      }
+      moving = { node: n, file: copy(this.draft), outcomes: this.preview?.editor ?? [], from: m.baseOrigin(n), key: `move:${n}:${++moves}` }
       this.notice = null
       return true
     },
 
-    /**
-     * Sets node `n` down at `to`. The change that put it in or moved it last takes the new spot, and the links
-     * changed after it that name the node follow it; a node the changes have not placed gets a move.
-     */
-    moveNode(n: number, to: Vec3) {
-      const m = this.model
-      if (!m) return
-      const spot = at(to)
-      const i = this.placedBy(n)
-      if (i === null) {
-        this.addPatch({ op: 'move_node', from: at(m.baseOrigin(n)), to: spot })
-        return
+    /** Where the node dragged would stand now: previewed as it goes, a change only when it is let go. */
+    moveLive(n: number, to: Vec3) {
+      if (moving?.node !== n) return
+      this.transient = markRaw(withMove(moving.file, moving.outcomes, n, moving.from, to))
+      void this.refresh()
+    },
+
+    /** Lets the node dragged go at `to` (one change), or back where it was (`null`); it stays selected. */
+    moveEnd(n: number, to: Vec3 | null) {
+      const m = moving
+      const live = this.transient !== null
+      moving = null
+      this.transient = null
+      if (m?.node === n && to) {
+        this.commit(withMove(m.file, m.outcomes, n, m.from, to), { now: true })
+        this.selectNode(n)
+      } else if (live) {
+        void this.refresh()
       }
-      const outcomes = this.preview?.editor ?? []
-      this.change((f) => {
-        const list = f.nav?.patches ?? []
-        const p = list[i]
-        if (p.op === 'add_node') list[i] = { ...p, at: spot }
-        else if (p.op === 'move_node') list[i] = { ...p, to: spot }
-        for (let j = i + 1; j < list.length; j++) {
-          const q = list[j]
-          const ends = outcomes[j]?.nodes ?? []
-          if ((q.op === 'add_link' || q.op === 'remove_link') && ends.length === 2) {
-            if (ends[0] === n) q.from = spot
-            if (ends[1] === n) q.to = spot
-          }
-        }
-      })
-      this.selNode = null
-      this.selLink = null
-      this.selPatch = i
+    },
+
+    /** Sets node `n` down at `to` from the position fields: a change at once, one step of undo until `moveStop`. */
+    moveTo(n: number, to: Vec3) {
+      if (moving?.node !== n && !this.moveStart(n)) return
+      const m = moving!
+      this.commit(withMove(m.file, m.outcomes, n, m.from, to), { key: m.key, now: true })
+      this.ghost = { node: n, to: at(to) }
+    },
+
+    /** The position fields let go: the next move is another step of undo. */
+    moveStop() {
+      moving = null
+      lastKey = null
+      this.ghost = null
+    },
+
+    /** A finer or a coarser grid for moves. */
+    snapBy(dir: -1 | 1) {
+      const i = SNAP_STEPS.indexOf(this.snapStep)
+      this.snapStep = SNAP_STEPS[Math.min(SNAP_STEPS.length - 1, Math.max(0, (i < 0 ? 3 : i) + dir))]
     },
 
     removePlace(i: number) {
@@ -657,6 +779,7 @@ export const useNav = defineStore('nav', {
         this.version = r.version
         this.savedText = sentText
         this.conflict = null
+        this.savedGraph = r.graph
         // Changes made while it was saving are not saved: they stay in the browser.
         storeDraft(map, this.version, this.dirty ? this.draft : null)
         const saved = r.graph.written

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { LINK_KIND_CHOICES, useNav } from '../stores/nav'
+import { LINK_KIND_CHOICES, SNAP_STEPS, useNav } from '../stores/nav'
 import { toolInfo } from '../tools'
 
 const nav = useNav()
 
-const WITH_OPTIONS = new Set(['link', 'unlink', 'forbid', 'place', 'route'])
+const WITH_OPTIONS = new Set(['link', 'unlink', 'move', 'forbid', 'place', 'route'])
 const shown = computed(() => WITH_OPTIONS.has(nav.tool))
 </script>
 
@@ -25,6 +25,15 @@ const shown = computed(() => WITH_OPTIONS.has(nav.tool))
       <span v-if="nav.pending !== null" class="state">from node {{ nav.pending }} · Esc stops</span>
     </template>
     <label v-else-if="nav.tool === 'unlink'"><input v-model="nav.unlinkBoth" type="checkbox" /> both ways</label>
+    <template v-else-if="nav.tool === 'move'">
+      <label title="Moves snap to the grid; [ and ] change its step">
+        grid
+        <select v-model.number="nav.snapStep">
+          <option v-for="s in SNAP_STEPS" :key="s" :value="s">{{ s }}</option>
+        </select>
+      </label>
+      <span class="muted">[ ] step · Alt: off the grid · arrows of the gizmo: one axis, squares: a plane</span>
+    </template>
     <label v-else-if="nav.tool === 'forbid'">
       radius <input v-model.number="nav.forbidRadius" type="number" min="8" max="2048" step="8" />
     </label>

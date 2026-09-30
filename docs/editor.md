@@ -80,7 +80,9 @@ Where things are:
   *Apply on server*; when *Apply* is off, its tooltip says why.
 - **On the view**: the tools down the left edge, with their keys; the chosen tool's options along the top; the graph's
   legend at the bottom (a click hides or shows the graph, a kind of link, or the links that are off; the tooltips count
-  them). What a change or a save came to pops up at the bottom for a few seconds.
+  them). *Selected only* (I) draws the links of what is selected alone, as arrows in their colours seen through walls
+  (as lines while the Move tool's gizmo is on the node: its arrows are the only ones then): a node's, both ends' of a
+  link, a change's nodes', the node a link is being drawn from; with nothing selected, all of them. What a change or a save came to pops up at the bottom for a few seconds.
 - **The status bar**: where the camera is, what is under the pointer, what the tool does and how to fly.
 - **The panel**: *Navigation* shows what is selected on top (a node, a link, a change, a route or an entity) and the
   changes under it; *Map* shows the map's faces, textures, lightmaps, the WADs it names (missing ones in red), the
@@ -100,27 +102,34 @@ says which). The changes go into `maps/<map>/editor.yaml`, the file the in-game 
 Every change is checked at once as the server will check it, and the list of changes shows what it did: the links it
 put in and their kinds, or why it did nothing (marked red).
 
-| Tool   | Key | Click                                    | Does                                                              |
-|--------|-----|------------------------------------------|-------------------------------------------------------------------|
-| Select | V   | a node, a link, an entity                | shows it in the panel, with what can be done to it                |
-| Link   | L   | a node, then another; on from there      | a link of the kind chosen, both ways or one, trusted or checked   |
-| Unlink | U   | a link                                   | takes it out, both ways or one                                    |
-| Node   | N   | the floor where a node is missing        | a node, linked with the nodes around wherever the links check out |
-| Move   | M   | a node, dragged to where it should stand | the node set down there, its links checked again                  |
-| Forbid | X   | where bots must never plan through       | a zone of the radius chosen                                       |
-| Place  | P   | where the named place is                 | a place with a name, a radius and tags                            |
-| Route  | R   | where a bot starts, then where it goes   | the way a bot plans with the changes, its time and its links      |
+| Tool   | Key | Click                                  | Does                                                              |
+|--------|-----|----------------------------------------|-------------------------------------------------------------------|
+| Select | V   | a node, a link, an entity              | shows it in the panel, with what can be done to it                |
+| Link   | L   | a node, then another; on from there    | a link of the kind chosen, both ways or one, trusted or checked   |
+| Unlink | U   | a link                                 | takes it out, both ways or one                                    |
+| Node   | N   | the floor where a node is missing      | a node, linked with the nodes around wherever the links check out |
+| Move   | M   | a node, dragged; or the gizmo on it    | the node set down there, its links checked again                  |
+| Forbid | X   | where bots must never plan through     | a zone of the radius chosen                                       |
+| Place  | P   | where the named place is               | a place with a name, a radius and tags                            |
+| Route  | R   | where a bot starts, then where it goes | the way a bot plans with the changes, its time and its links      |
 
 - **Link kinds.** *As it checks out*: the check finds what the link is (a walk, a drop, a door, a jump, ...). *Jump*:
   a jump is tried first. *Crouch*: walked crouched. *Long jump* and *gauss boost*: the trick is planned (only bots
   with the module, or with the gauss and its uranium, take them). A link that does not check out is not put in
   unless *trust* is on; a trusted trick gets a contract that makes a bot try it.
-- **Move** drags a node: in 3D and from the top it slides over the surface under the pointer, in the front and side
-  views it moves in the view's plane at its depth; the server sets it down on the floor. Its links are checked again
-  there: those that still check out stay (a walk may turn into a drop), the others go unless they were trusted, and it
-  is linked with the nodes around like a node put in. A node put in by the page moves in its own change, and the
-  links drawn to it after it follow; a node of the graph gets a `move_node` change, which dragging it again changes.
-  Esc while dragging leaves it where it was; a node in a forbidden zone does not move.
+- **Move** moves a node. Pressed on a node, it drags it: in 3D over the surface under the pointer. A click selects the
+  node and puts the gizmo on it, drawn over everything: an arrow for each axis, lettered at its tip (X red, Y green, Z
+  blue), moves it along that axis only, a square between two arrows in that plane, the ball in the middle freely. The top, front and side
+  views show the two arrows of their plane, and the ball moves in the plane without following the surfaces, for
+  moves to the unit. Moves snap to the grid (8 units at first; `[` and `]` change the step, shown along the top;
+  Alt held moves off it), and the 2D views draw their grid at that step, or coarser where the lines would crowd.
+  While dragging, the server sets the node down where it would stand and checks its links, as often as it keeps up:
+  the node and its links follow, and a dashed line runs from where it stood. Letting go makes one change; Esc puts it back. The server sets a node down on the
+  floor under the spot, so Z picks the floor it stands on. Its links are checked again there: those that still check
+  out stay (a walk may turn into a drop), the others go unless they were trusted, and it is linked with the nodes
+  around like a node put in. A node put in by the page moves in its own change, and the links drawn to it after it
+  follow; a node of the graph gets a `move_node` change, which moving it again changes. A node in a forbidden zone
+  does not move.
 - **Forbid** clicked on a node puts the zone about the node. A zone holds for the changes after it too: nothing is
   linked into it, and no node is put in or moved into it. A link taken out stays out when a node put in or moved
   links itself with the nodes around.
@@ -135,7 +144,9 @@ put in and their kinds, or why it did nothing (marked red).
 each with its kind (in the legend's colours) and cost. The pointer on a line lights the links and that node up in the
 view; a click on the number selects that node, on a link selects the link, and × takes the links with that node out.
 The view turns to what is selected from the panel when it is out of sight (and flies to it when it is far); ‹ goes back
-to what was selected before, ⌖ brings it close. The node says which change put it in, moved it or shut it off (a click
+to what was selected before, ⌖ brings it close. Its *Position* can be typed, or stepped with ↑ and ↓ by the grid's step
+(Shift: ten times): the node moves at once, and all the moves until the fields are left are one change and one step
+of undo (Esc in a field takes them back). The node says which change put it in, moved it or shut it off (a click
 selects the change), and it can be linked from (*Link from here*), routed from (*Route from here*) or shut off alone
 (*Shut off*: a zone of 16 units about it). A link shows its kind, cost and the link back, and can be taken out one way
 or both, or put in again checked as another kind or trusted. What is done from the panel keeps the selection and pops
@@ -151,11 +162,18 @@ Save also writes `maps/<map>/editor.lbnav`: the server's graph with `editor.yaml
 server reads them. The server plays on it as it is, with the node numbers the page shows, while it goes with what the
 server would load: the same build of the map, generator and physics, and exactly the overlays on disk. Otherwise
 (`overlay.yaml` changed by hand, `editor.yaml` saved from the game, a new generator) the server leaves it and applies
-the overlays itself. It is written only over the server's own graph checked with the default physics; when it is not,
-the notice after saving says why and one saved before is removed. `lb edit save` and `lb nav regen` remove it too. *Apply on server* sends `lb overlay reload` over
-the server's command channel (the telemetry port + 1 on loopback, signed with the channel's secret): the server reads
-the overlays of the map it is on again. Without a secret the button is off and says why; `lb overlay reload` in the
-server console does the same.
+the overlays itself. It is written only over the server's own graph: when the server has not played this build of the
+map with this version of the bots, the line under *Changes* says so after saving, and one saved before is removed.
+Once the server has loaded the map, open it again in the page (or reload the page): the editor takes the server's new
+graph then. `lb edit save` and `lb nav regen` remove `editor.lbnav` too.
+
+Changes are checked, and `editor.lbnav` made, with the player physics the server's graph was made with (`sv_gravity`,
+`sv_maxspeed`, `mp_bunnyhop`, `mp_falldamage`): the graph files keep it. Graphs kept by builds before that are made
+again the first time the server loads the map.
+
+*Apply on server* sends `lb overlay reload` over the server's command channel (the telemetry port + 1 on loopback,
+signed with the channel's secret): the server reads the overlays of the map it is on again. Without a secret the
+button is off and says why; `lb overlay reload` in the server console does the same.
 
 The in-game editor (`lb edit`) does not save over changes saved from the page either: it says the file changed and
 asks to start editing again.

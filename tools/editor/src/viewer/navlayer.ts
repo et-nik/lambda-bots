@@ -16,6 +16,9 @@ const SELECT = 0xffd24a
 const PENDING = 0xff4df0
 const ROUTE = 0x3ae0ff
 const PEEK = 0xffffff
+/** Links of the selection alone are drawn as arrows this thick, up to this many (lines beyond). */
+const FOCUS_RADIUS = 1.2
+const FOCUS_ARROWS = 200
 
 export interface Highlight {
   node?: number | null
@@ -106,6 +109,19 @@ function dashedLines(segments: [Vec3, Vec3][], color: number): THREE.LineSegment
   return lines
 }
 
+/** A link as a tube with a head at the end it goes to, seen through walls. */
+function arrowParts(pa: THREE.Vector3, pb: THREE.Vector3, color: number, radius: number): THREE.Object3D[] {
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(radius * 3, radius * 8, 8),
+    new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true }),
+  )
+  const dir = pb.clone().sub(pa).normalize()
+  cone.position.copy(pb).addScaledVector(dir, -radius * 4 - NODE_SIZE)
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
+  cone.renderOrder = 16
+  return [tube([pa, pb], radius, color, 0.9), cone]
+}
+
 function disposeTree(o: THREE.Object3D) {
   o.traverse((c) => {
     const m = c as THREE.Mesh
@@ -149,10 +165,22 @@ export class NavLayer {
     }
   }
 
-  setGraph(model: GraphModel | null, forbidden: Set<number>, hiddenKinds: Set<string> = new Set(), hideOff = false) {
+  /**
+   * Draws `model`; with `focus`, only the links in and out of those nodes (and their changes), through walls and, with
+   * `arrows`, as arrows (not while the gizmo's arrows are about: they would be taken for each other).
+   */
+  setGraph(
+    model: GraphModel | null,
+    forbidden: Set<number>,
+    hiddenKinds: Set<string> = new Set(),
+    hideOff = false,
+    focus: Set<number> | null = null,
+    arrows = true,
+  ) {
     this.clear(this.graph)
     this.model = model
-    this.shown = (l) => !hiddenKinds.has(l.kind) && (!hideOff || linkValid(l))
+    const near = (a: number, b: number) => !focus || focus.has(a) || focus.has(b)
+    this.shown = (l) => near(l.from, l.to) && !hiddenKinds.has(l.kind) && (!hideOff || linkValid(l))
     if (!model) {
       return
     }
@@ -197,42 +225,52 @@ export class NavLayer {
     }
     const plainColor = (l: Link) => (linkValid(l) ? (KIND_COLORS[l.kind] ?? 0xffffff) : INVALID)
     const drawn = model.links.filter(this.shown)
-    this.graph.add(lines(drawn.filter((l) => !l.added), plainColor, false))
-    // What the overlays change is drawn through walls.
-    const added = drawn.filter((l) => l.added)
-    if (added.length) {
-      this.graph.add(lines(added, plainColor, true))
+    if (focus && arrows && drawn.length <= FOCUS_ARROWS) {
+      // The few links of what is selected are what is looked for: arrows in their colours, through walls.
+      const point = (n: number) => new THREE.Vector3(...model.origin(n))
+      for (const l of drawn) {
+        this.graph.add(...arrowParts(point(l.from), point(l.to), plainColor(l), FOCUS_RADIUS))
+      }
+    } else {
+      this.graph.add(lines(drawn.filter((l) => !l.added), plainColor, focus !== null))
+      // What the overlays change is drawn through walls.
+      const added = drawn.filter((l) => l.added)
+      if (added.length) {
+        this.graph.add(lines(added, plainColor, true))
+      }
     }
-    if (model.removed.length) {
-      this.graph.add(dashedLines(model.removed.map(([a, b]) => [model.origin(a), model.origin(b)]), INVALID))
+    const removed = model.removed.filter(([a, b]) => near(a, b))
+    if (removed.length) {
+      this.graph.add(dashedLines(removed.map(([a, b]) => [model.origin(a), model.origin(b)]), INVALID))
     }
-    if (model.movedFrom.size) {
-      const trails = [...model.movedFrom].map(([n, from]): [Vec3, Vec3] => [from, model.origin(n)])
+    const trails = [...model.movedFrom]
+      .filter(([n]) => near(n, n))
+      .map(([n, from]): [Vec3, Vec3] => [from, model.origin(n)])
+    if (trails.length) {
       this.graph.add(dashedLines(trails, ADDED_NODE))
     }
   }
 
   /** A node being dragged: where it would stand, and its links from there. */
-  setDrag(drag: { node: number; to: Vec3 } | null) {
+  /**
+   * A node being moved: a dashed line from where it stood to where it goes, and a ball there when nothing else (the
+   * gizmo) marks the spot. Its links, checked as it goes, are drawn with the graph.
+   */
+  setDrag(drag: { from: Vec3; to: Vec3; marker: boolean } | null) {
     this.clear(this.dragged)
-    const model = this.model
-    if (!drag || !model || drag.node >= model.nodes) {
+    if (!drag) {
       return
     }
-    const to = new THREE.Vector3(...drag.to)
-    const ghost = new THREE.Mesh(
-      new THREE.SphereGeometry(12, 12, 8),
-      new THREE.MeshBasicMaterial({ color: ADDED_NODE, wireframe: true, depthTest: false, transparent: true }),
-    )
-    ghost.position.copy(to)
-    ghost.renderOrder = 16
-    const ends = [...model.linksOut(drag.node).map((l) => l.to), ...model.linksIn(drag.node).map((l) => l.from)]
-    const spokes = new THREE.LineSegments(
-      new THREE.BufferGeometry().setFromPoints(ends.flatMap((e) => [to, new THREE.Vector3(...model.origin(e))])),
-      new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.5 }),
-    )
-    spokes.renderOrder = 15
-    this.dragged.add(ghost, spokes, dashedLines([[model.origin(drag.node), drag.to]], ADDED_NODE))
+    this.dragged.add(dashedLines([[drag.from, drag.to]], ADDED_NODE))
+    if (drag.marker) {
+      const ghost = new THREE.Mesh(
+        new THREE.SphereGeometry(12, 12, 8),
+        new THREE.MeshBasicMaterial({ color: ADDED_NODE, wireframe: true, depthTest: false, transparent: true }),
+      )
+      ghost.position.set(...drag.to)
+      ghost.renderOrder = 16
+      this.dragged.add(ghost)
+    }
   }
 
   /** Forbidden zones and places of the editor file (bright) and the hand-written overlay (dim). */
@@ -289,17 +327,7 @@ export class NavLayer {
       if (a >= model.nodes || b >= model.nodes) {
         return
       }
-      const [pa, pb] = [at(a), at(b)]
-      this.marks.add(tube([pa, pb], radius, color, 0.9))
-      const cone = new THREE.Mesh(
-        new THREE.ConeGeometry(radius * 3, radius * 8, 8),
-        new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true }),
-      )
-      const dir = pb.clone().sub(pa).normalize()
-      cone.position.copy(pb).addScaledVector(dir, -radius * 4 - NODE_SIZE)
-      cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
-      cone.renderOrder = 16
-      this.marks.add(cone)
+      this.marks.add(...arrowParts(at(a), at(b), color, radius))
     }
     if (h.route && h.route.nodes.length > 1) {
       this.marks.add(tube(h.route.nodes.filter((n) => n < model.nodes).map(at), 3, ROUTE, 0.85))

@@ -33,6 +33,9 @@ function peek(o: Outcome | null) {
       <span class="muted">editor.yaml · {{ nav.patches.length + nav.places.length }}</span>
       <span v-if="nav.dirty" class="unsaved">unsaved</span>
     </header>
+    <p v-if="nav.savedGraph" class="graph" :title="nav.savedGraph.detail">
+      {{ nav.savedGraph.written ? 'Saved with the graph, editor.lbnav' : `No editor.lbnav: ${nav.savedGraph.detail}` }}
+    </p>
     <p v-if="nav.loading" class="muted small">Loading the graph… (making one takes a while on a big map)</p>
     <p v-if="nav.error" class="error small">{{ nav.error }}</p>
     <div v-if="nav.conflict" class="conflict">
@@ -124,6 +127,12 @@ h3 {
 .small {
   margin: 0 0 6px;
   font-size: 12px;
+}
+.graph {
+  margin: -2px 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 .empty {
   line-height: 1.5;

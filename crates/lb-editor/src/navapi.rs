@@ -26,8 +26,8 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, ApiError> + S
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
 }
 
-/// The map's file name as the game has it, and its navigation.
-fn nav_map(state: &AppState, map: &str) -> Result<(String, Arc<NavMap>), ApiError> {
+/// The map's file name as the game has it, and its navigation (`fresh`: with the server's graph as it is now).
+fn nav_map(state: &AppState, map: &str, fresh: bool) -> Result<(String, Arc<NavMap>), ApiError> {
     let file = state
         .maps
         .game
@@ -35,14 +35,14 @@ fn nav_map(state: &AppState, map: &str) -> Result<(String, Arc<NavMap>), ApiErro
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such map".into()))?;
     let nav = state
         .nav
-        .get(&file.name, &file.path, &state.install)
+        .get(&file.name, &file.path, &state.install, fresh)
         .map_err(unprocessable)?;
     Ok((file.name, nav))
 }
 
 pub async fn info(State(state): State<Arc<AppState>>, Path(map): Path<String>) -> ApiResult {
     blocking(move || {
-        let (name, nav) = nav_map(&state, &map)?;
+        let (name, nav) = nav_map(&state, &map, true)?;
         let body = serde_json::json!({
             "origin": nav.origin,
             "kinds": nav::kinds(),
@@ -68,7 +68,7 @@ pub async fn preview(
     Json(req): Json<PreviewRequest>,
 ) -> ApiResult {
     blocking(move || {
-        let (name, nav) = nav_map(&state, &map)?;
+        let (name, nav) = nav_map(&state, &map, false)?;
         let overlay = nav::read_overlay(&state.install, &name, OVERLAYS[1]).file;
         let patched = nav.patched(&req.editor, overlay.as_ref());
         Ok(Json(nav::preview(&nav.base, &patched)).into_response())
@@ -93,11 +93,11 @@ pub async fn route(
     Json(req): Json<RouteRequest>,
 ) -> ApiResult {
     blocking(move || {
-        let (name, nav) = nav_map(&state, &map)?;
+        let (name, nav) = nav_map(&state, &map, false)?;
         let overlay = nav::read_overlay(&state.install, &name, OVERLAYS[1]).file;
         let patched = nav.patched(&req.editor, overlay.as_ref());
         let (from, to) = (Vec3::from_array(req.from), Vec3::from_array(req.to));
-        let route = nav::route(&patched.graph, from, to, req.longjump, req.gauss).map_err(unprocessable)?;
+        let route = nav::route(patched.routable(), from, to, req.longjump, req.gauss).map_err(unprocessable)?;
         Ok(Json(route).into_response())
     })
     .await
@@ -125,7 +125,7 @@ pub async fn save(
             .name;
         match nav::save_editor(&state.install, &name, &req.file, &req.base) {
             Ok(version) => {
-                let graph = match nav_map(&state, &map) {
+                let graph = match nav_map(&state, &map, false) {
                     Ok((_, nav)) => nav::save_edited(&nav, &state.install),
                     Err(e) => nav::EditedGraph {
                         written: false,

@@ -2,6 +2,7 @@ import * as THREE from 'three'
 
 import type { Layer, Manifest, Pick, Vec3, View } from '../types'
 import { FlyControls, Keys, OrthoControls, viewAxes } from './controls'
+import { AXIS, closestOnAxis, type Handle, MoveGizmo, NORMAL, onPlane } from './gizmo'
 import { STAND } from './graph'
 import { grid } from './grid'
 import { pointMarkers } from './markers'
@@ -16,8 +17,12 @@ export interface ViewerEvents {
   camera(position: [number, number, number]): void
   /** Whether pressing the left button on a node there picks it up to drag. */
   grab(pick: Pick): boolean
-  /** A node dragged is let go where it should stand. */
-  drop(node: number, to: Vec3): void
+  /** Whether the node the gizmo stands on may be moved (a press on one of its handles). */
+  moveStart(node: number): boolean
+  /** Where the node dragged would stand now. */
+  moveLive(node: number, to: Vec3): void
+  /** A node dragged is let go where it should stand, or back where it was (`null`: a click, or Esc). */
+  drop(node: number, to: Vec3 | null): void
 }
 
 /** Milliseconds between hover picks, and between the spots a node dragged is shown at. */
@@ -28,6 +33,10 @@ const DRAG_EVERY = 16
 const REVEAL_EDGE = 0.85
 /** Nearer than this, the 3D camera turns to what it reveals instead of flying to it (units). */
 const REVEAL_TURN = 1500
+
+/** Grid lines of a 2D view are this far apart on screen at least, and this many across the map at most. */
+const GRID_PX = 8
+const GRID_LINES = 2000
 
 /** Pixels the pointer may move between press and release for a click that selects. */
 const CLICK_SLOP = 4
@@ -56,9 +65,28 @@ export class Viewer {
   private selected: number | null = null
   private raycaster = new THREE.Raycaster()
   private pressed: { x: number; y: number } | null = null
-  /** A node picked up: where the press was, and where it would stand now. */
-  private dragging: { node: number; x: number; y: number; to: Vec3 | null } | null = null
+  /**
+   * A node being moved: by a handle of the gizmo, or by itself (`free`); where it stood, the point on the axis (`t0`)
+   * or plane (`grab`) the press took, where the press was, and where the node would stand now.
+   */
+  private dragging: {
+    node: number
+    handle: Handle
+    start: THREE.Vector3
+    t0: number
+    grab: THREE.Vector3 | null
+    x: number
+    y: number
+    to: Vec3 | null
+  } | null = null
   private dragged = 0
+  private gizmo: MoveGizmo
+  /** The node the gizmo stands on, and where. */
+  private gizmoNode: number | null = null
+  private gizmoAt: THREE.Vector3 | null = null
+  /** Grid step moves snap to, and the step the 2D grid is drawn at. */
+  private snap = 8
+  private gridStep = 0
   private raf = 0
   private last = performance.now()
   private reported = 0
@@ -79,6 +107,7 @@ export class Viewer {
     this.scene.background = new THREE.Color(0x15171b)
     this.scene.add(this.map)
     this.nav = new NavLayer(this.scene)
+    this.gizmo = new MoveGizmo(this.scene)
     const canvas = this.renderer.domElement
     canvas.tabIndex = 0
     el.appendChild(canvas)
@@ -119,6 +148,9 @@ export class Viewer {
       this.fly.update(dt)
     } else {
       this.flat.update(dt)
+    }
+    if (this.gizmo.visible) {
+      this.gizmo.fit(this.camera(), this.el.clientHeight)
     }
     this.renderer.render(this.scene, this.camera())
     if (now - this.reported > 100) {
@@ -205,21 +237,57 @@ export class Viewer {
 
   setView(view: View) {
     this.view = view
+    this.dropGrid()
+    if (view !== '3d') {
+      const [mins, maxs] = this.bounds()
+      this.flat.frame(view, mins, maxs)
+      this.refreshGrid()
+    }
+    this.gizmo.setView(view)
+    this.applySlice()
+  }
+
+  /** The 2D view's grid at the snap step, or coarser where its lines would crowd together. */
+  private refreshGrid() {
+    if (this.view === '3d') return
+    const [mins, maxs] = this.bounds()
+    const axes = viewAxes(this.view)
+    const extent = Math.max(
+      maxs.getComponent(axes.across) - mins.getComponent(axes.across),
+      maxs.getComponent(axes.up) - mins.getComponent(axes.up),
+      1,
+    )
+    let step = Math.max(this.snap, 1)
+    while (step * this.orthographic.zoom < GRID_PX || extent / step > GRID_LINES) step *= 2
+    if (this.gridLines && step === this.gridStep) return
+    this.dropGrid()
+    this.gridStep = step
+    this.gridLines = grid(axes, mins, maxs, mins.getComponent(axes.depth) - 64, step)
+    this.gridLines.renderOrder = -1
+    this.scene.add(this.gridLines)
+  }
+
+  private dropGrid() {
     if (this.gridLines) {
       this.scene.remove(this.gridLines)
       this.gridLines.geometry.dispose()
       ;(this.gridLines.material as THREE.Material).dispose()
       this.gridLines = null
     }
-    if (view !== '3d') {
-      const [mins, maxs] = this.bounds()
-      const axes = viewAxes(view)
-      this.flat.frame(view, mins, maxs)
-      this.gridLines = grid(axes, mins, maxs, mins.getComponent(axes.depth) - 64)
-      this.gridLines.renderOrder = -1
-      this.scene.add(this.gridLines)
-    }
-    this.applySlice()
+  }
+
+  /** The grid step moves snap to. */
+  setSnap(step: number) {
+    this.snap = step
+    this.refreshGrid()
+  }
+
+  /** The node the move gizmo stands on (the Move tool's selection), and where; or none. */
+  setGizmo(g: { node: number; at: Vec3 } | null) {
+    this.gizmoNode = g?.node ?? null
+    this.gizmoAt = g ? new THREE.Vector3(...g.at) : null
+    if (!this.dragging) this.gizmo.show(this.gizmoAt)
+    if (!g) this.gizmo.highlight(null)
   }
 
   setSlice(at: number | null) {
@@ -381,35 +449,82 @@ export class Viewer {
     return { entity: s.entity, point: s.point, node: nav.node, link: nav.link }
   }
 
-  /**
-   * Where a node dragged to the pointer would stand: a player's height over the map surface under it (in a side
-   * view: in the view's plane, as deep as the node is). The server sets it down on the floor.
-   */
-  private dragTarget(clientX: number, clientY: number, node: number): Vec3 | null {
+  /** The pointer's ray into the view (the raycaster is left aimed along it). */
+  private rayAt(clientX: number, clientY: number): THREE.Ray {
+    const camera = this.camera()
+    camera.updateMatrixWorld()
+    this.raycaster.setFromCamera(this.ndc(clientX, clientY), camera)
+    return this.raycaster.ray.clone()
+  }
+
+  private pickHandle(clientX: number, clientY: number): Handle | null {
+    if (this.gizmoNode === null) return null
+    this.rayAt(clientX, clientY)
+    return this.gizmo.pick(this.raycaster)
+  }
+
+  /** The plane a plane handle moves in, or the centre in a 2D view: its normal. */
+  private planeNormal(handle: Handle): THREE.Vector3 {
+    if (handle === 'xy' || handle === 'xz' || handle === 'yz') return NORMAL[handle]
+    const n = new THREE.Vector3()
+    if (this.view !== '3d') n.setComponent(viewAxes(this.view).depth, 1)
+    return n
+  }
+
+  private beginDrag(node: number, handle: Handle, e: PointerEvent) {
     const model = this.nav.model
-    if (!model || node >= model.nodes) {
-      return null
+    if (!model || node >= model.nodes) return
+    const start = new THREE.Vector3(...model.origin(node))
+    const ray = this.rayAt(e.clientX, e.clientY)
+    let t0 = 0
+    let grab: THREE.Vector3 | null = null
+    if (handle === 'x' || handle === 'y' || handle === 'z') {
+      t0 = closestOnAxis(ray, start, AXIS[handle]) ?? 0
+    } else if (handle !== 'free' || this.view !== '3d') {
+      grab = onPlane(ray, start, this.planeNormal(handle)) ?? start.clone()
     }
-    const round = (p: THREE.Vector3): Vec3 => [Math.round(p.x), Math.round(p.y), Math.round(p.z)]
-    if (this.view === 'front' || this.view === 'side') {
-      const depth = viewAxes(this.view).depth
-      const p = new THREE.Vector3(...this.ndc(clientX, clientY).toArray(), 0).unproject(this.orthographic)
-      return round(p.setComponent(depth, model.origin(node)[depth]))
+    this.dragging = { node, handle, start, t0, grab, x: e.clientX, y: e.clientY, to: null }
+    this.renderer.domElement.setPointerCapture(e.pointerId)
+  }
+
+  /**
+   * Where the node dragged would stand with the pointer there: moved along the axis or in the plane taken, or (the
+   * node itself in 3D) a player's height over the map surface under the pointer; on the grid unless `free`. The
+   * server sets it down on the floor under the spot.
+   */
+  private dragTarget(clientX: number, clientY: number, free: boolean): Vec3 | null {
+    const d = this.dragging
+    if (!d) return null
+    const snap = (v: number) => (free || this.snap <= 1 ? Math.round(v) : Math.round(v / this.snap) * this.snap)
+    const ray = this.rayAt(clientX, clientY)
+    const p = d.start.clone()
+    const h = d.handle
+    if (h === 'x' || h === 'y' || h === 'z') {
+      const t = closestOnAxis(ray, d.start, AXIS[h])
+      if (t === null) return d.to
+      p.addScaledVector(AXIS[h], t - d.t0)
+      const i = 'xyz'.indexOf(h)
+      p.setComponent(i, snap(p.getComponent(i)))
+    } else if (d.grab) {
+      const n = this.planeNormal(h)
+      const hit = onPlane(ray, d.start, n)
+      if (!hit) return d.to
+      p.add(hit.sub(d.grab))
+      for (let i = 0; i < 3; i++) {
+        if (n.getComponent(i) === 0) p.setComponent(i, snap(p.getComponent(i)))
+      }
+    } else {
+      const hit = this.surface(clientX, clientY).point
+      if (!hit) return d.to
+      p.set(snap(hit[0]), snap(hit[1]), hit[2] + STAND)
     }
-    const hit = this.surface(clientX, clientY).point
-    if (hit) {
-      return round(new THREE.Vector3(hit[0], hit[1], hit[2] + STAND))
-    }
-    if (this.view === 'top') {
-      const p = new THREE.Vector3(...this.ndc(clientX, clientY).toArray(), 0).unproject(this.orthographic)
-      return round(p.setZ(model.origin(node)[2]))
-    }
-    return null
+    return [Math.round(p.x), Math.round(p.y), Math.round(p.z)]
   }
 
   private endDrag(e?: PointerEvent) {
     this.dragging = null
     this.nav.setDrag(null)
+    this.gizmo.show(this.gizmoAt)
     const canvas = this.renderer.domElement
     canvas.style.cursor = ''
     if (e && canvas.hasPointerCapture(e.pointerId)) {
@@ -422,10 +537,12 @@ export class Viewer {
     canvas.focus()
     if (e.button === 0) {
       this.pressed = { x: e.clientX, y: e.clientY }
-      const pick = this.pick(e.clientX, e.clientY)
-      if (pick.node !== null && this.events.grab(pick)) {
-        this.dragging = { node: pick.node, x: e.clientX, y: e.clientY, to: null }
-        canvas.setPointerCapture(e.pointerId)
+      const handle = this.pickHandle(e.clientX, e.clientY)
+      if (handle && this.gizmoNode !== null) {
+        if (this.events.moveStart(this.gizmoNode)) this.beginDrag(this.gizmoNode, handle, e)
+      } else {
+        const pick = this.pick(e.clientX, e.clientY)
+        if (pick.node !== null && this.events.grab(pick)) this.beginDrag(pick.node, 'free', e)
       }
     }
     if (this.view === '3d') {
@@ -442,8 +559,13 @@ export class Viewer {
       if (now - this.dragged >= DRAG_EVERY) {
         this.dragged = now
         this.renderer.domElement.style.cursor = 'grabbing'
-        d.to = this.dragTarget(e.clientX, e.clientY, d.node) ?? d.to
-        this.nav.setDrag(d.to ? { node: d.node, to: d.to } : null)
+        const to = this.dragTarget(e.clientX, e.clientY, e.altKey)
+        if (to && String(to) !== String(d.to)) {
+          d.to = to
+          this.nav.setDrag({ from: [d.start.x, d.start.y, d.start.z], to, marker: false })
+          this.gizmo.show(new THREE.Vector3(...to))
+          this.events.moveLive(d.node, to)
+        }
       }
     }
     if (e.buttons === 0) {
@@ -451,6 +573,11 @@ export class Viewer {
       if (now - this.hovered > HOVER_EVERY) {
         this.hovered = now
         this.events.hover(this.pick(e.clientX, e.clientY))
+      }
+      if (this.gizmoNode !== null) {
+        const h = this.pickHandle(e.clientX, e.clientY)
+        this.gizmo.highlight(h)
+        this.renderer.domElement.style.cursor = h ? 'grab' : ''
       }
     }
     if (this.view === '3d') {
@@ -463,14 +590,11 @@ export class Viewer {
   private onUp = (e: PointerEvent) => {
     const d = this.dragging
     if (e.button === 0 && d) {
+      const moved = Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_SLOP
+      const to = moved ? (this.dragTarget(e.clientX, e.clientY, e.altKey) ?? d.to) : null
       this.endDrag(e)
-      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_SLOP) {
-        this.pressed = null
-        const to = this.dragTarget(e.clientX, e.clientY, d.node) ?? d.to
-        if (to) {
-          this.events.drop(d.node, to)
-        }
-      }
+      if (moved) this.pressed = null
+      this.events.drop(d.node, to)
     }
     if (e.button === 0 && this.pressed) {
       const moved = Math.hypot(e.clientX - this.pressed.x, e.clientY - this.pressed.y)
@@ -492,6 +616,7 @@ export class Viewer {
       this.fly.wheel(e)
     } else {
       this.flat.wheel(e)
+      this.refreshGrid()
     }
   }
 
@@ -500,9 +625,12 @@ export class Viewer {
       this.focus()
     }
     if (e.code === 'Escape' && this.dragging) {
-      // Let go where it was: no drop, and no click on release.
+      // Back where it was, and no click on release; the selection stays (the editor's Esc would drop it).
+      e.stopImmediatePropagation()
+      const node = this.dragging.node
       this.endDrag()
       this.pressed = null
+      this.events.drop(node, null)
     }
   }
 
@@ -511,6 +639,7 @@ export class Viewer {
     this.unload()
     this.resizer.disconnect()
     this.nav.dispose()
+    this.gizmo.dispose()
     this.keys.dispose()
     window.removeEventListener('keydown', this.onKey)
     this.renderer.dispose()
