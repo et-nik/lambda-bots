@@ -6,7 +6,7 @@ import { toolInfo } from '../tools'
 
 const nav = useNav()
 
-const WITH_OPTIONS = new Set(['link', 'unlink', 'move', 'forbid', 'place', 'route'])
+const WITH_OPTIONS = new Set(['link', 'unlink', 'node', 'move', 'forbid', 'place', 'route'])
 const shown = computed(() => WITH_OPTIONS.has(nav.tool))
 </script>
 
@@ -25,6 +25,12 @@ const shown = computed(() => WITH_OPTIONS.has(nav.tool))
       <span v-if="nav.pending !== null" class="state">from node {{ nav.pending }} · Esc stops</span>
     </template>
     <label v-else-if="nav.tool === 'unlink'"><input v-model="nav.unlinkBoth" type="checkbox" /> both ways</label>
+    <label
+      v-else-if="nav.tool === 'node'"
+      title="Link the node with the nodes around wherever the links check out; off: it goes in without links, for Link (L)"
+    >
+      <input v-model="nav.nodeLink" type="checkbox" /> auto-link
+    </label>
     <template v-else-if="nav.tool === 'move'">
       <label title="Moves snap to the grid; [ and ] change its step">
         grid

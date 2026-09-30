@@ -249,6 +249,56 @@ pub fn plan(
     }
 }
 
+/// Seconds from `from` to every node along the cheapest paths (`INFINITY` where there is none), and the node each is
+/// reached from (`u32::MAX` for `from` and the nodes not reached), in one go.
+pub fn costs_from(graph: &NavGraph, from: NodeId, penalty: &dyn Fn(NodeId, &NavLink) -> f32) -> (Vec<f32>, Vec<u32>) {
+    let n = graph.len();
+    let mut g = vec![f32::INFINITY; n];
+    let mut came = vec![u32::MAX; n];
+    let mut open = BinaryHeap::new();
+    if (from as usize) < n {
+        g[from as usize] = 0.0;
+        open.push(Open { f: 0.0, node: from });
+    }
+    while let Some(Open { f, node }) = open.pop() {
+        if f > g[node as usize] + 1e-4 {
+            continue;
+        }
+        for link in graph.links(node) {
+            if !link.valid() {
+                continue;
+            }
+            let extra = penalty(node, link);
+            if !extra.is_finite() {
+                continue;
+            }
+            let cand = g[node as usize] + link.cost + extra.max(0.0);
+            if cand < g[link.to as usize] {
+                g[link.to as usize] = cand;
+                came[link.to as usize] = node;
+                open.push(Open { f: cand, node: link.to });
+            }
+        }
+    }
+    (g, came)
+}
+
+/// The path to `to` that `costs_from` found, from its start to `to` (both included); `None` when `to` was not
+/// reached.
+pub fn path_back(came: &[u32], costs: &[f32], to: NodeId) -> Option<Vec<NodeId>> {
+    if !costs.get(to as usize)?.is_finite() {
+        return None;
+    }
+    let mut path = vec![to];
+    let mut cur = to;
+    while came[cur as usize] != u32::MAX {
+        cur = came[cur as usize];
+        path.push(cur);
+    }
+    path.reverse();
+    Some(path)
+}
+
 /// No penalty, but no tricks either: a way any bot can go.
 pub fn plain(_from: NodeId, link: &NavLink) -> f32 {
     if link.kind.is_trick() { f32::INFINITY } else { 0.0 }
@@ -312,6 +362,13 @@ pub(crate) mod tests {
         assert_eq!(plan(&g, 0, 3, &blocked).unwrap(), vec![0, 2, 3]);
         assert_eq!(plan(&g, 3, 0, &|_, _| 0.0), None, "links are directed");
         assert!((path_time(&g, &[0, 1, 3]) - 200.0 / RUN_SPEED).abs() < 1e-6);
+        // Every node's cost at once: the same paths.
+        let (costs, came) = costs_from(&g, 0, &blocked);
+        assert_eq!(path_back(&came, &costs, 3).unwrap(), vec![0, 2, 3]);
+        assert_eq!(path_back(&came, &costs, 0).unwrap(), vec![0]);
+        assert!((costs[1] - 100.0 / RUN_SPEED).abs() < 1e-6);
+        let (costs, came) = costs_from(&g, 3, &|_, _| 0.0);
+        assert_eq!(path_back(&came, &costs, 0), None);
     }
 
     #[test]

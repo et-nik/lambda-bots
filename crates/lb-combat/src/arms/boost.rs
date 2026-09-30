@@ -1,7 +1,9 @@
-//! The weapons' part of a gauss boost (yapb's gauss jump): draw the gauss, charge it fully, turn the view back the
-//! way the bot is to fly and down, jump, and let the charge go as the bot leaves the ground. The recoil of a
-//! charged shot pushes its shooter back at five times its damage, up too in multiplayer, and throws it the way it
-//! looks away from. Navigation stops the bot at the takeoff and asks for the boost; it steers the flight after.
+//! The weapons' part of a gauss boost (yapb's gauss jump): draw the gauss, turn the view back the way the bot is to
+//! fly and down, charge the gauss for as long as navigation asks (fully, or the share of a full charge the flight
+//! takes), jump, and let the charge go as the bot leaves the ground. The recoil of a charged shot pushes its shooter
+//! back at five times its damage, up too in multiplayer, and throws it the way it looks away from. The view comes
+//! round before the charge starts, so a partial charge goes on time. Navigation stops the bot at the takeoff and asks
+//! for the boost; it steers the flight after.
 //!
 //! The protocol holds the weapon, the look, the movement and the jump until the charge is gone, so a fight that
 //! starts meanwhile does not fire it the wrong way. Called off before the jump (navigation no longer asks), a charge
@@ -34,9 +36,20 @@ const HOLD_LIMIT: f64 = 6.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Draw,
-    Charge { pressed: SimTime, started: Option<SimTime> },
-    Jump { at: SimTime },
-    Release { at: SimTime },
+    /// The gauss is out: the view comes round to the boost's.
+    Aim {
+        since: SimTime,
+    },
+    Charge {
+        pressed: SimTime,
+        started: Option<SimTime>,
+    },
+    Jump {
+        at: SimTime,
+    },
+    Release {
+        at: SimTime,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -45,7 +58,7 @@ pub struct GaussBoost {
     since: SimTime,
     /// View angles to let the charge go along.
     pub view: Vec3,
-    /// Seconds the charge builds at least.
+    /// Seconds the charge builds, from the press.
     pub charge: f32,
     /// The charge started spinning then, and is still held: it is handed on when the boost is called off.
     pub held: Option<SimTime>,
@@ -68,6 +81,7 @@ impl GaussBoost {
     pub fn phase(&self) -> &'static str {
         match self.phase {
             Phase::Draw => "draw",
+            Phase::Aim { .. } => "aim",
             Phase::Charge { .. } => "charge",
             Phase::Jump { .. } => "jump",
             Phase::Release { .. } => "release",
@@ -93,27 +107,38 @@ impl GaussBoost {
             self.held = None;
             return Status::Failed("the gauss left the hand");
         }
+        let holding = Request {
+            weapon: Some(hold(WeaponId::Gauss)),
+            look,
+            movement: Some(stop()),
+            jump: false,
+        };
         match self.phase {
             Phase::Draw => {
                 if !go {
                     return Status::Failed("called off");
                 }
                 if h.ready(WeaponId::Gauss) {
+                    self.phase = Phase::Aim { since: now };
+                    return self.update(h, go, None);
+                }
+                if now.since(self.since) > DRAW_WITHIN {
+                    return Status::Failed("the gauss did not come out");
+                }
+                Status::Running(holding)
+            }
+            Phase::Aim { since } => {
+                if !go {
+                    return Status::Failed("called off");
+                }
+                if settled(h.view, self.view, AIM) || now.since(since) > AIM_WAIT {
                     self.phase = Phase::Charge {
                         pressed: now,
                         started: None,
                     };
                     return Status::Running(charging);
                 }
-                if now.since(self.since) > DRAW_WITHIN {
-                    return Status::Failed("the gauss did not come out");
-                }
-                Status::Running(Request {
-                    weapon: Some(hold(WeaponId::Gauss)),
-                    look,
-                    movement: Some(stop()),
-                    jump: false,
-                })
+                Status::Running(holding)
             }
             Phase::Charge { pressed, started } => {
                 let spinning = h.predicted(WeaponId::Gauss).is_some_and(|p| p.in_attack != 0);
@@ -131,12 +156,12 @@ impl GaussBoost {
                 if !go {
                     return Status::Failed("called off");
                 }
-                let age = now.since(started);
-                if age > HOLD_LIMIT {
-                    return Status::Failed("the view never came round");
+                // The game counts the charge from the first command with the button down, sent soon after the press.
+                let age = now.since(pressed);
+                if now.since(started) > HOLD_LIMIT {
+                    return Status::Failed("the bot never left the ground");
                 }
-                let aimed = settled(h.view, self.view, AIM) || age > f64::from(self.charge) + AIM_WAIT;
-                if age >= f64::from(self.charge) && aimed && h.on_ground {
+                if age >= f64::from(self.charge) && h.on_ground {
                     self.phase = Phase::Jump { at: now };
                     return Status::Running(Request { jump: true, ..charging });
                 }
@@ -247,6 +272,11 @@ mod tests {
             }
             let fire = r.weapon.map_or(Fire::None, |w| w.fire);
             if fire == Fire::Secondary && b.weapon == Some(WeaponId::Gauss) {
+                assert!(
+                    b.spinning || settled(b.view, view, AIM),
+                    "turned round before the charge: {}",
+                    b.view
+                );
                 b.spinning = true;
             } else if b.spinning && fire == Fire::None {
                 b.spinning = false;
@@ -274,14 +304,50 @@ mod tests {
     }
 
     #[test]
-    fn called_off_while_charging_hands_the_charge_on() {
+    fn a_partial_charge_goes_its_seconds_after_the_press() {
         let arsenal = [Armed::new(WeaponId::Gauss, None, Some(60))];
-        let mut boost = GaussBoost::new(SimTime(0.0), Vec3::new(34.0, 180.0, 0.0), 1.6);
+        let view = Vec3::new(40.0, 90.0, 0.0);
+        let mut boost = GaussBoost::new(SimTime(0.0), view, 0.7);
         let mut b = Bot {
             weapon: Some(WeaponId::Gauss),
             spinning: false,
             on_ground: true,
-            view: Vec3::ZERO,
+            view,
+        };
+        let mut pressed_at = None;
+        let mut t = 0.0;
+        let jumped = loop {
+            assert!(t < 2.0, "no jump");
+            let p = prediction(&b);
+            let Status::Running(r) = boost.update(&hands(t, &b, &arsenal, &p), true, None) else {
+                panic!("stopped at {t:.2}");
+            };
+            if r.weapon.is_some_and(|w| w.fire == Fire::Secondary) {
+                pressed_at.get_or_insert(t);
+                b.spinning = true;
+            }
+            if r.jump {
+                break t;
+            }
+            t += 0.01;
+        };
+        let pressed = pressed_at.expect("charged");
+        assert!(
+            (jumped - pressed - 0.7).abs() < 0.015,
+            "pressed {pressed:.2}, jumped {jumped:.2}"
+        );
+    }
+
+    #[test]
+    fn called_off_while_charging_hands_the_charge_on() {
+        let arsenal = [Armed::new(WeaponId::Gauss, None, Some(60))];
+        let view = Vec3::new(34.0, 180.0, 0.0);
+        let mut boost = GaussBoost::new(SimTime(0.0), view, 1.6);
+        let mut b = Bot {
+            weapon: Some(WeaponId::Gauss),
+            spinning: false,
+            on_ground: true,
+            view,
         };
         let p = prediction(&b);
         assert!(matches!(

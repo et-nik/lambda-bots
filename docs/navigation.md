@@ -139,7 +139,7 @@ executor can act.
 | teleport    | —                                        | walks into the trigger; done when the bot finds itself at the destination                                                                                                                                                                                    |
 | breakable   | —                                        | shoots the brush (crowbar close up) until it is gone, then walks through                                                                                                                                                                                     |
 | longjump    | approach, run, takeoff, air              | stops at the start of the run-up with the view level on the landing, runs at the takeoff, presses duck and jump together in the window, holds duck and steers the flight onto the landing                                                                    |
-| gauss_boost | approach, charge, air                    | stops at the takeoff; the weapons protocol draws the gauss, charges it, turns round and jumps letting it go; steers the flight onto the landing                                                                                                              |
+| gauss_boost | approach, charge, air                    | stops within 6 units of the takeoff; the weapons protocol draws the gauss, turns round, charges it for the link's push and jumps letting it go; steers the flight onto the landing                                                                           |
 
 Buttons and doors are pressed the way a player presses them: from 64 units, looking at the target within 8°, with
 a fresh press of use. A press counts only if the mechanism moves within 1.5 s; after 4 presses the link fails.
@@ -178,11 +178,16 @@ validates is one a bot can make:
   landing, and takes off within 12 units of the entry, on its floor, with the view within 5° of the landing. The motor
   makes the press: both keys afresh in one command, a command with neither going out first when either is held.
 - **Gauss boost.** A charged gauss shot pushes its shooter back at five times its damage, up and down too in
-  multiplayer. The bot looks back and 30–38° down (so the beam neither glances off the floor behind nor, too thick to
-  punch through, comes back at it), jumps, and the charge goes on the next command: a full charge adds some 850
-  units/s forward and 550 up. The check tries pitches 34°, 30° and 38°, steering onto the landing; 3° off to either
-  side, 2° up or down and 8 units along must land too, and the unsteered flight must come down safely (a fight may take
-  the bot's mind off the steering).
+  multiplayer. The bot looks back and down (so the beam neither glances off the floor behind nor, too thick to punch
+  through, comes back at it), jumps, and the charge goes on the next command: a full charge adds some 850 units/s
+  forward and 550 up looking 34° down. The recoil grows over the 1.5 s of a full charge and the game lets a charge go
+  after half a second at the soonest, so a boost is charged for the push it takes, a third of a full one or more: a
+  lower arc under ceilings, a shorter fall, an unsteered flight that ends near the landing. The check tries pitches
+  from 30° to 70°, each with the least push that throws the bot past the landing in the open (32 units and 8% of the
+  way further: steering in the air only brakes), the gentlest first. The steered flight must come down within 64
+  units of the landing; 3° off to either side, 2° up or down, 8 units along and the push 4% off must too; and the
+  unsteered flight must come down safely (a fight may take the bot's mind off the steering). The push is part of the
+  link's contract; the executor charges for it (`boost_charge`).
 - **On the way.** Two tricks are taken off the graph's links, as shortcuts of the follower:
   - a long jump along the path, onto the node furthest along it that the flight, followed through the server's
     traces, comes down on, out of lava and slime, where the path goes on walking (not onto the start of a jump, a
@@ -286,6 +291,9 @@ one route frame by frame while long jumping.
 sample of each kind of special link (up to 40) is carried out from its entry (the bot with the long jump module and a
 gauss), and a bot walks from the nearest spawn point to every item the coverage report counts as reachable. Results
 are in `docs/m3-acceptance.md` and, for the tricks, `docs/m4-acceptance.md`.
+
+**To a spot** (`lb do`, `lb test`, `lb-cli nav try`). A bot given items goes to a spot a command or the map's tests
+name, finding a jump, a long jump or a gauss boost onto it where the graph has no way: `docs/testing.md`.
 
 **Live** (`lb nav test`). A bot is taken off its behavior and runs chosen special links on the running server:
 

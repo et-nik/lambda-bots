@@ -81,6 +81,18 @@ const HELP: &[(&str, &str)] = &[
         "show the config, or reload config, skill table and profiles",
     ),
     (
+        "give <name|#userid|all> <item>...",
+        "items for bots now: gauss, uranium, longjump, health, armor, a weapon or a classname (needs sv_cheats 1)",
+    ),
+    (
+        "do <name|#userid|all> go <x y z|node N|@me|@aim|place P> [radius R] [timeout T] [tricks ...] | stop",
+        "send bots to a spot, finding a jump, long jump or gauss boost where the graph has no way; others stand still",
+    ),
+    (
+        "test [list] | add <id> <spot> [from <spot>] [give ...] | remove <id> | run [<id>...] | stop | results",
+        "the map's tests (maps/<map>/tests.yaml): a bot given items goes from a start to a goal; reports in logs/tests",
+    ),
+    (
         "test motor <#userid|all> run|strafe|jump|duckjump|spin [arg]",
         "scripted motor measurement",
     ),
@@ -156,6 +168,8 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "quota" => quota(rt, host, rest),
         "config" => config(rt, host, rest),
         "test" => test(rt, host, rest),
+        "give" => crate::orders::give(rt, host, rest),
+        "do" => crate::orders::command(rt, host, rest),
         "debug" => debug(rt, host, rest),
         "record" => record(rt, rest),
         other => vec![format!("lb: unknown command `{other}`, see `lb help`")],
@@ -1424,7 +1438,7 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
     ]
 }
 
-fn find_bots(rt: &Runtime, target: Option<&str>) -> Vec<usize> {
+pub(crate) fn find_bots(rt: &Runtime, target: Option<&str>) -> Vec<usize> {
     match target {
         None | Some("all") => (0..rt.bots.len()).collect(),
         Some(t) if t.starts_with('#') => {
@@ -1570,9 +1584,7 @@ fn open_yaw(host: &mut dyn Host, origin: lb_core::Vec3) -> f32 {
 
 fn test(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     if args.first() != Some(&"motor") {
-        return vec![
-            "usage: lb test motor <#userid|all> run|strafe|jump|duckjump|spin [arg] | lb test motor stop".into(),
-        ];
+        return crate::testrun::command(rt, host, args);
     }
     if args.get(1) == Some(&"stop") {
         for b in &mut rt.bots {
@@ -1739,18 +1751,6 @@ fn trace_dump(rt: &mut Runtime, host: &mut dyn Host, n: usize) -> std::io::Resul
 }
 
 /// Weapon names for `lb weapons`: classnames without `weapon_` and the usual aliases.
-fn weapon_by_name(name: &str) -> Option<lb_game::weapons::WeaponId> {
-    use lb_game::weapons::WeaponId;
-    match name.to_ascii_lowercase().as_str() {
-        "357" | "python" => Some(WeaponId::Python),
-        "mp5" | "9mmar" => Some(WeaponId::Mp5),
-        "glock" | "9mmhandgun" => Some(WeaponId::Glock),
-        "hornet" | "hornetgun" => Some(WeaponId::Hornetgun),
-        "grenade" | "handgrenade" => Some(WeaponId::HandGrenade),
-        other => WeaponId::from_classname(other),
-    }
-}
-
 fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
     use lb_game::weapons::WeaponId;
     let describe = |rt: &Runtime| {
@@ -1799,7 +1799,7 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
         _ => {
             let mut list = Vec::new();
             for n in &names {
-                match weapon_by_name(n) {
+                match crate::orders::weapon(n) {
                     Some(w) => list.push(w),
                     None => return vec![format!("unknown weapon `{n}`")],
                 }

@@ -27,7 +27,7 @@ export const TOOLS: ToolInfo[] = [
     label: 'Node',
     key: 'N',
     code: 'KeyN',
-    hint: 'click the floor where a node is missing: it is linked with the nodes around that check out',
+    hint: 'click the floor where a node is missing; auto-link links it with the nodes around that check out',
   },
   {
     id: 'move',

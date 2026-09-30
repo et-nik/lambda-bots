@@ -19,6 +19,7 @@ use lb_nav::NavGraph;
 use lb_nav::exec::{HitKind, MechView, MoverState, NavInput};
 use lb_nav::known::LinkHealth;
 use lb_nav::navigator::{Failure, NavCtx, Navigator};
+use lb_nav::reach::Reach;
 use lb_nav_api::{NavStatus, NavStep, Tricks};
 use lb_worldq::HullKind;
 
@@ -563,12 +564,15 @@ pub struct CourseBot {
     last_fire: f64,
 }
 
-/// The weapons' part of a gauss boost: charging while the view turns to the boost's, the jump, and the recoil on
-/// the command after the bot leaves the ground (the button comes up then, and the game fires after that move).
+/// The weapons' part of a gauss boost: the view turns to the boost's, the charge builds for the seconds asked, the
+/// jump, and the recoil on the command after the bot leaves the ground (the button comes up then, and the game fires
+/// after that move): five times the damage the charge built up to.
 #[derive(Clone, Copy, Debug)]
 struct CourseBoost {
     since: f64,
     view: Vec3,
+    /// When the charge started: the view had come round.
+    charged: Option<f64>,
     jumped: bool,
     /// Off the ground after the jump: the charge goes on the next command.
     armed: bool,
@@ -695,6 +699,59 @@ impl<W: SimWorld> Course<W> {
 
     /// One server frame for one bot heading to `dest`; `frame_ms` of game time passes.
     pub fn frame(&mut self, bot: &mut CourseBot, dest: Vec3, frame_ms: f64) -> NavStatus {
+        self.frame_with(bot, frame_ms, |nav, ctx, input| nav.go_to(ctx, input, dest))
+    }
+
+    /// One server frame of an attempt to reach a spot (`lb_nav::reach`), its trick search following flights through
+    /// `search` (the map at rest); true once the attempt is over.
+    pub fn frame_reach(
+        &mut self,
+        bot: &mut CourseBot,
+        reach: &mut Reach,
+        search: &mut dyn MoveWorld,
+        frame_ms: f64,
+    ) -> bool {
+        self.frame_with(bot, frame_ms, |nav, ctx, input| {
+            (NavStatus::Moving, reach.step(nav, ctx, search, input))
+        });
+        if bot.health <= 0.0 {
+            let input = self.input(bot);
+            reach.died(&input);
+        }
+        reach.outcome().is_some()
+    }
+
+    /// Runs an attempt to reach a spot until it is over or `seconds` pass, at `fps`.
+    pub fn attempt(
+        &mut self,
+        bot: &mut CourseBot,
+        reach: &mut Reach,
+        search: &mut dyn MoveWorld,
+        seconds: f64,
+        fps: f64,
+    ) -> Outcome {
+        let start = self.now;
+        let log_start = self.game.log.len();
+        while self.now - start < seconds && !self.frame_reach(bot, reach, search, 1000.0 / fps) {}
+        Outcome {
+            arrived: reach.outcome().is_some_and(|o| o.arrived()),
+            seconds: self.now - start,
+            worst_stuck: bot.worst_stuck,
+            phases: std::mem::take(&mut bot.phases),
+            log: self.game.log[log_start..].to_vec(),
+            end: bot.player.origin,
+            gait: std::mem::take(&mut bot.gait),
+            ..Outcome::default()
+        }
+    }
+
+    /// One server frame for one bot, `drive` telling navigation's status and step; `frame_ms` of game time passes.
+    fn frame_with(
+        &mut self,
+        bot: &mut CourseBot,
+        frame_ms: f64,
+        drive: impl FnOnce(&mut Navigator, &mut NavCtx<'_>, &NavInput) -> (NavStatus, Option<NavStep>),
+    ) -> NavStatus {
         let now = self.now;
         let p = bot.player;
         let input = NavInput {
@@ -724,7 +781,7 @@ impl<W: SimWorld> Course<W> {
             budget: None,
             flights: None,
         };
-        let (status, step) = bot.nav.go_to(&mut ctx, &input, dest);
+        let (status, step) = drive(&mut bot.nav, &mut ctx, &input);
         bot.stuck = bot.nav.stuck_for(p.origin, now);
         bot.worst_stuck = bot.worst_stuck.max(bot.stuck);
         let phase = bot.nav.phase();
@@ -743,6 +800,7 @@ impl<W: SimWorld> Course<W> {
                 let b = bot.boost.get_or_insert(CourseBoost {
                     since: now,
                     view: call.view,
+                    charged: None,
                     jumped: false,
                     armed: false,
                 });
@@ -757,7 +815,11 @@ impl<W: SimWorld> Course<W> {
                 let v = bot.motor.view;
                 let settled =
                     lb_core::math::angle_diff(v.y, call.view.y).abs() <= 2.0 && (v.x - call.view.x).abs() <= 2.0;
-                if (now - b.since >= f64::from(call.charge) && settled && p.on_ground()) || b.jumped {
+                if b.charged.is_none() && (settled || now - b.since > 1.2) {
+                    b.charged = Some(now);
+                }
+                let charged = b.charged.is_some_and(|c| now - c >= f64::from(call.charge));
+                if (charged && p.on_ground()) || b.jumped {
                     b.jumped = true;
                     intents.stance(
                         Prio::Protocol,
@@ -805,7 +867,9 @@ impl<W: SimWorld> Course<W> {
             if let Some(b) = bot.boost.as_mut().filter(|b| b.jumped) {
                 if b.armed {
                     let (forward, _, _) = view_angle_vectors(b.view);
-                    bot.player.velocity -= forward * 5.0 * bot.tricks.gauss_damage;
+                    let held = b.charged.map_or(0.0, |c| (now - c) as f32);
+                    let share = (held / lb_kin::tricks::FULL_CHARGE).min(1.0);
+                    bot.player.velocity -= forward * 5.0 * bot.tricks.gauss_damage * share;
                     bot.boost = None;
                 } else if !bot.player.on_ground() {
                     b.armed = true;

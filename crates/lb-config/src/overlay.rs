@@ -41,6 +41,14 @@ fn default_radius() -> f32 {
     128.0
 }
 
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NavPatches {
@@ -96,6 +104,9 @@ pub enum Patch {
     /// ways to the nodes around it, every link checked like a generated one. Patches after it may use it.
     AddNode {
         at: [f32; 3],
+        /// `false`: put in without links, for the patches after it to link.
+        #[serde(default = "yes", skip_serializing_if = "is_yes")]
+        link: bool,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
@@ -243,6 +254,20 @@ nav:
         ));
         let again = OverlayFile::parse(&f.to_yaml().unwrap(), "again.yaml").unwrap();
         assert_eq!(again, f);
+    }
+
+    #[test]
+    fn a_node_put_in_is_linked_unless_it_says_not() {
+        let f = OverlayFile::parse(SAMPLE, "overlay.yaml").unwrap();
+        assert!(matches!(f.nav.patches[3], Patch::AddNode { link: true, .. }));
+        assert!(
+            !f.to_yaml().unwrap().contains("link: true"),
+            "the default is not written"
+        );
+        let bare = SAMPLE.replace("note: the crate top", "link: false\n      note: the crate top");
+        let f = OverlayFile::parse(&bare, "o.yaml").unwrap();
+        assert!(matches!(f.nav.patches[3], Patch::AddNode { link: false, .. }));
+        assert_eq!(OverlayFile::parse(&f.to_yaml().unwrap(), "again.yaml").unwrap(), f);
     }
 
     #[test]

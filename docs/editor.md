@@ -84,10 +84,12 @@ Where things are:
   same size on screen however near) seen through walls (as lines while the Move tool's gizmo is on the node: its
   arrows are the only ones then): a node's, both ends' of a link, a change's nodes', the node a link is being drawn
   from; with nothing selected, all of them. What a change or a save came to pops up at the bottom for a few seconds.
-- **The status bar**: where the camera is, what is under the pointer, what the tool does and how to fly.
-- **The panel**: *Navigation* shows what is selected on top (a node, a link, a change, a route or an entity) and the
-  changes under it; *Map* shows the map's faces, textures, lightmaps, the WADs it names (missing ones in red), the
-  graph's counts by kind and the entities by class.
+- **The status bar**: *Changes* with their count (and a red ! when one did nothing or something went wrong with
+  them), which opens and closes the list of changes under the view (C); where the camera is, what is under the
+  pointer, what the tool does and how to fly.
+- **The panel**: *Navigation* shows what is selected (a node, a link, a change, a route or an entity); *Map* shows the
+  map's faces, textures, lightmaps, the WADs it names (missing ones in red), the graph's counts by kind and the
+  entities by class.
 - The map opened last is kept in the address (`#map=crossfire`).
 
 Point entities are boxes: spawns are green hull-sized boxes, weapons and ammo orange, items blue, monsters red, the
@@ -101,7 +103,7 @@ says which). The changes go into `maps/<map>/editor.yaml`, the file the in-game 
 `overlay.yaml`, written by hand, is shown and applied after them but not changed.
 
 Every change is checked at once as the server will check it, and the list of changes shows what it did: the links it
-put in and their kinds, or why it did nothing (marked red).
+put in and their kinds, or why it did nothing (marked red); what is wrong in the graph is listed under *Problems*.
 
 | Tool   | Key | Click                                  | Does                                                              |
 |--------|-----|----------------------------------------|-------------------------------------------------------------------|
@@ -134,12 +136,15 @@ put in and their kinds, or why it did nothing (marked red).
 - **Forbid** clicked on a node puts the zone about the node. A zone holds for the changes after it too: nothing is
   linked into it, and no node is put in or moved into it. A link taken out stays out when a node put in or moved
   links itself with the nodes around.
+- **Node** with *auto-link* off (along the top) puts the node in without links, to be linked by hand with Link; the
+  change's own *auto-link* turns it either way later.
 - **Route** takes long jumps and gauss boosts when those boxes are on, and tells the time without tricks too.
-- The changes list is `editor.yaml` in order, one line each; the pointer on one lights its nodes and links up in the
-  view, a click selects it: its fields (radius, kind, both ways, trust, a note) and the nodes it came to open on top,
-  and the view turns to it. × removes it. `overlay.yaml`'s changes are folded under *By hand*. Undo and redo: ⌘Z and
-  ⌘⇧Z (Ctrl+Z and Ctrl+Shift+Z off a Mac). Delete removes the selected change or unlinks the selected link; Esc
-  drops a link or a route half drawn and the selection.
+- The list of changes, under the view (*Changes* in the status bar, or C; it opens by itself when a save finds the
+  file changed or the changes cannot be checked), is `editor.yaml` in order, one line each; the pointer on one lights
+  its nodes and links up in the view, a click selects it: its fields (radius, kind, both ways, trust, auto-link, a
+  note) and the nodes it came to open in the panel, and the view turns to it. × removes it. `overlay.yaml`'s changes
+  are folded under *By hand*. Undo and redo: ⌘Z and ⌘⇧Z (Ctrl+Z and Ctrl+Shift+Z off a Mac). Delete removes the
+  selected change or unlinks the selected link; Esc drops a link or a route half drawn and the selection.
 
 **What is selected.** A node lists its links by the node at the other end: → a link out, ← a link in, ⇄ both alike,
 each with its kind (in the legend's colours) and cost. The pointer on a line lights the links and that node up in the
@@ -154,6 +159,33 @@ or both, or put in again checked as another kind or trusted. What is done from t
 up what it came to.
 - What changed is drawn through walls: links put in bright, links taken out dashed red, nodes put in or moved pink
   (a dashed line from where a moved node stood), forbidden nodes dark red.
+
+**Problems.** The page flags what is wrong in the graph with the changes, or worth a look, every time it checks them:
+
+| Kind           | Level     | What it is                                                                                                                 |
+|----------------|-----------|----------------------------------------------------------------------------------------------------------------------------|
+| not put in     | error     | a link a change asked for does not check out, with why: what the check found                                               |
+| failed in runs | error     | a link bots failed in the map's last test run (`lb test`) or its last commands (`lb do`), how often, the last time and why |
+| missed in runs | error     | a trick found for a run came down elsewhere: where from, and how far off                                                   |
+| does nothing   | attention | a change that does nothing, like taking out a link that is not there any more (error for the others)                       |
+| falls          | attention | a walk that falls off a ledge on the way (more than a step down); where it lands is not checked as a drop's landing is     |
+| weak           | attention | a trick link that lands in fewer than 80% of the tries a little off: the takeoff, the speed or the aim                     |
+| not checked    | attention | a link put in trusted, without the check                                                                                   |
+
+- **Why a link is not put in** is what its check found: "the long jump comes down 95 u past the landing", "taking off
+  12 u further on is off the floor: the takeoff is at an edge", "looking 42° down with a push of 610: only 3 of 8 tries
+  a little off land", "a running jump, ducking, comes down 88 u short of the landing, 274 u below it".
+- **In the view**, seen through walls: a band under a link in the graph, red for an error and yellow otherwise (the
+  worst of the link's problems); a dashed line where a link is asked for or failed and is not in the graph. *Problems
+  N* in the legend shows or hides them.
+- **In the Navigation tab**, under what is selected: the list, errors first. The pointer on a row lights its nodes and
+  link up; a click selects the link, or, when it is not in the graph, the change it comes of.
+- **Links and changes.** A link's card lists its problems, and the node's card marks its links that have some. A change
+  that put a link in one way only is `!` in yellow in the list of changes, and its card tells why the other way does
+  not check out.
+- A link a change asked for and a later change put in after all is no problem. Test runs are read from
+  `logs/tests/<map>-*.json` (the last one) and `logs/tests/<map>-orders.jsonl` (the last 50 commands); their places are
+  matched to the nodes within 24 units.
 
 **Saving and the server.** *Save* (⌘S, or Ctrl+S) writes `editor.yaml` unless it changed on disk since the page read it
 (saved from the game meanwhile): then the page asks whether to keep its changes or take the file. Changes not saved

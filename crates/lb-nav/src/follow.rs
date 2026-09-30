@@ -149,16 +149,18 @@ enum Recovery {
     Duck,
 }
 
-/// A trick taken off the graph's links: a long jump along a straight stretch of the path, or a gauss boost toward
-/// the goal. It lands at node `to`, `path[at]` when that is on the path (off it, the way on is planned again).
+/// A trick taken off the graph's links: a long jump along a straight stretch of the path, a gauss boost toward the
+/// goal, or a trick onto a spot off the graph. It lands at node `to`, `path[at]` when that is on the path (off it,
+/// the way on is planned again), or at its exit when it lands off the graph.
 #[derive(Clone, Debug)]
 struct Shortcut {
     spec: TraversalSpec,
     exec: Exec,
-    to: NodeId,
+    to: Option<NodeId>,
     at: Option<usize>,
-    /// Where it starts, as a node.
+    /// Where it starts and where it lands, as nodes.
     from: NavNode,
+    exit: NavNode,
 }
 
 #[derive(Clone, Debug)]
@@ -186,6 +188,8 @@ pub struct PathFollower {
     leap_misses: smallvec::SmallVec<[(NodeId, Vec3); 4]>,
     /// A trick that left the ground just ended: which, and whether it landed where it should.
     event: Option<(TrickKind, bool)>,
+    /// The shortcut just ended: done, or why it failed.
+    ended: Option<Result<(), FailReason>>,
 }
 
 impl PathFollower {
@@ -218,12 +222,18 @@ impl PathFollower {
             leap_after: f64::NEG_INFINITY,
             leap_misses: smallvec::SmallVec::new(),
             event: None,
+            ended: None,
         }
     }
 
     /// A trick that left the ground and ended since the last call: which, and whether it landed where it should.
     pub fn take_event(&mut self) -> Option<(TrickKind, bool)> {
         self.event.take()
+    }
+
+    /// How the shortcut under way ended, when it did since the last call.
+    pub fn take_ended(&mut self) -> Option<Result<(), FailReason>> {
+        self.ended.take()
     }
 
     pub fn path(&self) -> &[NodeId] {
@@ -247,27 +257,30 @@ impl PathFollower {
     }
 
     /// Takes a trick off the graph's links next: from where the bot is, landing at node `to` (`path[at]` when on the
-    /// path). `once`: a long jump that is not lined up in time is given up rather than tried again.
-    pub fn take_shortcut(&mut self, spec: TraversalSpec, to: NodeId, at: Option<usize>, now: f64, once: bool) {
+    /// path), or off the graph at the spec's exit without one. `once`: a long jump that is not lined up in time is
+    /// given up rather than tried again.
+    pub fn take_shortcut(&mut self, spec: TraversalSpec, to: Option<NodeId>, at: Option<usize>, now: f64, once: bool) {
         let mut exec = Exec::new(&spec, now);
         if let Exec::LongJump(e) | Exec::GaussBoost(e) = &mut exec {
             e.once = once;
         }
-        let from = NavNode {
-            origin: spec.entry.origin,
+        let spot = |a: &Anchor| NavNode {
+            origin: a.origin,
             flags: NodeFlags::empty(),
-            radius: spec.entry.radius,
+            radius: a.radius,
             support: 0,
             first_link: 0,
             link_count: 0,
         };
         self.shortcut = Some(Shortcut {
-            spec,
             exec,
             to,
             at,
-            from,
+            from: spot(&spec.entry),
+            exit: spot(&spec.exit),
+            spec,
         });
+        self.ended = None;
     }
 
     /// Walks to the path's first node before the rest when the second one is not in a straight line from `origin`
@@ -566,7 +579,7 @@ impl PathFollower {
         tracer: &mut dyn Tracer,
     ) -> Option<Option<FollowOutput>> {
         let sc = self.shortcut.as_mut()?;
-        let to = *g.node(sc.to);
+        let to = sc.to.map_or(sc.exit, |n| *g.node(n));
         let mut ctx = ExecCtx {
             input: s,
             mech,
@@ -591,6 +604,7 @@ impl PathFollower {
         match status {
             ExecStatus::Done => {
                 self.event = Some((kind, true));
+                self.ended = Some(Ok(()));
                 let at = sc.at;
                 self.shortcut = None;
                 match at {
@@ -611,6 +625,7 @@ impl PathFollower {
                     self.event = Some((kind, false));
                     missed(kind, s, &sc.spec, sc.exec.launch());
                 }
+                self.ended = Some(Err(reason));
                 self.shortcut = None;
                 // Down somewhere else: the way on is planned from there. Not lined up in time: walk on.
                 flying.then_some(Some(FollowOutput {
@@ -769,7 +784,7 @@ impl PathFollower {
                 },
             };
             self.leap_after = s.now + LEAP_COOLDOWN[b];
-            self.take_shortcut(spec, self.path[k], Some(k), s.now, true);
+            self.take_shortcut(spec, Some(self.path[k]), Some(k), s.now, true);
             return true;
         }
         false

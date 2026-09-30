@@ -15,11 +15,13 @@ pub mod motor_test;
 pub mod names;
 pub mod nav;
 pub mod nav_test;
+pub mod orders;
 pub mod perf;
 pub mod record;
 pub mod roster;
 pub mod selftest;
 pub mod stall;
+pub mod testrun;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -206,6 +208,14 @@ pub struct Runtime {
     pub freeze: bool,
     /// `lb selftest` froze the other bots; the freeze to go back to when it ends.
     pub freeze_before_selftest: Option<bool>,
+    /// Bots on command (`lb do`, `lb test`) froze the others; the freeze to go back to when the last is done.
+    pub freeze_before_orders: Option<bool>,
+    /// The map with its mechanisms at rest, for the trick search of bots on command; `None` until the map loads.
+    pub search_world: Option<Box<lb_bsp::BspWorld>>,
+    /// `lb test run` under way.
+    pub test_run: Option<testrun::TestRun>,
+    /// What the last test run came to, for `lb test results`.
+    pub test_summary: Vec<String>,
     pub game_mode_forced: i32,
     feedback: Vec<LbMoveFeedback>,
     cmds: Vec<LbBotCommand>,
@@ -373,6 +383,10 @@ impl Runtime {
             dev: false,
             freeze: false,
             freeze_before_selftest: None,
+            freeze_before_orders: None,
+            search_world: None,
+            test_run: None,
+            test_summary: Vec::new(),
             game_mode_forced: -1,
             feedback: Vec::new(),
             cmds: Vec::new(),
@@ -589,6 +603,7 @@ impl Runtime {
     }
 
     pub fn map_start(&mut self, host: &mut dyn Host, name: &str, max_clients: u32, epoch: MapEpoch, late_load: bool) {
+        self.end_test_run(host, "the map changed");
         if let Some(c) = self.capture.take() {
             let (path, n) = c.finish();
             tracing::warn!(
@@ -644,6 +659,7 @@ impl Runtime {
         self.compat_pending = true;
         self.graph = None;
         self.tactics = None;
+        self.search_world = None;
         self.experience = None;
         self.experience_saved = SimTime::ZERO;
         self.vis = None;
@@ -1032,6 +1048,7 @@ impl Runtime {
                     );
                     self.mechs.set_map(Some(loaded.mechs), max_clients);
                     self.overlays = loaded.overlays;
+                    self.search_world = loaded.world;
                     match loaded.graph {
                         Ok(graph) => {
                             let s = &graph.stats;
@@ -1487,6 +1504,7 @@ impl Runtime {
     pub fn frame_post(&mut self, host: &mut dyn Host, mono_ns: u64) {
         if self.safe_mode.is_none() {
             self.drive_bots(host);
+            self.tend_orders(host);
         }
         if let Some(x) = self.experience.as_mut() {
             x.decay(self.now.secs());
@@ -2349,6 +2367,7 @@ impl Runtime {
         let mut recognized = Vec::new();
         let mechs = &self.mechs;
         let link_health = &mut self.link_health;
+        let mut search_world = self.search_world.as_deref_mut();
         let mut tracer = nav::LiveTracer { host, count: 0 };
         // Path search expansions and long jump flights checked this frame, shared by the bots: steady rates with
         // caps per frame.
@@ -2385,7 +2404,14 @@ impl Runtime {
                     tricks: self.config.tricks,
                     projectiles: &self.projectile_entities,
                 };
-                let cmd = drive_one(bot, &ctx, &mut tracer, link_health, &mut budgets);
+                let cmd = drive_one(
+                    bot,
+                    &ctx,
+                    &mut tracer,
+                    link_health,
+                    &mut budgets,
+                    search_world.as_deref_mut(),
+                );
                 watch_stalls(bot, now, cmd.as_ref(), &subjects, &teams, &mut tracer);
                 cmd
             }));
@@ -2644,7 +2670,12 @@ fn watch_stalls(
     teams: &[u8],
     tracer: &mut nav::LiveTracer<'_>,
 ) {
-    if bot.state != BotState::Alive || bot.nav_test.is_some() || bot.test.is_some() || bot.selftest.is_some() {
+    if bot.state != BotState::Alive
+        || bot.nav_test.is_some()
+        || bot.test.is_some()
+        || bot.selftest.is_some()
+        || bot.order.is_some()
+    {
         return;
     }
     let body = &bot.self_state.body;
@@ -2677,6 +2708,7 @@ fn drive_one(
     tracer: &mut nav::LiveTracer<'_>,
     link_health: &mut LinkHealth,
     budgets: &mut nav::Budgets,
+    world: Option<&mut lb_bsp::BspWorld>,
 ) -> Option<LbBotCommand> {
     if bot.fault_on_next_frame {
         bot.fault_on_next_frame = false;
@@ -2693,7 +2725,7 @@ fn drive_one(
                 buttons |= IN_JUMP;
             }
         }
-        BotState::Alive if !ctx.freeze || bot.selftest.is_some() => {
+        BotState::Alive if !ctx.freeze || bot.selftest.is_some() || bot.order.is_some() => {
             if let Some(test) = bot.selftest.as_mut() {
                 let frame = test.step(now, &bot.self_state, ctx.projectiles, bot.id.slot);
                 for line in &frame.lines {
@@ -2726,6 +2758,11 @@ fn drive_one(
                 if out.done {
                     test.finished = true;
                 }
+            } else if bot.order.is_some() {
+                let out = drive_order(bot, ctx, tracer, link_health, world);
+                forward = out.forward;
+                side = out.side;
+                buttons |= out.buttons;
             } else if bot.nav_test.as_ref().is_some_and(|t| !t.finished) {
                 let out = drive_nav_test(bot, ctx, tracer, link_health);
                 forward = out.forward;
@@ -2744,6 +2781,19 @@ fn drive_one(
         && let (Some(t), Some(g)) = (bot.nav_test.as_mut(), ctx.graph)
     {
         t.on_death(g, now.secs());
+    }
+    if matches!(bot.state, BotState::Dead | BotState::Respawning)
+        && bot
+            .order
+            .as_ref()
+            .and_then(|o| o.reach())
+            .is_some_and(|r| r.outcome().is_none())
+    {
+        let body = body_of(bot, ctx);
+        let input = nav_input(bot, ctx, &body);
+        if let Some(orders::OrderKind::Go(reach)) = bot.order.as_mut().map(|o| &mut o.kind) {
+            reach.died(&input);
+        }
     }
     buttons |= direction_buttons(forward, side);
     let sent = bot.driver.tick(frame_ms, buttons)?;
@@ -2840,17 +2890,7 @@ fn give_weapons(bot: &mut Bot, weapons: &[WeaponId]) {
         for _ in 0..times {
             bot.pending_client_cmds.push(vec!["give".into(), w.classname().into()]);
         }
-        let ammo: &[&str] = match w {
-            WeaponId::Glock => &["ammo_9mmclip"],
-            WeaponId::Mp5 => &["ammo_9mmAR", "ammo_ARgrenades"],
-            WeaponId::Python => &["ammo_357"],
-            WeaponId::Crossbow => &["ammo_crossbow"],
-            WeaponId::Shotgun => &["ammo_buckshot"],
-            WeaponId::Rpg => &["ammo_rpgclip"],
-            WeaponId::Gauss | WeaponId::Egon => &["ammo_gaussclip"],
-            _ => &[],
-        };
-        for a in ammo {
+        for a in orders::ammo_of(w) {
             for _ in 0..3 {
                 bot.pending_client_cmds.push(vec!["give".into(), (*a).into()]);
             }
@@ -2916,18 +2956,9 @@ fn nav_input(bot: &Bot, ctx: &DriveCtx<'_>, body: &lb_brain::Body) -> lb_nav::ex
     }
 }
 
-/// `lb nav test`: the course drives the bot, nothing else does.
-fn drive_nav_test(
-    bot: &mut Bot,
-    ctx: &DriveCtx<'_>,
-    tracer: &mut nav::LiveTracer<'_>,
-    link_health: &mut LinkHealth,
-) -> lb_motor::MotorOut {
-    use lb_combat::arms::Status;
-    use lb_motor::{Intents, LookIntent, MoveIntent, Prio, StanceIntent};
-    let body = body_of(bot, ctx);
-    let mut input = nav_input(bot, ctx, &body);
-    // Gauss boosts with the gun and a full charge's uranium in hand or in the pack.
+/// What a bot taken off its behavior may do with what it carries: gauss boosts with the gun, a full charge's uranium
+/// in hand or in the pack and the health for one.
+fn commanded_tricks(input: &mut lb_nav::exec::NavInput, body: &lb_brain::Body) {
     let uranium = match body.prediction {
         Some(p) if p.current == Some(WeaponId::Gauss) && body.weapon == Some(WeaponId::Gauss) => p.primary_ammo,
         _ => body.armed(WeaponId::Gauss).and_then(|a| a.reserve).unwrap_or(0),
@@ -2936,7 +2967,20 @@ fn drive_nav_test(
     input.tricks.gauss_boost = input.tricks.boost_now;
     input.tricks.gauss_damage = body.damages.gauss_charged;
     input.tricks.selfgauss = body.selfgauss == 1;
-    let mut intents = Intents::default();
+}
+
+/// `lb nav test`: the course drives the bot, nothing else does.
+fn drive_nav_test(
+    bot: &mut Bot,
+    ctx: &DriveCtx<'_>,
+    tracer: &mut nav::LiveTracer<'_>,
+    link_health: &mut LinkHealth,
+) -> lb_motor::MotorOut {
+    let body = body_of(bot, ctx);
+    let mut input = nav_input(bot, ctx, &body);
+    commanded_tricks(&mut input, &body);
+    let mut boost = bot.nav_test.as_mut().and_then(|t| t.boost.take());
+    let mut step = None;
     if let Some(graph) = ctx.graph
         && let Some(test) = bot.nav_test.as_mut()
     {
@@ -2949,99 +2993,158 @@ fn drive_nav_test(
             budget: None,
             flights: None,
         };
-        let step = test.step(&mut bot.nav, &mut nctx, &input);
+        step = test.step(&mut bot.nav, &mut nctx, &input);
         if std::mem::take(&mut test.refill) {
             for item in ["item_healthkit", "item_healthkit", "ammo_gaussclip", "ammo_gaussclip"] {
                 bot.pending_client_cmds.push(vec!["give".into(), item.into()]);
-            }
-        }
-        if let Some(step) = step {
-            intents.movement(
-                Prio::Goal,
-                MoveIntent {
-                    dir: step.move_dir,
-                    speed: step.speed,
-                },
-            );
-            intents.stance(
-                Prio::Goal,
-                StanceIntent {
-                    jump: step.jump,
-                    duck: step.duck,
-                    longjump: step.longjump,
-                },
-            );
-            if step.use_key {
-                intents.use_key(Prio::Goal);
-            }
-            let look = match step.pitch {
-                Some(pitch) => {
-                    let mut a = lb_core::math::dir_to_view_angles(step.look_at - body.eye);
-                    a.x = pitch;
-                    LookIntent::Angles(a)
-                }
-                None => LookIntent::Point {
-                    at: step.look_at,
-                    engaged: false,
-                },
-            };
-            intents.look(Prio::Goal, look);
-            if let Some(call) = step.boost
-                && test.boost.is_none()
-            {
-                test.boost = Some(lb_combat::arms::boost::GaussBoost::new(ctx.now, call.view, call.charge));
-            }
-            if let Some(boost) = test.boost.as_mut() {
-                let hands = lb_combat::arms::Hands {
-                    now: ctx.now,
-                    eye: body.eye,
-                    origin: body.origin,
-                    velocity: body.velocity,
-                    view: bot.view,
-                    on_ground: body.on_ground,
-                    on_ladder: body.on_ladder,
-                    waterlevel: body.waterlevel,
-                    fov: body.fov,
-                    weapon: body.weapon,
-                    arsenal: &body.arsenal,
-                    prediction: body.prediction.as_ref(),
-                    dll: body.dll,
-                    gravity: body.gravity,
-                };
-                match boost.update(&hands, step.boost.is_some(), step.boost.map(|c| c.view)) {
-                    Status::Running(r) => {
-                        if let Some(w) = r.weapon {
-                            intents.weapon(Prio::Protocol, w);
-                        }
-                        if let Some(l) = r.look {
-                            intents.look(Prio::Protocol, l);
-                        }
-                        if let Some(m) = r.movement {
-                            intents.movement(Prio::Protocol, m);
-                        }
-                        if r.jump {
-                            intents.stance(
-                                Prio::Protocol,
-                                StanceIntent {
-                                    jump: true,
-                                    duck: false,
-                                    longjump: false,
-                                },
-                            );
-                        }
-                    }
-                    Status::Done => test.boost = None,
-                    Status::Failed(why) => {
-                        tracing::info!("nav test: gauss boost given up: {why}");
-                        test.boost = None;
-                    }
-                }
             }
         }
         if test.finished {
             for line in test.report() {
                 tracing::info!("nav test: {line}");
                 logging::console_line(format!("[lambdabots] nav test: {line}"));
+            }
+        }
+    }
+    let out = play_step(bot, ctx, &body, step, &mut boost);
+    if let Some(t) = bot.nav_test.as_mut() {
+        t.boost = boost;
+    }
+    out
+}
+
+/// `lb do`, `lb test`: the command drives the bot, nothing else does. The trick search follows flights through
+/// `world`, the map at rest.
+fn drive_order(
+    bot: &mut Bot,
+    ctx: &DriveCtx<'_>,
+    tracer: &mut nav::LiveTracer<'_>,
+    link_health: &mut LinkHealth,
+    world: Option<&mut lb_bsp::BspWorld>,
+) -> lb_motor::MotorOut {
+    let body = body_of(bot, ctx);
+    let mut input = nav_input(bot, ctx, &body);
+    commanded_tricks(&mut input, &body);
+    let mut boost = bot.order.as_mut().and_then(|o| o.boost.take());
+    let step = match (bot.order.as_mut().map(|o| &mut o.kind), ctx.graph, world) {
+        (Some(orders::OrderKind::Go(reach)), Some(graph), Some(world)) => {
+            let mut nctx = lb_nav::navigator::NavCtx {
+                graph,
+                tracer,
+                mech: ctx.mechs,
+                health: Some(link_health),
+                bot: u32::from(bot.id.slot),
+                budget: None,
+                flights: None,
+            };
+            reach.step(&mut bot.nav, &mut nctx, world, &input)
+        }
+        (Some(orders::OrderKind::Go(reach)), _, _) => {
+            let why = "the map's graph is not loaded".to_string();
+            reach.end(lb_nav::reach::Outcome::NoWay { why }, &input);
+            None
+        }
+        _ => None,
+    };
+    let out = play_step(bot, ctx, &body, step, &mut boost);
+    if let Some(o) = bot.order.as_mut() {
+        o.boost = boost;
+    }
+    out
+}
+
+/// Plays a navigation step for a bot taken off its behavior: movement, stance, use and look, and the weapons' part of
+/// a gauss boost the step asks for (`boost` keeps it from frame to frame); then the motor.
+fn play_step(
+    bot: &mut Bot,
+    ctx: &DriveCtx<'_>,
+    body: &lb_brain::Body,
+    step: Option<lb_nav_api::NavStep>,
+    boost: &mut Option<lb_combat::arms::boost::GaussBoost>,
+) -> lb_motor::MotorOut {
+    use lb_combat::arms::Status;
+    use lb_motor::{Intents, LookIntent, MoveIntent, Prio, StanceIntent};
+    let mut intents = Intents::default();
+    if let Some(step) = step {
+        intents.movement(
+            Prio::Goal,
+            MoveIntent {
+                dir: step.move_dir,
+                speed: step.speed,
+            },
+        );
+        intents.stance(
+            Prio::Goal,
+            StanceIntent {
+                jump: step.jump,
+                duck: step.duck,
+                longjump: step.longjump,
+            },
+        );
+        if step.use_key {
+            intents.use_key(Prio::Goal);
+        }
+        let look = match step.pitch {
+            Some(pitch) => {
+                let mut a = lb_core::math::dir_to_view_angles(step.look_at - body.eye);
+                a.x = pitch;
+                LookIntent::Angles(a)
+            }
+            None => LookIntent::Point {
+                at: step.look_at,
+                engaged: false,
+            },
+        };
+        intents.look(Prio::Goal, look);
+        if let Some(call) = step.boost
+            && boost.is_none()
+        {
+            *boost = Some(lb_combat::arms::boost::GaussBoost::new(ctx.now, call.view, call.charge));
+        }
+        if let Some(b) = boost.as_mut() {
+            let hands = lb_combat::arms::Hands {
+                now: ctx.now,
+                eye: body.eye,
+                origin: body.origin,
+                velocity: body.velocity,
+                view: bot.view,
+                on_ground: body.on_ground,
+                on_ladder: body.on_ladder,
+                waterlevel: body.waterlevel,
+                fov: body.fov,
+                weapon: body.weapon,
+                arsenal: &body.arsenal,
+                prediction: body.prediction.as_ref(),
+                dll: body.dll,
+                gravity: body.gravity,
+            };
+            match b.update(&hands, step.boost.is_some(), step.boost.map(|c| c.view)) {
+                Status::Running(r) => {
+                    if let Some(w) = r.weapon {
+                        intents.weapon(Prio::Protocol, w);
+                    }
+                    if let Some(l) = r.look {
+                        intents.look(Prio::Protocol, l);
+                    }
+                    if let Some(m) = r.movement {
+                        intents.movement(Prio::Protocol, m);
+                    }
+                    if r.jump {
+                        intents.stance(
+                            Prio::Protocol,
+                            StanceIntent {
+                                jump: true,
+                                duck: false,
+                                longjump: false,
+                            },
+                        );
+                    }
+                }
+                Status::Done => *boost = None,
+                Status::Failed(why) => {
+                    tracing::info!("{}: gauss boost given up: {why}", bot.persona.name);
+                    *boost = None;
+                }
             }
         }
     }

@@ -121,11 +121,12 @@ pub enum Action {
     LongJump {
         robustness: f32,
     },
-    /// Stop at the entry with the gauss fully charged, look back from the exit `pitch` degrees down, jump and let
-    /// the charge go; its recoil throws the bot toward the exit, steering onto it in the air.
+    /// Stop at the entry, look back from the exit `pitch` degrees down, charge the gauss for a recoil of `push`
+    /// units/s, jump and let the charge go; the recoil throws the bot toward the exit, steering onto it in the air.
     GaussBoost {
         pitch: f32,
         robustness: f32,
+        push: f32,
     },
 }
 

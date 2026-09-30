@@ -111,7 +111,7 @@ impl Navigator {
     }
 
     /// Nearest node the bot can reach in a straight line.
-    fn start_node(ctx: &mut NavCtx<'_>, origin: Vec3) -> Option<NodeId> {
+    pub(crate) fn start_node(ctx: &mut NavCtx<'_>, origin: Vec3) -> Option<NodeId> {
         for (id, _) in ctx.graph.nearest(origin, 512.0, 6) {
             let node = ctx.graph.node(id);
             let tr = ctx
@@ -159,26 +159,7 @@ impl Navigator {
             self.search = Some(Search::new(ctx.graph, ctx.graph.alt.as_deref(), start, goal));
         }
         self.known.expire(now);
-        let known = &self.known;
-        let health = ctx.health.as_deref();
-        let graph = ctx.graph;
-        let tricks = input.tricks;
-        let penalty = |a: NodeId, l: &NavLink| {
-            if health.is_some_and(|h| h.disabled(a, l.to)) {
-                return f32::INFINITY;
-            }
-            // Tricks only for the bots that can do them now.
-            let open = match l.kind {
-                LinkKind::LongJump => tricks.longjump,
-                LinkKind::GaussBoost => tricks.gauss_boost && tricks.boost_now,
-                _ => true,
-            };
-            let hurts = l.kind.is_trick() && graph.spec(l).is_some_and(|s| s.needs.health > input.health);
-            if !open || hurts {
-                return f32::INFINITY;
-            }
-            known.penalty(a, l.to, now)
-        };
+        let penalty = link_penalty(ctx.graph, &self.known, ctx.health.as_deref(), input);
         let mut unlimited = u32::MAX;
         let budget = match ctx.budget.as_deref_mut() {
             Some(b) => b,
@@ -325,6 +306,39 @@ impl Navigator {
         }
     }
 
+    /// Takes a trick off the graph next, from node `at` where the bot stands: `spec` lands at its exit, off the graph
+    /// (`reach`).
+    pub fn take_trick(&mut self, spec: crate::spec::TraversalSpec, at: NodeId, now: f64) {
+        let mut f = PathFollower::new(vec![at], now);
+        f.take_shortcut(spec, None, None, now, false);
+        self.follower = Some(f);
+        self.goal = None;
+        self.search = None;
+    }
+
+    /// Runs the trick taken with `take_trick`: the step, and how the trick ended when it just did (the follower is
+    /// dropped then).
+    pub fn run_trick(
+        &mut self,
+        ctx: &mut NavCtx<'_>,
+        input: &NavInput,
+    ) -> (Option<NavStep>, Option<Result<(), FailReason>>) {
+        let Some(follower) = self.follower.as_mut() else {
+            return (None, Some(Err(FailReason::ControllerFailure)));
+        };
+        let mut spare = u32::MAX;
+        let flights = ctx.flights.as_deref_mut().unwrap_or(&mut spare);
+        let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer, flights);
+        if let Some((kind, landed)) = follower.take_event() {
+            self.tricks.record(kind, landed);
+        }
+        let ended = follower.take_ended();
+        if ended.is_some() {
+            self.follower = None;
+        }
+        (Some(out.step), ended)
+    }
+
     /// A gauss boost from where the bot stands onto a node further along its path (`tricks::leap_along`): the
     /// follower takes it next. False when there is none, or no path followed.
     pub fn gauss_leap(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput) -> bool {
@@ -341,7 +355,7 @@ impl Navigator {
                     ctx.bot,
                     if at.is_some() { "on" } else { "off" }
                 );
-                f.take_shortcut(spec, to, at, input.now, false);
+                f.take_shortcut(spec, Some(to), at, input.now, false);
                 true
             }
             None => false,
@@ -483,8 +497,35 @@ impl Navigator {
     }
 }
 
+/// What a link costs this bot on top of its seconds: nothing it can take (`INFINITY`) when the link is switched off
+/// for every bot, is a trick the bot cannot do now, or takes more health than it has; otherwise what the bot learned
+/// about it.
+pub(crate) fn link_penalty<'a>(
+    graph: &'a NavGraph,
+    known: &'a KnownChanges,
+    health: Option<&'a LinkHealth>,
+    input: &'a NavInput,
+) -> impl Fn(NodeId, &NavLink) -> f32 + 'a {
+    move |a, l| {
+        if health.is_some_and(|h| h.disabled(a, l.to)) {
+            return f32::INFINITY;
+        }
+        let tricks = input.tricks;
+        let open = match l.kind {
+            LinkKind::LongJump => tricks.longjump,
+            LinkKind::GaussBoost => tricks.gauss_boost && tricks.boost_now,
+            _ => true,
+        };
+        let hurts = l.kind.is_trick() && graph.spec(l).is_some_and(|s| s.needs.health > input.health);
+        if !open || hurts {
+            return f32::INFINITY;
+        }
+        known.penalty(a, l.to, input.now)
+    }
+}
+
 /// Nothing in the way of walking straight to `dest` and floor under the way (no gap to fall into).
-fn straight_clear(tracer: &mut dyn Tracer, input: &NavInput, dest: Vec3) -> bool {
+pub(crate) fn straight_clear(tracer: &mut dyn Tracer, input: &NavInput, dest: Vec3) -> bool {
     let level = Vec3::new(dest.x, dest.y, input.origin.z);
     let tr = tracer.trace(&TraceQuery::hull(input.origin, level, HullKind::Stand));
     if tr.start_solid || tr.fraction < 1.0 {
@@ -499,7 +540,7 @@ fn straight_clear(tracer: &mut dyn Tracer, input: &NavInput, dest: Vec3) -> bool
 }
 
 /// A step straight at `dest`.
-fn straight(input: &NavInput, dest: Vec3) -> NavStep {
+pub(crate) fn straight(input: &NavInput, dest: Vec3) -> NavStep {
     let mut step = NavStep::hold(Vec3::new(dest.x, dest.y, input.origin.z + EYE_HEIGHT));
     step.speed = input.max_speed;
     step.move_dir = steer(

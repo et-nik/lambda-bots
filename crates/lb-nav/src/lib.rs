@@ -12,6 +12,7 @@ pub mod known;
 pub mod navigator;
 pub mod plan;
 pub mod probe;
+pub mod reach;
 pub mod spec;
 pub mod store;
 pub mod tricks;

@@ -857,6 +857,7 @@ dependencies = [
  "lb-nav-api",
  "lb-navgen",
  "lb-runtime",
+ "lb-testkit",
  "lb-worldq",
  "serde_json",
 ]
@@ -927,6 +928,8 @@ dependencies = [
  "lb-nav",
  "lb-navgen",
  "lb-telemetry",
+ "lb-worldq",
+ "rustc-hash",
  "serde",
  "serde_json",
  "subtle",

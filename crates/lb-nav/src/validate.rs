@@ -141,11 +141,13 @@ fn walk(tracer: &mut dyn Tracer, from: Vec3, to: Vec3, hull: HullKind, slide: bo
     if (target - cur.truncate()).length() > 8.0 {
         return WalkCheck::Blocked;
     }
-    if fall > 0.0 {
-        return WalkCheck::Drop(fall);
-    }
+    // Down on another floor than the target's (a walk off a ledge under a platform the target stands on) is not the
+    // way there.
     if (cur.z - to.z).abs() > ARRIVE_DZ {
-        WalkCheck::Blocked
+        return WalkCheck::Blocked;
+    }
+    if fall > 0.0 {
+        WalkCheck::Drop(fall)
     } else {
         WalkCheck::Ok
     }

@@ -76,6 +76,8 @@ pub struct MoveVerdict {
     pub ok: bool,
     /// Where the player came to rest (hull centre).
     pub landing: Vec3,
+    /// Where it first came down, before walking the rest of the way (hull centre).
+    pub touchdown: Vec3,
     /// Seconds in the air.
     pub flight: f32,
     /// Downward speed at the landing.
@@ -86,6 +88,36 @@ pub struct MoveVerdict {
 
 pub(crate) fn flat_dir(from: Vec3, to: Vec3) -> Vec2 {
     (to - from).truncate().normalize_or_zero()
+}
+
+/// Where a move from `from` meant to come down at `to` (standing origins) came down instead (`down`), for people:
+/// how far past, short of or to the side of the landing, and how far above or below it.
+pub fn came_down(from: Vec3, to: Vec3, down: Vec3) -> String {
+    let dir = flat_dir(from, to);
+    let off = (down - to).truncate();
+    let along = off.dot(dir);
+    let across = (off - dir * along).length();
+    let mut ways = Vec::new();
+    if along > 8.0 {
+        ways.push(format!("{along:.0} u past"));
+    } else if along < -8.0 {
+        ways.push(format!("{:.0} u short of", -along));
+    }
+    if across > 8.0 {
+        ways.push(format!("{across:.0} u to the side of"));
+    }
+    let mut s = if ways.is_empty() {
+        "comes down at the landing".to_string()
+    } else {
+        format!("comes down {} the landing", ways.join(" and "))
+    };
+    let dz = down.z - to.z;
+    if dz < -ARRIVE_DZ {
+        s.push_str(&format!(", {:.0} u below it", -dz));
+    } else if dz > ARRIVE_DZ {
+        s.push_str(&format!(", {dz:.0} u above it"));
+    }
+    s
 }
 
 pub(crate) fn arrived(p: &Player, to: Vec3, radius: f32) -> bool {
@@ -156,6 +188,7 @@ pub fn simulate_run_jump(world: &mut dyn MoveWorld, phys: &Physics, q: &JumpQuer
     MoveVerdict {
         ok: false,
         landing: p.origin,
+        touchdown: p.origin,
         flight: 0.0,
         impact: 0.0,
         in_water: false,
@@ -196,6 +229,7 @@ fn jump_from(world: &mut dyn MoveWorld, phys: &Physics, mut p: Player, q: &JumpQ
         }
     }
     let mut ok = jumped && airborne && arrived(&p, q.to, ARRIVE_RADIUS);
+    let touchdown = p.origin;
     if !ok && jumped && airborne && p.on_ground() && (p.feet() - (q.to.z - 36.0)).abs() <= ARRIVE_DZ {
         // Landed on the right floor short of the node: walk the rest, stopping at it (not past an edge).
         for _ in 0..60 {
@@ -210,6 +244,7 @@ fn jump_from(world: &mut dyn MoveWorld, phys: &Physics, mut p: Player, q: &JumpQ
     MoveVerdict {
         ok,
         landing: p.origin,
+        touchdown,
         flight,
         impact,
         in_water: p.waterlevel > 0,
@@ -317,6 +352,7 @@ pub fn simulate_swim(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: 
             return MoveVerdict {
                 ok: true,
                 landing: p.origin,
+                touchdown: p.origin,
                 flight: 0.0,
                 impact: 0.0,
                 in_water: p.waterlevel > 0,
@@ -336,6 +372,7 @@ pub fn simulate_swim(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: 
     MoveVerdict {
         ok: false,
         landing: p.origin,
+        touchdown: p.origin,
         flight: 0.0,
         impact: 0.0,
         in_water: p.waterlevel > 0,
@@ -466,6 +503,7 @@ fn push_run(world: &mut dyn MoveWorld, phys: &Physics, run: &PushRun, reach: boo
     let verdict = |p: &Player, ok: bool, flight: f32, impact: f32| MoveVerdict {
         ok,
         landing: p.origin,
+        touchdown: p.origin,
         flight,
         impact,
         in_water: p.waterlevel > 0,
@@ -595,6 +633,7 @@ pub fn simulate_drop(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: 
     MoveVerdict {
         ok: airborne && near && arrived(&p, to, ARRIVE_RADIUS),
         landing: p.origin,
+        touchdown: touchdown.unwrap_or(p.origin),
         flight,
         impact,
         in_water: p.waterlevel > 0,
@@ -641,6 +680,7 @@ pub fn simulate_walk(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: 
     MoveVerdict {
         ok: arrived(&p, to, 20.0),
         landing: p.origin,
+        touchdown: p.origin,
         flight,
         impact,
         in_water: p.waterlevel > 0,
@@ -701,6 +741,24 @@ pub fn plan_jump(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3
         }
     }
     best
+}
+
+/// Why no jump from `from` onto `to` holds: where the farthest-reaching one (the fastest run-up, ducking) comes down,
+/// or that jumps land only in some of the tries a little off.
+pub fn why_no_jump(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3) -> String {
+    let q = JumpQuery {
+        from,
+        to,
+        speed: JUMP_SPEEDS[JUMP_SPEEDS.len() - 1].min(phys.maxspeed),
+        duck: true,
+        longjump: false,
+    };
+    let room = run_up_room(world, from, flat_dir(from, to), q.speed);
+    let v = simulate_run_jump(world, phys, &q, room);
+    if !v.ok {
+        return format!("a running jump, ducking, {}", came_down(from, to, v.touchdown));
+    }
+    "jumps land in fewer than half of the tries a little off (the speed 10%, the takeoff 8 u, 3° across)".into()
 }
 
 fn jump_robustness(world: &mut dyn MoveWorld, phys: &Physics, q: &JumpQuery) -> f32 {

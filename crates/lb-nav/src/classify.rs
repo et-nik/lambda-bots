@@ -310,6 +310,7 @@ impl Classifier<'_> {
             action: Action::GaussBoost {
                 pitch: plan.pitch,
                 robustness: plan.robustness,
+                push: plan.push,
             },
             needs: Needs {
                 health: BOOST_HEALTH.max(damage + BOOST_HEALTH_AFTER),

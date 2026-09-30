@@ -91,7 +91,8 @@ pub async fn preview(
         let (name, nav) = page_map(&state, &map, req.revision)?;
         let overlay = nav::read_overlay(&state.install, &name, OVERLAYS[1]).file;
         let patched = nav.patched(&req.editor, overlay.as_ref());
-        Ok(Json(nav::preview(&nav.base, &patched)).into_response())
+        let tested = crate::problems::from_tests(&state.install, &name, &patched.graph);
+        Ok(Json(nav::preview(&nav.base, &patched, tested)).into_response())
     })
     .await
 }

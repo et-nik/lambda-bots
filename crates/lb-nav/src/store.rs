@@ -10,7 +10,7 @@ use crate::graph::NavGraph;
 
 pub const MAGIC: &[u8; 8] = b"LBNAV\0\r\n";
 /// Bumped when the layout, the key or the graph types change.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// What a graph was made from; a graph is reused only for exactly the same key.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -63,7 +63,8 @@ If the check fails the link is not added, unless the patch says `trust: true`; a
 `lb nav` and the live check still checks it. A trusted trick gets a contract that makes a bot try it.
 
 A node put in (`add_node`) is set down on the floor under `at` (crouched where standing does not fit) and linked both
-ways with the nodes within 384 units wherever the links check out; the patches after it may use it as an end.
+ways with the nodes within 384 units wherever the links check out; the patches after it may use it as an end. With
+`link: false` it goes in without links, and only the `add_link` patches after it link it.
 
 A node moved (`move_node`) keeps its number: the node nearest `from` is set down on the floor under `to` (a ladder node
 is moved as it is), and its links are checked again from there. Those that still check out stay, as what they are now

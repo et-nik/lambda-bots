@@ -2,7 +2,20 @@ import { defineStore } from 'pinia'
 import { markRaw } from 'vue'
 
 import { ApiError, applyOnServer, navInfo, navPreview, navRoute, saveEditor, STALE_GRAPH } from '../api'
-import type { EditedGraph, NavInfo, OnDisk, Outcome, OverlayFile, PatchOp, Pick, Preview, Route, Tool, Vec3 } from '../types'
+import type {
+  EditedGraph,
+  NavInfo,
+  OnDisk,
+  Outcome,
+  OverlayFile,
+  PatchOp,
+  Pick,
+  Preview,
+  Problem,
+  Route,
+  Tool,
+  Vec3,
+} from '../types'
 import { GraphModel, STAND } from '../viewer/graph'
 import { forbiddenNodes } from '../viewer/navlayer'
 import { useEditor } from './editor'
@@ -84,6 +97,25 @@ function storeDraft(map: string, version: string, file: OverlayFile | null) {
   }
 }
 
+const CHANGES_SHOWN = 'lb-editor:changes-shown'
+const PROBLEMS_SHOWN = 'lb-editor:problems-shown'
+
+function storedChangesShown(): boolean {
+  try {
+    return localStorage.getItem(CHANGES_SHOWN) === '1'
+  } catch {
+    return false
+  }
+}
+
+function storedProblemsShown(): boolean {
+  try {
+    return localStorage.getItem(PROBLEMS_SHOWN) !== '0'
+  } catch {
+    return true
+  }
+}
+
 let previewTimer = 0
 let previewSeq = 0
 /** A preview is on its way; `again` asks for another once it is back (the draft changed meanwhile). */
@@ -151,6 +183,8 @@ export const useNav = defineStore('nav', {
     linkBoth: true,
     linkTrust: false,
     unlinkBoth: true,
+    /** A node put in is linked with the nodes around. */
+    nodeLink: true,
     forbidRadius: 64,
     placeName: 'spot',
     placeRadius: 128,
@@ -178,12 +212,16 @@ export const useNav = defineStore('nav', {
     noticeSeq: 0,
     /** A change put in from the panel whose outcome is told once the preview has it. */
     reportPatch: null as number | null,
+    /** The list of changes is open under the view. */
+    changesShown: storedChangesShown(),
     show: true,
     /** Link kinds not drawn, and whether links that are off are hidden. */
     hiddenKinds: [] as string[],
     hideOff: false,
     /** Only the links of what is selected are drawn. */
     onlySelected: false,
+    /** The problems are marked in the view. */
+    problemsShown: storedProblemsShown(),
     /** Bumped when the panel asks the view to bring the selection close. */
     focusRequest: 0,
     /** Bumped when the panel asks the view to show the selection if it is out of sight. */
@@ -217,6 +255,19 @@ export const useNav = defineStore('nav', {
     },
     dirty(): boolean {
       return text(this.draft) !== this.savedText
+    },
+    problems(): Problem[] {
+      return this.preview?.problems ?? []
+    },
+    /** The problems of each link, by `from:to`. */
+    problemsByLink(): Map<string, Problem[]> {
+      const out = new Map<string, Problem[]>()
+      for (const p of this.problems) {
+        if (p.from === null || p.to === null) continue
+        const key = `${p.from}:${p.to}`
+        out.set(key, [...(out.get(key) ?? []), p])
+      }
+      return out
     },
     patches(): PatchOp[] {
       return this.draft?.nav?.patches ?? []
@@ -398,6 +449,58 @@ export const useNav = defineStore('nav', {
     notify(text: string) {
       this.notice = text
       this.noticeSeq++
+    },
+
+    /** Marks the problems in the view, or not; the page marks them as it was left. */
+    showProblems(on: boolean) {
+      this.problemsShown = on
+      try {
+        localStorage.setItem(PROBLEMS_SHOWN, on ? '1' : '0')
+      } catch {
+        // Blocked storage: remembered for this page only.
+      }
+    },
+
+    /** The problems of the link `a → b`. */
+    problemsOf(a: number, b: number): Problem[] {
+      return this.problemsByLink.get(`${a}:${b}`) ?? []
+    },
+
+    /**
+     * Shows what a problem is about: the link when it is in the graph, else the change it comes of in the editor
+     * file, else the node it starts from.
+     */
+    goProblem(p: Problem) {
+      const m = this.model
+      if (m && p.from !== null && p.to !== null && m.find(p.from, p.to)) {
+        this.goLink([p.from, p.to])
+      } else if (p.patch && p.patch[0] === 'editor' && this.patches[p.patch[1]]) {
+        this.goPatch(p.patch[1])
+      } else if (p.from !== null) {
+        this.goNode(p.from)
+      }
+    },
+
+    /** Lights up in the view what a problem is about. */
+    peekProblem(p: Problem | null) {
+      const m = this.model
+      if (!p || !m) {
+        this.peek = null
+        return
+      }
+      const nodes = [p.from, p.to].filter((n): n is number => n !== null && n < m.nodes)
+      const there = p.from !== null && p.to !== null && m.find(p.from, p.to) !== undefined
+      this.peek = { nodes, links: there ? [[p.from!, p.to!]] : [] }
+    },
+
+    /** Opens or closes the list of changes; the page opens it as it was left. */
+    showChanges(on: boolean) {
+      this.changesShown = on
+      try {
+        localStorage.setItem(CHANGES_SHOWN, on ? '1' : '0')
+      } catch {
+        // Blocked storage: remembered for this page only.
+      }
     },
 
     /** Takes the links between `a` and `b` out, both ways (those there are). */
@@ -693,7 +796,7 @@ export const useNav = defineStore('nav', {
           else this.notify('Click a link.')
           return
         case 'node':
-          if (p.point) this.addPatch({ op: 'add_node', at: up(p.point) })
+          if (p.point) this.addPatch({ op: 'add_node', at: up(p.point), ...(this.nodeLink ? {} : { link: false }) })
           return
         case 'move':
           if (p.node !== null) {

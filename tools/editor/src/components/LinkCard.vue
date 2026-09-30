@@ -15,6 +15,7 @@ const b = computed(() => props.link[1])
 const l = computed(() => nav.model?.find(a.value, b.value))
 const back = computed(() => nav.model?.find(b.value, a.value))
 const linked = computed(() => nav.linkedBy(a.value, b.value))
+const problems = computed(() => nav.problemsOf(a.value, b.value))
 const kind = ref<LinkKindChoice>('auto')
 const trust = ref(false)
 
@@ -42,7 +43,13 @@ onBeforeUnmount(() => (nav.peek = null))
         Put in by <button class="linkish" @click="nav.goPatch(linked)">change {{ linked + 1 }}</button>
       </p>
     </template>
+    <p v-else-if="problems.some((p) => p.kind === 'refused')" class="note">Not put in: it does not check out.</p>
     <p v-else class="note">No such link now: a change took it out.</p>
+    <ul v-if="problems.length" class="problems">
+      <li v-for="(p, i) in problems" :key="i" :class="p.level">
+        <span class="mark">{{ p.level === 'error' ? '●' : '▲' }}</span>{{ p.why }}
+      </li>
+    </ul>
 
     <dl>
       <dt>From</dt>
@@ -80,6 +87,26 @@ onBeforeUnmount(() => (nav.peek = null))
 </template>
 
 <style scoped>
+.problems {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.problems li {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0;
+}
+.problems .mark {
+  flex: none;
+}
+.problems .error .mark {
+  color: var(--warn);
+}
+.problems .attention .mark {
+  color: var(--attention);
+}
 .what {
   display: flex;
   gap: 6px;

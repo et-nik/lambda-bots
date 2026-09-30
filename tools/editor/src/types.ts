@@ -95,7 +95,7 @@ export type PatchOp =
   | { op: 'forbid'; at: Vec3; radius: number; note?: string }
   | { op: 'add_link'; from: Vec3; to: Vec3; kind?: string; both: boolean; trust: boolean; note?: string }
   | { op: 'remove_link'; from: Vec3; to: Vec3; both: boolean; note?: string }
-  | { op: 'add_node'; at: Vec3; note?: string }
+  | { op: 'add_node'; at: Vec3; link?: boolean; note?: string }
   | { op: 'move_node'; from: Vec3; to: Vec3; note?: string }
 
 export interface Place {
@@ -126,6 +126,28 @@ export interface Outcome {
   message: string
   nodes: number[]
   links: [number, number][]
+  /** Links it asked for that do not check out, and why: a change that put a link in one way only has some. */
+  refused: { from: number; to: number; why: string }[]
+}
+
+/**
+ * What the page flags: an error (a link a change asked for that does not check out, a link bots failed in test runs)
+ * or one to look at (a change that does nothing, a trick link that lands only in some tries, one put in without the
+ * check, a walk that falls off a ledge on the way).
+ */
+export interface Problem {
+  level: 'error' | 'attention'
+  kind: 'refused' | 'failed' | 'missed' | 'idle' | 'weak' | 'trusted' | 'fall'
+  /** The link's ends in the graph shown; null where no node stands. */
+  from: number | null
+  to: number | null
+  /** Where the ends stand (x, y, z each): a link not in the graph is drawn from them. */
+  at: [number, number, number, number, number, number]
+  /** The link's kind, or the kind a change asked for. */
+  link: string
+  why: string
+  /** The change it comes of: `editor` or `overlay`, and its index there. */
+  patch: ['editor' | 'overlay', number] | null
 }
 
 /** Flat graph: `[x, y, z, flags]` a node, `[from, to, kind, flags, centiseconds]` a link. */
@@ -156,6 +178,8 @@ export interface Preview {
   removed: number[]
   editor: Outcome[]
   overlay: Outcome[]
+  /** Errors first. */
+  problems: Problem[]
 }
 
 export interface Route {

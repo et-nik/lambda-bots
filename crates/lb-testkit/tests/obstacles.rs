@@ -576,6 +576,7 @@ fn a_gauss_boost_gets_the_bot_onto_a_ledge() {
         Some(Action::GaussBoost {
             pitch: 34.0,
             robustness: 1.0,
+            push: 1000.0,
         }),
     );
     let mut c = Course::new(w, Game::default(), g.build());
@@ -608,6 +609,7 @@ fn a_gauss_boost_gets_the_bot_onto_a_ledge() {
                 Some(Action::GaussBoost {
                     pitch: 34.0,
                     robustness: 1.0,
+                    push: 1000.0,
                 }),
             );
             g.build()

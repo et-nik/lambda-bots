@@ -8,7 +8,8 @@ export const MOD = MAC ? '⌘' : 'Ctrl+'
 const CTRL_SHORTCUT = 600
 
 /**
- * The editor's keys: tools, undo and redo, save, Esc, Delete, the grid's step and the links of the selection alone.
+ * The editor's keys: tools, undo and redo, save, Esc, Delete, the grid's step, the links of the selection alone and
+ * the list of changes.
  * Returns what takes them away.
  */
 export function installShortcuts(): () => void {
@@ -49,6 +50,8 @@ export function installShortcuts(): () => void {
       nav.snapBy(e.code === 'BracketLeft' ? -1 : 1)
     } else if (e.code === 'KeyI') {
       nav.onlySelected = !nav.onlySelected
+    } else if (e.code === 'KeyC') {
+      nav.showChanges(!nav.changesShown)
     } else {
       const tool = TOOLS.find((x) => x.code === e.code)
       if (tool) nav.setTool(tool.id)

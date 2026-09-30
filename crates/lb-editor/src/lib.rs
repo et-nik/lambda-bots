@@ -8,6 +8,7 @@ pub mod guard;
 pub mod maps;
 pub mod nav;
 mod navapi;
+pub mod problems;
 
 use std::path::PathBuf;
 use std::sync::Arc;

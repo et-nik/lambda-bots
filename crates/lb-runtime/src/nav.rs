@@ -71,6 +71,9 @@ pub struct LoadedMap {
     pub overlays: Arc<Vec<OverlayFile>>,
     pub patches: String,
     pub millis: u128,
+    /// The map with its doors, lifts and breakables at rest, for the offline checks of commanded bots (the trick
+    /// search of `lb do` and `lb test`); `None` without a graph.
+    pub world: Option<Box<lb_bsp::BspWorld>>,
 }
 
 /// `LoadedMap::origin` of the graph the map editor saved with the overlays applied (`mapload::EDITED`).
@@ -303,6 +306,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         }
         Err(_) => None,
     };
+    let world = graph.is_ok().then(|| Box::new(world));
     Ok(LoadedMap {
         vis,
         items: Arc::new(items),
@@ -315,6 +319,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         overlays: Arc::new(overlays),
         patches,
         millis: started.elapsed().as_millis(),
+        world,
     })
 }
 

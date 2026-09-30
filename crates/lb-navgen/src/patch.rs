@@ -47,6 +47,16 @@ pub struct Outcome {
     pub nodes: Vec<NodeId>,
     /// Links it put in or took out; the links a moved node has now.
     pub links: Vec<(NodeId, NodeId)>,
+    /// Links it asked for that do not check out, a patch that put in the link one way only included.
+    pub refused: Vec<Refusal>,
+}
+
+/// A link a patch asked for that does not check out, and why, from what its check found.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Refusal {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub why: String,
 }
 
 /// What applying the patches came to.
@@ -91,6 +101,7 @@ fn done(message: String, nodes: Vec<NodeId>, links: Vec<(NodeId, NodeId)>) -> Ou
         message,
         nodes,
         links,
+        refused: Vec::new(),
     }
 }
 
@@ -127,10 +138,47 @@ fn checked(cls: &mut Classifier<'_>, x: usize, y: usize, kind: Option<&str>) -> 
             let plan = plan_boost(cls.world, &cls.phys, from, to, FULL_PUSH)?;
             let view = boost_view((to - from).truncate().normalize_or_zero(), plan.pitch);
             let eye = lb_nav::tricks::boost_eye(from);
-            lb_nav::tricks::beam_safe(cls.world, eye, view, FULL_PUSH / 5.0, true)
+            lb_nav::tricks::beam_safe(cls.world, eye, view, plan.push / 5.0, true)
                 .then(|| cls.boost_from_plan(&a, &b, &plan))
         }
         _ => Some(cls.classify(x, y, kind == Some("jump"))).filter(|c| c.valid),
+    }
+}
+
+/// Why the link `x → y` of the kind an added link names does not check out, from what its check found.
+fn why_not(cls: &mut Classifier<'_>, x: usize, y: usize, kind: Option<&str>) -> String {
+    let (a, b) = (cls.nodes[x], cls.nodes[y]);
+    let (from, to) = (stand_origin(&a), stand_origin(&b));
+    let phys = cls.phys;
+    match kind {
+        Some("longjump") => lb_kin::tricks::why_no_longjump(cls.world, &phys, from, to),
+        Some("gauss_boost") => match plan_boost(cls.world, &phys, from, to, FULL_PUSH) {
+            None => lb_kin::tricks::why_no_boost(cls.world, &phys, from, to, FULL_PUSH),
+            Some(_) => {
+                "the beam would glance off, or come back at the bot through a wall too thick to punch through".into()
+            }
+        },
+        Some("crouch") => walk_why(walk_check(
+            cls.world,
+            crouch_origin(&a),
+            crouch_origin(&b),
+            HullKind::Crouch,
+        )),
+        Some("jump") => lb_kin::validate::why_no_jump(cls.world, &phys, from, to),
+        _ => format!(
+            "walking there {}, and {}",
+            walk_why(walk_check(cls.world, a.origin, b.origin, HullKind::Stand)),
+            lb_kin::validate::why_no_jump(cls.world, &phys, from, to)
+        ),
+    }
+}
+
+fn walk_why(r: WalkCheck) -> String {
+    match r {
+        WalkCheck::Ok => "gets there".into(),
+        WalkCheck::Drop(h) => format!("falls {h:.0} u on the way"),
+        WalkCheck::Gap => "is cut by a gap".into(),
+        _ => "is blocked".into(),
     }
 }
 
@@ -142,6 +190,7 @@ fn trusted(cls: &mut Classifier<'_>, x: usize, y: usize, kind: Option<&str>) -> 
         Some("longjump") => {
             let plan = TrickPlan {
                 pitch: 0.0,
+                push: 0.0,
                 robustness: 0.5,
                 flight: flight(LONGJUMP_SPEED),
                 impact: 0.0,
@@ -151,6 +200,7 @@ fn trusted(cls: &mut Classifier<'_>, x: usize, y: usize, kind: Option<&str>) -> 
         Some("gauss_boost") => {
             let plan = TrickPlan {
                 pitch: TRUSTED_BOOST_PITCH,
+                push: FULL_PUSH,
                 robustness: 0.5,
                 flight: flight(LONGJUMP_SPEED),
                 impact: 0.0,
@@ -231,7 +281,7 @@ pub fn apply(
                 trust,
                 ..
             } => p.add_link(v(*from), v(*to), kind.as_deref(), *both, *trust),
-            Patch::AddNode { at, .. } => p.add_node(v(*at)),
+            Patch::AddNode { at, link, .. } => p.add_node(v(*at), *link),
             Patch::MoveNode { from, to, .. } => p.move_node(v(*from), v(*to)),
         };
         if outcome.ok {
@@ -337,7 +387,11 @@ impl Patcher<'_> {
                     )
                 }
                 None => {
-                    refusals.push(format!("{x} -> {y}"));
+                    refusals.push(Refusal {
+                        from: x as NodeId,
+                        to: y as NodeId,
+                        why: why_not(&mut self.cls, x, y, kind),
+                    });
                     continue;
                 }
             };
@@ -348,14 +402,18 @@ impl Patcher<'_> {
             links.push((x as NodeId, y as NodeId, made));
         }
         let wanted = kind.unwrap_or("a link");
+        let named: Vec<String> = refusals.iter().map(|r| format!("{} -> {}", r.from, r.to)).collect();
         if links.is_empty() {
-            return refused(
-                format!(
-                    "{} does not check out as {wanted}; `trust: true` adds it anyway",
-                    refusals.join(" and ")
-                ),
-                ends,
-            );
+            return Outcome {
+                refused: refusals,
+                ..refused(
+                    format!(
+                        "{} does not check out as {wanted}; `trust: true` adds it anyway",
+                        named.join(" and ")
+                    ),
+                    ends,
+                )
+            };
         }
         let made: Vec<String> = links
             .iter()
@@ -367,12 +425,15 @@ impl Patcher<'_> {
             if unchecked { " without the check (trusted)" } else { "" }
         );
         if !refusals.is_empty() {
-            message.push_str(&format!("; {} does not check out", refusals.join(", ")));
+            message.push_str(&format!("; {} does not check out", named.join(", ")));
         }
-        done(message, ends, links.into_iter().map(|(x, y, _)| (x, y)).collect())
+        Outcome {
+            refused: refusals,
+            ..done(message, ends, links.into_iter().map(|(x, y, _)| (x, y)).collect())
+        }
     }
 
-    fn add_node(&mut self, at: Vec3) -> Outcome {
+    fn add_node(&mut self, at: Vec3, link: bool) -> Outcome {
         let (origin, flags, support) = self.cls.settle(at, NodeFlags::empty());
         if flags.contains(NodeFlags::AIRBORNE) {
             return failed("no floor within 96 units under the point, or the point is inside a wall".into());
@@ -391,6 +452,11 @@ impl Patcher<'_> {
         });
         self.out.push(Vec::new());
         self.shut.push(false);
+        if !link {
+            let id = id as NodeId;
+            let message = format!("node {id} at {}{}: not linked", place(origin), crouched(flags));
+            return done(message, vec![id], Vec::new());
+        }
         let links = self.link_around(id, &FxHashSet::default());
         let id = id as NodeId;
         let outs = links.iter().filter(|(x, _)| *x == id).count();
@@ -402,10 +468,10 @@ impl Patcher<'_> {
         );
         if links.is_empty() {
             return Outcome {
-                ok: false,
                 message: format!("{message}: nothing around checks out; link it with a trusted add_link"),
                 nodes: vec![id],
                 links,
+                ..Outcome::default()
             };
         }
         done(message, vec![id], links)
@@ -485,10 +551,10 @@ impl Patcher<'_> {
         );
         if links.is_empty() {
             return Outcome {
-                ok: false,
                 message: format!("{message}: nothing around checks out; link it with a trusted add_link"),
                 nodes: vec![id],
                 links,
+                ..Outcome::default()
             };
         }
         done(message, vec![id], links)
@@ -622,6 +688,7 @@ mod tests {
         let patches = vec![
             Patch::AddNode {
                 at: mid.to_array(),
+                link: true,
                 note: String::new(),
             },
             Patch::RemoveLink {
@@ -645,6 +712,7 @@ mod tests {
         assert!(patched.find_link(id, a).is_none() && patched.find_link(a, id).is_none());
         let again = vec![Patch::AddNode {
             at: g.node(a).origin.to_array(),
+            link: true,
             note: String::new(),
         }];
         let (_, report) = apply(g.clone(), &again, &mut world, &mech, Physics::default());
@@ -654,10 +722,47 @@ mod tests {
         );
         let air = vec![Patch::AddNode {
             at: [99999.0, 0.0, 0.0],
+            link: true,
             note: String::new(),
         }];
         let (_, report) = apply(g, &air, &mut world, &mech, Physics::default());
         assert!(!report.outcomes[0].ok);
+    }
+
+    #[test]
+    fn a_node_put_in_without_links_gets_only_the_links_after_it() {
+        let Some((mut world, mech, g)) = crossfire() else {
+            return;
+        };
+        let (a, _, mid) = long_walk(&g);
+        let patches = vec![
+            Patch::AddNode {
+                at: mid.to_array(),
+                link: false,
+                note: String::new(),
+            },
+            Patch::AddLink {
+                from: mid.to_array(),
+                to: g.node(a).origin.to_array(),
+                kind: None,
+                both: false,
+                trust: false,
+                note: String::new(),
+            },
+        ];
+        let (patched, report) = apply(g.clone(), &patches, &mut world, &mech, Physics::default());
+        let id = g.len() as NodeId;
+        let put = &report.outcomes[0];
+        assert!(
+            put.ok && put.links.is_empty() && put.message.ends_with("not linked"),
+            "{report:?}"
+        );
+        assert!(report.outcomes[1].ok, "{report:?}");
+        assert_eq!(patched.links(id).iter().map(|l| l.to).collect::<Vec<_>>(), vec![a]);
+        assert!(
+            (0..id).all(|n| patched.links(n).iter().all(|l| l.to != id)),
+            "nothing links into it"
+        );
     }
 
     #[test]
@@ -773,6 +878,7 @@ mod tests {
             },
             Patch::AddNode {
                 at: mid.to_array(),
+                link: true,
                 note: String::new(),
             },
             Patch::AddLink {
@@ -790,6 +896,7 @@ mod tests {
             },
             Patch::AddNode {
                 at: (at + Vec3::X * 4.0).to_array(),
+                link: true,
                 note: String::new(),
             },
         ];

@@ -74,7 +74,8 @@ checked with a port of the engine's player movement, and every special link (jum
 teleport, breakable, push) carries a contract that an executor carries out the way a player would, with fresh presses
 of use and jump. Failed links are avoided for a while, by reason; a bot stuck for good uses `kill`. Details and the
 obstacle courses: `docs/navigation.md`. Places and graph patches per map, and the in-game editor: `docs/overlays.md`.
-The map in 3D in the browser, next to any server: `docs/editor.md`.
+The map in 3D in the browser, next to any server: `docs/editor.md`. Testing how bots get to a spot, with items and
+tricks, live and offline, and the map's saved tests: `docs/testing.md`.
 
 ## Recording and replay
 
@@ -100,6 +101,9 @@ run them from their own console.
 | `lb edit …`                            | in-game editor of the map's overlay (`lb_editor 1`)             |
 | `lb nav test <kind\|all> [n]`          | a bot runs special links (obstacle course)                      |
 | `lb nav test link <from> <to> …`       | a bot runs exactly these links                                  |
+| `lb give <name\|all> <item>…`          | items for bots now (needs `sv_cheats 1`)                        |
+| `lb do <name\|all> go <spot> …`        | send bots to a spot, with tricks where the graph has no way     |
+| `lb test [add\|run\|stop …]`           | the map's tests from a start to a goal, reports in logs/tests   |
 | `lb record [start [s]\|stop]`          | record the next map for `lb-cli replay`                         |
 | `lb vision [name]`                     | what bots see, hear and remember                                |
 | `lb brain [name]`                      | goals, candidates, target, weapon, reactions, weapon prediction |
@@ -185,7 +189,7 @@ scripts/stand/lbcmd.sh --stop
 | `crates/lb-brain`      | per-bot senses, beliefs and attention                                           |
 | `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging, recorder                 |
 | `crates/lb-plugin`     | exported `lb_core_*`, panic isolation                                           |
-| `crates/lb-cli`        | `config check`, `replay`, `nav gen/coverage/path/validate-overlay/tracecheck`   |
+| `crates/lb-cli`        | config check, replay, `nav gen/coverage/path/try/validate-overlay/tracecheck`   |
 | `crates/lb-testkit`    | simulated server for the obstacle courses                                       |
 | `data/`                | config, name lists; installed into `addons/lambdabots/`                         |
 | `tools/editor`         | the map editor's page (Vue 3, three.js)                                         |

@@ -7,17 +7,21 @@
 //!   onto its landing; the air takes speed away fast, so a long jump comes down anywhere short of its full reach.
 //! - **Gauss boost.** A charged gauss shot pushes its shooter back at five times its damage, up and down too in
 //!   multiplayer. Looking back and 30–38° down, a full charge let go as the bot jumps adds some 850 units/s forward
-//!   and 550 up: a flight of over a thousand units, or onto a ledge a few hundred units up.
+//!   and 550 up: a flight of over a thousand units, or onto a ledge a few hundred units up. The damage grows evenly
+//!   over the 1.5 s of a full charge and the game lets a charge go after half a second at the soonest, so a boost is
+//!   charged for the push it needs, a third of a full one or more: a lower arc under ceilings, a shorter fall, an
+//!   unsteered flight that ends near the landing.
 
 use lb_core::input::{IN_DUCK, IN_FORWARD, IN_JUMP};
 use lb_core::math::{dir_to_view_angles, view_angle_vectors};
 use lb_core::{Vec2, Vec3};
 use lb_worldq::{HullKind, Trace, TraceQuery, Tracer, contents};
+use smallvec::SmallVec;
 
 use crate::physics::Physics;
-use crate::pmove::{Cmd, LONGJUMP_SPEED, LONGJUMP_UP, Ladder, MoveWorld, Player, player_move};
+use crate::pmove::{Cmd, JUMP_SPEED, LONGJUMP_SPEED, LONGJUMP_UP, Ladder, MoveWorld, Player, player_move};
 use crate::validate::{
-    ARRIVE_DZ, ARRIVE_RADIUS, MoveVerdict, STEP_MS, air_steer, arrived, cmd_toward, flat_dir, settled,
+    ARRIVE_DZ, ARRIVE_RADIUS, MoveVerdict, STEP_MS, air_steer, arrived, came_down, cmd_toward, flat_dir, settled,
 };
 
 /// A long jump is taken moving at least this fast (the game wants more than 50 units/s).
@@ -67,6 +71,7 @@ fn verdict(p: &Player, ok: bool, flight: f32, impact: f32) -> MoveVerdict {
     MoveVerdict {
         ok,
         landing: p.origin,
+        touchdown: p.origin,
         flight,
         impact,
         in_water: p.waterlevel > 0,
@@ -106,6 +111,7 @@ fn fly(world: &mut dyn MoveWorld, phys: &Physics, mut p: Player, yaw: f32, to: O
     let Some(to) = to else {
         return verdict(&p, down, flight, impact);
     };
+    let touchdown = p.origin;
     if down && !arrived(&p, to, ARRIVE_RADIUS) && p.on_ground() && (p.feet() - (to.z - 36.0)).abs() <= ARRIVE_DZ {
         for _ in 0..WALK_REST {
             if (to - p.origin).truncate().length() < 12.0 || !p.on_ground() {
@@ -116,7 +122,10 @@ fn fly(world: &mut dyn MoveWorld, phys: &Physics, mut p: Player, yaw: f32, to: O
         }
     }
     let ok = down && arrived(&p, to, ARRIVE_RADIUS);
-    verdict(&p, ok, flight, impact)
+    MoveVerdict {
+        touchdown,
+        ..verdict(&p, ok, flight, impact)
+    }
 }
 
 /// A long jump taken now by `p` (on the ground, moving faster than 50 units/s), looking level along `yaw`, with the
@@ -186,11 +195,13 @@ pub fn simulate_longjump(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, 
     verdict(&p, false, 0.0, 0.0)
 }
 
-/// How a trick link is done: the view's pitch it needs (the gauss boost's look down), the share of perturbed
-/// attempts that still land, how long it flies and how hard it comes down.
+/// How a trick link is done: the view's pitch it needs (the gauss boost's look down) and the push of the boost's
+/// charge, the share of perturbed attempts that still land, how long it flies and how hard it comes down.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrickPlan {
     pub pitch: f32,
+    /// A boost's recoil, units/s (0 for a long jump).
+    pub push: f32,
     pub robustness: f32,
     pub flight: f32,
     pub impact: f32,
@@ -221,6 +232,7 @@ pub fn plan_longjump(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: 
     let robustness = landed as f32 / variants.len() as f32;
     (landed == variants.len()).then_some(TrickPlan {
         pitch: 0.0,
+        push: 0.0,
         robustness,
         flight: v.flight,
         impact: v.impact,
@@ -274,72 +286,218 @@ pub fn simulate_boost(world: &mut dyn MoveWorld, phys: &Physics, q: &BoostQuery)
     fly(world, phys, p, dir_to_view_angles(q.dir.extend(0.0)).y, q.to, 0)
 }
 
-/// Pitches a boost is tried with, the likeliest first.
-pub const BOOST_PITCHES: [f32; 3] = [34.0, 30.0, 38.0];
+/// Seconds a charge takes to build fully in multiplayer (`CGauss::GetFullChargeTime`); its damage, and so its push,
+/// grows evenly until then.
+pub const FULL_CHARGE: f32 = 1.5;
+/// The game lets a charge go no sooner than this after it starts: a boost pushes a third of a full one at least.
+pub const MIN_CHARGE: f32 = 0.5;
 
-/// The gauss boost from `from` onto `to`, if one gets there reliably (the view off by 3° across or 2° down, the
-/// takeoff 8 units along the way, still lands), and comes down somewhere safe unsteered too (the steering may stop
-/// when a fight takes the bot's mind off it).
-pub fn plan_boost(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3, push: f32) -> Option<TrickPlan> {
-    let dir = flat_dir(from, to);
-    for pitch in BOOST_PITCHES {
-        let q = BoostQuery {
-            from,
-            dir,
-            pitch,
-            push,
-            to: Some(to),
-        };
-        let v = simulate_boost(world, phys, &q);
-        if !v.ok {
-            continue;
+/// Seconds to charge the gauss for a boost of `push` when a full charge pushes `full` (five times its damage).
+pub fn charge_for(push: f32, full: f32) -> f32 {
+    (FULL_CHARGE * push / full.max(1.0)).clamp(MIN_CHARGE, FULL_CHARGE)
+}
+
+/// Pitches a boost is tried with: the shallow ones throw far, the steep ones high.
+pub const BOOST_PITCHES: [f32; 11] = [30.0, 34.0, 38.0, 42.0, 46.0, 50.0, 54.0, 58.0, 62.0, 66.0, 70.0];
+/// A boost is pushed to come down unsteered this far past its landing, and this share of the way further: the air
+/// steering brakes the rest, and a charge let go a little early still gets there.
+const OVERSHOOT: f32 = 32.0;
+const OVERSHOOT_SHARE: f32 = 0.08;
+/// The top of a boost's arc clears its landing by this much at least.
+const APEX_CLEAR: f32 = 24.0;
+/// A boost's steered flight comes down this near its landing at most (flat).
+const BOOST_TOUCHDOWN: f32 = 64.0;
+
+/// The least push that throws a boost looking `pitch` degrees down onto a landing `along` units away and `up` units
+/// above the takeoff (standing origins), with the overshoot the steering brakes, in the open. `None` when a full
+/// charge's push (`full`) does not.
+pub fn boost_push(gravity: f32, pitch: f32, along: f32, up: f32, full: f32) -> Option<f32> {
+    let (s, c) = lb_core::dmath::sin_cos(pitch.to_radians());
+    let want = along * (1.0 + OVERSHOOT_SHARE) + OVERSHOOT;
+    let reach = |push: f32| {
+        let vz = JUMP_SPEED + push * s;
+        if vz * vz < 2.0 * gravity * (up + APEX_CLEAR) {
+            return 0.0;
         }
-        let turn = |deg: f32| {
-            let (s, c) = lb_core::dmath::sin_cos(deg.to_radians());
-            Vec2::new(dir.x * c - dir.y * s, dir.x * s + dir.y * c)
-        };
-        let variants = [
-            BoostQuery { dir: turn(-3.0), ..q },
-            BoostQuery { dir: turn(3.0), ..q },
-            BoostQuery {
-                pitch: pitch - 2.0,
-                ..q
-            },
-            BoostQuery {
-                pitch: pitch + 2.0,
-                ..q
-            },
-            BoostQuery {
-                from: from - dir.extend(0.0) * 8.0,
-                ..q
-            },
-            BoostQuery {
-                from: from + dir.extend(0.0) * 8.0,
-                ..q
-            },
-        ];
-        let landed = variants.iter().filter(|v| simulate_boost(world, phys, v).ok).count();
-        let robustness = landed as f32 / variants.len() as f32;
-        if robustness < TRICK_ROBUST {
-            continue;
-        }
-        let free = simulate_boost(world, phys, &BoostQuery { to: None, ..q });
-        if !free.ok || phys.fall_damage(free.impact) > phys.fall_damage(v.impact).max(10.0) {
-            continue;
-        }
-        let mut p = settled(world, phys, free.landing);
-        p.origin = free.landing;
-        if hazard(world, &p) {
-            continue;
-        }
-        return Some(TrickPlan {
-            pitch,
-            robustness,
-            flight: v.flight,
-            impact: v.impact,
-        });
+        push * c * (vz + (vz * vz - 2.0 * gravity * up).sqrt()) / gravity
+    };
+    if reach(full) < want {
+        return None;
     }
-    None
+    let (mut lo, mut hi) = (0.0f32, full);
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if reach(mid) >= want {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(hi.max(full * MIN_CHARGE / FULL_CHARGE))
+}
+
+/// The pitches and pushes a boost from `from` onto `to` is tried with when a full charge pushes `full`: every pitch
+/// that can throw that far and high, with the least push it takes (`boost_push`), the gentlest first.
+pub fn boost_tries(gravity: f32, from: Vec3, to: Vec3, full: f32) -> SmallVec<[(f32, f32); 11]> {
+    let along = (to - from).truncate().length();
+    let mut tries: SmallVec<[(f32, f32); 11]> = BOOST_PITCHES
+        .iter()
+        .filter_map(|&pitch| boost_push(gravity, pitch, along, to.z - from.z, full).map(|push| (pitch, push)))
+        .collect();
+    tries.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)));
+    tries
+}
+
+/// The boost from `from` onto `to` looking `pitch` degrees down with `push`, if it gets there reliably: its steered
+/// flight still lands with the view off by 3° across or 2° down, the takeoff 8 units along the way or the push 4% off
+/// (no more than `full`), and it comes down somewhere safe unsteered too (the steering may stop when a fight takes
+/// the bot's mind off it).
+pub fn check_boost(
+    world: &mut dyn MoveWorld,
+    phys: &Physics,
+    from: Vec3,
+    to: Vec3,
+    (pitch, push): (f32, f32),
+    full: f32,
+) -> Option<TrickPlan> {
+    try_boost(world, phys, from, to, (pitch, push), full).ok()
+}
+
+/// `check_boost`, saying what fails when the boost does not hold.
+pub fn try_boost(
+    world: &mut dyn MoveWorld,
+    phys: &Physics,
+    from: Vec3,
+    to: Vec3,
+    (pitch, push): (f32, f32),
+    full: f32,
+) -> Result<TrickPlan, String> {
+    let dir = flat_dir(from, to);
+    let q = BoostQuery {
+        from,
+        dir,
+        pitch,
+        push,
+        to: Some(to),
+    };
+    // Down near the landing: a flight that hits an edge on the way and walks the rest is not one to count on.
+    let lands = |v: &MoveVerdict| v.ok && (v.touchdown - to).truncate().length() <= BOOST_TOUCHDOWN;
+    let v = simulate_boost(world, phys, &q);
+    if !lands(&v) {
+        return Err(format!("the flight {}", came_down(from, to, v.touchdown)));
+    }
+    let turn = |deg: f32| {
+        let (s, c) = lb_core::dmath::sin_cos(deg.to_radians());
+        Vec2::new(dir.x * c - dir.y * s, dir.x * s + dir.y * c)
+    };
+    let variants = [
+        BoostQuery { dir: turn(-3.0), ..q },
+        BoostQuery { dir: turn(3.0), ..q },
+        BoostQuery {
+            pitch: pitch - 2.0,
+            ..q
+        },
+        BoostQuery {
+            pitch: pitch + 2.0,
+            ..q
+        },
+        BoostQuery {
+            from: from - dir.extend(0.0) * 8.0,
+            ..q
+        },
+        BoostQuery {
+            from: from + dir.extend(0.0) * 8.0,
+            ..q
+        },
+        BoostQuery { push: push * 0.96, ..q },
+        BoostQuery {
+            push: (push * 1.04).min(full),
+            ..q
+        },
+    ];
+    let landed = variants
+        .iter()
+        .filter(|v| lands(&simulate_boost(world, phys, v)))
+        .count();
+    let robustness = landed as f32 / variants.len() as f32;
+    if robustness < TRICK_ROBUST {
+        return Err(format!(
+            "only {landed} of {} tries a little off (the view 2–3°, the takeoff 8 u, the push 4%) land",
+            variants.len()
+        ));
+    }
+    let free = simulate_boost(world, phys, &BoostQuery { to: None, ..q });
+    if !free.ok {
+        return Err("unsteered, the flight does not come down".into());
+    }
+    let hurt = phys.fall_damage(free.impact);
+    if hurt > phys.fall_damage(v.impact).max(10.0) {
+        return Err(format!("unsteered, it comes down hard ({hurt:.0} damage)"));
+    }
+    let mut p = settled(world, phys, free.landing);
+    p.origin = free.landing;
+    if hazard(world, &p) {
+        return Err("unsteered, it comes down in lava or slime".into());
+    }
+    Ok(TrickPlan {
+        pitch,
+        push,
+        robustness,
+        flight: v.flight,
+        impact: v.impact,
+    })
+}
+
+/// Why no boost from `from` onto `to` holds when a full charge pushes `full`: what fails for the gentlest try.
+pub fn why_no_boost(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3, full: f32) -> String {
+    match boost_tries(phys.gravity, from, to, full).first() {
+        None => "no pitch from 30° to 70° down throws the bot that far and that high, even with a full charge".into(),
+        Some(&(pitch, push)) => match try_boost(world, phys, from, to, (pitch, push), full) {
+            Err(why) => format!("looking {pitch:.0}° down with a push of {push:.0}: {why}"),
+            Ok(_) => "a boost holds".into(),
+        },
+    }
+}
+
+/// Why no long jump from `from` onto `to` holds: where the jump comes down, or which of the takeoffs a little off it
+/// must allow fails.
+pub fn why_no_longjump(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3) -> String {
+    let v = simulate_longjump(world, phys, from, to, 0.0);
+    if !v.ok {
+        if v.flight == 0.0 {
+            return "the run-up there does not end in a long jump".into();
+        }
+        return format!("the long jump {}", came_down(from, to, v.touchdown));
+    }
+    let dir = flat_dir(from, to).extend(0.0);
+    let tries = [
+        (dir * -12.0, 0.0, "12 u earlier"),
+        (dir * 12.0, 0.0, "12 u further on"),
+        (Vec3::ZERO, -8.0, "8 u to one side"),
+        (Vec3::ZERO, 8.0, "8 u to the other side"),
+    ];
+    for (along, side, name) in tries {
+        let r = simulate_longjump(world, phys, from + along, to + along, side);
+        if r.ok {
+            continue;
+        }
+        if r.flight == 0.0 {
+            return format!("taking off {name} is off the floor: the takeoff is at an edge");
+        }
+        return format!(
+            "taking off {name}, the long jump {}",
+            came_down(from + along, to + along, r.touchdown)
+        );
+    }
+    "a long jump holds".into()
+}
+
+/// The gauss boost from `from` onto `to` when a full charge pushes `full`, if one gets there reliably: the gentlest
+/// of `boost_tries` that `check_boost` passes.
+pub fn plan_boost(world: &mut dyn MoveWorld, phys: &Physics, from: Vec3, to: Vec3, full: f32) -> Option<TrickPlan> {
+    boost_tries(phys.gravity, from, to, full)
+        .into_iter()
+        .find_map(|t| check_boost(world, phys, from, to, t, full))
 }
 
 #[cfg(test)]
@@ -477,6 +635,56 @@ mod tests {
         assert!(plan.robustness >= TRICK_ROBUST, "{plan:?}");
         // A jump does not.
         assert!(crate::validate::plan_jump(&mut w, &phys, from, top).is_none());
+    }
+
+    #[test]
+    fn a_boost_is_charged_for_the_push_it_needs() {
+        let g = 800.0;
+        let near = boost_push(g, 34.0, 400.0, 0.0, FULL_PUSH).unwrap();
+        let far = boost_push(g, 34.0, 900.0, 0.0, FULL_PUSH).unwrap();
+        assert!(near < far && far < FULL_PUSH, "{near} {far}");
+        assert!(boost_push(g, 34.0, 3000.0, 0.0, FULL_PUSH).is_none(), "too far");
+        assert!(boost_push(g, 34.0, 100.0, 900.0, FULL_PUSH).is_none(), "too high");
+        let least = boost_push(g, 34.0, 20.0, 0.0, FULL_PUSH).unwrap();
+        assert!(
+            (least - FULL_PUSH / 3.0).abs() < 0.1,
+            "no less than half a second's charge: {least}"
+        );
+        assert!((charge_for(FULL_PUSH / 2.0, FULL_PUSH) - 0.75).abs() < 1e-5);
+        assert_eq!(charge_for(FULL_PUSH / 10.0, FULL_PUSH), MIN_CHARGE);
+        assert_eq!(charge_for(2.0 * FULL_PUSH, FULL_PUSH), FULL_CHARGE);
+    }
+
+    #[test]
+    fn a_boost_under_a_low_ceiling_is_charged_partly_and_lands() {
+        let phys = Physics::default();
+        // A hall 360 units high, a ledge 120 up from 300 units along.
+        let mut w = flat();
+        w.solid(Vec3::new(-512.0, -512.0, 360.0), Vec3::new(1400.0, 512.0, 420.0));
+        w.solid(Vec3::new(300.0, -256.0, 0.0), Vec3::new(1400.0, 256.0, 120.0));
+        let from = Vec3::new(0.0, 0.0, 36.0);
+        let top = Vec3::new(420.0, 0.0, 156.0);
+        let plan = plan_boost(&mut w, &phys, from, top, FULL_PUSH).expect("the boost gets onto the ledge");
+        assert!(
+            plan.push < 0.8 * FULL_PUSH && plan.robustness >= TRICK_ROBUST,
+            "{plan:?}"
+        );
+        let free = simulate_boost(
+            &mut w,
+            &phys,
+            &BoostQuery {
+                from,
+                dir: Vec2::X,
+                pitch: plan.pitch,
+                push: plan.push,
+                to: None,
+            },
+        );
+        assert!(
+            free.ok && (free.landing - top).truncate().length() < 200.0,
+            "unsteered it comes down past the landing, not across the hall: {:?}",
+            free.landing
+        );
     }
 
     #[test]

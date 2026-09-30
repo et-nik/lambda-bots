@@ -5,6 +5,7 @@ import { describe } from '../format'
 import { useNav } from '../stores/nav'
 import type { Outcome } from '../types'
 
+defineEmits<{ close: [] }>()
 const nav = useNav()
 
 const overlay = computed(() => nav.info?.overlay.file ?? null)
@@ -24,6 +25,17 @@ function short(o: Outcome | null): string {
 function peek(o: Outcome | null) {
   nav.peek = o ? { nodes: o.nodes, links: o.links } : null
 }
+
+/** Applied, but not all of it: a link it asked for does not check out one way. */
+function partly(o: Outcome | null): boolean {
+  return !!o && o.ok && o.refused.length > 0
+}
+
+/** The outcome, with why what it asked for does not check out. */
+function full(o: Outcome | null): string | undefined {
+  if (!o) return undefined
+  return [o.message, ...o.refused.map((r) => `${r.from} → ${r.to}: ${r.why}`)].join('\n')
+}
 </script>
 
 <template>
@@ -32,6 +44,7 @@ function peek(o: Outcome | null) {
       <h3>Changes</h3>
       <span class="muted">editor.yaml · {{ nav.patches.length + nav.places.length }}</span>
       <span v-if="nav.dirty" class="unsaved">unsaved</span>
+      <button class="close" title="Hide the changes (C)" aria-label="Hide the changes" @click="$emit('close')">×</button>
     </header>
     <p v-if="nav.savedGraph" class="graph" :title="nav.savedGraph.detail">
       {{ nav.savedGraph.written ? 'Saved with the graph, editor.lbnav' : `No editor.lbnav: ${nav.savedGraph.detail}` }}
@@ -52,13 +65,16 @@ function peek(o: Outcome | null) {
       <li
         v-for="(p, i) in nav.patches"
         :key="i"
-        :class="{ sel: nav.selPatch === i, bad: outcome(i) && !outcome(i)!.ok }"
-        :title="outcome(i)?.message"
+        :class="{ sel: nav.selPatch === i, bad: outcome(i) && !outcome(i)!.ok, part: partly(outcome(i)) }"
+        :title="full(outcome(i))"
         @mouseenter="peek(outcome(i))"
         @click="nav.goPatch(i)"
       >
-        <span class="mark" :aria-label="outcome(i)?.ok === false ? 'did nothing' : 'applied'">
-          {{ outcome(i)?.ok === false ? '!' : '✓' }}
+        <span
+          class="mark"
+          :aria-label="outcome(i)?.ok === false ? 'did nothing' : partly(outcome(i)) ? 'applied in part' : 'applied'"
+        >
+          {{ outcome(i)?.ok === false || partly(outcome(i)) ? '!' : '✓' }}
         </span>
         <span class="no">{{ i + 1 }}</span>
         <span class="what">{{ describe(p, outcome(i)) }}</span>
@@ -83,11 +99,16 @@ function peek(o: Outcome | null) {
         <li
           v-for="(p, i) in overlay?.nav?.patches ?? []"
           :key="`o${i}`"
-          :class="{ bad: nav.preview?.overlay[i] && !nav.preview.overlay[i].ok }"
-          :title="nav.preview?.overlay[i]?.message"
+          :class="{
+            bad: nav.preview?.overlay[i] && !nav.preview.overlay[i].ok,
+            part: partly(nav.preview?.overlay[i] ?? null),
+          }"
+          :title="full(nav.preview?.overlay[i] ?? null)"
           @mouseenter="peek(nav.preview?.overlay[i] ?? null)"
         >
-          <span class="mark">{{ nav.preview?.overlay[i]?.ok === false ? '!' : '✓' }}</span>
+          <span class="mark">
+            {{ nav.preview?.overlay[i]?.ok === false || partly(nav.preview?.overlay[i] ?? null) ? '!' : '✓' }}
+          </span>
           <span class="what">{{ describe(p, nav.preview?.overlay[i]) }}</span>
           <span class="res">{{ short(nav.preview?.overlay[i] ?? null) }}</span>
         </li>
@@ -104,10 +125,14 @@ function peek(o: Outcome | null) {
 
 <style scoped>
 .head {
+  position: sticky;
+  z-index: 1;
+  top: 0;
   display: flex;
   gap: 8px;
-  align-items: baseline;
-  margin-bottom: 6px;
+  align-items: center;
+  padding: 6px 0;
+  background: var(--panel);
 }
 h3 {
   margin: 0;
@@ -123,6 +148,21 @@ h3 {
   margin-left: auto;
   color: var(--accent);
   font-size: 12px;
+}
+.close {
+  margin-left: auto;
+  padding: 0 7px;
+  line-height: 20px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.unsaved + .close {
+  margin-left: 0;
+}
+.close:hover {
+  color: var(--text-strong);
+  border-color: var(--line);
 }
 .small {
   margin: 0 0 6px;
@@ -177,6 +217,9 @@ h3 {
 .list li.bad {
   border-left-color: var(--warn);
 }
+.list li.part {
+  border-left-color: var(--attention);
+}
 .list li.place {
   border-left-color: #5aa0ff;
   cursor: default;
@@ -193,6 +236,9 @@ h3 {
 }
 .bad .mark {
   color: var(--warn);
+}
+.part .mark {
+  color: var(--attention);
 }
 .place .mark {
   color: #5aa0ff;
