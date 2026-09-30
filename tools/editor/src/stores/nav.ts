@@ -3,12 +3,10 @@ import { markRaw } from 'vue'
 
 import { ApiError, applyOnServer, navInfo, navPreview, navRoute, saveEditor } from '../api'
 import type { NavInfo, OnDisk, OverlayFile, PatchOp, Pick, Preview, Route, Tool, Vec3 } from '../types'
-import { GraphModel } from '../viewer/graph'
+import { GraphModel, STAND } from '../viewer/graph'
 import { forbiddenNodes } from '../viewer/navlayer'
 import { useEditor } from './editor'
 
-/** A player's origin is this far over the floor clicked. */
-const STAND = 36
 /** Milliseconds a preview waits for more changes. */
 const PREVIEW_DELAY = 120
 
@@ -260,6 +258,67 @@ export const useNav = defineStore('nav', {
       })
     },
 
+    /** The last change of the editor file that put node `n` in or moved it (and so says where it stands). */
+    placedBy(n: number): number | null {
+      const outcomes = this.preview?.editor ?? []
+      for (let i = this.patches.length - 1; i >= 0; i--) {
+        const op = this.patches[i].op
+        if ((op === 'add_node' || op === 'move_node') && outcomes[i]?.nodes[0] === n) return i
+      }
+      return null
+    },
+
+    /** Whether node `n` under a press can be dragged (the Move tool); says why not when it cannot. */
+    grab(p: Pick): boolean {
+      const m = this.model
+      if (this.tool !== 'move' || p.node === null || !m) return false
+      const n = p.node
+      this.selectNode(n)
+      if (this.forbidden.has(n)) {
+        this.notice = `Node ${n} is shut off by a forbidden zone: take the zone out to move it.`
+        return false
+      }
+      if (n >= m.baseNodes && this.placedBy(n) === null) {
+        this.notice = `Node ${n} is put in by overlay.yaml: move it there.`
+        return false
+      }
+      this.notice = null
+      return true
+    },
+
+    /**
+     * Sets node `n` down at `to`. The change that put it in or moved it last takes the new spot, and the links
+     * changed after it that name the node follow it; a node the changes have not placed gets a move.
+     */
+    moveNode(n: number, to: Vec3) {
+      const m = this.model
+      if (!m) return
+      const spot = at(to)
+      const i = this.placedBy(n)
+      if (i === null) {
+        this.addPatch({ op: 'move_node', from: at(m.baseOrigin(n)), to: spot })
+        return
+      }
+      const outcomes = this.preview?.editor ?? []
+      this.change((f) => {
+        const list = f.nav?.patches ?? []
+        const p = list[i]
+        if (p.op === 'add_node') list[i] = { ...p, at: spot }
+        else if (p.op === 'move_node') list[i] = { ...p, to: spot }
+        for (let j = i + 1; j < list.length; j++) {
+          const q = list[j]
+          const ends = outcomes[j]?.nodes ?? []
+          if ((q.op === 'add_link' || q.op === 'remove_link') && ends.length === 2) {
+            if (ends[0] === n) q.from = spot
+            if (ends[1] === n) q.to = spot
+          }
+        }
+      })
+      this.selNode = null
+      this.selLink = null
+      this.selPatch = i
+    },
+
     removePlace(i: number) {
       this.change((f) => {
         f.places?.splice(i, 1)
@@ -334,9 +393,20 @@ export const useNav = defineStore('nav', {
         case 'node':
           if (p.point) this.addPatch({ op: 'add_node', at: up(p.point) })
           return
-        case 'forbid':
-          if (p.point) this.addPatch({ op: 'forbid', at: up(p.point), radius: this.forbidRadius })
+        case 'move':
+          if (p.node !== null) {
+            this.selectNode(p.node)
+            editor.select(null)
+          } else {
+            this.clearSelection()
+          }
           return
+        case 'forbid': {
+          // Clicked on a node: the zone is about it, not about the floor behind it.
+          const point = p.node !== null && m ? at(m.origin(p.node)) : p.point ? up(p.point) : null
+          if (point) this.addPatch({ op: 'forbid', at: point, radius: this.forbidRadius })
+          return
+        }
         case 'place': {
           if (!p.point) return
           const taken = new Set(this.places.map((pl) => pl.name))
@@ -373,7 +443,7 @@ export const useNav = defineStore('nav', {
     },
 
     onHover(p: Pick | null) {
-      const wanted = this.tool === 'select' || this.tool === 'link' || this.tool === 'unlink'
+      const wanted = this.tool === 'select' || this.tool === 'link' || this.tool === 'unlink' || this.tool === 'move'
       const h = wanted && p ? { node: p.node, link: this.tool === 'link' ? null : p.link } : null
       const same =
         (h === null && this.hover === null) ||
@@ -426,9 +496,12 @@ export const useNav = defineStore('nav', {
         this.savedText = text(this.draft)
         this.conflict = null
         storeDraft(this.map, this.version, null)
+        const saved = r.graph.written
+          ? 'Saved editor.yaml and the graph with the changes (editor.lbnav).'
+          : `Saved editor.yaml; no editor.lbnav: ${r.graph.detail}.`
         this.notice = this.info?.apply.available
-          ? 'Saved. “Apply on server” makes the server read it.'
-          : 'Saved. The server takes it with `lb overlay reload`.'
+          ? `${saved} “Apply on server” makes the server read them.`
+          : `${saved} The server takes them with \`lb overlay reload\`.`
       } catch (e) {
         this.notice = e instanceof Error ? e.message : String(e)
       }

@@ -254,7 +254,7 @@ A single re-entrancy rule applies to every hook: it only records into the arena.
 | DLL `ClientCommand` | pre | our bot inside our own command → IGNORED; argv0 `lb` from a human → `EV_CLIENT_CMD` + SUPERCEDE (access check is in Rust); `say`/`say_team` → `EV_CLIENT_CMD{SAY}` (chat bus) |
 | DLL `ServerActivate` | post | epoch++, edict scan, resolve message ids, → `lb_core_map_start` |
 | DLL `ServerDeactivate` | pre | `lb_core_map_end`, registry and slot reset |
-| DLL `StartFrame` | pre | fixangle emulation, snapshots, swap arena → `lb_core_frame_pre` |
+| DLL `StartFrame` | pre | fixangle emulation, adopt clients that skipped our connect hooks (other plugins' bots put in the game with `MDLL_*`, as jk_botti does) → `EV_CLIENT{CONNECT, PUT_IN_SERVER}`, snapshots, swap arena → `lb_core_frame_pre` |
 | DLL `StartFrame` | post | `lb_core_frame_post` (AI, motor, commands, telemetry) |
 | DLL `CmdStart` | pre | our bot with a pending seed → call gamedll `CmdStart(player, cmd, seed)` directly, SUPERCEDE |
 | DLL `UpdateClientData` | post | disguise fake-ping path only on non-ReHLDS engines |

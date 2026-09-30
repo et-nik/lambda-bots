@@ -1,4 +1,4 @@
-//! `maps/<map>/overlay.yaml` (written by hand) and `maps/<map>/editor.yaml` (written by the in-game editor): what a
+//! `maps/<map>/overlay.yaml` (written by hand) and `maps/<map>/editor.yaml` (written by the editors): what a
 //! map needs besides what the generator finds in it — named places, and patches to its navigation graph. Both files
 //! have the same schema; the hand-written one is applied last, so it has the last word.
 
@@ -96,6 +96,15 @@ pub enum Patch {
     /// ways to the nodes around it, every link checked like a generated one. Patches after it may use it.
     AddNode {
         at: [f32; 3],
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+    },
+    /// The node nearest `from` set down on the floor under `to` instead, keeping its number. Its links are checked
+    /// again there: those that no longer hold are taken out (trusted ones stay), and it is linked with the nodes
+    /// around it like a node put in. Patches after it find it at `to`.
+    MoveNode {
+        from: [f32; 3],
+        to: [f32; 3],
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
@@ -200,17 +209,27 @@ nav:
     - op: add_node
       at: [10, 20, 30]
       note: the crate top
+    - op: move_node
+      from: [1, 2, 3]
+      to: [40, 2, 3]
 ";
 
     #[test]
     fn a_sample_overlay_reads_and_writes_back() {
         let f = OverlayFile::parse(SAMPLE, "overlay.yaml").unwrap();
         assert_eq!(f.places[0].name, "bunker");
-        assert_eq!(f.nav.patches.len(), 4);
+        assert_eq!(f.nav.patches.len(), 5);
         assert!(matches!(
             f.nav.patches[3],
             Patch::AddNode {
                 at: [10.0, 20.0, 30.0],
+                ..
+            }
+        ));
+        assert!(matches!(
+            f.nav.patches[4],
+            Patch::MoveNode {
+                to: [40.0, 2.0, 3.0],
                 ..
             }
         ));

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 
 import { LINK_KIND_CHOICES, useNav } from '../stores/nav'
-import type { Outcome, PatchOp, Tool } from '../types'
+import type { Outcome, PatchOp, Tool, Vec3 } from '../types'
 import { KIND_COLORS, type Link, linkValid, LINK, nodeFlagNames, OFF_COLOR } from '../viewer/graph'
 
 const nav = useNav()
@@ -23,6 +23,13 @@ const TOOLS: { id: Tool; label: string; key: string; code: string; hint: string 
     key: 'N',
     code: 'KeyN',
     hint: 'Click the floor where a node is missing: it is linked with the nodes around that check out.',
+  },
+  {
+    id: 'move',
+    label: 'Move',
+    key: 'M',
+    code: 'KeyM',
+    hint: 'Drag a node to where it should stand: its links are checked again there. Esc while dragging leaves it.',
   },
   { id: 'forbid', label: 'Forbid', key: 'X', code: 'KeyX', hint: 'Click where bots must never plan through.' },
   { id: 'place', label: 'Place', key: 'P', code: 'KeyP', hint: 'Click where the named place is.' },
@@ -63,7 +70,13 @@ function describe(p: PatchOp): string {
       return `Unlink${p.both ? ', both ways' : ''}`
     case 'add_node':
       return 'Node'
+    case 'move_node':
+      return `Move, ${Math.round(Math.hypot(p.to[0] - p.from[0], p.to[1] - p.from[1], p.to[2] - p.from[2]))} u`
   }
+}
+
+function spot(p: Vec3): string {
+  return p.map((v) => Math.round(v)).join(' ')
 }
 
 function outcome(i: number): Outcome | null {
@@ -241,7 +254,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <div class="actions">
       <button :disabled="!nav.history.length" :title="`Undo (${MOD}Z)`" @click="nav.undo()">Undo</button>
       <button :disabled="!nav.future.length" :title="`Redo (${MOD}Shift+Z)`" @click="nav.redo()">Redo</button>
-      <button class="primary" :disabled="!nav.dirty || !nav.draft" :title="`Save editor.yaml (${MOD}S)`" @click="nav.save()">
+      <button class="primary" :disabled="!nav.dirty || !nav.draft" :title="`Save editor.yaml and the graph with the changes, editor.lbnav (${MOD}S)`" @click="nav.save()">
         Save
       </button>
       <button
@@ -267,7 +280,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         Node {{ nav.selNode }}
         <span class="muted">{{ nodeFlagNames(model.flags[nav.selNode]).join(', ') }}</span>
       </h3>
-      <p class="muted small">{{ model.origin(nav.selNode).map((v) => Math.round(v)).join(' ') }}</p>
+      <p class="muted small">
+        {{ spot(model.origin(nav.selNode)) }}
+        <template v-if="model.movedFrom.has(nav.selNode)">
+          · moved from {{ spot(model.baseOrigin(nav.selNode)) }}
+        </template>
+      </p>
       <table class="links">
         <tbody>
           <tr v-for="l in model.linksOut(nav.selNode)" :key="`o${l.to}`" :class="{ off: !linkValid(l) }">

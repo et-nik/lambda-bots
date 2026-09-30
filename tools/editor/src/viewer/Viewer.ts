@@ -1,7 +1,8 @@
 import * as THREE from 'three'
 
-import type { Layer, Manifest, Pick, View } from '../types'
+import type { Layer, Manifest, Pick, Vec3, View } from '../types'
 import { FlyControls, Keys, OrthoControls, viewAxes } from './controls'
+import { STAND } from './graph'
 import { grid } from './grid'
 import { pointMarkers } from './markers'
 import { MapMaterials } from './materials'
@@ -13,10 +14,15 @@ export interface ViewerEvents {
   /** What is under the pointer while it moves over the map without buttons; null when it leaves. */
   hover(pick: Pick | null): void
   camera(position: [number, number, number]): void
+  /** Whether pressing the left button on a node there picks it up to drag. */
+  grab(pick: Pick): boolean
+  /** A node dragged is let go where it should stand. */
+  drop(node: number, to: Vec3): void
 }
 
-/** Milliseconds between hover picks. */
+/** Milliseconds between hover picks, and between the spots a node dragged is shown at. */
 const HOVER_EVERY = 50
+const DRAG_EVERY = 16
 
 /** Pixels the pointer may move between press and release for a click that selects. */
 const CLICK_SLOP = 4
@@ -45,6 +51,9 @@ export class Viewer {
   private selected: number | null = null
   private raycaster = new THREE.Raycaster()
   private pressed: { x: number; y: number } | null = null
+  /** A node picked up: where the press was, and where it would stand now. */
+  private dragging: { node: number; x: number; y: number; to: Vec3 | null } | null = null
+  private dragged = 0
   private raf = 0
   private last = performance.now()
   private reported = 0
@@ -305,20 +314,21 @@ export class Viewer {
     }
   }
 
-  /** What is under the pointer: the map surface and its entity, and the graph's node or link drawn nearest. */
-  private pick(clientX: number, clientY: number): Pick {
+  /** The pointer in normalized device coordinates. */
+  private ndc(clientX: number, clientY: number): THREE.Vector2 {
     const rect = this.renderer.domElement.getBoundingClientRect()
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
+    return new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
+  }
+
+  /** The map surface under the pointer: its point and entity, and its depth along the view (Infinity for none). */
+  private surface(clientX: number, clientY: number): { entity: number | null; point: Vec3 | null; depth: number } {
     const camera = this.camera()
     // No frame may have been drawn since the camera moved (a hidden tab draws none).
     camera.updateMatrixWorld()
-    this.raycaster.setFromCamera(ndc, camera)
+    this.raycaster.setFromCamera(this.ndc(clientX, clientY), camera)
     const planes = this.renderer.clippingPlanes
     const targets = [...this.map.children, ...(this.points?.children.filter((p) => p.visible) ?? [])]
     const forward = camera.getWorldDirection(new THREE.Vector3())
-    let entity: number | null = null
-    let point: [number, number, number] | null = null
-    let surface = Infinity
     for (const hit of this.raycaster.intersectObjects(targets, false)) {
       if (planes.some((p) => p.distanceToPoint(hit.point) < 0)) {
         continue
@@ -329,19 +339,70 @@ export class Viewer {
         continue
       }
       const e = (obj.userData.entity as number | null) ?? null
-      entity = e === 0 ? null : e
-      point = [hit.point.x, hit.point.y, hit.point.z]
-      surface = hit.point.clone().sub(camera.position).dot(forward)
-      break
+      return {
+        entity: e === 0 ? null : e,
+        point: [hit.point.x, hit.point.y, hit.point.z],
+        depth: hit.point.clone().sub(camera.position).dot(forward),
+      }
     }
-    const nav = this.nav.pick(clientX - rect.left, clientY - rect.top, camera, rect.width, rect.height, surface, planes)
-    return { entity, point, node: nav.node, link: nav.link }
+    return { entity: null, point: null, depth: Infinity }
+  }
+
+  /** What is under the pointer: the map surface and its entity, and the graph's node or link drawn nearest. */
+  private pick(clientX: number, clientY: number): Pick {
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const s = this.surface(clientX, clientY)
+    const planes = this.renderer.clippingPlanes
+    const nav = this.nav.pick(clientX - rect.left, clientY - rect.top, this.camera(), rect.width, rect.height, s.depth, planes)
+    return { entity: s.entity, point: s.point, node: nav.node, link: nav.link }
+  }
+
+  /**
+   * Where a node dragged to the pointer would stand: a player's height over the map surface under it (in a side
+   * view: in the view's plane, as deep as the node is). The server sets it down on the floor.
+   */
+  private dragTarget(clientX: number, clientY: number, node: number): Vec3 | null {
+    const model = this.nav.model
+    if (!model || node >= model.nodes) {
+      return null
+    }
+    const round = (p: THREE.Vector3): Vec3 => [Math.round(p.x), Math.round(p.y), Math.round(p.z)]
+    if (this.view === 'front' || this.view === 'side') {
+      const depth = viewAxes(this.view).depth
+      const p = new THREE.Vector3(...this.ndc(clientX, clientY).toArray(), 0).unproject(this.orthographic)
+      return round(p.setComponent(depth, model.origin(node)[depth]))
+    }
+    const hit = this.surface(clientX, clientY).point
+    if (hit) {
+      return round(new THREE.Vector3(hit[0], hit[1], hit[2] + STAND))
+    }
+    if (this.view === 'top') {
+      const p = new THREE.Vector3(...this.ndc(clientX, clientY).toArray(), 0).unproject(this.orthographic)
+      return round(p.setZ(model.origin(node)[2]))
+    }
+    return null
+  }
+
+  private endDrag(e?: PointerEvent) {
+    this.dragging = null
+    this.nav.setDrag(null)
+    const canvas = this.renderer.domElement
+    canvas.style.cursor = ''
+    if (e && canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId)
+    }
   }
 
   private onDown = (e: PointerEvent) => {
-    this.renderer.domElement.focus()
+    const canvas = this.renderer.domElement
+    canvas.focus()
     if (e.button === 0) {
       this.pressed = { x: e.clientX, y: e.clientY }
+      const pick = this.pick(e.clientX, e.clientY)
+      if (pick.node !== null && this.events.grab(pick)) {
+        this.dragging = { node: pick.node, x: e.clientX, y: e.clientY, to: null }
+        canvas.setPointerCapture(e.pointerId)
+      }
     }
     if (this.view === '3d') {
       this.fly.pointerDown(e)
@@ -351,6 +412,16 @@ export class Viewer {
   }
 
   private onMove = (e: PointerEvent) => {
+    const d = this.dragging
+    if (d && (d.to || Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_SLOP)) {
+      const now = performance.now()
+      if (now - this.dragged >= DRAG_EVERY) {
+        this.dragged = now
+        this.renderer.domElement.style.cursor = 'grabbing'
+        d.to = this.dragTarget(e.clientX, e.clientY, d.node) ?? d.to
+        this.nav.setDrag(d.to ? { node: d.node, to: d.to } : null)
+      }
+    }
     if (e.buttons === 0) {
       const now = performance.now()
       if (now - this.hovered > HOVER_EVERY) {
@@ -366,6 +437,17 @@ export class Viewer {
   }
 
   private onUp = (e: PointerEvent) => {
+    const d = this.dragging
+    if (e.button === 0 && d) {
+      this.endDrag(e)
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_SLOP) {
+        this.pressed = null
+        const to = this.dragTarget(e.clientX, e.clientY, d.node) ?? d.to
+        if (to) {
+          this.events.drop(d.node, to)
+        }
+      }
+    }
     if (e.button === 0 && this.pressed) {
       const moved = Math.hypot(e.clientX - this.pressed.x, e.clientY - this.pressed.y)
       this.pressed = null
@@ -392,6 +474,11 @@ export class Viewer {
   private onKey = (e: KeyboardEvent) => {
     if (e.code === 'KeyF' && !(e.target instanceof HTMLInputElement)) {
       this.focus()
+    }
+    if (e.code === 'Escape' && this.dragging) {
+      // Let go where it was: no drop, and no click on release.
+      this.endDrag()
+      this.pressed = null
     }
   }
 

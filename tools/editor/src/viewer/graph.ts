@@ -1,4 +1,7 @@
-import type { NavInfo, Preview } from '../types'
+import type { NavInfo, Preview, Vec3 } from '../types'
+
+/** A player's origin is this far over the floor under it. */
+export const STAND = 36
 
 /** `NodeFlags` of `lb-nav`. */
 export const NODE = {
@@ -84,6 +87,8 @@ export class GraphModel {
   readonly links: Link[]
   /** Links of the base graph the overlays take out (or change), `[from, to]`. */
   readonly removed: [number, number][]
+  /** Nodes of the base graph the overlays moved, and where they stand in it. */
+  readonly movedFrom = new Map<number, Vec3>()
   private out: number[][]
   private into: number[][]
 
@@ -102,6 +107,14 @@ export class GraphModel {
         this.pos.set([list[i], list[i + 1], list[i + 2]], n * 3)
         this.flags[n] = list[i + 3]
       }
+    }
+    const moved = preview?.moved ?? []
+    for (let i = 0; i < moved.length; i += 5) {
+      const m = moved[i]
+      if (m >= this.baseNodes) continue
+      this.movedFrom.set(m, this.origin(m))
+      this.pos.set([moved[i + 1], moved[i + 2], moved[i + 3]], m * 3)
+      this.flags[m] = moved[i + 4]
     }
     const removed = new Set<string>()
     this.removed = []
@@ -137,8 +150,18 @@ export class GraphModel {
     })
   }
 
-  origin(n: number): [number, number, number] {
+  origin(n: number): Vec3 {
     return [this.pos[n * 3], this.pos[n * 3 + 1], this.pos[n * 3 + 2]]
+  }
+
+  /** Where a node stands before the overlays: in the base graph, or where the change putting it in left it. */
+  baseOrigin(n: number): Vec3 {
+    return this.movedFrom.get(n) ?? this.origin(n)
+  }
+
+  /** Put in or moved by the overlays. */
+  changed(n: number): boolean {
+    return n >= this.baseNodes || this.movedFrom.has(n)
   }
 
   linksOut(n: number): Link[] {

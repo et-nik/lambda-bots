@@ -23,10 +23,15 @@ pub fn key(world: &BspWorld, opts: &GenOptions, rules: u64, overlay: u64) -> Gra
         bsp,
         bsp_size,
         generator: GENERATOR,
-        physics: xxhash_rust::xxh3::xxh3_64(format!("{opts:?}").as_bytes()),
+        physics: physics_hash(opts),
         rules,
         overlay,
     }
+}
+
+/// The key's hash of the settings a graph is made with (the player physics among them).
+pub fn physics_hash(opts: &GenOptions) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(format!("{opts:?}").as_bytes())
 }
 
 /// The graphs of one map.

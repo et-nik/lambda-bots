@@ -487,10 +487,15 @@ fn nav_regen(rt: &mut Runtime) -> Vec<String> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "lbnav"))
         .filter(|e| std::fs::remove_file(e.path()).is_ok())
         .count();
+    let edited = if lb_navgen::mapload::remove_edited(&rt.init.install_dir, &map) {
+        format!(" and the map editor's one ({})", lb_navgen::mapload::EDITED)
+    } else {
+        String::new()
+    };
     rt.nav_status = format!("remaking the graph for {map}");
     rt.start_nav_load(&map);
     vec![format!(
-        "{map}: {removed} kept graph(s) removed, making it again ({}); bots keep the current graph until then",
+        "{map}: {removed} kept graph(s){edited} removed, making it again ({}); bots keep the current graph until then",
         rt.config.nav.source.name()
     )]
 }

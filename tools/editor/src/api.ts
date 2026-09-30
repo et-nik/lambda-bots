@@ -1,4 +1,4 @@
-import type { Manifest, MapFile, NavInfo, OnDisk, OverlayFile, Preview, Route, Vec3 } from './types'
+import type { EditedGraph, Manifest, MapFile, NavInfo, OnDisk, OverlayFile, Preview, Route, Vec3 } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -73,12 +73,13 @@ export async function saveEditor(
   map: string,
   file: OverlayFile,
   base: string,
-): Promise<{ saved: true; version: string } | { saved: false; now: OnDisk }> {
+): Promise<{ saved: true; version: string; graph: EditedGraph } | { saved: false; now: OnDisk }> {
   const r = await send('PUT', `${mapPath(map)}/overlay`, { file, base })
   if (r.status === 409) {
     return { saved: false, now: await r.json() }
   }
-  return { saved: true, version: (await r.json()).version }
+  const body = await r.json()
+  return { saved: true, version: body.version, graph: body.graph }
 }
 
 export async function applyOnServer(map: string): Promise<{ sent: string; to: string }> {

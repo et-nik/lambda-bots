@@ -85,6 +85,24 @@ function ring(at: THREE.Vector3, radius: number, color: number): THREE.LineLoop 
   return loop
 }
 
+/** Dashed segments seen through walls. */
+function dashedLines(segments: [Vec3, Vec3][], color: number): THREE.LineSegments {
+  const positions = new Float32Array(segments.length * 6)
+  segments.forEach(([a, b], i) => {
+    positions.set(a, i * 6)
+    positions.set(b, i * 6 + 3)
+  })
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  const lines = new THREE.LineSegments(
+    geo,
+    new THREE.LineDashedMaterial({ color, dashSize: 8, gapSize: 6, depthTest: false, transparent: true }),
+  )
+  lines.computeLineDistances()
+  lines.renderOrder = 11
+  return lines
+}
+
 function disposeTree(o: THREE.Object3D) {
   o.traverse((c) => {
     const m = c as THREE.Mesh
@@ -104,11 +122,12 @@ export class NavLayer {
   private graph = new THREE.Group()
   private markup = new THREE.Group()
   private marks = new THREE.Group()
+  private dragged = new THREE.Group()
   /** Links drawn (and picked): kinds shown, and whether links that are off are. */
   private shown: (l: Link) => boolean = () => true
 
   constructor(scene: THREE.Scene) {
-    this.group.add(this.graph, this.markup, this.marks)
+    this.group.add(this.graph, this.markup, this.marks, this.dragged)
     scene.add(this.group)
   }
 
@@ -144,7 +163,7 @@ export class NavLayer {
     for (let n = 0; n < model.nodes; n++) {
       m.makeTranslation(model.pos[n * 3], model.pos[n * 3 + 1], model.pos[n * 3 + 2])
       mesh.setMatrixAt(n, m)
-      const c = forbidden.has(n) ? FORBIDDEN : n >= model.baseNodes ? ADDED_NODE : nodeColor(model.flags[n])
+      const c = forbidden.has(n) ? FORBIDDEN : model.changed(n) ? ADDED_NODE : nodeColor(model.flags[n])
       mesh.setColorAt(n, color.setHex(c))
     }
     mesh.instanceMatrix.needsUpdate = true
@@ -182,21 +201,35 @@ export class NavLayer {
       this.graph.add(lines(added, plainColor, true))
     }
     if (model.removed.length) {
-      const positions = new Float32Array(model.removed.length * 6)
-      model.removed.forEach(([a, b], i) => {
-        positions.set(model.origin(a), i * 6)
-        positions.set(model.origin(b), i * 6 + 3)
-      })
-      const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-      const dashed = new THREE.LineSegments(
-        geo,
-        new THREE.LineDashedMaterial({ color: INVALID, dashSize: 8, gapSize: 6, depthTest: false, transparent: true }),
-      )
-      dashed.computeLineDistances()
-      dashed.renderOrder = 11
-      this.graph.add(dashed)
+      this.graph.add(dashedLines(model.removed.map(([a, b]) => [model.origin(a), model.origin(b)]), INVALID))
     }
+    if (model.movedFrom.size) {
+      const trails = [...model.movedFrom].map(([n, from]): [Vec3, Vec3] => [from, model.origin(n)])
+      this.graph.add(dashedLines(trails, ADDED_NODE))
+    }
+  }
+
+  /** A node being dragged: where it would stand, and its links from there. */
+  setDrag(drag: { node: number; to: Vec3 } | null) {
+    this.clear(this.dragged)
+    const model = this.model
+    if (!drag || !model || drag.node >= model.nodes) {
+      return
+    }
+    const to = new THREE.Vector3(...drag.to)
+    const ghost = new THREE.Mesh(
+      new THREE.SphereGeometry(12, 12, 8),
+      new THREE.MeshBasicMaterial({ color: ADDED_NODE, wireframe: true, depthTest: false, transparent: true }),
+    )
+    ghost.position.copy(to)
+    ghost.renderOrder = 16
+    const ends = [...model.linksOut(drag.node).map((l) => l.to), ...model.linksIn(drag.node).map((l) => l.from)]
+    const spokes = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(ends.flatMap((e) => [to, new THREE.Vector3(...model.origin(e))])),
+      new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.5 }),
+    )
+    spokes.renderOrder = 15
+    this.dragged.add(ghost, spokes, dashedLines([[model.origin(drag.node), drag.to]], ADDED_NODE))
   }
 
   /** Forbidden zones and places of the editor file (bright) and the hand-written overlay (dim). */
@@ -365,7 +398,7 @@ export class NavLayer {
   }
 
   dispose() {
-    for (const g of [this.graph, this.markup, this.marks]) {
+    for (const g of [this.graph, this.markup, this.marks, this.dragged]) {
       this.clear(g)
     }
     this.group.parent?.remove(this.group)

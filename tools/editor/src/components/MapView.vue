@@ -60,7 +60,7 @@ const highlight = computed<Highlight>(() => ({
 }))
 
 function patchPoints(p: PatchOp): [number, number, number][] {
-  return p.op === 'add_link' || p.op === 'remove_link' ? [p.from, p.to] : [p.at]
+  return p.op === 'add_link' || p.op === 'remove_link' || p.op === 'move_node' ? [p.from, p.to] : [p.at]
 }
 
 /** What F and the panel's list bring into view: the selected node, link, change or route. */
@@ -83,6 +83,8 @@ onMounted(() => {
       click: (p) => nav.click(p),
       hover: (p) => nav.onHover(p),
       camera: (p) => (store.camera = p),
+      grab: (p) => nav.grab(p),
+      drop: (n, to) => nav.moveNode(n, to),
     },
     store.layers,
   )
@@ -149,6 +151,9 @@ watch(
 }
 .viewport:not(.tool-select) :deep(canvas) {
   cursor: crosshair;
+}
+.viewport.tool-move :deep(canvas) {
+  cursor: grab;
 }
 .overlay {
   position: absolute;

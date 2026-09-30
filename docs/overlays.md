@@ -43,6 +43,9 @@ nav:
     - op: add_node         # a node where the generator put none, linked with the nodes around
       at: [-203, 660, -1813]
       note: the crate top
+    - op: move_node        # the node nearest `from`, set down under `to` instead
+      from: [-8, 584, -1759]
+      to: [-42, 646, -1811]
 ```
 
 Points are player origins (the centre of the standing hull) or near them: each end of a patch is the node nearest to
@@ -62,7 +65,24 @@ If the check fails the link is not added, unless the patch says `trust: true`; a
 A node put in (`add_node`) is set down on the floor under `at` (crouched where standing does not fit) and linked both
 ways with the nodes within 384 units wherever the links check out; the patches after it may use it as an end.
 
+A node moved (`move_node`) keeps its number: the node nearest `from` is set down on the floor under `to` (a ladder node
+is moved as it is), and its links are checked again from there. Those that still check out stay, as what they are now
+(a walk may turn into a drop or a jump); the others are taken out unless they were trusted; and it is linked with the
+nodes around like a node put in. The patches after it find it at `to`.
+
+A patch does not quietly undo an earlier one. A forbidden zone holds for the patches after it: nothing links the nodes
+it shut off (`add_link` to one says so), and no node is put in or moved into it. The links a node put in or moved makes
+by itself leave out the links a `remove_link` before it took out.
+
 Places are named spots for behavior (shelters, sniper nests) and for people reading logs; `lb overlay` lists them.
+
+## The map editor's graph
+
+Saving in the web editor (`docs/editor.md`) also writes `maps/<map>/editor.lbnav`: the server's graph with both files
+applied. The server plays on it as it is (`lb nav` says `editor`) while its key is the one of the graph the server
+would load with the overlays on disk: the same build of the map, generator and physics, and exactly the same patches.
+Otherwise it is left alone and the overlays are applied as above. `lb edit save` and `lb nav regen` remove it. To take
+the changes to another server, copy the overlay files: the graph there is its own.
 
 ## Checking an overlay offline
 
@@ -96,11 +116,11 @@ in the game console (on a listen server the host always has access). Run the `lb
 | `lb edit save`                            | writes `editor.yaml` and applies the overlays to the graph at once              |
 
 `lb edit save` does not write over `editor.yaml` saved meanwhile from the web editor: it says the file changed, and
-editing starts again with `lb edit off` and `lb edit on`.
+editing starts again with `lb edit off` and `lb edit on`. It removes `editor.lbnav`, made of the file before.
 
 Nodes are drawn by what they are: items yellow, ladders cyan, water blue, crouch spots purple, buttons and lifts
 orange, the rest green. Links are drawn by kind: walk grey, crouch purple, jump green, drop yellow, ladder cyan, swim
 blue, door orange, lift violet, teleport white, breakable brown, push pink; a link that is off is red.
 
-`lb nav regen` throws away the map's kept graphs and makes the graph again (for a changed generator or map); the
-overlays are applied to the new graph the same way.
+`lb nav regen` throws away the map's kept graphs and the map editor's one, and makes the graph again (for a changed
+generator or map); the overlays are applied to the new graph the same way.

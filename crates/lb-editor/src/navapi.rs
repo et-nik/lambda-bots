@@ -110,6 +110,7 @@ pub struct SaveRequest {
     base: String,
 }
 
+/// Saves the editor file, then the graph with the overlays applied (`nav::save_edited`).
 pub async fn save(
     State(state): State<Arc<AppState>>,
     Path(map): Path<String>,
@@ -123,7 +124,16 @@ pub async fn save(
             .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such map".into()))?
             .name;
         match nav::save_editor(&state.install, &name, &req.file, &req.base) {
-            Ok(version) => Ok(Json(serde_json::json!({ "version": version })).into_response()),
+            Ok(version) => {
+                let graph = match nav_map(&state, &map) {
+                    Ok((_, nav)) => nav::save_edited(&nav, &state.install),
+                    Err(e) => nav::EditedGraph {
+                        written: false,
+                        detail: e.1,
+                    },
+                };
+                Ok(Json(serde_json::json!({ "version": version, "graph": graph })).into_response())
+            }
             Err(SaveError::Conflict(now)) => Ok((StatusCode::CONFLICT, Json(*now)).into_response()),
             Err(SaveError::Invalid(e)) => Err(unprocessable(e)),
             Err(SaveError::Io(e)) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e)),

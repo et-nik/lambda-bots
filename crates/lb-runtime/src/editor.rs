@@ -288,6 +288,8 @@ impl Editor {
         let tmp = path.with_extension("yaml.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // The map editor's graph was made of the file as it was.
+        lb_navgen::mapload::remove_edited(install, &self.file.map);
         self.loaded = Some(text);
         self.changes.clear();
         Ok(path)
@@ -377,7 +379,12 @@ mod tests {
         assert_eq!(ed.unsaved(), 3);
         ed.command(&["undo"], Some(&g), Vec3::ZERO);
         assert!(ed.file.places.is_empty());
+        // The map editor's graph was made of the file before: it goes with the save.
+        let edited = lb_navgen::mapload::overlay_path(&dir, "crossfire", lb_navgen::mapload::EDITED);
+        std::fs::create_dir_all(edited.parent().unwrap()).unwrap();
+        std::fs::write(&edited, b"stale").unwrap();
         let path = ed.save(&dir).unwrap();
+        assert!(!edited.exists());
         let again = Editor::open(1, &dir, "crossfire").unwrap();
         assert_eq!(again.file.nav.patches.len(), 2);
         assert!(matches!(

@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use lb_bsp::BspWorld;
 use lb_bsp::mech::Mechanisms;
-use lb_config::overlay::OverlayFile;
+use lb_config::overlay::{OverlayFile, Patch};
 use lb_core::Vec3;
 use lb_kin::Physics;
 use lb_nav::graph::{LinkKind, NavGraph, NavLink, NodeId};
-use lb_navgen::mapload;
+use lb_nav::store::GraphKey;
+use lb_navgen::mapload::{self, OVERLAYS};
 use lb_navgen::patch::{self, Outcome};
 use serde::Serialize;
 
@@ -35,6 +36,8 @@ pub struct NavMap {
     pub bsp_size: u64,
     pub base: NavGraph,
     pub origin: Origin,
+    /// The key of the server's graph (`Origin::Server`).
+    pub base_key: Option<GraphKey>,
     world: Mutex<BspWorld>,
     mech: Mechanisms,
     last: Mutex<Option<(String, Arc<Patched>)>>,
@@ -52,8 +55,8 @@ impl NavMap {
         let bytes = std::fs::read(bsp).map_err(|e| format!("{}: {e}", bsp.display()))?;
         let mut world = BspWorld::load(&bytes).map_err(|e| format!("{}: {e}", bsp.display()))?;
         let mech = Mechanisms::from_world(&world);
-        let (base, origin) = match mapload::kept_graph(install, map, &world) {
-            Some(g) => (g, Origin::Server),
+        let (base, origin, base_key) = match mapload::kept_graph(install, map, &world) {
+            Some((key, g)) => (g, Origin::Server, Some(key)),
             None => {
                 let started = std::time::Instant::now();
                 let g = lb_navgen::generate(&mut world, &mech, &lb_navgen::GenOptions::default(), "editor").graph;
@@ -64,7 +67,7 @@ impl NavMap {
                     "{map}: no graph of the server's, made one in {} ms",
                     started.elapsed().as_millis()
                 );
-                (g, Origin::Made)
+                (g, Origin::Made, None)
             }
         };
         mapload::prepare_world(&mut world, &mech);
@@ -73,6 +76,7 @@ impl NavMap {
             bsp_size: bytes.len() as u64,
             base,
             origin,
+            base_key,
             world: Mutex::new(world),
             mech,
             last: Mutex::new(None),
@@ -88,9 +92,8 @@ impl NavMap {
         {
             return p.clone();
         }
-        let mut patches = editor.nav.patches.clone();
-        let split = patches.len();
-        patches.extend(overlay.iter().flat_map(|o| o.nav.patches.iter().cloned()));
+        let patches = all_patches(editor, overlay);
+        let split = editor.nav.patches.len();
         let (graph, report) = {
             let mut world = self.world.lock().expect("no panics while locked");
             patch::apply(self.base.clone(), &patches, &mut world, &self.mech, Physics::default())
@@ -105,6 +108,17 @@ impl NavMap {
         *self.last.lock().expect("no panics while locked") = Some((key, p.clone()));
         p
     }
+}
+
+/// The patches of the editor file, then of the hand-written overlay: in the order the server applies them.
+fn all_patches(editor: &OverlayFile, overlay: Option<&OverlayFile>) -> Vec<Patch> {
+    editor
+        .nav
+        .patches
+        .iter()
+        .chain(overlay.iter().flat_map(|o| o.nav.patches.iter()))
+        .cloned()
+        .collect()
 }
 
 /// A map's navigation kept, with the BSP file and its modification time it was loaded from.
@@ -204,11 +218,13 @@ pub fn graph_json(g: &NavGraph) -> GraphJson {
     out
 }
 
-/// What the overlays change in the base graph: the nodes put in (numbered on from the base's), links put in or
-/// changed, links taken out or changed (`[from, to]` each), and each patch's outcome.
+/// What the overlays change in the base graph: the nodes put in (numbered on from the base's), the nodes of the base
+/// moved (`[node, x, y, z, flags]` each), links put in or changed, links taken out or changed (`[from, to]` each),
+/// and each patch's outcome.
 #[derive(Clone, Debug, Serialize)]
 pub struct Preview {
     pub nodes: Vec<f32>,
+    pub moved: Vec<f32>,
     pub added: Vec<f32>,
     pub removed: Vec<u32>,
     pub editor: Vec<Outcome>,
@@ -223,6 +239,7 @@ pub fn preview(base: &NavGraph, p: &Patched) -> Preview {
     let g = &p.graph;
     let mut out = Preview {
         nodes: Vec::new(),
+        moved: Vec::new(),
         added: Vec::new(),
         removed: Vec::new(),
         editor: p.editor.clone(),
@@ -230,6 +247,13 @@ pub fn preview(base: &NavGraph, p: &Patched) -> Preview {
     };
     for n in base.len()..g.len() {
         push_node(&mut out.nodes, g, n);
+    }
+    for n in 0..base.len() {
+        let (was, now) = (&base.nodes[n], &g.nodes[n]);
+        if was.origin != now.origin || was.flags != now.flags {
+            out.moved.push(n as f32);
+            push_node(&mut out.moved, g, n);
+        }
     }
     for n in 0..g.len() {
         let now = g.links(n as NodeId);
@@ -344,6 +368,52 @@ pub fn read_overlay(install: &Path, map: &str, name: &str) -> OnDisk {
     }
 }
 
+/// What became of the editor's graph (`mapload::EDITED`) on a save.
+#[derive(Clone, Debug, Serialize)]
+pub struct EditedGraph {
+    /// Written with the overlays now on disk applied; when not, one written before is removed.
+    pub written: bool,
+    /// Where it is, or why it is not.
+    pub detail: String,
+}
+
+/// Writes the server's graph with the map's overlays applied as the server reads them, for the server to play on
+/// as it is (`mapload::EDITED`). Only on the server's own graph checked with its physics: otherwise, and without
+/// changes, the server applies the overlays itself and one written before is removed.
+pub fn save_edited(nav: &NavMap, install: &Path) -> EditedGraph {
+    let map = nav.map.as_str();
+    let not = |why: &str| EditedGraph {
+        written: false,
+        detail: if mapload::remove_edited(install, map) {
+            format!("{why}; the one saved before is removed")
+        } else {
+            why.to_string()
+        },
+    };
+    let Some(base) = &nav.base_key else {
+        return not("the server has not made a graph of this build of the map: it applies the changes itself");
+    };
+    if base.physics != lb_navgen::cache::physics_hash(&lb_navgen::GenOptions::default()) {
+        return not("the server plays with other physics than the editor checks with: it applies the changes itself");
+    }
+    let files = mapload::read_overlay_files(install, map, nav.bsp_size);
+    let file = |name: &str| files.iter().find(|(n, _)| *n == name).map(|(_, f)| f);
+    let empty = OverlayFile::new(map);
+    let (editor, overlay) = (file(OVERLAYS[0]).unwrap_or(&empty), file(OVERLAYS[1]));
+    let patches = all_patches(editor, overlay);
+    if patches.is_empty() {
+        return not("no changes: the server plays on its own graph");
+    }
+    let patched = nav.patched(editor, overlay);
+    match mapload::write_edited(install, map, &mapload::edited_key(base, &patches), &patched.graph) {
+        Ok(path) => EditedGraph {
+            written: true,
+            detail: path.display().to_string(),
+        },
+        Err(e) => not(&e),
+    }
+}
+
 pub enum SaveError {
     /// The file changed since the page read it.
     Conflict(Box<OnDisk>),
@@ -425,6 +495,64 @@ mod tests {
     }
 
     #[test]
+    fn a_save_writes_the_graph_the_server_plays_on_with_the_overlays_saved() {
+        let Some(bsp) = stand() else { return };
+        let install = std::env::temp_dir().join(format!("lb-editor-edited-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&install);
+        let made = NavMap::load("crossfire", &bsp, &install).expect("crossfire loads");
+        let g = &made.base;
+        let (a, b) = (0 as NodeId, g.links(0)[0].to);
+        let unlink = |both: bool| Patch::RemoveLink {
+            from: g.node(a).origin.to_array(),
+            to: g.node(b).origin.to_array(),
+            both,
+            note: String::new(),
+        };
+        let mut f = OverlayFile::new("crossfire");
+        f.nav.patches.push(unlink(true));
+        let v1 = save_editor(&install, "crossfire", &f, "none").ok().expect("saved");
+        let e = save_edited(&made, &install);
+        assert!(!e.written && e.detail.contains("has not made"), "{e:?}");
+
+        // The server's graph, kept as the server keeps it.
+        let world = BspWorld::load(&std::fs::read(&bsp).unwrap()).unwrap();
+        let key = lb_navgen::cache::key(&world, &lb_navgen::GenOptions::default(), 0, 0);
+        lb_navgen::cache::GraphCache::new(&install.join("nav"), "crossfire")
+            .store(&key, &made.base)
+            .unwrap();
+        let nav = NavMap::load("crossfire", &bsp, &install).expect("crossfire loads");
+        assert_eq!(nav.origin, Origin::Server);
+        let e = save_edited(&nav, &install);
+        assert!(e.written, "{e:?}");
+        // What the server reads: the overlays on disk, and the graph saved with exactly them.
+        let on_disk = || -> Vec<Patch> {
+            mapload::read_overlays(&install, "crossfire", nav.bsp_size)
+                .into_iter()
+                .flat_map(|o| o.nav.patches)
+                .collect()
+        };
+        let played = mapload::edited_graph(&install, "crossfire", &key, &on_disk()).expect("goes with the overlays");
+        let applied = nav.patched(&f, None);
+        assert_eq!(
+            (&played.nodes, &played.links),
+            (&applied.graph.nodes, &applied.graph.links)
+        );
+        assert!(played.find_link(a, b).is_none() && played.find_link(b, a).is_none());
+
+        // Changed since (by hand, or from the game): the server applies the overlays itself.
+        f.nav.patches[0] = unlink(false);
+        let v2 = save_editor(&install, "crossfire", &f, &v1).ok().expect("saved");
+        assert!(mapload::edited_graph(&install, "crossfire", &key, &on_disk()).is_none());
+        save_editor(&install, "crossfire", &OverlayFile::new("crossfire"), &v2)
+            .ok()
+            .expect("saved");
+        let e = save_edited(&nav, &install);
+        assert!(!e.written && e.detail.contains("removed"), "{e:?}");
+        assert!(!mapload::overlay_path(&install, "crossfire", mapload::EDITED).exists());
+        let _ = std::fs::remove_dir_all(&install);
+    }
+
+    #[test]
     fn a_preview_shows_what_the_changes_do_and_routes_take_them() {
         let Some(bsp) = stand() else { return };
         let install = std::env::temp_dir().join(format!("lb-editor-nav-{}", std::process::id()));
@@ -443,11 +571,34 @@ mod tests {
         assert!(p.editor[0].ok);
         let diff = preview(&nav.base, &p);
         assert_eq!(diff.removed, vec![a, b]);
-        assert!(diff.added.is_empty() && diff.nodes.is_empty());
+        assert!(diff.added.is_empty() && diff.nodes.is_empty() && diff.moved.is_empty());
         assert!(
             Arc::ptr_eq(&p, &nav.patched(&editor, None)),
             "the same changes are applied once"
         );
+        let (c, l) = (0..g.len() as NodeId)
+            .find_map(|n| {
+                g.links(n)
+                    .iter()
+                    .find(|l| l.kind == LinkKind::Walk && l.valid() && l.length > 150.0)
+                    .map(|l| (n, *l))
+            })
+            .expect("a long walk link");
+        let step = g.node(c).origin + (g.node(l.to).origin - g.node(c).origin).normalize() * 32.0;
+        let mut moving = editor.clone();
+        moving.nav.patches.push(Patch::MoveNode {
+            from: g.node(c).origin.to_array(),
+            to: step.to_array(),
+            note: String::new(),
+        });
+        let moved = preview(&nav.base, &nav.patched(&moving, None));
+        assert!(moved.editor[1].ok, "{:?}", moved.editor[1]);
+        assert_eq!(
+            (moved.moved.len(), moved.moved[0]),
+            (5, c as f32),
+            "the node moved, where it is now"
+        );
+        assert!(moved.nodes.is_empty(), "no node put in");
         let json = graph_json(&nav.base);
         assert_eq!(json.nodes.len(), g.len() * 4);
         let far = (0..g.len() as NodeId)

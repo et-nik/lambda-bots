@@ -96,6 +96,7 @@ export type PatchOp =
   | { op: 'add_link'; from: Vec3; to: Vec3; kind?: string; both: boolean; trust: boolean; note?: string }
   | { op: 'remove_link'; from: Vec3; to: Vec3; both: boolean; note?: string }
   | { op: 'add_node'; at: Vec3; note?: string }
+  | { op: 'move_node'; from: Vec3; to: Vec3; note?: string }
 
 export interface Place {
   name: string
@@ -146,6 +147,8 @@ export interface NavInfo {
 export interface Preview {
   /** Nodes put in, numbered on from the base graph's. */
   nodes: number[]
+  /** Nodes of the base graph moved: `[node, x, y, z, flags]` each. */
+  moved: number[]
   added: number[]
   /** `[from, to]` pairs. */
   removed: number[]
@@ -162,7 +165,14 @@ export interface Route {
   plain: number | null
 }
 
-export type Tool = 'select' | 'link' | 'unlink' | 'node' | 'forbid' | 'place' | 'route'
+export type Tool = 'select' | 'link' | 'unlink' | 'node' | 'move' | 'forbid' | 'place' | 'route'
+
+/** What became of `editor.lbnav`, the server's graph with the changes applied, on a save. */
+export interface EditedGraph {
+  written: boolean
+  /** Where it is, or why it is not. */
+  detail: string
+}
 
 /** What a click hit: an entity, a node or a link of the graph, and the point on the map under it. */
 export interface Pick {

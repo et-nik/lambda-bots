@@ -5,9 +5,9 @@ the map in 3D, as Hammer shows it: textured and lit, with every brush entity and
 and inspected, and the bots' navigation graph over it, which can be edited. It reads the maps and WADs straight from
 the game's mod directory, and the graph and the map's overlays from the bots' directory.
 
-State: viewing (M6.1a) and editing the graph (M6.2): nodes, links of every kind (long jumps and gauss boosts
-included), forbidden zones and places, checked as the server checks them, saved to `maps/<map>/editor.yaml` and
-applied on the running server. Coming next: why a link was not taken, and live bots with their paths and commands
+State: viewing (M6.1a) and editing the graph (M6.2): nodes put in and moved, links of every kind (long jumps and
+gauss boosts included), forbidden zones and places, checked as the server checks them, saved to
+`maps/<map>/editor.yaml` with the graph they make (`editor.lbnav`) and applied on the running server. Coming next: why a link was not taken, and live bots with their paths and commands
 (M6.3).
 
 ## Running
@@ -93,32 +93,49 @@ says which). The changes go into `maps/<map>/editor.yaml`, the file the in-game 
 The **Navigation** tab holds the tools, the changes and what is selected. Every change is checked at once as the
 server will check it, and the list shows what it did: the links it put in and their kinds, or why it did nothing.
 
-| Tool   | Key | Click                                  | Does                                                              |
-|--------|-----|----------------------------------------|-------------------------------------------------------------------|
-| Select | V   | a node, a link, an entity              | shows it: a node's links in and out with kinds and costs          |
-| Link   | L   | a node, then another; on from there    | a link of the kind chosen, both ways or one, trusted or checked   |
-| Unlink | U   | a link                                 | takes it out, both ways or one                                    |
-| Node   | N   | the floor where a node is missing      | a node, linked with the nodes around wherever the links check out |
-| Forbid | X   | where bots must never plan through     | a zone of the radius chosen                                       |
-| Place  | P   | where the named place is               | a place with a name, a radius and tags                            |
-| Route  | R   | where a bot starts, then where it goes | the way a bot plans with the changes, its time and its links      |
+| Tool   | Key | Click                                    | Does                                                              |
+|--------|-----|------------------------------------------|-------------------------------------------------------------------|
+| Select | V   | a node, a link, an entity                | shows it: a node's links in and out with kinds and costs          |
+| Link   | L   | a node, then another; on from there      | a link of the kind chosen, both ways or one, trusted or checked   |
+| Unlink | U   | a link                                   | takes it out, both ways or one                                    |
+| Node   | N   | the floor where a node is missing        | a node, linked with the nodes around wherever the links check out |
+| Move   | M   | a node, dragged to where it should stand | the node set down there, its links checked again                  |
+| Forbid | X   | where bots must never plan through       | a zone of the radius chosen                                       |
+| Place  | P   | where the named place is                 | a place with a name, a radius and tags                            |
+| Route  | R   | where a bot starts, then where it goes   | the way a bot plans with the changes, its time and its links      |
 
 - **Link kinds.** *As it checks out*: the check finds what the link is (a walk, a drop, a door, a jump, ...). *Jump*:
   a jump is tried first. *Crouch*: walked crouched. *Long jump* and *gauss boost*: the trick is planned (only bots
   with the module, or with the gauss and its uranium, take them). A link that does not check out is not put in
   unless *trust* is on; a trusted trick gets a contract that makes a bot try it.
+- **Move** drags a node: in 3D and from the top it slides over the surface under the pointer, in the front and side
+  views it moves in the view's plane at its depth; the server sets it down on the floor. Its links are checked again
+  there: those that still check out stay (a walk may turn into a drop), the others go unless they were trusted, and it
+  is linked with the nodes around like a node put in. A node put in by the page moves in its own change, and the
+  links drawn to it after it follow; a node of the graph gets a `move_node` change, which dragging it again changes.
+  Esc while dragging leaves it where it was; a node in a forbidden zone does not move.
+- **Forbid** clicked on a node puts the zone about the node. A zone holds for the changes after it too: nothing is
+  linked into it, and no node is put in or moved into it. A link taken out stays out when a node put in or moved
+  links itself with the nodes around.
 - **Route** takes long jumps and gauss boosts when those boxes are on, and tells the time without tricks too.
 - **The legend** under the header counts the links of each kind; a click hides or shows a kind, or the links that are
   off.
 - The changes list is `editor.yaml` in order; a click brings a change into view and opens its fields (radius, kind,
   both ways, trust, a note); × removes it. Undo and redo: ⌘Z and ⌘⇧Z (Ctrl+Z and Ctrl+Shift+Z off a Mac). Delete
   removes the selected change or unlinks the selected link; Esc drops a link or a route half drawn.
-- What changed is drawn through walls: links put in bright, links taken out dashed red, nodes put in pink, forbidden
-  nodes dark red.
+- What changed is drawn through walls: links put in bright, links taken out dashed red, nodes put in or moved pink
+  (a dashed line from where a moved node stood), forbidden nodes dark red.
 
 **Saving and the server.** *Save* (⌘S, or Ctrl+S) writes `editor.yaml` unless it changed on disk since the page read it
 (saved from the game meanwhile): then the page asks whether to keep its changes or take the file. Changes not saved
-yet stay in the browser and come back when the map is opened again. *Apply on server* sends `lb overlay reload` over
+yet stay in the browser and come back when the map is opened again.
+
+Save also writes `maps/<map>/editor.lbnav`: the server's graph with `editor.yaml` and `overlay.yaml` applied, as the
+server reads them. The server plays on it as it is, with the node numbers the page shows, while it goes with what the
+server would load: the same build of the map, generator and physics, and exactly the overlays on disk. Otherwise
+(`overlay.yaml` changed by hand, `editor.yaml` saved from the game, a new generator) the server leaves it and applies
+the overlays itself. It is written only over the server's own graph checked with the default physics; when it is not,
+the notice after saving says why and one saved before is removed. `lb edit save` and `lb nav regen` remove it too. *Apply on server* sends `lb overlay reload` over
 the server's command channel (the telemetry port + 1 on loopback, signed with the channel's secret): the server reads
 the overlays of the map it is on again. Without a secret the button is off and says why; `lb overlay reload` in the
 server console does the same.
