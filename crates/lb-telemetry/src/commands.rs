@@ -83,6 +83,11 @@ impl CommandChannel {
         })
     }
 
+    /// The port it listens on (the one the OS picked when opened on port 0).
+    pub fn local_port(&self) -> Option<u16> {
+        Some(self.socket.as_ref()?.local_addr().ok()?.port())
+    }
+
     /// Drains pending datagrams; returns verified commands and verification failures.
     pub fn poll(&mut self, now_ms: u64, out: &mut Vec<Result<CommandRequest, (SocketAddr, VerifyError)>>) {
         let Some(socket) = self.socket.as_ref() else { return };

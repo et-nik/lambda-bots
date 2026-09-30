@@ -23,6 +23,8 @@ struct SlotInfo {
     uint32_t pending_seed = 0;
     bool has_seed = false;
     bool zombie = false;
+    // The client that last left the slot: its edict may still look like a player's.
+    int left_userid = 0;
 };
 
 struct State {

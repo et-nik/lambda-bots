@@ -9,3 +9,5 @@
 /tools/observer/recordings/*
 !/tools/observer/recordings/.gitkeep
 __pycache__/
+/tools/editor/node_modules/
+/tools/editor/dist/

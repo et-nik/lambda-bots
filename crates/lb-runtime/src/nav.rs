@@ -65,13 +65,16 @@ pub struct LoadedMap {
     pub graph: Result<Arc<NavGraph>, String>,
     /// Who sees whom, chokepoints, spots to hold and to mine, worked out from the graph; `None` without one.
     pub tactics: Option<Arc<lb_mapknow::MapTactics>>,
-    /// Where the graph came from: "cache", "generated" or "yapb".
+    /// Where the graph came from: "cache", "generated", "yapb" or `EDITED_ORIGIN`.
     pub origin: &'static str,
     /// The map's overlays (editor's, then the hand-written one) and what applying their patches came to.
     pub overlays: Arc<Vec<OverlayFile>>,
     pub patches: String,
     pub millis: u128,
 }
+
+/// `LoadedMap::origin` of the graph the map editor saved with the overlays applied (`mapload::EDITED`).
+pub const EDITED_ORIGIN: &str = "editor";
 
 /// How a map's graph is had.
 #[derive(Clone, Debug)]
@@ -227,9 +230,19 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     let mech = Mechanisms::from_world(&world);
     let mechs = Arc::new(MapMechs::from(&world, &mech));
     let overlays = read_overlays(install, map, world.bsp.fingerprint.1);
-    let (graph, origin) = match opts.source {
-        NavSource::Yapb => (load_graph(&files, map, &mut world, &mech, &opts.import), "yapb"),
-        NavSource::Generated => match generated_graph(install, map, &mut world, &mech, opts) {
+    let patches: Vec<Patch> = overlays.iter().flat_map(|o| o.nav.patches.iter().cloned()).collect();
+    // The map editor's graph: the one made here with these overlays applied, as it saved it.
+    let edited = match opts.source {
+        NavSource::Generated if !patches.is_empty() => {
+            let key = lb_navgen::cache::key(&world, &gen_options(opts), 0, 0);
+            lb_navgen::mapload::edited_graph(install, map, &key, &patches)
+        }
+        _ => None,
+    };
+    let (graph, origin) = match (edited, &opts.source) {
+        (Some(g), _) => (Ok(Arc::new(g)), EDITED_ORIGIN),
+        (None, NavSource::Yapb) => (load_graph(&files, map, &mut world, &mech, &opts.import), "yapb"),
+        (None, NavSource::Generated) => match generated_graph(install, map, &mut world, &mech, opts) {
             Ok((graph, origin)) => (Ok(graph), origin),
             Err(e) => {
                 tracing::warn!("{map}: {e}; trying the yapb graph");
@@ -237,8 +250,21 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
             }
         },
     };
-    let patches: Vec<Patch> = overlays.iter().flat_map(|o| o.nav.patches.iter().cloned()).collect();
+    // Patches are checked in the world the generator leaves, a graph read from the cache or not.
+    lb_navgen::mapload::prepare_world(&mut world, &mech);
     let (graph, patches) = match graph {
+        Ok(g) if origin == EDITED_ORIGIN => {
+            tracing::info!(
+                "{map}: the map editor's graph with the {} overlay patches",
+                patches.len()
+            );
+            let summary = format!(
+                "{} overlay patches, applied by the map editor ({})",
+                patches.len(),
+                lb_navgen::mapload::EDITED
+            );
+            (Ok(g), summary)
+        }
         Ok(g) if !patches.is_empty() => {
             let base = Arc::try_unwrap(g).unwrap_or_else(|g| (*g).clone());
             let (patched, report) = lb_navgen::patch::apply(base, &patches, &mut world, &mech, opts.import.physics);
@@ -292,35 +318,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     })
 }
 
-/// A map's overlay files under `maps/<map>/`, in the order they apply: the in-game editor's, then the hand-written one.
-pub const OVERLAYS: [&str; 2] = ["editor.yaml", "overlay.yaml"];
-
-/// The map's overlays (`OVERLAYS`) in the order they apply. A file that does not read is left out with a warning.
-pub fn read_overlays(install: &Path, map: &str, bsp_size: u64) -> Vec<OverlayFile> {
-    let dir = install.join("maps").join(map);
-    OVERLAYS
-        .iter()
-        .filter_map(|name| {
-            let path = dir.join(name);
-            let text = std::fs::read_to_string(&path).ok()?;
-            match OverlayFile::parse(&text, &path.display().to_string()) {
-                Ok(o) if o.bsp_size.is_some_and(|s| s != bsp_size) => {
-                    tracing::warn!(
-                        "{}: made for a {}-byte {map}.bsp, this one has {bsp_size} bytes; not applied",
-                        path.display(),
-                        o.bsp_size.unwrap_or(0)
-                    );
-                    None
-                }
-                Ok(o) => Some(o),
-                Err(e) => {
-                    tracing::warn!("{e}; not applied");
-                    None
-                }
-            }
-        })
-        .collect()
-}
+pub use lb_navgen::mapload::{OVERLAYS, read_overlays};
 
 /// Generator settings for the server's physics.
 pub fn gen_options(opts: &LoadOptions) -> GenOptions {
@@ -754,5 +752,75 @@ impl NavService for BotNavService<'_, '_> {
             flights: None,
         };
         self.nav.fly_on(&mut ctx, &self.input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lb_nav::graph::{GraphStats, NavNode, NodeFlags};
+
+    /// Two nodes: a graph that can only have come from the file it was written to.
+    fn marked(source: &str) -> NavGraph {
+        let nodes: Vec<NavNode> = (0..2)
+            .map(|i| NavNode {
+                origin: Vec3::new(i as f32 * 64.0, 0.0, 0.0),
+                flags: NodeFlags::empty(),
+                radius: 16.0,
+                support: 0,
+                first_link: 0,
+                link_count: 0,
+            })
+            .collect();
+        NavGraph::from_parts(nodes, vec![Vec::new(); 2], Vec::new(), source, GraphStats::default())
+    }
+
+    #[test]
+    fn the_map_editors_graph_is_played_while_it_goes_with_the_overlays() {
+        let Some(maps) = lb_bsp::test_maps_dir().filter(|m| m.join("crossfire.bsp").is_file()) else {
+            return;
+        };
+        let game = maps.parent().expect("maps are in the game directory");
+        let install = std::env::temp_dir().join(format!("lb-runtime-edited-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&install);
+        let opts = LoadOptions {
+            source: NavSource::Generated,
+            import: ImportOptions::default(),
+            threads: 1,
+        };
+        let world = lb_bsp::BspWorld::load(&std::fs::read(maps.join("crossfire.bsp")).unwrap()).unwrap();
+        let key = lb_navgen::cache::key(&world, &gen_options(&opts), 0, 0);
+        GraphCache::new(&install.join("nav"), "crossfire")
+            .store(&key, &marked("kept"))
+            .unwrap();
+        let mut f = OverlayFile::new("crossfire");
+        f.nav.patches.push(Patch::Forbid {
+            at: [0.0, 0.0, 0.0],
+            radius: 8.0,
+            note: String::new(),
+        });
+        let path = lb_navgen::mapload::overlay_path(&install, "crossfire", lb_navgen::mapload::OVERLAYS[0]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, f.to_yaml().unwrap()).unwrap();
+        let edited = lb_navgen::mapload::edited_key(&key, &f.nav.patches);
+        lb_navgen::mapload::write_edited(&install, "crossfire", &edited, &marked("edited")).unwrap();
+
+        let loaded = load(game, &install, "crossfire", &opts).expect("loads");
+        assert_eq!(loaded.origin, EDITED_ORIGIN);
+        assert_eq!(loaded.graph.as_ref().unwrap().source, "edited");
+        // The file changed since the editor saved its graph: the kept graph, the overlays applied here.
+        f.nav.patches.push(Patch::Forbid {
+            at: [64.0, 0.0, 0.0],
+            radius: 8.0,
+            note: String::new(),
+        });
+        std::fs::write(&path, f.to_yaml().unwrap()).unwrap();
+        let loaded = load(game, &install, "crossfire", &opts).expect("loads");
+        assert_eq!(
+            (loaded.origin, loaded.graph.as_ref().unwrap().source.as_str()),
+            ("cache", "kept")
+        );
+        assert_eq!(loaded.patches, "2 of 2 overlay patches applied");
+        let _ = std::fs::remove_dir_all(&install);
     }
 }

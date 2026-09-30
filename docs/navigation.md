@@ -46,18 +46,16 @@ and its vertical push accelerates the player against gravity, at that many units
    - Push fields: each field is run into from eight sides, walking and jumping in, drifting or keeping to its middle
      while it lifts; the flights land where nodes are put. Then flights are steered at the nodes near each field its
      entries cannot walk to, nearest first.
-   - Tricks (see "Long jumps and gauss boosts" below):
-     - long jumps across gaps: from nodes near an edge to nodes 160–560 units off (48 up to 240 down) that the graph
-       joins only by a way more than twice as long, where the jump saves a second and a third of the way round and
-       costs no fall damage;
-     - gauss boosts: from every standing node with 128 units of room overhead, the flight along each of twelve ways,
-       34° down, is followed to where it comes down, and the node there gets a boost when the graph's way to it is
-       1.3 times as costly as the boost at least (or there is none).
+   - Tricks (see "Long jumps and gauss boosts" below): long jumps across gaps, from nodes near an edge to nodes
+     160–560 units off (48 up to 240 down) that the graph joins only by a way more than twice as long, where the jump
+     saves a second and a third of the way round and costs no fall damage. Gauss boosts are not made: they are put in
+     by hand (the map editor's Link tool, or `add_link` with `kind: gauss_boost` in an overlay), and planned and
+     checked then as a made one would be.
 5. **Report.** The coverage report (`lb-cli nav coverage`) counts the floor and the items a bot gets to from the
    spawn points and back, and lists the rest.
 
-On crossfire this takes 0.46 s on the stand's cores (890 nodes, 4713 links, 3 of them long jumps and 68 gauss
-boosts); on the largest map, boot_camp, 1.1 s.
+On crossfire this takes 0.44 s on the stand's cores (890 nodes, 4645 links, 3 of them long jumps); on the largest
+map, boot_camp, 1.3 s.
 A kept graph loads in under a millisecond (96 ms on the stand, with the BSP and the visibility sets). The file
 (`.lbnav`: postcard, LZ4, CRC-32C) is named by the key of what the graph was made from: the BSP (BLAKE3 and size),
 the generator's version, the physics, the rules and the overlay. Only a graph with exactly the same key is used; the

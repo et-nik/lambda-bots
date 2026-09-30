@@ -1,7 +1,8 @@
 # M5 acceptance: game modes and bot management
 
-State as of 2026-09-29, after sub-stage M5.1, GunGame. Still to come: M5.2, team play (TDM, team GunGame, joining a
-team), and M5.3, bot management (rotation, the quota's cvars, disguise).
+State as of 2026-09-29, after sub-stage M5.1, GunGame. The rest of M5, team play (TDM, team GunGame, joining a team)
+and bot management (rotation, the quota's cvars, disguise), moved to M9: a map editor in the browser, commands and
+scenarios for bots, test maps and better routes (M6–M8) come first.
 
 The production server plays FFA GunGame, so GunGame came first. By the user's decisions:
 - The bots know GunGame from the scoreboard alone: a player's level is its frags over 100 and the leader is the
@@ -13,11 +14,11 @@ The production server plays FFA GunGame, so GunGame came first. By the user's de
 
 ## Results against the plan's criteria
 
-| Criterion                                                                                           | Status   | How it is checked                         |
-|-----------------------------------------------------------------------------------------------------|----------|-------------------------------------------|
-| A GunGame match: levels going up, no weapon pickups, the tripmine level, the last level, the warmup | the user | on the production server (hl-gungame 2.3) |
-| TDM with no team kills                                                                              | M5.2     |                                           |
-| Every disguise switch on its own                                                                    | M5.3     |                                           |
+| Criterion                                                                                           | Status | How it is checked                  |
+|-----------------------------------------------------------------------------------------------------|--------|------------------------------------|
+| A GunGame match: levels going up, no weapon pickups, the tripmine level, the last level, the warmup | partly | the test server (production stack) |
+| TDM with no team kills                                                                              | M9     |                                    |
+| Every disguise switch on its own                                                                    | M9     |                                    |
 
 ## GunGame (M5.1)
 
@@ -28,8 +29,9 @@ From `hl-gungame` (`gungame.sma` 2.3), what shapes the bots:
   level gives its weapon alone (the tripmine level a glock too, the last one the crowbar, a long jump and two
   batteries); on every level change the player is stripped and given the next kit. Bots skip the levels marked
   `botcant` (the satchels and the tripmines on most maps).
-- **The scoreboard.** On every level change the plugin sets the player's frags to level × 100; the game's own
-  scoring adds and takes a frag for each kill and suicide in between.
+- **The scoreboard.** Whenever it equips a player (every spawn and level change) the plugin sets the player's frags
+  to level × 100 plus the kills made on the level; the game's own scoring adds and takes a frag for each kill and
+  death by the world or by one's own hand in between, so a player a frag short of the hundred is still on the level.
 - **Damage.** Only the level's weapons hurt other players: hits and projectiles of any other weapon are blocked
   (the attacker hears an electric sound). A player's own blasts always hurt it.
 - **Pickups.** Weapons, ammo and weapon boxes cannot be picked up; the map's are hidden. Health, batteries, the long
@@ -73,6 +75,10 @@ In short (the whole of it in `docs/behavior.md`, *GunGame*):
   the scoreboard; no goal went for a weapon or ammo (bots still took the ones they ran over, which a server with the
   plugin does not let them), no suicide. The ordinary game after it on the same build: 22.5 kills a minute (20–25 at
   M4's end), no suicide, no enemy close in front unseen, core p99 247 µs.
+- **The test server** (the production stack: ReHLDS 3.15, BugfixedHL, AMXX 1.9, GunGame 2.3, its own level lists;
+  bots alone, expert, with a copy of the plugin that starts the match without humans): bots won on crossfire and
+  13thflaw, where GunGame skips the satchel and tripmine levels for bots, and stayed on the tripmine level on
+  1hp_crazy_rooms_beta5, where it does not (*Found on the way*).
 - **The production server:** the user's match (to come).
 
 ### Hearing grenades bounce
@@ -104,6 +110,19 @@ close by), and kill as many.
   message manager: every message comes through Metamod, as on any engine, and the frags other plugins write
   (GunGame's levels) are read from the players' entities, as they already were. The server's ReHLDS is the official
   3.15.0.896.
+- **The crash fix held**: three hours on the test server with the test plugin sending HUD text to every player
+  twenty times a second, two GunGame ends (the plugin's own standings on the HUD) and two map changes, no crash.
+- **A level read one short**: a death by the world takes a frag off until the next spawn, and 999 frags read as the
+  level below. A level is now read with up to a tenth of its frags missing.
+- **The tripmine level where bots must play it.** GunGame skips a level for bots only when the level list marks it
+  `botcant`. The server's default list (every map without its own) and the lists of dm_snow, 1hp_crazy_rooms_beta5,
+  ag_arena_b4, gg_1hp_basement, gg_egypt and hl_pool_day do not mark the tripmine level, and in three hours the bots
+  killed nobody with a mine: with bots alone the match stops there (two and a half hours on 1hp_crazy_rooms_beta5).
+  The user left the lists as they are for now; the mines wait for M9.
+- **Maps with 1 health.** The retreat goal weighs health against 100, so on 1hp maps the bots retreat all the time.
+  For M9: weigh health against what the bot spawned with.
+- **Doors that crush.** On 1hp_crazy_rooms_beta5, 24 doors open on touch and close by themselves 2 s later with 100
+  damage; they killed the bots 1183 times in two and a half hours. For M8 (navigation).
 - **Slots lost on a map change** (Xash3D): every spawn clears the fake client flag, and Xash drops fake clients on a
   level change by it; the bots that had died stayed on as clients no one moves. Found by M4's 60-minute run, fixed
   in the adapter (`docs/m4-acceptance.md`, *The 60-minute run*).
@@ -111,9 +130,11 @@ close by), and kill as many.
 
 ### Left
 
-- **Team GunGame** (`gg_teamplay`: levels shared by the team, no descore) waits for M5.2's teams; the bots read
+- **Team GunGame** (`gg_teamplay`: levels shared by the team, no descore) waits for M9's teams; the bots read
   its levels from frags already.
 - **A bot's own snarks** still turn on it now and then (3 of 4 suicides in the first 12 minutes of M4's 60-minute
   run, a mixed game); on the snark level with `gg_descore` each costs a kill.
+- **The tripmine level** where GunGame does not skip it for bots, and **maps with 1 health** (*Found on the way*):
+  M9.
 - The kills a bot still needs for its next level are not used (the scoreboard shows them as frags over the
   level's hundreds).

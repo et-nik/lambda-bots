@@ -129,6 +129,43 @@ void build_snapshots() {
     }
 }
 
+std::string info_value(edict_t *ed, const char *key) {
+    char *info = g_engfuncs.pfnGetInfoKeyBuffer(ed);
+    const char *v = info ? g_engfuncs.pfnInfoKeyValue(info, key) : nullptr;
+    return v ? v : "";
+}
+
+// A client already in the slot that did not come through our connect hooks.
+void adopt_client(int slot, edict_t *ed) {
+    SlotInfo &s = state().slots[slot];
+    s = SlotInfo{};
+    s.connected = true;
+    s.in_game = ed->pvPrivateData != nullptr;
+    s.userid = g_engfuncs.pfnGetPlayerUserId(ed);
+    const std::string name = info_value(ed, "name");
+    const std::string model = info_value(ed, "model");
+    record_client(LB_CLIENT_EV_CONNECT, slot, name.c_str(), model.c_str(), "", "");
+    if (s.in_game) record_client(LB_CLIENT_EV_PUT_IN_SERVER, slot, name.c_str(), model.c_str(), "", g_engfuncs.pfnGetPlayerAuthId(ed));
+}
+
+// Bot plugins such as jk_botti put their bots in the game by calling the game's ClientConnect and ClientPutInServer
+// directly, past Metamod, so our hooks never see them: they are adopted once the engine has them in a slot.
+void adopt_unhooked_clients() {
+    const int max = state().max_clients < kMaxSlots ? state().max_clients : kMaxSlots;
+    for (int i = 1; i <= max; i++) {
+        const SlotInfo &s = state().slots[i];
+        if (s.ours) continue;
+        edict_t *ed = edict_of(i);
+        if (!ed || ed->free || !(ed->v.flags & FL_CLIENT) || !ed->pvPrivateData || !ed->v.netname ||
+            !lb_string(ed->v.netname)[0]) {
+            continue;
+        }
+        const int userid = g_engfuncs.pfnGetPlayerUserId(ed);
+        if (userid <= 0 || userid == s.userid || userid == s.left_userid) continue;
+        adopt_client(i, ed);
+    }
+}
+
 void advance_clock() {
     State &s = state();
     double sim = 0.0;
@@ -153,6 +190,7 @@ void call_frame_pre() {
     state().frame_no++;
     advance_clock();
     emulate_network_duties();
+    adopt_unhooked_clients();
     build_snapshots();
     arena().swap();
     LbFrameInput in{};
@@ -190,12 +228,6 @@ void call_frame_post() {
     state().core_depth--;
 }
 
-std::string info_value(edict_t *ed, const char *key) {
-    char *info = g_engfuncs.pfnGetInfoKeyBuffer(ed);
-    const char *v = info ? g_engfuncs.pfnInfoKeyValue(info, key) : nullptr;
-    return v ? v : "";
-}
-
 }  // namespace
 
 void begin_map(bool late) {
@@ -227,14 +259,7 @@ void scan_existing_clients() {
     for (int i = 1; i <= gpGlobals->maxClients && i <= kMaxSlots; i++) {
         edict_t *ed = edict_of(i);
         if (!ed || ed->free || !(ed->v.flags & FL_CLIENT) || !ed->v.netname) continue;
-        SlotInfo &s = state().slots[i];
-        s.connected = true;
-        s.in_game = ed->pvPrivateData != nullptr;
-        s.userid = g_engfuncs.pfnGetPlayerUserId(ed);
-        const std::string name = info_value(ed, "name");
-        const std::string model = info_value(ed, "model");
-        record_client(LB_CLIENT_EV_CONNECT, i, name.c_str(), model.c_str(), "", "");
-        if (s.in_game) record_client(LB_CLIENT_EV_PUT_IN_SERVER, i, name.c_str(), model.c_str(), "", g_engfuncs.pfnGetPlayerAuthId(ed));
+        adopt_client(i, ed);
     }
 }
 
@@ -274,7 +299,9 @@ LB_ENTRY void h_ClientDisconnect(edict_t *ed) {
     const int slot = index_of(ed);
     if (slot >= 1 && slot <= kMaxSlots) {
         record_client(LB_CLIENT_EV_DISCONNECT, slot, lb_string(ed->v.netname), "", "", "");
+        const int userid = g_engfuncs.pfnGetPlayerUserId(ed);
         forget_slot(slot);
+        state().slots[slot].left_userid = userid;
     }
     LB_RETURN_META(mm::MRES_IGNORED);
 }

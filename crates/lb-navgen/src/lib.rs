@@ -7,6 +7,7 @@
 pub mod build;
 pub mod cache;
 pub mod field;
+pub mod mapload;
 pub mod patch;
 pub mod place;
 pub mod push;

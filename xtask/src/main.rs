@@ -52,6 +52,8 @@ const ENGINE_FREE: &[&str] = &[
     "lb-telemetry",
     "lb-game",
     "lb-bsp",
+    "lb-mapmesh",
+    "lb-editor",
     "lb-kin",
     "lb-nav-api",
     "lb-nav",

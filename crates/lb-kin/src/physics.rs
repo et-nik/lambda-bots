@@ -5,7 +5,7 @@ pub const SAFE_FALL_SPEED: f32 = 580.0;
 /// Landing speed that kills with progressive fall damage (100 damage).
 pub const FATAL_FALL_SPEED: f32 = 1024.0;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Physics {
     pub gravity: f32,
     /// `sv_maxspeed`; HL's `server.cfg` sets 270.

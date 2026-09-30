@@ -1,0 +1,79 @@
+:root {
+  --bg: #15171b;
+  --panel: #1d2026;
+  --line: #2e333c;
+  --text: #c9ced6;
+  --text-strong: #f1f3f6;
+  --muted: #8a93a1;
+  --accent: #ff9f1a;
+  --accent-dim: #6b4617;
+  --warn: #f07167;
+  color-scheme: dark;
+  font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button,
+select {
+  padding: 3px 10px;
+  background: #262a32;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover,
+select:hover {
+  border-color: #454c58;
+}
+
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+/* Shared by the panel's cards. */
+.muted {
+  color: var(--muted);
+}
+.linkish {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.linkish:hover {
+  text-decoration: underline;
+}
+.tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #2f343d;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: 1px;
+}

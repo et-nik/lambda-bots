@@ -1,0 +1,35 @@
+[package]
+name = "lb-editor"
+description = "The map editor's server: maps, textures and lightmaps for the browser page it serves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-mapmesh.workspace = true
+lb-core.workspace = true
+lb-bsp.workspace = true
+lb-kin.workspace = true
+lb-nav.workspace = true
+lb-navgen.workspace = true
+lb-config.workspace = true
+lb-telemetry.workspace = true
+blake3.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[lints]
+workspace = true

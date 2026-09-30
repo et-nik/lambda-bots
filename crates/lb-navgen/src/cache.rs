@@ -11,7 +11,7 @@ use lb_nav::store::{GraphKey, read, read_key_from, write};
 use crate::GenOptions;
 
 /// Version of the generator. Bump it whenever the same map and settings would give another graph.
-pub const GENERATOR: u32 = 6;
+pub const GENERATOR: u32 = 7;
 /// Graphs kept per map.
 pub const KEEP: usize = 4;
 
@@ -23,10 +23,16 @@ pub fn key(world: &BspWorld, opts: &GenOptions, rules: u64, overlay: u64) -> Gra
         bsp,
         bsp_size,
         generator: GENERATOR,
-        physics: xxhash_rust::xxh3::xxh3_64(format!("{opts:?}").as_bytes()),
+        physics: physics_hash(opts),
         rules,
         overlay,
+        movement: opts.physics,
     }
+}
+
+/// The key's hash of the settings a graph is made with (the player physics among them).
+pub fn physics_hash(opts: &GenOptions) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(format!("{opts:?}").as_bytes())
 }
 
 /// The graphs of one map.

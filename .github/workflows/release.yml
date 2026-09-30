@@ -27,6 +27,12 @@ jobs:
           --linux artifacts/lambdabots-linux-i386/lambdabots_mm_i386.so
           --windows artifacts/lambdabots-windows-x86/lambdabots_mm.dll
           --macos artifacts/lambdabots-macos-arm64/lambdabots_mm.dylib
+      - name: The map editor
+        run: |
+          for plat in linux-x86_64 macos-arm64; do
+            chmod +x "artifacts/lb-editor-$plat/lb-editor"
+            tar -czf "dist/lb-editor-$LB_VERSION-$plat.tar.gz" -C "artifacts/lb-editor-$plat" lb-editor
+          done
       - uses: softprops/action-gh-release@v2
         with:
           files: |
