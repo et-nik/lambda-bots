@@ -319,6 +319,8 @@ export class NavLayer {
       f.heads.setMatrixAt(i, m)
     })
     f.heads.instanceMatrix.needsUpdate = true
+    // The heads' size changed with the camera: the bounds the view culls them by go with it.
+    f.heads.computeBoundingSphere()
   }
 
   /**
