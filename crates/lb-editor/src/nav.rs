@@ -15,8 +15,9 @@ use lb_navgen::mapload::{self, OVERLAYS};
 use lb_navgen::patch::{self, Outcome};
 use serde::Serialize;
 
-/// Maps whose navigation is kept at once (each keeps its world for checking changes).
-const KEEP: usize = 2;
+/// Graphs of maps kept at once (each keeps its world for checking changes): a page open on an older graph of a map
+/// than the one opened last keeps working on its own.
+const KEEP: usize = 3;
 /// A route's ends snap to the nearest node within this distance.
 const ROUTE_SNAP: f32 = 256.0;
 
@@ -38,6 +39,8 @@ pub struct NavMap {
     pub origin: Origin,
     /// The key of the server's graph (`Origin::Server`).
     pub base_key: Option<GraphKey>,
+    /// Which load of the map this is: a page names it with its changes, since node numbers belong to one graph.
+    pub revision: u64,
     world: Mutex<BspWorld>,
     mech: Mechanisms,
     last: Mutex<Option<(String, Arc<Patched>)>>,
@@ -85,6 +88,7 @@ impl NavMap {
             base,
             origin,
             base_key,
+            revision: 0,
             world: Mutex::new(world),
             mech,
             last: Mutex::new(None),
@@ -158,6 +162,7 @@ pub struct NavMaps {
     kept: Mutex<Vec<Kept>>,
     /// Held while a map loads: making a graph takes a while, and two pages asking at once make one.
     loading: Mutex<()>,
+    revisions: std::sync::atomic::AtomicU64,
 }
 
 impl NavMaps {
@@ -184,12 +189,25 @@ impl NavMaps {
             return Ok(nav);
         }
         let files = graphs.clone().unwrap_or_else(|| graph_files(install, map));
-        let nav = Arc::new(NavMap::load(map, bsp, install)?);
+        let mut loaded = NavMap::load(map, bsp, install)?;
+        loaded.revision = self.revisions.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let nav = Arc::new(loaded);
         let mut kept = self.kept.lock().expect("no panics while locked");
-        kept.retain(|(p, _, _, _)| p != bsp);
         kept.insert(0, (bsp.to_path_buf(), stamp, files, nav.clone()));
         kept.truncate(KEEP);
         Ok(nav)
+    }
+
+    /// The graph of the map from `bsp` a page opened (`revision`), while it is kept.
+    pub fn revision(&self, bsp: &Path, revision: u64) -> Option<Arc<NavMap>> {
+        let mut kept = self.kept.lock().expect("no panics while locked");
+        let i = kept
+            .iter()
+            .position(|(p, _, _, n)| p == bsp && n.revision == revision)?;
+        let k = kept.remove(i);
+        let nav = k.3.clone();
+        kept.insert(0, k);
+        Some(nav)
     }
 }
 
@@ -640,6 +658,11 @@ mod tests {
         );
         let server = maps.get("crossfire", &bsp, &install, true).unwrap();
         assert_eq!(server.origin, Origin::Server);
+        assert_ne!(server.revision, made.revision);
+        // A page still on the graph it opened keeps it.
+        let old = maps.revision(&bsp, made.revision).expect("kept");
+        assert!(Arc::ptr_eq(&old, &made));
+        assert!(maps.revision(&bsp, 999).is_none());
         let _ = std::fs::remove_dir_all(&install);
     }
 

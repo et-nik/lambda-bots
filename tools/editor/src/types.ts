@@ -136,6 +136,8 @@ export interface FlatGraph {
 
 export interface NavInfo {
   origin: 'server' | 'made'
+  /** The load of the map's graph the page works on: its previews and routes name it. */
+  revision: number
   kinds: string[]
   base: FlatGraph
   editor: OnDisk

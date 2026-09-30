@@ -40,11 +40,29 @@ fn nav_map(state: &AppState, map: &str, fresh: bool) -> Result<(String, Arc<NavM
     Ok((file.name, nav))
 }
 
+/// The graph a page opened (`revision`, from `info`): its changes and routes are worked out on it. Once it is not kept
+/// any more, the page opens the map again.
+fn page_map(state: &AppState, map: &str, revision: u64) -> Result<(String, Arc<NavMap>), ApiError> {
+    let file = state
+        .maps
+        .game
+        .map(map)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such map".into()))?;
+    let nav = state.nav.revision(&file.path, revision).ok_or_else(|| {
+        ApiError(
+            StatusCode::PRECONDITION_FAILED,
+            "the map's graph changed since the page opened it: open the map again".into(),
+        )
+    })?;
+    Ok((file.name, nav))
+}
+
 pub async fn info(State(state): State<Arc<AppState>>, Path(map): Path<String>) -> ApiResult {
     blocking(move || {
         let (name, nav) = nav_map(&state, &map, true)?;
         let body = serde_json::json!({
             "origin": nav.origin,
+            "revision": nav.revision,
             "kinds": nav::kinds(),
             "base": nav::graph_json(&nav.base),
             "editor": nav::read_overlay(&state.install, &name, OVERLAYS[0]),
@@ -60,6 +78,8 @@ pub async fn info(State(state): State<Arc<AppState>>, Path(map): Path<String>) -
 #[derive(Deserialize)]
 pub struct PreviewRequest {
     editor: OverlayFile,
+    /// The graph the page opened.
+    revision: u64,
 }
 
 pub async fn preview(
@@ -68,7 +88,7 @@ pub async fn preview(
     Json(req): Json<PreviewRequest>,
 ) -> ApiResult {
     blocking(move || {
-        let (name, nav) = nav_map(&state, &map, false)?;
+        let (name, nav) = page_map(&state, &map, req.revision)?;
         let overlay = nav::read_overlay(&state.install, &name, OVERLAYS[1]).file;
         let patched = nav.patched(&req.editor, overlay.as_ref());
         Ok(Json(nav::preview(&nav.base, &patched)).into_response())
@@ -79,6 +99,7 @@ pub async fn preview(
 #[derive(Deserialize)]
 pub struct RouteRequest {
     editor: OverlayFile,
+    revision: u64,
     from: [f32; 3],
     to: [f32; 3],
     #[serde(default)]
@@ -93,7 +114,7 @@ pub async fn route(
     Json(req): Json<RouteRequest>,
 ) -> ApiResult {
     blocking(move || {
-        let (name, nav) = nav_map(&state, &map, false)?;
+        let (name, nav) = page_map(&state, &map, req.revision)?;
         let overlay = nav::read_overlay(&state.install, &name, OVERLAYS[1]).file;
         let patched = nav.patched(&req.editor, overlay.as_ref());
         let (from, to) = (Vec3::from_array(req.from), Vec3::from_array(req.to));
@@ -125,7 +146,8 @@ pub async fn save(
             .name;
         match nav::save_editor(&state.install, &name, &req.file, &req.base) {
             Ok(version) => {
-                let graph = match nav_map(&state, &map, false) {
+                // The server's graph as it is now: the one it plays `editor.lbnav` on.
+                let graph = match nav_map(&state, &map, true) {
                     Ok((_, nav)) => nav::save_edited(&nav, &state.install),
                     Err(e) => nav::EditedGraph {
                         written: false,

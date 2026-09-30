@@ -76,13 +76,8 @@ fn nav_gen(bsp: &Path, args: &[&str]) -> Result<bool> {
     let stages: Vec<String> = generated.timings.iter().map(|(n, ms)| format!("{n} {ms}")).collect();
     println!("stages, ms: {}", stages.join(", "));
     println!(
-        "jumps {} of {} planned, long jumps {} of {}, gauss boosts {} of {}",
-        generated.jumps.1,
-        generated.jumps.0,
-        generated.longjumps.1,
-        generated.longjumps.0,
-        generated.boosts.1,
-        generated.boosts.0
+        "jumps {} of {} planned, long jumps {} of {}",
+        generated.jumps.1, generated.jumps.0, generated.longjumps.1, generated.longjumps.0
     );
     let c = lb_navgen::report::coverage(&generated);
     println!(

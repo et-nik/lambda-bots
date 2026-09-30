@@ -152,6 +152,7 @@ export class Viewer {
     if (this.gizmo.visible) {
       this.gizmo.fit(this.camera(), this.el.clientHeight)
     }
+    this.nav.fit(this.camera(), this.el.clientWidth, this.el.clientHeight)
     this.renderer.render(this.scene, this.camera())
     if (now - this.reported > 100) {
       this.reported = now
@@ -539,6 +540,8 @@ export class Viewer {
       this.pressed = { x: e.clientX, y: e.clientY }
       const handle = this.pickHandle(e.clientX, e.clientY)
       if (handle && this.gizmoNode !== null) {
+        // A press on the gizmo moves its node or does nothing: never a click on the map under it.
+        this.pressed = null
         if (this.events.moveStart(this.gizmoNode)) this.beginDrag(this.gizmoNode, handle, e)
       } else {
         const pick = this.pick(e.clientX, e.clientY)

@@ -53,19 +53,23 @@ export async function navInfo(map: string): Promise<NavInfo> {
   return (await get(`${mapPath(map)}/nav`)).json()
 }
 
-export async function navPreview(map: string, editor: OverlayFile): Promise<Preview> {
-  return (await send('POST', `${mapPath(map)}/nav/preview`, { editor })).json()
+/** HTTP status of a preview or a route asked on a graph the server no longer keeps: the map is opened again. */
+export const STALE_GRAPH = 412
+
+export async function navPreview(map: string, revision: number, editor: OverlayFile): Promise<Preview> {
+  return (await send('POST', `${mapPath(map)}/nav/preview`, { editor, revision })).json()
 }
 
 export async function navRoute(
   map: string,
+  revision: number,
   editor: OverlayFile,
   from: Vec3,
   to: Vec3,
   longjump: boolean,
   gauss: boolean,
 ): Promise<Route> {
-  return (await send('POST', `${mapPath(map)}/nav/route`, { editor, from, to, longjump, gauss })).json()
+  return (await send('POST', `${mapPath(map)}/nav/route`, { editor, revision, from, to, longjump, gauss })).json()
 }
 
 /** Saves the editor file over version `base`: the new version, or the file on disk when it changed meanwhile. */

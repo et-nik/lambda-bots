@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { markRaw } from 'vue'
 
-import { ApiError, applyOnServer, navInfo, navPreview, navRoute, saveEditor } from '../api'
+import { ApiError, applyOnServer, navInfo, navPreview, navRoute, saveEditor, STALE_GRAPH } from '../api'
 import type { EditedGraph, NavInfo, OnDisk, Outcome, OverlayFile, PatchOp, Pick, Preview, Route, Tool, Vec3 } from '../types'
 import { GraphModel, STAND } from '../viewer/graph'
 import { forbiddenNodes } from '../viewer/navlayer'
@@ -266,6 +266,17 @@ export const useNav = defineStore('nav', {
       }
     },
 
+    /**
+     * The graph the page opened is gone (the server made the map's graph again, and another page opened it): opens
+     * the map again. Changes not saved come back from the browser.
+     */
+    async reopen() {
+      const map = this.map
+      if (!map) return
+      await this.load(map)
+      this.notify("The map's graph changed on the server: it is opened again, with the changes not saved yet.")
+    },
+
     /** Starts over from the file on disk. */
     take(disk: OnDisk) {
       const file = disk.file ? copy(disk.file) : emptyFile(this.map ?? '')
@@ -347,7 +358,7 @@ export const useNav = defineStore('nav', {
           if (!map || !file) break
           const seq = ++previewSeq
           try {
-            const p = await navPreview(map, normal(file))
+            const p = await navPreview(map, this.info?.revision ?? 0, normal(file))
             if (seq === previewSeq && this.map === map) {
               this.preview = markRaw(p)
               this.error = null
@@ -358,7 +369,8 @@ export const useNav = defineStore('nav', {
               }
             }
           } catch (e) {
-            if (seq === previewSeq) this.error = e instanceof Error ? e.message : String(e)
+            if (e instanceof ApiError && e.status === STALE_GRAPH) void this.reopen()
+            else if (seq === previewSeq) this.error = e instanceof Error ? e.message : String(e)
           }
         } while (again)
       } finally {
@@ -630,11 +642,22 @@ export const useNav = defineStore('nav', {
     async runRoute(from: Vec3, to: Vec3) {
       if (!this.map || !this.draft) return
       try {
-        this.route = markRaw(await navRoute(this.map, normal(this.draft), from, to, this.routeLongjump, this.routeGauss))
+        this.route = markRaw(
+          await navRoute(
+            this.map,
+            this.info?.revision ?? 0,
+            normal(this.draft),
+            from,
+            to,
+            this.routeLongjump,
+            this.routeGauss,
+          ),
+        )
         this.notice = null
       } catch (e) {
         this.route = null
-        this.notify(e instanceof ApiError ? e.message : String(e))
+        if (e instanceof ApiError && e.status === STALE_GRAPH) void this.reopen()
+        else this.notify(e instanceof ApiError ? e.message : String(e))
       }
     },
 

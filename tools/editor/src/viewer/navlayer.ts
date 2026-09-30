@@ -1,4 +1,7 @@
 import * as THREE from 'three'
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 
 import type { Outcome, OverlayFile, Place, Route, Vec3 } from '../types'
 import { GraphModel, KIND_COLORS, type Link, linkValid, nodeColor, OFF_COLOR } from './graph'
@@ -16,8 +19,12 @@ const SELECT = 0xffd24a
 const PENDING = 0xff4df0
 const ROUTE = 0x3ae0ff
 const PEEK = 0xffffff
-/** Links of the selection alone are drawn as arrows this thick, up to this many (lines beyond). */
-const FOCUS_RADIUS = 1.2
+/**
+ * Links of the selection alone are drawn as arrows the same size on screen however near: lines this many pixels wide
+ * with heads this many pixels long; up to this many of them (plain lines beyond).
+ */
+const FOCUS_WIDTH = 2
+const FOCUS_HEAD = 9
 const FOCUS_ARROWS = 200
 
 export interface Highlight {
@@ -144,6 +151,13 @@ export class NavLayer {
   private dragged = new THREE.Group()
   /** Links drawn (and picked): kinds shown, and whether links that are off are. */
   private shown: (l: Link) => boolean = () => true
+  /** The selection's links as arrows: their lines, and their heads with where each head's tip is and points. */
+  private focusArrows: {
+    lines: LineSegments2
+    heads: THREE.InstancedMesh
+    tips: THREE.Vector3[]
+    dirs: THREE.Vector3[]
+  } | null = null
 
   constructor(scene: THREE.Scene) {
     this.group.add(this.graph, this.markup, this.marks, this.dragged)
@@ -178,6 +192,7 @@ export class NavLayer {
     arrows = true,
   ) {
     this.clear(this.graph)
+    this.focusArrows = null
     this.model = model
     const near = (a: number, b: number) => !focus || focus.has(a) || focus.has(b)
     this.shown = (l) => near(l.from, l.to) && !hiddenKinds.has(l.kind) && (!hideOff || linkValid(l))
@@ -225,12 +240,9 @@ export class NavLayer {
     }
     const plainColor = (l: Link) => (linkValid(l) ? (KIND_COLORS[l.kind] ?? 0xffffff) : INVALID)
     const drawn = model.links.filter(this.shown)
-    if (focus && arrows && drawn.length <= FOCUS_ARROWS) {
+    if (focus && arrows && drawn.length && drawn.length <= FOCUS_ARROWS) {
       // The few links of what is selected are what is looked for: arrows in their colours, through walls.
-      const point = (n: number) => new THREE.Vector3(...model.origin(n))
-      for (const l of drawn) {
-        this.graph.add(...arrowParts(point(l.from), point(l.to), plainColor(l), FOCUS_RADIUS))
-      }
+      this.drawFocus(model, drawn, plainColor)
     } else {
       this.graph.add(lines(drawn.filter((l) => !l.added), plainColor, focus !== null))
       // What the overlays change is drawn through walls.
@@ -252,6 +264,63 @@ export class NavLayer {
   }
 
   /** A node being dragged: where it would stand, and its links from there. */
+  /** The selection's links as thin arrows: lines dim at the start and bright at the end, and a head at the end. */
+  private drawFocus(model: GraphModel, links: Link[], colorOf: (l: Link) => number) {
+    const positions: number[] = []
+    const colors: number[] = []
+    const tips: THREE.Vector3[] = []
+    const dirs: THREE.Vector3[] = []
+    const heads = new THREE.InstancedMesh(
+      new THREE.ConeGeometry(0.34, 1, 10).translate(0, -0.5, 0),
+      new THREE.MeshBasicMaterial({ depthTest: false, transparent: true }),
+      links.length,
+    )
+    const color = new THREE.Color()
+    links.forEach((l, i) => {
+      const a = new THREE.Vector3(...model.origin(l.from))
+      const b = new THREE.Vector3(...model.origin(l.to))
+      const dir = b.clone().sub(a).normalize()
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z)
+      color.setHex(colorOf(l))
+      colors.push(color.r * 0.45, color.g * 0.45, color.b * 0.45, color.r, color.g, color.b)
+      tips.push(b.clone().addScaledVector(dir, -NODE_SIZE))
+      dirs.push(dir)
+      heads.setColorAt(i, color)
+    })
+    const geometry = new LineSegmentsGeometry()
+    geometry.setPositions(positions)
+    geometry.setColors(colors)
+    const lines = new LineSegments2(
+      geometry,
+      new LineMaterial({ linewidth: FOCUS_WIDTH, vertexColors: true, depthTest: false, transparent: true }),
+    )
+    lines.renderOrder = 15
+    heads.renderOrder = 16
+    this.graph.add(lines, heads)
+    this.focusArrows = { lines, heads, tips, dirs }
+  }
+
+  /** Keeps what is drawn at a size on screen (the selection's arrows) that size, for the camera now. */
+  fit(camera: THREE.Camera, width: number, height: number) {
+    const f = this.focusArrows
+    if (!f) return
+    ;(f.lines.material as LineMaterial).resolution.set(width, height)
+    const perPixel = (at: THREE.Vector3) =>
+      camera instanceof THREE.PerspectiveCamera
+        ? (2 * camera.position.distanceTo(at) * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / Math.max(height, 1)
+        : 1 / (camera as THREE.OrthographicCamera).zoom
+    const up = new THREE.Vector3(0, 1, 0)
+    const m = new THREE.Matrix4()
+    const q = new THREE.Quaternion()
+    const scale = new THREE.Vector3()
+    f.tips.forEach((tip, i) => {
+      scale.setScalar(FOCUS_HEAD * perPixel(tip))
+      m.compose(tip, q.setFromUnitVectors(up, f.dirs[i]), scale)
+      f.heads.setMatrixAt(i, m)
+    })
+    f.heads.instanceMatrix.needsUpdate = true
+  }
+
   /**
    * A node being moved: a dashed line from where it stood to where it goes, and a ball there when nothing else (the
    * gizmo) marks the spot. Its links, checked as it goes, are drawn with the graph.

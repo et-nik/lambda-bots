@@ -79,10 +79,11 @@ Where things are:
   under the roofs (looking down it starts over the heads at the first spawn). On the right: undo, redo, *Save* and
   *Apply on server*; when *Apply* is off, its tooltip says why.
 - **On the view**: the tools down the left edge, with their keys; the chosen tool's options along the top; the graph's
-  legend at the bottom (a click hides or shows the graph, a kind of link, or the links that are off; the tooltips count
-  them). *Selected only* (I) draws the links of what is selected alone, as arrows in their colours seen through walls
-  (as lines while the Move tool's gizmo is on the node: its arrows are the only ones then): a node's, both ends' of a
-  link, a change's nodes', the node a link is being drawn from; with nothing selected, all of them. What a change or a save came to pops up at the bottom for a few seconds.
+  legend at the bottom (a click hides or shows the graph, a kind of link, or the links that are off; the tooltips
+  count them). *Selected only* (I) draws the links of what is selected alone, as thin arrows in their colours (the
+  same size on screen however near) seen through walls (as lines while the Move tool's gizmo is on the node: its
+  arrows are the only ones then): a node's, both ends' of a link, a change's nodes', the node a link is being drawn
+  from; with nothing selected, all of them. What a change or a save came to pops up at the bottom for a few seconds.
 - **The status bar**: where the camera is, what is under the pointer, what the tool does and how to fly.
 - **The panel**: *Navigation* shows what is selected on top (a node, a link, a change, a route or an entity) and the
   changes under it; *Map* shows the map's faces, textures, lightmaps, the WADs it names (missing ones in red), the
