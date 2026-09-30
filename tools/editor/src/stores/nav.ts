@@ -49,6 +49,14 @@ function at(p: Vec3): Vec3 {
   return [Math.round(p[0]), Math.round(p[1]), Math.round(p[2])]
 }
 
+/** Radius of the zone that shuts off one node (nodes stand further apart). */
+const SHUT_RADIUS = 16
+/** Selections kept for ‹ back. */
+const TRAIL = 50
+
+/** A node or a link selected. */
+export type Selected = { node: number } | { link: [number, number] }
+
 const draftKey = (map: string) => `lb-editor:draft:${map}`
 
 function storedDraft(map: string, version: string): OverlayFile | null {
@@ -110,15 +118,25 @@ export const useNav = defineStore('nav', {
     selLink: null as [number, number] | null,
     selPatch: null as number | null,
     hover: null as { node: number | null; link: [number, number] | null } | null,
+    /** Nodes and links the panel points at (under the pointer there), lit up in the view. */
+    peek: null as { nodes: number[]; links: [number, number][] } | null,
+    /** Selections before the current one, for ‹ back. */
+    trail: [] as Selected[],
     /** The file on disk when a save found it changed. */
     conflict: null as OnDisk | null,
     notice: null as string | null,
+    /** Bumped with every notice, so the same words show again. */
+    noticeSeq: 0,
+    /** A change put in from the panel whose outcome is told once the preview has it. */
+    reportPatch: null as number | null,
     show: true,
     /** Link kinds not drawn, and whether links that are off are hidden. */
     hiddenKinds: [] as string[],
     hideOff: false,
     /** Bumped when the panel asks the view to bring the selection close. */
     focusRequest: 0,
+    /** Bumped when the panel asks the view to show the selection if it is out of sight. */
+    revealRequest: 0,
   }),
   getters: {
     model(): GraphModel | null {
@@ -135,6 +153,12 @@ export const useNav = defineStore('nav', {
     },
     places(): NonNullable<OverlayFile['places']> {
       return this.draft?.places ?? []
+    },
+    /** What ‹ goes back to. */
+    backLabel(): string | null {
+      const prev = this.trail[this.trail.length - 1]
+      if (!prev) return null
+      return 'node' in prev ? `${prev.node}` : `${prev.link[0]} → ${prev.link[1]}`
     },
   },
   actions: {
@@ -158,7 +182,7 @@ export const useNav = defineStore('nav', {
         const kept = storedDraft(map, info.editor.version)
         if (kept && text(kept) !== this.savedText) {
           this.draft = kept
-          this.notice = 'Unsaved changes from the last visit are back.'
+          this.notify('Unsaved changes from the last visit are back.')
         }
         if (info.editor.error) {
           this.error = `editor.yaml does not read: ${info.editor.error}. Saving writes it anew.`
@@ -224,19 +248,152 @@ export const useNav = defineStore('nav', {
         if (seq === previewSeq) {
           this.preview = markRaw(p)
           this.error = null
+          const i = this.reportPatch
+          if (i !== null && p.editor[i]) {
+            this.reportPatch = null
+            this.notify(`Change ${i + 1}: ${p.editor[i].message}`)
+          }
         }
       } catch (e) {
         if (seq === previewSeq) this.error = e instanceof Error ? e.message : String(e)
       }
     },
 
-    addPatch(p: PatchOp) {
+    /**
+     * Puts a change in at the end. From a tool it becomes the selection; from the panel (`keep`) the selection stays
+     * and a notice tells what the change did.
+     */
+    addPatch(p: PatchOp, keep = false) {
       this.change((f) => {
         f.nav = { patches: [...(f.nav?.patches ?? []), p] }
       })
+      if (keep) {
+        this.reportPatch = this.patches.length - 1
+        return
+      }
       this.selNode = null
       this.selLink = null
       this.selPatch = this.patches.length - 1
+    },
+
+    notify(text: string) {
+      this.notice = text
+      this.noticeSeq++
+    },
+
+    /** Takes the links between `a` and `b` out, both ways (those there are). */
+    unlinkPair(a: number, b: number) {
+      const m = this.model
+      if (!m) return
+      const there = m.find(a, b) !== undefined
+      const back = m.find(b, a) !== undefined
+      if (!there && !back) return
+      const [from, to] = there ? [a, b] : [b, a]
+      this.addPatch({ op: 'remove_link', from: at(m.origin(from)), to: at(m.origin(to)), both: there && back }, true)
+    },
+
+    /** Takes the link `a → b` out, and the one back with `both`. */
+    unlinkOne(a: number, b: number, both: boolean) {
+      const m = this.model
+      if (!m) return
+      this.addPatch({ op: 'remove_link', from: at(m.origin(a)), to: at(m.origin(b)), both }, true)
+    },
+
+    /** Puts the link `a → b` in again, checked as `kind` (or trusted). */
+    relink(a: number, b: number, kind: LinkKindChoice, trust: boolean) {
+      const m = this.model
+      if (!m) return
+      this.addPatch(
+        {
+          op: 'add_link',
+          from: at(m.origin(a)),
+          to: at(m.origin(b)),
+          ...(kind === 'auto' ? {} : { kind }),
+          both: false,
+          trust,
+        },
+        true,
+      )
+    },
+
+    /** A forbidden zone about node `n` alone. */
+    shutOff(n: number) {
+      const m = this.model
+      if (!m) return
+      this.addPatch({ op: 'forbid', at: at(m.origin(n)), radius: SHUT_RADIUS }, true)
+    },
+
+    routeFromNode(n: number) {
+      const m = this.model
+      if (!m) return
+      this.setTool('route')
+      this.routeFrom = at(m.origin(n))
+      this.route = null
+    },
+
+    /** The last change of the editor file that shut node `n` off. */
+    shutBy(n: number): number | null {
+      const outcomes = this.preview?.editor ?? []
+      for (let i = this.patches.length - 1; i >= 0; i--) {
+        if (this.patches[i].op === 'forbid' && outcomes[i]?.nodes.includes(n)) return i
+      }
+      return null
+    },
+
+    /** The last change of the editor file that put the link `a → b` in (a link, or a node put in or moved). */
+    linkedBy(a: number, b: number): number | null {
+      const outcomes = this.preview?.editor ?? []
+      for (let i = this.patches.length - 1; i >= 0; i--) {
+        const op = this.patches[i].op
+        if (op !== 'remove_link' && op !== 'forbid' && outcomes[i]?.links.some(([x, y]) => x === a && y === b)) {
+          return i
+        }
+      }
+      return null
+    },
+
+    /** The node or link selected now, kept for ‹ back before another is selected from the panel. */
+    remember() {
+      const now: Selected | null =
+        this.selNode !== null ? { node: this.selNode } : this.selLink ? { link: this.selLink } : null
+      if (!now) return
+      this.trail.push(now)
+      if (this.trail.length > TRAIL) this.trail.shift()
+    },
+
+    /** Selects node `n` from the panel: ‹ comes back, and the view shows it if it is out of sight. */
+    goNode(n: number) {
+      if (this.selNode !== n) {
+        this.remember()
+        this.selectNode(n)
+        useEditor().select(null)
+      }
+      this.revealRequest++
+    },
+
+    goLink(l: [number, number]) {
+      if (String(this.selLink) !== String(l)) {
+        this.remember()
+        this.selectLink(l)
+        useEditor().select(null)
+      }
+      this.revealRequest++
+    },
+
+    goPatch(i: number) {
+      this.selPatch = i
+      this.selNode = null
+      this.selLink = null
+      useEditor().select(null)
+      this.revealRequest++
+    },
+
+    back() {
+      const prev = this.trail.pop()
+      if (!prev) return
+      if ('node' in prev) this.selectNode(prev.node)
+      else this.selectLink(prev.link)
+      this.revealRequest++
     },
 
     toggleKind(kind: string) {
@@ -275,11 +432,11 @@ export const useNav = defineStore('nav', {
       const n = p.node
       this.selectNode(n)
       if (this.forbidden.has(n)) {
-        this.notice = `Node ${n} is shut off by a forbidden zone: take the zone out to move it.`
+        this.notify(`Node ${n} is shut off by a forbidden zone: take the zone out to move it.`)
         return false
       }
       if (n >= m.baseNodes && this.placedBy(n) === null) {
-        this.notice = `Node ${n} is put in by overlay.yaml: move it there.`
+        this.notify(`Node ${n} is put in by overlay.yaml: move it there.`)
         return false
       }
       this.notice = null
@@ -355,7 +512,7 @@ export const useNav = defineStore('nav', {
         this.notice = null
       } catch (e) {
         this.route = null
-        this.notice = e instanceof ApiError ? e.message : String(e)
+        this.notify(e instanceof ApiError ? e.message : String(e))
       }
     },
 
@@ -378,7 +535,7 @@ export const useNav = defineStore('nav', {
           return
         case 'link':
           if (p.node === null) {
-            this.notice = 'Click a node.'
+            this.notify('Click a node.')
           } else if (this.pending === null || this.pending === p.node) {
             this.pending = this.pending === p.node ? null : p.node
           } else {
@@ -388,7 +545,7 @@ export const useNav = defineStore('nav', {
           return
         case 'unlink':
           if (p.link) this.unlink(p.link)
-          else this.notice = 'Click a link.'
+          else this.notify('Click a link.')
           return
         case 'node':
           if (p.point) this.addPatch({ op: 'add_node', at: up(p.point) })
@@ -470,6 +627,7 @@ export const useNav = defineStore('nav', {
       this.selNode = null
       this.selLink = null
       this.selPatch = null
+      this.trail = []
     },
 
     setTool(t: Tool) {
@@ -485,25 +643,32 @@ export const useNav = defineStore('nav', {
 
     async save(overwrite = false) {
       if (!this.map || !this.draft) return
+      const map = this.map
+      const sent = normal(this.draft)
+      const sentText = text(this.draft)
       const base = overwrite && this.conflict ? this.conflict.version : this.version
       try {
-        const r = await saveEditor(this.map, normal(this.draft), base)
+        const r = await saveEditor(map, sent, base)
+        if (this.map !== map) return
         if (!r.saved) {
           this.conflict = r.now
           return
         }
         this.version = r.version
-        this.savedText = text(this.draft)
+        this.savedText = sentText
         this.conflict = null
-        storeDraft(this.map, this.version, null)
+        // Changes made while it was saving are not saved: they stay in the browser.
+        storeDraft(map, this.version, this.dirty ? this.draft : null)
         const saved = r.graph.written
           ? 'Saved editor.yaml and the graph with the changes (editor.lbnav).'
           : `Saved editor.yaml; no editor.lbnav: ${r.graph.detail}.`
-        this.notice = this.info?.apply.available
-          ? `${saved} “Apply on server” makes the server read them.`
-          : `${saved} The server takes them with \`lb overlay reload\`.`
+        this.notify(
+          this.info?.apply.available
+            ? `${saved} “Apply on server” makes the server read them.`
+            : `${saved} The server takes them with \`lb overlay reload\`.`,
+        )
       } catch (e) {
-        this.notice = e instanceof Error ? e.message : String(e)
+        this.notify(e instanceof Error ? e.message : String(e))
       }
     },
 
@@ -520,9 +685,9 @@ export const useNav = defineStore('nav', {
       if (!this.map) return
       try {
         const r = await applyOnServer(this.map)
-        this.notice = `Sent “${r.sent}” to ${r.to}: the server reads the overlays of the map it is on; its console shows what it did.`
+        this.notify(`Sent “${r.sent}” to ${r.to}: the server reads the overlays of the map it is on; its console shows what it did.`)
       } catch (e) {
-        this.notice = e instanceof Error ? e.message : String(e)
+        this.notify(e instanceof Error ? e.message : String(e))
       }
     },
   },

@@ -92,6 +92,14 @@ export class FlyControls {
     this.aim()
   }
 
+  /** Turns to look at `p` from where the camera is. */
+  lookAt(p: THREE.Vector3) {
+    const d = p.clone().sub(this.camera.position)
+    this.yaw = Math.atan2(d.y, d.x)
+    this.pitch = THREE.MathUtils.clamp(Math.atan2(d.z, Math.hypot(d.x, d.y)), -1.55, 1.55)
+    this.aim()
+  }
+
   forward(): THREE.Vector3 {
     const c = Math.cos(this.pitch)
     return new THREE.Vector3(c * Math.cos(this.yaw), c * Math.sin(this.yaw), Math.sin(this.pitch))

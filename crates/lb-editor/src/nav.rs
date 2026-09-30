@@ -160,28 +160,17 @@ impl NavMaps {
 }
 
 /// Graph data for the page, flat: `[x, y, z, flags]` a node and `[from, to, kind, flags, centiseconds]` a link,
-/// kinds as in `KINDS`.
+/// kinds as in `kinds()`.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct GraphJson {
     pub nodes: Vec<f32>,
     pub links: Vec<f32>,
 }
 
-pub const KINDS: [&str; 13] = [
-    "walk",
-    "crouch",
-    "jump",
-    "drop",
-    "ladder",
-    "swim",
-    "door",
-    "lift",
-    "teleport",
-    "breakable",
-    "push",
-    "longjump",
-    "gauss_boost",
-];
+/// Link kind names by `LinkKind::index`, the kind a link is written with.
+pub fn kinds() -> Vec<&'static str> {
+    LinkKind::ALL.iter().map(|k| k.as_str()).collect()
+}
 
 fn tenth(v: f32) -> f32 {
     (v * 10.0).round() / 10.0
@@ -454,6 +443,14 @@ mod tests {
         maps.join("crossfire.bsp")
             .is_file()
             .then_some(maps.join("crossfire.bsp"))
+    }
+
+    #[test]
+    fn kind_names_go_by_the_index_links_are_written_with() {
+        let names = kinds();
+        for k in LinkKind::ALL {
+            assert_eq!(names[k.index()], k.as_str());
+        }
     }
 
     #[test]

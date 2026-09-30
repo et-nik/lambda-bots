@@ -12,7 +12,7 @@ use lb_core::Vec3;
 use lb_navgen::mapload::OVERLAYS;
 use serde::Deserialize;
 
-use crate::nav::{self, KINDS, NavMap, SaveError};
+use crate::nav::{self, NavMap, SaveError};
 use crate::{ApiError, ApiResult, AppState};
 
 fn unprocessable(e: String) -> ApiError {
@@ -45,7 +45,7 @@ pub async fn info(State(state): State<Arc<AppState>>, Path(map): Path<String>) -
         let (name, nav) = nav_map(&state, &map)?;
         let body = serde_json::json!({
             "origin": nav.origin,
-            "kinds": KINDS,
+            "kinds": nav::kinds(),
             "base": nav::graph_json(&nav.base),
             "editor": nav::read_overlay(&state.install, &name, OVERLAYS[0]),
             "overlay": nav::read_overlay(&state.install, &name, OVERLAYS[1]),

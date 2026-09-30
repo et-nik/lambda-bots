@@ -24,6 +24,11 @@ export interface ViewerEvents {
 const HOVER_EVERY = 50
 const DRAG_EVERY = 16
 
+/** How near the edge of the view (in normalized coordinates) a revealed thing may already be. */
+const REVEAL_EDGE = 0.85
+/** Nearer than this, the 3D camera turns to what it reveals instead of flying to it (units). */
+const REVEAL_TURN = 1500
+
 /** Pixels the pointer may move between press and release for a click that selects. */
 const CLICK_SLOP = 4
 const EYE = 28
@@ -297,6 +302,25 @@ export class Viewer {
   focus() {
     const box = this.focusTarget ?? (this.selected === null ? null : this.entityBox(this.selected))
     if (box) {
+      this.show(box)
+    }
+  }
+
+  /**
+   * Brings the box into view when its middle is out of sight (behind or off the edges): in 3D the camera turns to it
+   * from where it is, and flies over only when it is far.
+   */
+  reveal(box: THREE.Box3) {
+    const camera = this.camera()
+    camera.updateMatrixWorld()
+    const center = box.getCenter(new THREE.Vector3())
+    const p = center.clone().project(camera)
+    if (p.z > -1 && p.z < 1 && Math.abs(p.x) < REVEAL_EDGE && Math.abs(p.y) < REVEAL_EDGE) {
+      return
+    }
+    if (this.view === '3d' && center.distanceTo(this.perspective.position) < REVEAL_TURN) {
+      this.fly.lookAt(center)
+    } else {
       this.show(box)
     }
   }

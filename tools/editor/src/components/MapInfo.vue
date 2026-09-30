@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { kindColor, kindName } from '../format'
 import { useEditor } from '../stores/editor'
+import { useNav } from '../stores/nav'
 
 const store = useEditor()
+const nav = useNav()
 
 const classes = computed(() => {
   const counts = new Map<string, number>()
@@ -13,47 +16,17 @@ const classes = computed(() => {
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
 })
 
-const model = computed(() => {
-  const e = store.entity
-  return e?.model == null ? null : (store.manifest?.models.find((m) => m.index === e.model) ?? null)
+/** Links of each kind in the graph as the changes leave it. */
+const kinds = computed(() => {
+  const counts = new Map<string, number>()
+  for (const l of nav.model?.links ?? []) counts.set(l.kind, (counts.get(l.kind) ?? 0) + 1)
+  return (nav.info?.kinds ?? []).filter((k) => counts.has(k)).map((k): [string, number] => [k, counts.get(k)!])
 })
-
-function fmt(v: number[]): string {
-  return v.map((x) => Math.round(x)).join(' ')
-}
 </script>
 
 <template>
-  <aside class="inspector">
-    <template v-if="store.entity">
-      <h2>{{ store.entity.classname }}</h2>
-      <p v-if="store.entity.targetname" class="sub">{{ store.entity.targetname }}</p>
-      <dl>
-        <dt>Entity</dt>
-        <dd>#{{ store.entity.index }}</dd>
-        <template v-if="model">
-          <dt>Model</dt>
-          <dd>*{{ model.index }}, layer {{ model.layer }}</dd>
-          <dt>Bounds</dt>
-          <dd>{{ fmt(model.mins) }} → {{ fmt(model.maxs) }}</dd>
-        </template>
-        <template v-else>
-          <dt>Origin</dt>
-          <dd>{{ fmt(store.entity.origin) }}</dd>
-        </template>
-      </dl>
-      <table class="kv">
-        <tbody>
-          <tr v-for="([k, v], i) in store.entity.kv" :key="i">
-            <th>{{ k }}</th>
-            <td>{{ v }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <button class="clear" @click="store.select(null)">Clear selection</button>
-    </template>
-
-    <template v-else-if="store.manifest">
+  <aside class="map">
+    <template v-if="store.manifest">
       <h2>{{ store.manifest.map }}</h2>
       <dl>
         <dt>Faces</dt>
@@ -79,6 +52,22 @@ function fmt(v: number[]): string {
           </span>
         </dd>
       </dl>
+      <h3>Graph</h3>
+      <p v-if="!nav.model" class="muted">{{ nav.loading ? 'Loading…' : 'None' }}</p>
+      <template v-else>
+        <p>
+          {{ nav.model.nodes }} nodes, {{ nav.model.links.length }} links ·
+          {{ nav.info?.origin === 'server' ? "the server's graph" : 'made here, with the default physics' }}
+        </p>
+        <table class="kv">
+          <tbody>
+            <tr v-for="[k, n] in kinds" :key="k">
+              <th><i :style="{ background: kindColor(k) }" />{{ kindName(k) }}</th>
+              <td class="num">{{ n }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
       <h3>Worldspawn</h3>
       <table class="kv">
         <tbody>
@@ -102,7 +91,7 @@ function fmt(v: number[]): string {
 </template>
 
 <style scoped>
-.inspector {
+.map {
   min-width: 0;
 }
 h2 {
@@ -164,7 +153,11 @@ dd {
   display: inline-block;
   margin-right: 8px;
 }
-.clear {
-  margin-top: 12px;
+.kv i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
 }
 </style>

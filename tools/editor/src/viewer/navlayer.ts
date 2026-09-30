@@ -15,6 +15,7 @@ const FORBIDDEN = 0x7a1010
 const SELECT = 0xffd24a
 const PENDING = 0xff4df0
 const ROUTE = 0x3ae0ff
+const PEEK = 0xffffff
 
 export interface Highlight {
   node?: number | null
@@ -27,6 +28,8 @@ export interface Highlight {
   /** Nodes and links a selected patch touched. */
   patch?: { nodes: number[]; links: [number, number][] } | null
   route?: Route | null
+  /** Nodes and links the panel points at. */
+  peek?: { nodes: number[]; links: [number, number][] } | null
 }
 
 function segmentDistance(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -319,6 +322,12 @@ export class NavLayer {
     }
     if (h.hover?.node != null) ball(h.hover.node, 0xffffff, 9)
     if (h.hover?.link) arrow(h.hover.link[0], h.hover.link[1], 0xffffff, 1.2)
+    for (const n of h.peek?.nodes ?? []) {
+      if (n < model.nodes) ball(n, PEEK, 11)
+    }
+    for (const [a, b] of h.peek?.links ?? []) {
+      arrow(a, b, PEEK, 2)
+    }
     if (h.pending != null) ball(h.pending, PENDING, 14)
     if (h.node != null && h.node < model.nodes) ball(h.node, SELECT, 14)
     if (h.link) arrow(h.link[0], h.link[1], SELECT, 2.2)

@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import { useEditor } from '../stores/editor'
 import { useNav } from '../stores/nav'
+import { toolInfo } from '../tools'
 
 const store = useEditor()
 const nav = useNav()
@@ -12,6 +13,11 @@ const hovered = computed(() => {
   if (h?.node != null) return `node ${h.node}`
   if (h?.link) return `link ${h.link[0]} → ${h.link[1]}`
   return ''
+})
+
+const tool = computed(() => {
+  const t = toolInfo(nav.tool)
+  return `${t.label}: ${t.hint}`
 })
 
 const hint = computed(() =>
@@ -25,6 +31,7 @@ const hint = computed(() =>
   <footer class="status">
     <span class="num">{{ store.camera.join(' ') }}</span>
     <span v-if="hovered" class="num">{{ hovered }}</span>
+    <span class="tool">{{ tool }}</span>
     <span class="hint">{{ hint }}</span>
   </footer>
 </template>
@@ -44,6 +51,10 @@ const hint = computed(() =>
 .num {
   font-variant-numeric: tabular-nums;
   min-width: 18ch;
+}
+.tool {
+  color: var(--text);
+  flex: none;
 }
 .hint {
   overflow: hidden;

@@ -1,30 +1,36 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import Inspector from './components/Inspector.vue'
+import MapInfo from './components/MapInfo.vue'
 import MapView from './components/MapView.vue'
 import NavPanel from './components/NavPanel.vue'
 import StatusBar from './components/StatusBar.vue'
 import TopBar from './components/TopBar.vue'
+import { installShortcuts } from './shortcuts'
 import { useEditor } from './stores/editor'
 import { useNav } from './stores/nav'
 
 const store = useEditor()
 const nav = useNav()
-const tab = ref<'nav' | 'inspector'>('nav')
+const tab = ref<'nav' | 'map'>('nav')
 
-// The panel follows what was clicked: an entity opens the inspector, a node or a link the navigation.
+// What is selected shows in the navigation tab, an entity too; the one selected last is the selection.
+watch([() => store.selected, () => nav.selNode, () => nav.selLink, () => nav.selPatch], (now) => {
+  if (now.some((s) => s !== null)) tab.value = 'nav'
+})
 watch(
   () => store.selected,
   (s) => {
-    if (s !== null) tab.value = 'inspector'
+    if (s !== null) nav.clearSelection()
   },
 )
-watch([() => nav.selNode, () => nav.selLink], ([n, l]) => {
-  if (n !== null || l !== null) tab.value = 'nav'
-})
 
-onMounted(() => store.start())
+let uninstall = () => {}
+onMounted(() => {
+  store.start()
+  uninstall = installShortcuts()
+})
+onBeforeUnmount(() => uninstall())
 </script>
 
 <template>
@@ -37,18 +43,15 @@ onMounted(() => store.start())
           <button role="tab" :aria-selected="tab === 'nav'" :class="{ on: tab === 'nav' }" @click="tab = 'nav'">
             Navigation<span v-if="nav.dirty" class="dot" title="Unsaved changes">•</span>
           </button>
-          <button
-            role="tab"
-            :aria-selected="tab === 'inspector'"
-            :class="{ on: tab === 'inspector' }"
-            @click="tab = 'inspector'"
-          >
-            Inspector
+          <button role="tab" :aria-selected="tab === 'map'" :class="{ on: tab === 'map' }" @click="tab = 'map'">
+            Map
           </button>
         </nav>
         <div class="pane">
           <NavPanel v-show="tab === 'nav'" />
-          <Inspector v-show="tab === 'inspector'" />
+          <div v-show="tab === 'map'" class="scroll">
+            <MapInfo />
+          </div>
         </div>
       </section>
       <div v-if="store.error" class="error" role="alert">
@@ -100,9 +103,15 @@ onMounted(() => store.start())
   margin-left: 4px;
 }
 .pane {
+  min-height: 0;
+  overflow: hidden;
+}
+.pane > * {
+  height: 100%;
+}
+.scroll {
   overflow: auto;
   padding: 12px;
-  min-height: 0;
 }
 .error {
   position: absolute;

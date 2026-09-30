@@ -72,12 +72,19 @@ letters keep flying the camera (Space does not press the last button clicked; an
 lowers the camera, so on a Mac the editor's shortcuts are ⌘Z, ⌘⇧Z and ⌘S; elsewhere they are Ctrl with the key,
 pressed together (Ctrl held longer is flying down). On a Mac, Ctrl with an arrow is the system's: it switches desktops.
 
-- **Layers**: the world, doors and lifts and buttons, breakables, walls (`func_wall`, `func_illusionary`, …), water,
-  point entities; hidden at first: ladders, triggers, lights, the sky.
-- **Cut** (2D views): hides what is nearer than a height or depth, to see the floors under the roofs; looking down it
-  starts over the heads at the first spawn.
-- **The inspector** shows the selected entity's keys, or the map's: faces, textures, lightmaps, the WADs it names
-  (missing ones in red) and the entities by class.
+Where things are:
+- **The top bar**: the map, the views, *Layers* (the world, doors and lifts and buttons, breakables, walls such as
+  `func_wall` and `func_illusionary`, water, point entities; hidden at first: ladders, triggers, lights, the sky), the
+  light, wireframe, and in the 2D views *Cut*, which hides what is nearer than a height or depth to see the floors
+  under the roofs (looking down it starts over the heads at the first spawn). On the right: undo, redo, *Save* and
+  *Apply on server*; when *Apply* is off, its tooltip says why.
+- **On the view**: the tools down the left edge, with their keys; the chosen tool's options along the top; the graph's
+  legend at the bottom (a click hides or shows the graph, a kind of link, or the links that are off; the tooltips count
+  them). What a change or a save came to pops up at the bottom for a few seconds.
+- **The status bar**: where the camera is, what is under the pointer, what the tool does and how to fly.
+- **The panel**: *Navigation* shows what is selected on top (a node, a link, a change, a route or an entity) and the
+  changes under it; *Map* shows the map's faces, textures, lightmaps, the WADs it names (missing ones in red), the
+  graph's counts by kind and the entities by class.
 - The map opened last is kept in the address (`#map=crossfire`).
 
 Point entities are boxes: spawns are green hull-sized boxes, weapons and ammo orange, items blue, monsters red, the
@@ -90,12 +97,12 @@ map. When the server has not played the map, the editor makes one the same way, 
 says which). The changes go into `maps/<map>/editor.yaml`, the file the in-game editor writes too (`docs/overlays.md`);
 `overlay.yaml`, written by hand, is shown and applied after them but not changed.
 
-The **Navigation** tab holds the tools, the changes and what is selected. Every change is checked at once as the
-server will check it, and the list shows what it did: the links it put in and their kinds, or why it did nothing.
+Every change is checked at once as the server will check it, and the list of changes shows what it did: the links it
+put in and their kinds, or why it did nothing (marked red).
 
 | Tool   | Key | Click                                    | Does                                                              |
 |--------|-----|------------------------------------------|-------------------------------------------------------------------|
-| Select | V   | a node, a link, an entity                | shows it: a node's links in and out with kinds and costs          |
+| Select | V   | a node, a link, an entity                | shows it in the panel, with what can be done to it                |
 | Link   | L   | a node, then another; on from there      | a link of the kind chosen, both ways or one, trusted or checked   |
 | Unlink | U   | a link                                   | takes it out, both ways or one                                    |
 | Node   | N   | the floor where a node is missing        | a node, linked with the nodes around wherever the links check out |
@@ -118,11 +125,21 @@ server will check it, and the list shows what it did: the links it put in and th
   linked into it, and no node is put in or moved into it. A link taken out stays out when a node put in or moved
   links itself with the nodes around.
 - **Route** takes long jumps and gauss boosts when those boxes are on, and tells the time without tricks too.
-- **The legend** under the header counts the links of each kind; a click hides or shows a kind, or the links that are
-  off.
-- The changes list is `editor.yaml` in order; a click brings a change into view and opens its fields (radius, kind,
-  both ways, trust, a note); × removes it. Undo and redo: ⌘Z and ⌘⇧Z (Ctrl+Z and Ctrl+Shift+Z off a Mac). Delete
-  removes the selected change or unlinks the selected link; Esc drops a link or a route half drawn.
+- The changes list is `editor.yaml` in order, one line each; the pointer on one lights its nodes and links up in the
+  view, a click selects it: its fields (radius, kind, both ways, trust, a note) and the nodes it came to open on top,
+  and the view turns to it. × removes it. `overlay.yaml`'s changes are folded under *By hand*. Undo and redo: ⌘Z and
+  ⌘⇧Z (Ctrl+Z and Ctrl+Shift+Z off a Mac). Delete removes the selected change or unlinks the selected link; Esc
+  drops a link or a route half drawn and the selection.
+
+**What is selected.** A node lists its links by the node at the other end: → a link out, ← a link in, ⇄ both alike,
+each with its kind (in the legend's colours) and cost. The pointer on a line lights the links and that node up in the
+view; a click on the number selects that node, on a link selects the link, and × takes the links with that node out.
+The view turns to what is selected from the panel when it is out of sight (and flies to it when it is far); ‹ goes back
+to what was selected before, ⌖ brings it close. The node says which change put it in, moved it or shut it off (a click
+selects the change), and it can be linked from (*Link from here*), routed from (*Route from here*) or shut off alone
+(*Shut off*: a zone of 16 units about it). A link shows its kind, cost and the link back, and can be taken out one way
+or both, or put in again checked as another kind or trusted. What is done from the panel keeps the selection and pops
+up what it came to.
 - What changed is drawn through walls: links put in bright, links taken out dashed red, nodes put in or moved pink
   (a dashed line from where a moved node stood), forbidden nodes dark red.
 
@@ -154,7 +171,7 @@ The lightmap of a face is sized from its texture coordinates, as the engine does
 engines in floats, and a face whose corners fall on a luxel line comes out one luxel larger or smaller in one of them.
 The size that fits the gap to the next face's lightmap in the lighting lump wins: all 116 maps of the stand fit
 (crossfire needs float precision for 280 faces, rapidcore for 403); a face nothing fits is counted in the manifest's
-`stats.lightmaps.mismatched` and shown in the inspector.
+`stats.lightmaps.mismatched` and shown in the Map tab.
 
 Not drawn as the game does: only the first light style; brush entities where the compiler left them (trains before
 they move to their first stop, doors closed); models and sprites; the sky (a flat color when its layer is on).

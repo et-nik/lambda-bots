@@ -1,11 +1,22 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 
+import { MOD } from '../shortcuts'
 import { LAYERS, useEditor } from '../stores/editor'
+import { useNav } from '../stores/nav'
 import type { View } from '../types'
 import { viewAxes } from '../viewer/controls'
+import Icon from './Icon.vue'
 
 const store = useEditor()
+const nav = useNav()
+
+const applyTitle = computed(() => {
+  if (nav.dirty) return 'Save first'
+  const a = nav.info?.apply
+  if (!a) return ''
+  return a.available ? `Send \`lb overlay reload\`: ${a.detail}` : a.detail
+})
 
 const VIEWS: { id: View; label: string; key: string }[] = [
   { id: '3d', label: '3D', key: '1' },
@@ -113,6 +124,27 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       />
       <span v-if="store.slice !== null" class="num">{{ store.slice }}</span>
     </template>
+
+    <div v-if="nav.draft" class="doc" aria-label="Changes">
+      <button class="icon" :disabled="!nav.history.length" :title="`Undo (${MOD}Z)`" aria-label="Undo" @click="nav.undo()">
+        <Icon name="undo" />
+      </button>
+      <button class="icon" :disabled="!nav.future.length" :title="`Redo (${MOD}Shift+Z)`" aria-label="Redo" @click="nav.redo()">
+        <Icon name="redo" />
+      </button>
+      <button
+        class="save"
+        :class="{ due: nav.dirty }"
+        :disabled="!nav.dirty"
+        :title="`Save editor.yaml and the graph with the changes, editor.lbnav (${MOD}S)`"
+        @click="nav.save()"
+      >
+        Save<span v-if="nav.dirty" class="dot">•</span>
+      </button>
+      <span :title="applyTitle">
+        <button :disabled="nav.dirty || !nav.info?.apply.available" @click="nav.apply()">Apply on server</button>
+      </span>
+    </div>
   </header>
 </template>
 
@@ -189,5 +221,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   font-variant-numeric: tabular-nums;
   color: var(--muted);
   min-width: 4ch;
+}
+.doc {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: auto;
+}
+.doc .icon {
+  display: grid;
+  place-items: center;
+  padding: 3px 7px;
+}
+.doc button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.save.due {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text-strong);
+}
+.dot {
+  margin-left: 3px;
+  color: var(--accent);
 }
 </style>

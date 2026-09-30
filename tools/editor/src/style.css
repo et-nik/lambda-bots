@@ -52,3 +52,28 @@ input[type='checkbox'] {
   accent-color: var(--accent);
   margin: 0;
 }
+
+/* Shared by the panel's cards. */
+.muted {
+  color: var(--muted);
+}
+.linkish {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.linkish:hover {
+  text-decoration: underline;
+}
+.tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #2f343d;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: 1px;
+}

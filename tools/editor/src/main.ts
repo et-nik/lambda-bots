@@ -17,7 +17,10 @@ const letGo = (e: Event) => {
   const held = t.closest<HTMLElement>('button, summary')
   if (held) {
     held.blur()
-  } else if (t instanceof HTMLSelectElement || (t instanceof HTMLInputElement && ['checkbox', 'range', 'radio'].includes(t.type))) {
+  } else if (t instanceof HTMLSelectElement) {
+    // The click that opens a list comes before the choice: letting go then would close it.
+    if (e.type === 'change') t.blur()
+  } else if (t instanceof HTMLInputElement && ['checkbox', 'range', 'radio'].includes(t.type)) {
     t.blur()
   }
 }

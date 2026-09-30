@@ -8,6 +8,10 @@ import { useNav } from '../stores/nav'
 import type { PatchOp } from '../types'
 import type { Highlight } from '../viewer/navlayer'
 import { Viewer } from '../viewer/Viewer'
+import Legend from './Legend.vue'
+import Toast from './Toast.vue'
+import ToolBar from './ToolBar.vue'
+import ToolOptions from './ToolOptions.vue'
 
 const store = useEditor()
 const nav = useNav()
@@ -57,6 +61,7 @@ const highlight = computed<Highlight>(() => ({
   routeFrom: nav.routeFrom,
   route: nav.route,
   patch: nav.selPatch === null ? null : (nav.preview?.editor[nav.selPatch] ?? null),
+  peek: nav.peek,
 }))
 
 function patchPoints(p: PatchOp): [number, number, number][] {
@@ -130,11 +135,21 @@ watch(
     if (focusBox.value) viewer?.show(focusBox.value)
   },
 )
+watch(
+  () => nav.revealRequest,
+  () => {
+    if (focusBox.value) viewer?.reveal(focusBox.value)
+  },
+)
 </script>
 
 <template>
   <div ref="host" class="viewport" :class="`tool-${nav.tool}`">
     <div v-if="store.loading" class="overlay">Loading {{ store.loading }}…</div>
+    <ToolBar />
+    <ToolOptions />
+    <Legend />
+    <Toast />
   </div>
 </template>
 
