@@ -30,6 +30,24 @@ fn point(s: &str) -> Result<Vec3> {
     }
 }
 
+/// A number above 0 for `option`, as the map's tests file wants its radius and timeout.
+fn above_zero(option: &str, s: &str) -> Result<f32> {
+    let v: f32 = s.trim().parse().with_context(|| option.to_string())?;
+    if v.is_nan() || v <= 0.0 {
+        bail!("{option}: `{s}` is not above 0");
+    }
+    Ok(v)
+}
+
+/// Frames a second: a finite number above 0.
+fn frame_rate(s: &str) -> Result<f64> {
+    let v: f64 = s.trim().parse().context("--fps")?;
+    if !v.is_finite() || v <= 0.0 {
+        bail!("--fps: `{s}` is not a frame rate above 0");
+    }
+    Ok(v)
+}
+
 fn list(s: &str) -> Vec<String> {
     s.split(',').filter(|w| !w.is_empty()).map(str::to_string).collect()
 }
@@ -54,13 +72,13 @@ pub fn run(bsp: &Path, args: &[&str]) -> Result<bool> {
         match arg {
             "--install" => install = Some(PathBuf::from(value()?)),
             "--repeat" => repeat = Some(value()?.parse::<u32>().context("--repeat")?.max(1)),
-            "--fps" => fps = value()?.parse::<f64>().context("--fps")?,
+            "--fps" => fps = frame_rate(value()?)?,
             "--from" => from = Some(point(value()?)?),
             "--to" => to = Some(point(value()?)?),
             "--give" => give = list(value()?),
             "--tricks" => tricks = Some(list(value()?)),
-            "--radius" => radius = value()?.parse().context("--radius")?,
-            "--timeout" => timeout = value()?.parse().context("--timeout")?,
+            "--radius" => radius = above_zero("--radius", value()?)?,
+            "--timeout" => timeout = above_zero("--timeout", value()?)?,
             "all" => {}
             id if !id.starts_with("--") => ids.push(id.to_string()),
             other => bail!("unknown option {other}\n{USAGE}"),
@@ -235,4 +253,21 @@ pub fn run(bsp: &Path, args: &[&str]) -> Result<bool> {
         all &= passed == attempts as usize;
     }
     Ok(all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_take_numbers_above_zero_only() {
+        assert_eq!(frame_rate("100").unwrap(), 100.0);
+        for bad in ["0", "-30", "inf", "NaN", "fast"] {
+            assert!(frame_rate(bad).is_err(), "{bad}");
+        }
+        assert_eq!(above_zero("--radius", "48").unwrap(), 48.0);
+        for bad in ["0", "-1", "NaN", "far"] {
+            assert!(above_zero("--timeout", bad).is_err(), "{bad}");
+        }
+    }
 }

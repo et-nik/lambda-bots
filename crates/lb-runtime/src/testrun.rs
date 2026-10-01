@@ -520,6 +520,13 @@ fn add(
                 .filter(|v| *v > 0.0)
                 .ok_or_else(|| format!("{what} <number above 0>"))
         };
+        let count = |what: &str| -> Result<u32, String> {
+            words
+                .first()
+                .and_then(|w| w.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .ok_or_else(|| format!("{what} <whole number above 0>"))
+        };
         match key {
             "from" => {
                 let (t, n) = Target::parse(&rest[i + 1..])?;
@@ -537,7 +544,7 @@ fn add(
             }
             "radius" => test.radius = number("radius")?,
             "timeout" => test.timeout = number("timeout")?,
-            "repeat" => test.repeat = number("repeat")? as u32,
+            "repeat" => test.repeat = count("repeat")?,
             "expect" => {
                 test.expect = match words.first().copied() {
                     Some("arrive") => Expect::Arrive,

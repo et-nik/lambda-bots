@@ -102,6 +102,19 @@ fn a_ledge_without_nodes_is_got_onto_by_a_gauss_boost() {
 }
 
 #[test]
+fn a_boost_the_bot_has_too_little_health_to_start_is_not_planned() {
+    let (w, g) = ledge();
+    let spot = Vec3::new(620.0, 0.0, 236.0);
+    // Enough to come down with health to spare, short of what setting off on a boost takes.
+    let r = run(w, g, Vec3::new(-400.0, 0.0, 36.0), spot, |b| {
+        gauss(b);
+        b.health = 50.0;
+    });
+    assert!(matches!(r.end, End::NoWay { .. }), "{:?}\n{}", r.end, r.report);
+    assert_eq!(r.trick, None, "{}", r.report);
+}
+
+#[test]
 fn without_the_gauss_there_is_no_way_up_and_the_report_says_why() {
     let (w, g) = ledge();
     let spot = Vec3::new(620.0, 0.0, 236.0);

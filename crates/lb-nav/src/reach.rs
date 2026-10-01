@@ -999,7 +999,9 @@ impl Search {
                 let full = 5.0 * tricks.gauss_damage;
                 let plan = check_boost(world, phys, from, to, (pitch, push), full)?;
                 let damage = phys.fall_damage(plan.impact);
-                if health - damage < BOOST_HEALTH_AFTER {
+                // The executor sets off with this much health only.
+                let needs = BOOST_HEALTH.max(damage + BOOST_HEALTH_AFTER);
+                if health < needs {
                     return None;
                 }
                 let view = boost_view((to - from).truncate().normalize_or_zero(), plan.pitch);
@@ -1024,7 +1026,7 @@ impl Search {
                         push: plan.push,
                     },
                     Needs {
-                        health: BOOST_HEALTH.max(damage + BOOST_HEALTH_AFTER),
+                        health: needs,
                         longjump: false,
                         gauss: true,
                     },
