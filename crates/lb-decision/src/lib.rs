@@ -171,6 +171,8 @@ impl Situation<'_> {
 }
 
 const ENGAGE_HOLD: f32 = 1.0;
+/// An enemy out of sight this briefly is still fought where it was; after that it is hunted.
+const ENGAGE_LINGER: f64 = 0.3;
 const HUNT_HOLD: f32 = 3.0;
 const RETREAT_HOLD: f32 = 2.0;
 const ROAM_HOLD: f32 = 5.0;
@@ -179,6 +181,8 @@ const HUNT_THRESHOLD: f32 = 0.5;
 /// A lost enemy's place is known well enough to hunt it until it is this uncertain (σ, units): some 8 s of running.
 const HUNT_SIGMA: f32 = 3000.0;
 const COLLECT_THRESHOLD: f32 = 0.1;
+/// Health this low makes a medkit, a battery or a charger worth going for before anything but a fight.
+const URGENT_HEALTH: f32 = 35.0;
 /// A charger is worth it only this low on health (armor).
 const CHARGER_HEALTH: f32 = 60.0;
 const CHARGER_ARMOR: f32 = 40.0;
@@ -590,7 +594,7 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
     let engage = s
         .target
         .and_then(|k| s.beliefs.track(k))
-        .filter(|t| t.state == TrackState::Visible || s.now.since(t.last_seen) <= 0.5);
+        .filter(|t| t.state == TrackState::Visible || s.now.since(t.last_seen) <= ENGAGE_LINGER);
     if let Some(t) = engage.filter(|_| !mines_level) {
         out.push(Goal {
             kind: GoalKind::Engage(t.who),
@@ -641,9 +645,8 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
             if w < COLLECT_THRESHOLD {
                 continue;
             }
-            let urgent = s.effective_health() < 30.0
-                && matches!(spot.kind, ItemKind::Health | ItemKind::Battery)
-                && !threat_near;
+            let urgent =
+                s.health < URGENT_HEALTH && matches!(spot.kind, ItemKind::Health | ItemKind::Battery) && !threat_near;
             out.push(Goal {
                 kind: GoalKind::CollectItem(i),
                 rank: if urgent { 2 } else { 1 },
@@ -680,7 +683,7 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
             if w < COLLECT_THRESHOLD {
                 continue;
             }
-            let urgent = !c.suit && s.effective_health() < 30.0 && !threat_near;
+            let urgent = !c.suit && s.health < URGENT_HEALTH && !threat_near;
             out.push(Goal {
                 kind: GoalKind::UseCharger(i),
                 rank: if urgent { 2 } else { 1 },
@@ -987,6 +990,30 @@ mod tests {
             d.decide(&s, &mut rng).kind,
             GoalKind::Roam,
             "a healthy bot leaves the medkit"
+        );
+    }
+
+    #[test]
+    fn a_scratched_bot_without_armor_turns_from_a_battery_to_fight() {
+        let spots = [ItemSpot {
+            kind: ItemKind::Battery,
+            origin: Vec3::new(300.0, 0.0, 0.0),
+        }];
+        let items = Items::new(&spots, SimTime(0.0));
+        let none = |_| 0.0;
+        let calm = Beliefs::default();
+        let mut d = Decider::default();
+        let mut rng = Pcg32::new(4, 4);
+        let s = situation(20.0, &calm, Some(&items), &KIT, 85.0, None, &none);
+        assert_eq!(d.decide(&s, &mut rng).kind, GoalKind::CollectItem(0));
+        let mut b = Beliefs::default();
+        b.on_sighting(&sighting(20.5, Vec3::new(1000.0, 0.0, 0.0)));
+        let key = PlayerKey { slot: 3, userid: 30 };
+        let s = situation(20.5, &b, Some(&items), &KIT, 85.0, Some(key), &none);
+        assert_eq!(
+            d.decide(&s, &mut rng).kind,
+            GoalKind::Engage(key),
+            "an enemy in sight comes before armor"
         );
     }
 

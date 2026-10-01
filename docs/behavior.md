@@ -5,16 +5,16 @@ and fights whenever an enemy is in sight.
 
 ## Goals
 
-Five times a second, and at once when a new enemy is recognized or the bot takes damage, every possible goal is
+Five times a second, and on the very frame a new enemy is recognized or the bot takes damage, every possible goal is
 scored:
 
 | Goal          | Rank | When                                                                         | Weight                                                                            |
 |---------------|------|------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
-| `engage`      | 2    | an enemy is in sight (or was, half a second ago)                             | 0.9 × (0.6 + 0.4 × aggression)                                                    |
+| `engage`      | 2    | an enemy is in sight (or was, 0.3 s ago)                                     | 0.9 × (0.6 + 0.4 × aggression)                                                    |
 | `retreat`     | 2    | the bot is hurt and scared, and was in a fight in the last 10 s              | (100 − health) × fear, fading with time since the fight; counts only above 0.4    |
 | `hunt`        | 1    | an enemy was lost moments ago and its position is still certain              | higher for close enemies and aggressive bots; counts only above 0.5               |
 | `investigate` | 1    | a shot, steps, pain, a pickup or a glimpse heard or seen 200–2500 units away | 0.6 × (0.3 + loudness) × freshness × (0.5 + aggression); counts only above 0.25   |
-| `collect`     | 1    | an item is worth taking (rank 2 for health when badly hurt)                  | the item's value × the chance it is there on arrival × a travel penalty           |
+| `collect`     | 1    | an item is worth taking (rank 2 for health and armor under 35 health)        | the item's value × the chance it is there on arrival × a travel penalty           |
 | `charger`     | 1    | health under 60 or armor under 40 and a charger believed to give             | like `collect`, with 4 s of charging added to the travel (rank 2 as for health)   |
 | `control`     | 1    | an item worth having comes back soon (armor, the long jump, a big gun)       | its value × how well the wait fits: up to 8 s is as good as any, none beyond 25 s |
 | `camp`        | 1    | calm for 3 s, 50 health or more, a gun for the spot                          | the spot's score × (1.1 − aggression) × a travel penalty; counts only above 0.15  |
@@ -22,8 +22,10 @@ scored:
 | `roam`        | 0    | always                                                                       | 0.2                                                                               |
 
 The weights are multiplied by the style's goal weights (`config/styles/*.yaml`, see `docs/personas.md`); holding
-spots, waiting for items and laying traps are rare for every style but the one they suit. Health here counts armor
-twice, as armor absorbs bullets. Aggression and fear are the bot's mood (see *Moods*).
+spots, waiting for items and laying traps are rare for every style but the one they suit. For `retreat` health counts
+armor twice, as armor absorbs bullets. Health and armor are worth a rank-2 run only with health under 35 and no enemy
+known within 800 units: a bot scratched in a fight goes on fighting. Aggression and fear are the bot's mood (see
+*Moods*).
 
 The highest rank present wins. Among its candidates within 90% of the best weight, one is drawn at random. A chosen
 goal is held for a while: 1 s for `engage`, 3 s for `hunt`, 2 s for `retreat`, until arrival for `collect` and
@@ -147,8 +149,10 @@ bot fights (how much it closes in) and how readily it throws.
 
 ## Fighting
 
-Ten times a second the bot picks the enemy to fight: the nearest counts most. An enemy aiming at the bot or firing
-counts more, and the current target keeps a bonus. Through the crossbow's scope the bot keeps to its target until the
+Ten times a second, and on the very frame an enemy is recognized, the bot is hurt or its target dies, the bot picks
+the enemy to fight: the nearest counts most. An enemy aiming at the bot or firing counts more, and the current target
+keeps a bonus; a target in sight is kept for half a second at least, unless another one in sight is shooting the bot:
+that one counts twice and is turned to at once. Through the crossbow's scope the bot keeps to its target until the
 kill, or until the target has been out of sight for a second.
 
 **Weapon.** Every gun is scored by the damage per second it is expected to deal at the target's distance: the server's
@@ -163,15 +167,18 @@ of the blast. A rocket in the clip counts as ready to go (a shot takes 1.5 s, th
 RPG in hand fires it rather than switching away close by, and one without it takes the launcher up only 100 units
 beyond that least distance, which moves with the enemy's pace (not to switch back and forth at its edge). The egon
 and the gauss lead up close, rockets and the zoomed
-crossbow far away, much as yapb's fixed order had it. When all guns are empty the bot reloads; with nothing left it
+crossbow far away, much as yapb's fixed order had it. The gun in hand counts 1.2 times more, against switching back and
+forth between two about as good; with a target in sight within 1200 units 1.5 times, as a switch costs half a second
+without a shot. When all guns are empty the bot reloads; with nothing left it
 takes the crowbar. A gun the game will not draw after three tries (it has no ammo for it, whatever the bot believed)
 is left alone for 8 s: the bot fights on with the one in hand. Grenades, satchels, snarks and tripmines are not guns:
 see *Explosives*.
 
 **Secondary attack** where it pays:
 - the glock's rapid fire (held down, five shots a second in a cone ten times wider) where it lands more bullets a
-  second than the clicked aimed shots, given the bot's own aim error and pause between clicks: up to 250–300 units
-  for a normal bot, about 200 for an expert, who clicks faster and aims better, 400 or more for a beginner;
+  second than the clicked aimed shots, given the bot's own aim error and pause between clicks: up to some 100–200
+  units (clicks go as fast as the glock fires within 272 units), about 300 for a beginner, who pauses longer between
+  clicks further off;
 - the hornet gun's darts under 250 units with at least four hornets;
 - both shotgun barrels at 32–300 units, half of the shots (as yapb).
 
@@ -191,12 +198,18 @@ the shot.
 - Head or body is decided once per contact, from the skill's `headshot` chance. The shotgun aims at the body beyond
   272 units, the MP5 beyond 544.
 - The bot aims where it saw the enemy `aim_latency` seconds ago, carried forward with the velocity it saw then. A
-  sudden turn is missed for that long.
+  sudden turn is missed for that long. It starts aiming on the frame it recognizes the enemy.
 - Projectiles lead the target by their flight time. Rockets go for the feet of a target on the ground, where a near
   miss still catches it in the blast.
 - A slowly drifting error grows with distance and shrinks with skill.
-- The view turns like a damped spring, stiffer in a fight for hard and expert bots. It is capped by `turn_speed`;
-  noob bots use yapb's wandering mouse model.
+- The view turns like a damped spring whose stiffness follows the skill's `turn_accel`, capped by `turn_speed`:
+  flicked at full acceleration at an enemy, at a glimpse, a shot, a hit or whatever a weapon or a jump needs, turned at
+  half of it to look along the way and around, and stiffer still in a fight for hard and expert bots. A 90° flick
+  takes some 0.1 s for an expert, 0.13 s hard, 0.22 s normal and 0.3 s easy; noob bots use yapb's wandering mouse
+  model. The view is worked out over each frame's own time, so it moves on every frame whatever the server's rate.
+- `bots.reflex` in `config/lambdabots.yaml` (cvar `lb_reflex`, 0.5–2) makes every bot that many times as quick on top
+  of its skill: recognition, the aim's latency and the scope's settling take that share of the time, and turns are
+  that much faster.
 
 **Trigger.**
 - The bot fires when the view is on the target closely enough (yapb's cones):
@@ -210,7 +223,8 @@ the shot.
   may be fired (200–300 units, as above), a bolt with one under 160, the egon's beam end under 128, and a rocket or a
   bolt with someone else standing near the first 350 units of it. An MP5 grenade's arc is looked along again from where the bot is when it fires, and the
   shot is called off if a wall, a player or the target itself (closer than 300 units) came in the way.
-- Automatic weapons are held down. Others are clicked, with a pause from `semi_auto_delay`.
+- Automatic weapons are held down. Others are clicked as fast as they fire within 272 units, and further off with a
+  pause from `semi_auto_delay` (yapb).
 - After a weapon switch it waits for the game to confirm it and 0.5 s more for the deploy.
 - **Rockets are guided:** the RPG's rocket follows the laser spot, which is where the bot looks, so after a shot the
   view stays on the target until the rocket should get there, and 0.4 s more (6 s at most; the rocket crawls at 250
@@ -272,20 +286,23 @@ away (550 for a bot under 40 health), with nobody near the first stretch of the 
 - **Style.** Every 1–3 s the bot decides between strafing and standing still. Closer than 768 units it strafes.
   Further away it stands with the skill's `stay_mid` / `stay_far` chance (not while closing in).
 - **Strafe side.** It strafes away from the side the enemy aims at, swaps sides now and then, and turns around at
-  walls. With walls close on both sides it strafes toward the farther one, stopping short of it; only in a corridor
+  walls. The side is decided again every 0.3–0.8 s, the better the bot the sooner (0.2–0.45 s for an expert), so
+  its strafe is hard to read. With walls close on both sides it strafes toward the farther one, stopping short of it; only in a corridor
   too narrow for that does it go back and forth instead (unskilled bots used to stand still there).
 - **Distance.** Otherwise skilled bots drift in when strong and back off when weak. All bots back off under 96 units
   and while reloading. With the crowbar they charge.
 - **Stuck.** A move on the ground that hardly gets anywhere for a third of a second (a box the wall checks pass over,
   a player, the wall behind a ledge it turned from) is backed out of for 0.3 s, and the strafe goes the other way.
   A bot keeping away from the enemy (its own blast on the way, a reload) backs out aside, never toward it.
-- **Extras.** Crouch taps and dodge jumps come with skill; from hard up a bot with the module dodges by a long jump
-  aside instead of a hop.
+- **Extras.** Crouch taps (`crouch_tap`) and dodge jumps (every `dodge_hop_cooldown` seconds, when the enemy aims at
+  the bot or the bot was hit in the last second) come with skill; from hard up a bot with the module dodges by a long
+  jump aside instead of a hop.
 - **Long jump at the enemy** when closing in (with the module; see *Tricks*).
 - **Ledges.** A move that would drop off a ledge is reversed.
 
 Whatever the goal, an enemy in sight is shot at: a bot running for health or backing off fires back. When nothing
-is in sight for 2 s, a low clip is reloaded, of the gun the bot would like in hand, not only the one it holds.
+is in sight for a second, a clip less than half full is reloaded, of the gun the bot would like in hand, not only the
+one it holds.
 
 ## Explosives
 
@@ -529,8 +546,13 @@ priority on each wins:
 - **Protocol (85):** a weapon's own sequence: a charging gauss, a gauss boost, a pulled pin, a throw, a mine placed,
   satchels set off, a rocket guided; a long jump to dodge. A shot at an enemy never breaks it.
 - **Threat (70):** aiming and firing at an enemy in sight, turning toward damage, dodging a blast.
+- **Alert (60):** a look at what calls for it at once: a glimpse, an enemy lost a moment ago, a shot or a cry of
+  pain nearby. It wins over the goal's looks (a spot held, a sound seen about, a charger), never over aiming, a weapon
+  protocol or a jump.
 - **Goal (50):** the goal's movement.
 - **Optional (20):** looking along the path and glancing at sounds.
+
+A look from Alert up is turned at the bot's full turn acceleration; a goal's look and the path's at half of it.
 
 ### Where a bot looks
 
@@ -538,14 +560,17 @@ priority on each wins:
   a corner before it gets there, tilted no more than 12° up or down. Nearer than 48 units such a point says little
   (the path's end, the top of a ladder), and the view keeps its heading. The pitch is exact only where it steers the
   move or aims: on ladders, in water, at a button to press.
-- **Sounds** draw a glance only when they matter and are not in front of the bot already:
+- **A glimpse** of someone not recognized yet (`docs/perception.md`) is looked at at once, whatever the bot was
+  glancing at or watching for, and once: a newer glimpse takes the eyes after a quarter of a second. So is the
+  direction damage came from, and a lost enemy's last known position.
+- **A shot within 1000 units or a cry of pain within 600**, more than 40° off the view, draws a look at once, once a
+  second at most; in teamplay not when a teammate in sight is by it.
+- **Other sounds** draw a glance only when they matter and are not in front of the bot already:
   - a shot within 1500 units, pain within 1000, steps, jumps and pickups within 700, weapon noises within 500;
   - more than 40° off the view;
   - 2.5–5 s after the last glance.
 
   A glance lasts 0.8 s and stays within 15° of level: how high a sound was is a guess.
-- **A glimpse** of someone not recognized yet is looked at directly, and so are a lost enemy's last known position and
-  the direction damage came from.
 - **A lost enemy** is watched for where it would come into view (see *Looking for a lost enemy*), for up to 8 s.
 - **Danger:** a bot with no enemy in sight for 4 s, at a place where bots got hurt before, glances where that came
   from, as it glances at sounds.
@@ -570,7 +595,8 @@ priority on each wins:
   dodges, and failures by reason;
 - the tricks (see *Tricks*);
 - which priority owns each channel;
-- reaction times: from the first glimpse of an enemy, and from recognizing it, to the first shot at it;
+- reaction times: from the first glimpse of an enemy, and from recognizing it, to the first shot at it, for enemies
+  new to the bot and for enemies it lost a moment before and saw again;
 - its stalls (below).
 
 **Stalls.** The server watches every bot for seeming stuck, for the log (`stall:` in `logs/lambdabots.*.log`), `lb

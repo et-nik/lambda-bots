@@ -25,6 +25,8 @@ bots:
   force_respawn: true
   respawn_delay: [0.3, 1.2]
   stuck_kill_time: 20.0
+  reflex: 1.0             # how quick every bot is on top of its skill, 0.5..2: 2 recognizes and aims in half the
+                          # time and turns twice as fast (cvar lb_reflex)
 
 # Personalities: a nickname always plays with the same style, skill (0..100) and look. They come from
 # profiles/*.yaml (written by you) and data/profiles.yaml (created by the server for new nicknames).

@@ -15,9 +15,10 @@ const FL_ONGROUND: u32 = 1 << 9;
 const VIEWER: u8 = 1;
 
 const PARAMS: PerceptionParams = PerceptionParams {
-    recognition_delay: [0.5, 1.0],
-    peripheral_gain: 0.45,
-    reacquire_delay: 0.15,
+    recognition_delay: [0.22, 0.35],
+    recognition_floor: 0.16,
+    peripheral_gain: 0.50,
+    reacquire_delay: 0.10,
     reacquire_grace: 2.0,
     hearing_threshold: 0.04,
     sound_bearing_sigma: 20.0,
@@ -63,6 +64,9 @@ struct Scene {
     walls: Vec<Aabb>,
     clients: Vec<RawClient>,
     traces: u32,
+    /// Teams by slot, and the viewer's; none by default.
+    teams: Vec<(u8, u8)>,
+    viewer_team: u8,
 }
 
 impl Tracer for Scene {
@@ -168,7 +172,7 @@ fn run(mut scene: Scene, yaw: f32, ticks: usize, seed: u64) -> Run {
         fov: 0.0,
         aspect: vision::DEFAULT_ASPECT,
         head_in_water: false,
-        team: 0,
+        team: scene.viewer_team,
     };
     let mut r = Run {
         ticks: Vec::new(),
@@ -188,7 +192,11 @@ fn run(mut scene: Scene, yaw: f32, ticks: usize, seed: u64) -> Run {
                     slot: c.slot,
                     userid: c.userid,
                 },
-                team: 0,
+                team: scene
+                    .teams
+                    .iter()
+                    .find(|(slot, _)| *slot == c.slot)
+                    .map_or(0, |(_, t)| *t),
                 weapon: None,
                 shot_at: None,
             })
@@ -257,12 +265,10 @@ fn a_running_enemy_in_plain_sight_is_recognized_after_the_drawn_delay() {
     let r = run(scene, 0.0, 40, 7);
     let (tick, rec) = first_recognition(&r).expect("recognized");
     let contact = r.vision.contacts.iter().find(|c| c.who.slot == 2).unwrap();
-    assert!((0.5..=1.0).contains(&contact.delay), "{}", contact.delay);
-    // Beyond the near range at full rate but for the range (some 0.85) and the middle band at worst (0.7), one tick
-    // of slack.
+    assert!((0.22..=0.35).contains(&contact.delay), "{}", contact.delay);
+    // Beyond the near range at full rate but for the middle band at worst (0.7), one tick of slack.
     assert!(
-        rec.latency >= f64::from(contact.delay) - PERIOD
-            && rec.latency <= f64::from(contact.delay) / (0.7 * 0.85) + PERIOD,
+        rec.latency >= f64::from(contact.delay) - PERIOD && rec.latency <= f64::from(contact.delay) / 0.7 + PERIOD,
         "latency {} delay {}",
         rec.latency,
         contact.delay
@@ -301,8 +307,9 @@ fn an_enemy_close_in_front_is_recognized_at_once_standing_or_ducked() {
         );
         let rec = first_recognition(&r).expect("recognized").1;
         let contact = r.vision.contacts.iter().find(|c| c.who.slot == 2).unwrap();
+        let floor = f64::from(PARAMS.recognition_floor);
         assert!(
-            rec.latency <= f64::from(contact.delay) / 3.5 + PERIOD,
+            rec.latency >= floor && rec.latency <= (f64::from(contact.delay) / 3.5).max(floor) + PERIOD,
             "ducked {ducked}: latency {} delay {}",
             rec.latency,
             contact.delay
@@ -331,7 +338,7 @@ fn a_still_enemy_far_away_takes_longer() {
         11,
     );
     let (a, b) = (first_recognition(&near).unwrap().1, first_recognition(&far).unwrap().1);
-    assert!(b.latency > a.latency * 3.0, "near {} far {}", a.latency, b.latency);
+    assert!(b.latency > a.latency * 2.0, "near {} far {}", a.latency, b.latency);
 }
 
 #[test]
@@ -593,11 +600,15 @@ fn a_far_player_is_not_starved_by_nearer_hidden_ones() {
 
 #[test]
 fn an_enemy_stepping_out_close_in_front_is_looked_at_while_others_far_off_are_followed() {
-    // Three players stand far off in plain sight: noticed at once, recognized only slowly.
-    let mut clients: Vec<RawClient> = [(900.0, -200.0), (950.0, 0.0), (1000.0, 200.0)]
+    // Three players crouch far off in plain sight: noticed at once, recognized only slowly.
+    let mut clients: Vec<RawClient> = [(2200.0, -400.0), (2250.0, 0.0), (2300.0, 400.0)]
         .iter()
         .enumerate()
-        .map(|(i, &(x, y))| player(2 + i as u8, Vec3::new(x, y, 0.0), Vec3::ZERO))
+        .map(|(i, &(x, y))| {
+            let mut c = player(2 + i as u8, Vec3::new(x, y, 0.0), Vec3::ZERO);
+            c.flags |= 1 << 14;
+            c
+        })
         .collect();
     // One walks out from behind a wall 250 units in front after some 0.7 s.
     clients.push(player(9, Vec3::new(250.0, -200.0, 0.0), Vec3::new(0.0, 150.0, 0.0)));
@@ -621,4 +632,68 @@ fn an_enemy_stepping_out_close_in_front_is_looked_at_while_others_far_off_are_fo
     );
     let rec = recognized(9).expect("never recognized");
     assert!(rec <= 22, "out about tick 14, recognized at tick {rec}");
+}
+
+#[test]
+fn something_is_noticed_early_on_the_way_to_recognizing_it() {
+    let scene = Scene {
+        clients: vec![player(2, Vec3::new(650.0, -200.0, 0.0), Vec3::new(0.0, 200.0, 0.0))],
+        ..Scene::default()
+    };
+    let r = run(scene, 0.0, 40, 7);
+    let (recognized, _) = first_recognition(&r).expect("recognized");
+    let cue = r.ticks.iter().position(|t| !t.cues.is_empty()).expect("a cue");
+    assert!(
+        cue <= recognized / 3 + 1,
+        "cue at tick {cue}, recognized at {recognized}"
+    );
+}
+
+#[test]
+fn a_player_lost_a_moment_ago_draws_no_glance_when_it_comes_back() {
+    let scene = Scene {
+        walls: vec![Aabb {
+            mins: Vec3::new(300.0, -40.0, -100.0),
+            maxs: Vec3::new(340.0, 40.0, 200.0),
+        }],
+        clients: vec![player(2, Vec3::new(500.0, -300.0, 0.0), Vec3::new(0.0, 200.0, 0.0))],
+        ..Scene::default()
+    };
+    let r = run(scene, 0.0, 80, 21);
+    let recognized: Vec<usize> = (0..r.ticks.len())
+        .filter(|&i| !r.ticks[i].recognitions.is_empty())
+        .collect();
+    assert!(recognized.len() >= 2 && r.ticks[recognized[1]].recognitions[0].reacquired);
+    assert!(
+        r.ticks[recognized[0] + 1..=recognized[1]]
+            .iter()
+            .all(|t| t.cues.is_empty()),
+        "seen again where it was expected"
+    );
+}
+
+#[test]
+fn a_teammate_known_to_be_about_there_draws_no_glance() {
+    // Walks behind a wall for some 2.5 s: longer than a quick re-acquisition, not long enough to be forgotten.
+    let scene = |team: u8| Scene {
+        walls: vec![Aabb {
+            mins: Vec3::new(400.0, -100.0, -100.0),
+            maxs: Vec3::new(416.0, 100.0, 200.0),
+        }],
+        clients: vec![player(2, Vec3::new(800.0, -700.0, 0.0), Vec3::new(0.0, 160.0, 0.0))],
+        teams: vec![(2, team)],
+        viewer_team: 1,
+        ..Scene::default()
+    };
+    // Cues once the player was recognized: it has gone behind the wall and come out again.
+    let cues_after_return = |team: u8| {
+        let r = run(scene(team), 0.0, 170, 4);
+        let (recognized, rec) = first_recognition(&r).expect("recognized before the wall");
+        assert!(!rec.reacquired && recognized < 60, "{recognized}");
+        let again = r.ticks[recognized + 1..].iter().flat_map(|t| &t.recognitions).next();
+        assert!(again.is_some_and(|x| !x.reacquired), "{again:?}");
+        r.ticks[recognized + 1..].iter().filter(|t| !t.cues.is_empty()).count()
+    };
+    assert!(cues_after_return(2) > 0, "an enemy coming out is noticed first");
+    assert_eq!(cues_after_return(1), 0, "the teammate is not");
 }

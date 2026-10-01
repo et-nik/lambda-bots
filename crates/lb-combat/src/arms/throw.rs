@@ -555,6 +555,7 @@ mod tests {
                 prediction: Some(&self.prediction),
                 dll: self.dll,
                 gravity: 800.0,
+                deploying: false,
             }
         }
     }

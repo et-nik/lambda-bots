@@ -6,8 +6,9 @@
 //! in the view, how it moves, how far it is and what drew attention to it set the rate at which evidence
 //! accumulates; a player within 200–600 units is plain to see however it moves, and up to 3.5 times sooner in the
 //! middle of the view. A contact is recognized when the evidence reaches 1; the time that takes at full rate is
-//! drawn once per contact. Nothing here consumes randomness before there is evidence, so hidden players change
-//! nothing.
+//! drawn once per contact, and nobody new is recognized sooner than the bot's floor after coming into view. A player
+//! seen again where it was lost a moment ago is recognized quickly wherever it is in the view. Nothing here consumes
+//! randomness before there is evidence, so hidden players change nothing.
 
 use lb_core::Vec3;
 use lb_core::math::view_angle_vectors;
@@ -33,9 +34,15 @@ pub const DEFAULT_FOV: f32 = 90.0;
 pub const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
 /// A contact without evidence keeps its evidence and delay this long.
 const PENDING_GRACE: f64 = 0.75;
-/// A recognized player out of sight this briefly is still followed without recognizing it again.
-const SIGHT_HOLD: f64 = 0.1;
-const CUE_EVIDENCE: f32 = 0.4;
+/// A recognized player out of sight this briefly (behind a pillar, another player) is still followed without
+/// recognizing it again.
+const SIGHT_HOLD: f64 = 0.25;
+/// A player seen again where it was lost is expected there: its evidence builds at least this fast.
+const REACQUIRE_RATE: f32 = 0.7;
+/// At this share of the evidence the bot notices something there, not knowing who it is, and may look at it.
+const CUE_EVIDENCE: f32 = 0.2;
+/// A teammate seen this recently about where a contact comes into view is taken for that teammate: no glance at it.
+const FRIEND_KNOWN_FOR: f64 = 3.0;
 /// Firing seen: a weapon event of the player this recent.
 const SHOT_SEEN_FOR: f64 = 0.2;
 /// Players this close are plain to see (fully within the first, not at all beyond the second): recognized
@@ -220,6 +227,8 @@ pub struct Contact {
     pub lost_at: Option<SimTime>,
     /// Started as a quick re-acquisition of a player lost moments ago.
     pub reacquired: bool,
+    /// Draws no glance before it is recognized: a player lost moments ago, or a teammate known to be about there.
+    pub quiet: bool,
     pub cue_sent: bool,
     pub visibility: f32,
     pub parts: u8,
@@ -457,10 +466,13 @@ impl Vision {
         let index = match self.contacts.iter().position(|c| c.who == s.key) {
             Some(i) => i,
             None => {
-                let reacquired = beliefs.track(s.key).is_some_and(|t| {
-                    now.since(t.last_seen) <= f64::from(params.reacquire_grace)
-                        && t.pos.distance(raw.origin) <= 3.0 * t.sigma + 64.0
-                });
+                let there = beliefs
+                    .track(s.key)
+                    .filter(|t| t.pos.distance(raw.origin) <= 3.0 * t.sigma + 64.0);
+                let reacquired = there.is_some_and(|t| now.since(t.last_seen) <= f64::from(params.reacquire_grace));
+                let friend = viewer.team != 0
+                    && there
+                        .is_some_and(|t| t.relation == Relation::Friend && now.since(t.last_seen) <= FRIEND_KNOWN_FOR);
                 let delay = if reacquired {
                     params.reacquire_delay
                 } else {
@@ -475,6 +487,7 @@ impl Vision {
                     recognized: false,
                     lost_at: None,
                     reacquired,
+                    quiet: reacquired || friend,
                     cue_sent: false,
                     visibility,
                     parts,
@@ -496,15 +509,19 @@ impl Vision {
             // Close by, standing still or ducked hides nobody.
             let near = nearness(distance);
             let motion = motion_gain(raw) + (1.0 - motion_gain(raw)) * near;
-            let rate = visibility
+            let mut rate = visibility
                 * fov_gain(eccentricity, params.peripheral_gain)
                 * close_gain(eccentricity, near)
                 * motion
                 * range_gain(distance)
                 * cue_gain(firing, bearing(viewer.eye, raw.origin), beliefs, now);
-            c.evidence += rate * dt / c.delay;
-            if c.evidence < 1.0 {
-                if c.evidence >= CUE_EVIDENCE && !c.cue_sent {
+            if c.reacquired {
+                rate = rate.max(REACQUIRE_RATE);
+            }
+            c.evidence = (c.evidence + rate * dt / c.delay).min(1.0);
+            let early = !c.reacquired && now.since(c.first_evidence) < f64::from(params.recognition_floor);
+            if c.evidence < 1.0 || early {
+                if c.evidence >= CUE_EVIDENCE && !c.cue_sent && !c.quiet {
                     c.cue_sent = true;
                     let dir = (raw.origin - viewer.eye).normalize_or_zero();
                     let range = RangeBin::of(distance);
@@ -629,15 +646,17 @@ pub fn close_gain(eccentricity: f32, near: f32) -> f32 {
     1.0 + (top - 1.0) * near
 }
 
+/// Anyone within the distances a fight on a deathmatch map takes place at is plain to see; beyond, the smaller the
+/// figure the longer it takes.
 pub fn range_gain(distance: f32) -> f32 {
-    if distance < 300.0 {
+    if distance < 1000.0 {
         1.0
-    } else if distance < 1000.0 {
-        1.0 - 0.4 * (distance - 300.0) / 700.0
-    } else if distance < 2500.0 {
-        0.6 - 0.25 * (distance - 1000.0) / 1500.0
+    } else if distance < 2000.0 {
+        1.0 - 0.3 * (distance - 1000.0) / 1000.0
+    } else if distance < 3000.0 {
+        0.7 - 0.2 * (distance - 2000.0) / 1000.0
     } else {
-        0.35
+        0.5
     }
 }
 

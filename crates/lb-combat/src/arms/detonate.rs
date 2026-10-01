@@ -315,6 +315,7 @@ mod tests {
             prediction: Some(prediction),
             dll,
             gravity: 800.0,
+            deploying: false,
         }
     }
 

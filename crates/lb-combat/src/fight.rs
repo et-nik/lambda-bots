@@ -3,7 +3,8 @@
 //! - **Style:** every 1–3 s the bot picks strafing or standing. Closer than 768 units it strafes; further away it
 //!   stands with the skill's `stay_mid` / `stay_far` chance. A low will to approach (health × aggression below
 //!   30), or a pistol or shotgun against an enemy facing the bot, makes it strafe.
-//! - **Strafe side:** away from the side the enemy aims at, swapped 30% of the time, re-decided every 0.3–0.8 s.
+//! - **Strafe side:** away from the side the enemy aims at, swapped 30% of the time, re-decided every 0.3–0.8 s, down
+//!   to every 0.2–0.45 s for the best.
 //!   Walls within 134 units on a side turn it around; with walls that close on both sides it strafes toward the one
 //!   farther off while there is room, and only in a corridor too narrow for that does it go back and forth instead.
 //! - **Distance:** further off than the weapon in hand does well at ([`close_in`]), a bot with the will to (health ×
@@ -12,7 +13,8 @@
 //!   close, and back off when cornered. Everyone backs off under 96 units, while reloading and closer than the fight
 //!   allows (its own weapon's blast, a GunGame player one kill from winning); melee charges. Nobody closes in while
 //!   its own rocket or launched grenade is on the way to the target.
-//! - **Extras:** crouch taps and dodge jumps by skill.
+//! - **Extras:** crouch taps and dodge jumps by skill; a dodge jump when the enemy aims at the bot or the bot is being
+//!   hit.
 //! - **Ledges:** a move that would drop more than 160 units is reversed.
 //! - **Stuck:** a move on the ground that hardly gets anywhere for a third of a second (a box the wall traces pass
 //!   over, a player, the wall behind a ledge turned from) is backed out of for a moment, and the strafe goes the other
@@ -62,6 +64,8 @@ pub struct FightInput {
     /// Observed facing yaw of the enemy, degrees.
     pub enemy_facing: f32,
     pub enemy_faces_me: bool,
+    /// The bot was hurt a moment ago: someone has it in their sights.
+    pub under_fire: bool,
     /// Health × aggression, 0..100.
     pub approach: f32,
     pub weapon: WeaponClass,
@@ -191,7 +195,9 @@ impl Fight {
                 if rng.next_f32() < 0.3 {
                     self.side = -self.side;
                 }
-                self.side_until = i.now + f64::from(rng.range_f32(0.3, 0.8));
+                // The better the bot, the less a strafe can be read and led.
+                let quick = f32::from(s.skill.min(100)) / 100.0;
+                self.side_until = i.now + f64::from(rng.range_f32(0.3 - 0.1 * quick, 0.8 - 0.35 * quick));
                 let room = |t: &mut dyn Tracer, dir: Vec2| {
                     let end = i.origin + (dir * WALL_DISTANCE).extend(0.0);
                     t.trace(&TraceQuery::line(i.origin, end)).fraction * WALL_DISTANCE
@@ -242,7 +248,7 @@ impl Fight {
                 && distance < 1088.0
                 && i.now >= self.hop_after
                 && i.on_ground
-                && i.enemy_faces_me
+                && (i.enemy_faces_me || i.under_fire)
                 && !matches!(i.weapon, WeaponClass::Sniper | WeaponClass::Launcher)
             {
                 self.hop_after = i.now + f64::from(cooldown * rng.range_f32(0.8, 1.2));
@@ -364,6 +370,7 @@ mod tests {
             enemy: Vec3::new(distance, 0.0, 0.0),
             enemy_facing: 180.0,
             enemy_faces_me: true,
+            under_fire: false,
             approach: 50.0,
             weapon: WeaponClass::Smg,
             reloading: false,
@@ -636,5 +643,64 @@ mod tests {
             backed_out |= f.escape.is_some();
         }
         assert!(backed_out);
+    }
+
+    #[test]
+    fn a_bot_being_hit_dodges_whoever_aims_at_it() {
+        let hops = FightSkill {
+            dodge_hop_cooldown: Some(1.0),
+            ..SKILL
+        };
+        // The enemy seems to look elsewhere (its facing is a noisy guess).
+        let unaimed = |now: f64, under_fire: bool| FightInput {
+            enemy_faces_me: false,
+            under_fire,
+            ..input(now, 500.0)
+        };
+        let jumps = |under_fire: bool| {
+            let mut f = Fight::default();
+            let mut rng = Pcg32::new(8, 8);
+            let mut open = Floor { wall_y: None };
+            (0..30)
+                .filter(|&k| {
+                    f.update(&unaimed(f64::from(k) * 0.1, under_fire), &hops, &mut open, &mut rng)
+                        .jump
+                })
+                .count()
+        };
+        assert_eq!(jumps(false), 0);
+        assert!(jumps(true) >= 2, "{}", jumps(true));
+    }
+
+    #[test]
+    fn the_best_decide_their_strafe_more_often() {
+        // Seconds a strafe side is kept before it is decided again, on average.
+        let mean_side = |skill: u8| {
+            let s = FightSkill { skill, ..SKILL };
+            let mut f = Fight::default();
+            let mut rng = Pcg32::new(3, 3);
+            let mut open = Floor { wall_y: None };
+            let mut decided = 0;
+            let mut until = SimTime::ZERO;
+            // The bot moves as asked.
+            let mut velocity = Vec2::ZERO;
+            for k in 0..600 {
+                let i = FightInput {
+                    velocity,
+                    ..input(f64::from(k) * 0.01, 500.0)
+                };
+                velocity = f.update(&i, &s, &mut open, &mut rng).velocity;
+                if f.side_until != until {
+                    decided += 1;
+                    until = f.side_until;
+                }
+            }
+            6.0 / f64::from(decided)
+        };
+        let (best, worst) = (mean_side(100), mean_side(0));
+        assert!(
+            (0.2..0.45).contains(&best) && (0.3..0.8).contains(&worst) && best < worst * 0.7,
+            "{best} {worst}"
+        );
     }
 }

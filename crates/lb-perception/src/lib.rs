@@ -23,6 +23,7 @@ pub use vision::{Contact, Frustum, Recognition, Subject, Viewer, Vision, VisionO
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PerceptionParams {
     pub recognition_delay: [f32; 2],
+    pub recognition_floor: f32,
     pub peripheral_gain: f32,
     pub reacquire_delay: f32,
     pub reacquire_grace: f32,
@@ -34,6 +35,7 @@ impl PerceptionParams {
     pub fn from_skill(s: &SkillParams) -> PerceptionParams {
         PerceptionParams {
             recognition_delay: s.recognition_delay,
+            recognition_floor: s.recognition_floor,
             peripheral_gain: s.peripheral_gain,
             reacquire_delay: s.reacquire_delay,
             reacquire_grace: s.reacquire_grace,

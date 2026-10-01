@@ -14,6 +14,8 @@ pub const MAJOR: u32 = 1;
 
 pub const PRESET_NAMES: [&str; 5] = ["noob", "easy", "normal", "hard", "expert"];
 pub const PRESET_STEP: u8 = 25;
+/// How far `bots.reflex` (`lb_reflex`) may speed every bot up or slow it down.
+pub const REFLEX_RANGE: [f32; 2] = [0.5, 2.0];
 
 /// A skill value written as a number (`62`) or a preset name (`hard`).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -172,6 +174,13 @@ macro_rules! skill_params {
             pub fn apply(&mut self, o: &SkillOverrides) {
                 $( if let Some(v) = &o.$field { self.$field = v.clone(); } )*
             }
+
+            /// Names of the parameters that differ from `other`.
+            pub fn differences(&self, other: &SkillParams) -> Vec<&'static str> {
+                let mut out = Vec::new();
+                $( if self.$field != other.$field { out.push(stringify!($field)); } )*
+                out
+            }
         }
 
         impl SkillOverrides {
@@ -185,6 +194,9 @@ macro_rules! skill_params {
 skill_params! {
     /// Seconds from first sight to recognizing an enemy, drawn once per contact from [min, max].
     recognition_delay: [f32; 2],
+    /// Nobody new to the bot is recognized sooner than this many seconds after it first came into view, however plain
+    /// to see: a human's quickest.
+    recognition_floor: f32,
     /// Recognition speed at the edge of the view relative to its center, 0..1.
     peripheral_gain: f32,
     /// Seconds to recognize again an enemy lost less than `reacquire_grace` seconds ago.
@@ -200,6 +212,8 @@ skill_params! {
     aim_error: [f32; 3],
     /// Maximum turn rate, degrees per second.
     turn_speed: f32,
+    /// Maximum turn acceleration, degrees per second squared: how hard the view is flicked.
+    turn_accel: f32,
     /// Extra pause between semi-automatic shots, seconds [min, max].
     semi_auto_delay: [f32; 2],
     /// Chance to stand still while fighting at 768–1024 units, 0..1.
@@ -241,6 +255,25 @@ skill_params! {
     gauss_walls: bool,
     /// Bunny hop speed limit as a multiple of maxspeed; none = no bunny hopping.
     bhop_speed: Option<f32>,
+}
+
+impl SkillParams {
+    /// The parameters of a bot `reflex` times as quick (clamped to [`REFLEX_RANGE`]): it recognizes enemies, follows
+    /// them with its aim and settles a scope in that share of the time, and turns that much faster.
+    pub fn with_reflex(mut self, reflex: f32) -> SkillParams {
+        let r = reflex.clamp(REFLEX_RANGE[0], REFLEX_RANGE[1]);
+        if r == 1.0 {
+            return self;
+        }
+        self.recognition_delay = self.recognition_delay.map(|v| v / r);
+        self.recognition_floor /= r;
+        self.reacquire_delay /= r;
+        self.aim_latency /= r;
+        self.scope_settle = self.scope_settle.map(|v| v / r);
+        self.turn_speed *= r;
+        self.turn_accel *= r;
+        self
+    }
 }
 
 /// `config/difficulty.yaml`: parameters at the five presets. A preset may leave parameters out; they keep their
@@ -295,6 +328,16 @@ impl Presets {
         [&self.noob, &self.easy, &self.normal, &self.hard, &self.expert]
     }
 
+    /// `preset.parameter` for every parameter that differs from the built-in table.
+    pub fn customized(&self) -> Vec<String> {
+        let built_in = Presets::default();
+        PRESET_NAMES
+            .iter()
+            .zip(self.ordered().into_iter().zip(built_in.ordered()))
+            .flat_map(|(name, (mine, theirs))| mine.differences(theirs).into_iter().map(move |f| format!("{name}.{f}")))
+            .collect()
+    }
+
     /// Parameters for a skill value 0..=100.
     pub fn at(&self, skill: u8) -> SkillParams {
         let skill = skill.min(100);
@@ -328,6 +371,7 @@ impl Default for Presets {
                  tricks: bool,
                  bhop_speed: Option<f32>| SkillParams {
             recognition_delay: recognition,
+            recognition_floor: 0.0,
             peripheral_gain: vision[0],
             reacquire_delay: vision[1],
             reacquire_grace: vision[2],
@@ -336,6 +380,7 @@ impl Default for Presets {
             headshot,
             aim_error,
             turn_speed,
+            turn_accel: 0.0,
             semi_auto_delay,
             stay_mid: stay[0],
             stay_far: stay[1],
@@ -359,15 +404,15 @@ impl Default for Presets {
         use AimModel::*;
         let mut presets = Presets {
             noob: p(
-                [1.5, 2.0],
-                [0.35, 0.35, 1.0],
-                0.30,
+                [0.7, 1.0],
+                [0.40, 0.25, 1.0],
+                0.22,
                 Newbie,
                 0.15,
                 [20.0, 20.0, 40.0],
-                180.0,
-                [0.7, 0.8],
-                [0.60, 0.85],
+                300.0,
+                [0.5, 0.6],
+                [0.50, 0.75],
                 0.0,
                 None,
                 [0.07, 35.0],
@@ -377,17 +422,17 @@ impl Default for Presets {
                 None,
             ),
             easy: p(
-                [1.0, 1.5],
-                [0.40, 0.25, 1.5],
-                0.24,
+                [0.4, 0.6],
+                [0.45, 0.15, 1.5],
+                0.15,
                 Spring,
                 0.20,
                 [15.0, 15.0, 30.0],
-                300.0,
-                [0.5, 0.6],
-                [0.40, 0.70],
-                0.0,
-                Some(5.25),
+                600.0,
+                [0.3, 0.4],
+                [0.30, 0.55],
+                0.03,
+                Some(4.0),
                 [0.055, 28.0],
                 6.0,
                 0.5,
@@ -395,17 +440,17 @@ impl Default for Presets {
                 None,
             ),
             normal: p(
-                [0.5, 1.0],
-                [0.45, 0.15, 2.0],
-                0.18,
+                [0.22, 0.35],
+                [0.50, 0.10, 2.0],
+                0.10,
                 Spring,
                 0.25,
                 [10.0, 10.0, 20.0],
-                450.0,
-                [0.4, 0.5],
-                [0.20, 0.45],
-                0.04,
-                Some(4.0),
+                1000.0,
+                [0.15, 0.25],
+                [0.12, 0.30],
+                0.06,
+                Some(3.0),
                 [0.04, 20.0],
                 8.0,
                 0.6,
@@ -413,17 +458,17 @@ impl Default for Presets {
                 Some(1.25),
             ),
             hard: p(
-                [0.25, 0.5],
-                [0.50, 0.10, 2.5],
-                0.12,
+                [0.14, 0.22],
+                [0.55, 0.06, 2.5],
+                0.07,
                 SpringCombat,
                 0.50,
                 [5.0, 5.0, 10.0],
-                650.0,
-                [0.3, 0.4],
-                [0.08, 0.20],
-                0.06,
-                Some(2.75),
+                1600.0,
+                [0.08, 0.14],
+                [0.05, 0.12],
+                0.10,
+                Some(2.0),
                 [0.03, 14.0],
                 10.0,
                 0.7,
@@ -431,17 +476,17 @@ impl Default for Presets {
                 Some(1.5),
             ),
             expert: p(
-                [0.1, 0.25],
-                [0.55, 0.05, 3.0],
-                0.06,
+                [0.08, 0.14],
+                [0.60, 0.04, 3.0],
+                0.05,
                 SpringCombat,
                 0.75,
                 [1.5, 1.5, 3.0],
-                900.0,
-                [0.1, 0.2],
-                [0.0, 0.10],
-                0.08,
-                Some(1.5),
+                2500.0,
+                [0.0, 0.05],
+                [0.0, 0.05],
+                0.12,
+                Some(1.2),
                 [0.02, 10.0],
                 12.0,
                 0.8,
@@ -452,11 +497,20 @@ impl Default for Presets {
         // (gauss_charge, scope_settle, throw_rate, longjump): skilled players fight the gauss charged, snap the
         // crossbow's scope on only for the shot, and get about by long jumps whenever they have the module.
         let extra = [
-            (0.2, [1.0, 1.4], 0.5, 0.15),
-            (0.45, [0.6, 0.9], 0.75, 0.35),
-            (0.75, [0.35, 0.55], 1.0, 0.6),
-            (0.85, [0.2, 0.3], 1.2, 0.9),
-            (0.9, [0.1, 0.15], 1.4, 1.0),
+            (0.2, [0.7, 1.0], 0.5, 0.15),
+            (0.45, [0.4, 0.6], 0.75, 0.35),
+            (0.75, [0.25, 0.35], 1.0, 0.6),
+            (0.85, [0.15, 0.22], 1.2, 0.9),
+            (0.9, [0.08, 0.12], 1.4, 1.0),
+        ];
+        // (recognition_floor, turn_accel): the quickest a player of the level recognizes someone, and how hard it
+        // flicks the view.
+        let reflexes = [
+            (0.30, 3000.0),
+            (0.22, 5000.0),
+            (0.16, 9000.0),
+            (0.13, 15000.0),
+            (0.10, 24000.0),
         ];
         let all = [
             &mut presets.noob,
@@ -465,11 +519,13 @@ impl Default for Presets {
             &mut presets.hard,
             &mut presets.expert,
         ];
-        for (params, (charge, settle, throws, longjump)) in all.into_iter().zip(extra) {
+        for ((params, (charge, settle, throws, longjump)), (floor, accel)) in all.into_iter().zip(extra).zip(reflexes) {
             params.gauss_charge = charge;
             params.scope_settle = settle;
             params.throw_rate = throws;
             params.longjump = longjump;
+            params.recognition_floor = floor;
+            params.turn_accel = accel;
         }
         for p in [&mut presets.hard, &mut presets.expert] {
             p.gauss_walls = true;
@@ -532,6 +588,12 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
             "turn_speed/aim_latency/track_forget/sound_bearing_sigma",
             "must be positive",
         ));
+    }
+    if p.turn_accel <= 0.0 {
+        return Err(bad("turn_accel", "must be positive"));
+    }
+    if p.recognition_floor < 0.0 {
+        return Err(bad("recognition_floor", "must not be negative"));
     }
     if p.reacquire_delay < 0.0 || p.reacquire_grace < 0.0 {
         return Err(bad("reacquire_delay/reacquire_grace", "must not be negative"));
@@ -624,6 +686,30 @@ mod tests {
         assert_eq!(f.presets.noob, Presets::default().noob);
         let typo = "schema: lambdabots/difficulty@1\npresets:\n  hard:\n    turn_sped: 1\n";
         assert!(DifficultyFile::parse(typo, "typo").is_err());
+    }
+
+    #[test]
+    fn reflex_scales_reactions_and_turns_only() {
+        let normal = Presets::default().normal;
+        assert_eq!(normal.clone().with_reflex(1.0), normal);
+        let quick = normal.clone().with_reflex(2.0);
+        assert_eq!(quick.recognition_delay, normal.recognition_delay.map(|v| v / 2.0));
+        assert_eq!(quick.aim_latency, normal.aim_latency / 2.0);
+        assert_eq!(quick.turn_accel, normal.turn_accel * 2.0);
+        assert_eq!(quick.aim_error, normal.aim_error, "no better aim");
+        assert_eq!(normal.clone().with_reflex(9.0), quick, "clamped");
+        let slow = normal.clone().with_reflex(0.5);
+        assert_eq!(slow.turn_speed, normal.turn_speed / 2.0);
+        assert_eq!(slow.recognition_floor, normal.recognition_floor * 2.0);
+    }
+
+    #[test]
+    fn a_file_off_the_built_in_table_is_told_apart() {
+        assert!(Presets::default().customized().is_empty());
+        let text =
+            "schema: lambdabots/difficulty@1\npresets:\n  hard:\n    turn_speed: 700\n  noob:\n    tricks: true\n";
+        let f = DifficultyFile::parse(text, "partial").unwrap();
+        assert_eq!(f.presets.customized(), ["noob.tricks", "hard.turn_speed"]);
     }
 
     #[test]

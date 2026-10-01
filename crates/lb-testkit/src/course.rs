@@ -5,7 +5,6 @@
 
 use lb_bsp::BspWorld;
 use lb_bsp::mech::{Mechanisms, Mover, MoverKind, SF_TRIGGER_NOCLIENTS, TriggerKind};
-use lb_config::skill::AimModel;
 use lb_core::input::IN_USE;
 use lb_core::math::view_angle_vectors;
 use lb_core::rng::Pcg32;
@@ -652,11 +651,7 @@ impl<W: SimWorld> Course<W> {
             phys: Physics::default(),
             health: LinkHealth::default(),
             now: 1.0,
-            look: LookParams {
-                model: AimModel::Spring,
-                turn_speed: 900.0,
-                skill: 100,
-            },
+            look: LookParams::NAV,
         }
     }
 

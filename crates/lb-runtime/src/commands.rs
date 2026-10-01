@@ -1161,15 +1161,17 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             owner(i.weapon.as_ref().map(|x| x.0)),
         ));
         let r = &m.reactions;
-        if r.count > 0 {
-            out.push(format!(
-                "  reactions: {} contacts answered; first glimpse to first shot mean {:.2} s, median {:.2} s, worst {:.2} s; recognition to shot mean {:.2} s",
-                r.count,
-                r.evidence_to_shot / r.count as f64,
-                r.median().unwrap_or(0.0),
-                r.worst,
-                r.recognition_to_shot / r.count as f64
-            ));
+        for (kind, r) in [("new enemies", &r.fresh), ("enemies seen again", &r.reacquired)] {
+            if r.count > 0 {
+                out.push(format!(
+                    "  reactions to {kind}: {} answered; first glimpse to first shot mean {:.2} s, median {:.2} s, worst {:.2} s; recognition to shot mean {:.2} s",
+                    r.count,
+                    r.evidence_to_shot / r.count as f64,
+                    r.median().unwrap_or(0.0),
+                    r.worst,
+                    r.recognition_to_shot / r.count as f64
+                ));
+            }
         }
     }
     out
@@ -1358,7 +1360,8 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
     let Some(p) = rt.roster.get(&name) else {
         return vec![format!("no personality named `{name}`; see `lb roster all`")];
     };
-    let k = p.skill_params(&rt.presets);
+    let reflex = rt.config.bots.reflex;
+    let k = p.skill_params(&rt.presets).with_reflex(reflex);
     let opt = |v: Option<f32>, unit: &str| v.map(|v| format!("{v:.2}{unit}")).unwrap_or_else(|| "never".into());
     let overrides = lb_config::yaml::to_string(&p.overrides).unwrap_or_default();
     vec![
@@ -1395,13 +1398,21 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             }
         ),
         format!(
-            "  skill: recognition {:.2}-{:.2} s, aim latency {:.2} s, {:?} aim, headshot {:.0}%, turn {:.0} deg/s",
+            "  skill{}: recognition {:.2}-{:.2} s (not before {:.2} s), aim latency {:.2} s, {:?} aim, headshot \
+             {:.0}%, turn {:.0} deg/s at {:.0} deg/s²",
+            if reflex == 1.0 {
+                String::new()
+            } else {
+                format!(" with reflexes ×{reflex}")
+            },
             k.recognition_delay[0],
             k.recognition_delay[1],
+            k.recognition_floor,
             k.aim_latency,
             k.aim_model,
             k.headshot * 100.0,
-            k.turn_speed
+            k.turn_speed,
+            k.turn_accel
         ),
         format!(
             "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, long jumps {:.0}% \

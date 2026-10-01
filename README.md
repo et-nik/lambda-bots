@@ -37,6 +37,9 @@ Game DLL: BugfixedHL-Rebased (production) and hlsdk-portable. Only the `valve` m
 3. Configure `addons/lambdabots/config/lambdabots.yaml` (default: fill up to 8 players with personalities of
    normal skill).
 
+When upgrading, replace `config/difficulty.yaml` too unless you changed it on purpose: the file overrides the built-in
+skill table, and the server warns about every parameter that differs from it.
+
 The module depends only on glibc 2.27+ (Linux) or system libraries (Windows, macOS).
 
 ## Bot personalities
@@ -123,6 +126,7 @@ run them from their own console.
 | `lb_quota_mode` | fill      | `normal`, `fill`, `match`                           |
 | `lb_difficulty` | normal    | skill filter: any, a preset, `normal-hard`, `40-70` |
 | `lb_style`      | any       | style filter: any or `rusher,sniper`                |
+| `lb_reflex`     | 1         | every bot's quickness on top of its skill, 0.5–2    |
 | `lb_cmd_rate`   | 100       | bot commands per second (0 — every frame)           |
 | `lb_game_mode`  | -1        | forced mode: -1 auto, 0 FFA, 1 teamplay             |
 | `lb_nav_source` | generated | `generated` (made from the map) or `yapb`           |

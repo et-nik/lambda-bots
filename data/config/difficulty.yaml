@@ -7,6 +7,7 @@ schema: lambdabots/difficulty@1
 # leaves a parameter out keeps its built-in value.
 #
 #   recognition_delay     seconds from first sight to recognizing an enemy, drawn once per contact [min, max]
+#   recognition_floor     nobody new is recognized sooner than this many seconds after coming into view
 #   peripheral_gain       recognition speed at the edge of the view relative to its center
 #   reacquire_delay       seconds to recognize again an enemy lost less than reacquire_grace seconds ago
 #   reacquire_grace       seconds after losing sight during which an enemy is recognized again quickly
@@ -15,6 +16,7 @@ schema: lambdabots/difficulty@1
 #   headshot              chance to aim at the head for a contact
 #   aim_error             aim error amplitude x, y, z (units)
 #   turn_speed            maximum turn rate, degrees per second
+#   turn_accel            maximum turn acceleration, degrees per second squared: how hard the view is flicked
 #   semi_auto_delay       extra pause between semi-automatic shots, seconds [min, max]
 #   stay_mid / stay_far   chance to stand still in a fight at 768..1024 / beyond 1024 units
 #   crouch_tap            chance of a crouch tap while strafing
@@ -40,18 +42,20 @@ schema: lambdabots/difficulty@1
 
 presets:
   noob:
-    recognition_delay: [1.5, 2.0]
-    peripheral_gain: 0.35
-    reacquire_delay: 0.35
+    recognition_delay: [0.7, 1.0]
+    recognition_floor: 0.30
+    peripheral_gain: 0.40
+    reacquire_delay: 0.25
     reacquire_grace: 1.0
-    aim_latency: 0.30
+    aim_latency: 0.22
     aim_model: newbie
     headshot: 0.15
     aim_error: [20, 20, 40]
-    turn_speed: 180
-    semi_auto_delay: [0.7, 0.8]
-    stay_mid: 0.60
-    stay_far: 0.85
+    turn_speed: 300
+    turn_accel: 3000
+    semi_auto_delay: [0.5, 0.6]
+    stay_mid: 0.50
+    stay_far: 0.75
     crouch_tap: 0.0
     dodge_hop_cooldown: ~
     hearing_threshold: 0.07
@@ -59,7 +63,7 @@ presets:
     track_forget: 4
     gauss_precharge: 0.0
     gauss_charge: 0.2
-    scope_settle: [1.0, 1.4]
+    scope_settle: [0.7, 1.0]
     throw_rate: 0.5
     throw_series: false
     tricks: false
@@ -69,26 +73,28 @@ presets:
     gauss_walls: false
     bhop_speed: ~
   easy:
-    recognition_delay: [1.0, 1.5]
-    peripheral_gain: 0.40
-    reacquire_delay: 0.25
+    recognition_delay: [0.4, 0.6]
+    recognition_floor: 0.22
+    peripheral_gain: 0.45
+    reacquire_delay: 0.15
     reacquire_grace: 1.5
-    aim_latency: 0.24
+    aim_latency: 0.15
     aim_model: spring
     headshot: 0.20
     aim_error: [15, 15, 30]
-    turn_speed: 300
-    semi_auto_delay: [0.5, 0.6]
-    stay_mid: 0.40
-    stay_far: 0.70
-    crouch_tap: 0.0
-    dodge_hop_cooldown: 5.25
+    turn_speed: 600
+    turn_accel: 5000
+    semi_auto_delay: [0.3, 0.4]
+    stay_mid: 0.30
+    stay_far: 0.55
+    crouch_tap: 0.03
+    dodge_hop_cooldown: 4.0
     hearing_threshold: 0.055
     sound_bearing_sigma: 28
     track_forget: 6
     gauss_precharge: 0.5
     gauss_charge: 0.45
-    scope_settle: [0.6, 0.9]
+    scope_settle: [0.4, 0.6]
     throw_rate: 0.75
     throw_series: false
     tricks: false
@@ -98,26 +104,28 @@ presets:
     gauss_walls: false
     bhop_speed: ~
   normal:
-    recognition_delay: [0.5, 1.0]
-    peripheral_gain: 0.45
-    reacquire_delay: 0.15
+    recognition_delay: [0.22, 0.35]
+    recognition_floor: 0.16
+    peripheral_gain: 0.50
+    reacquire_delay: 0.10
     reacquire_grace: 2.0
-    aim_latency: 0.18
+    aim_latency: 0.10
     aim_model: spring
     headshot: 0.25
     aim_error: [10, 10, 20]
-    turn_speed: 450
-    semi_auto_delay: [0.4, 0.5]
-    stay_mid: 0.20
-    stay_far: 0.45
-    crouch_tap: 0.04
-    dodge_hop_cooldown: 4.0
+    turn_speed: 1000
+    turn_accel: 9000
+    semi_auto_delay: [0.15, 0.25]
+    stay_mid: 0.12
+    stay_far: 0.30
+    crouch_tap: 0.06
+    dodge_hop_cooldown: 3.0
     hearing_threshold: 0.04
     sound_bearing_sigma: 20
     track_forget: 8
     gauss_precharge: 0.6
     gauss_charge: 0.75
-    scope_settle: [0.35, 0.55]
+    scope_settle: [0.25, 0.35]
     throw_rate: 1.0
     throw_series: false
     tricks: true
@@ -127,26 +135,28 @@ presets:
     gauss_walls: false
     bhop_speed: 1.25
   hard:
-    recognition_delay: [0.25, 0.5]
-    peripheral_gain: 0.50
-    reacquire_delay: 0.10
+    recognition_delay: [0.14, 0.22]
+    recognition_floor: 0.13
+    peripheral_gain: 0.55
+    reacquire_delay: 0.06
     reacquire_grace: 2.5
-    aim_latency: 0.12
+    aim_latency: 0.07
     aim_model: spring_combat
     headshot: 0.50
     aim_error: [5, 5, 10]
-    turn_speed: 650
-    semi_auto_delay: [0.3, 0.4]
-    stay_mid: 0.08
-    stay_far: 0.20
-    crouch_tap: 0.06
-    dodge_hop_cooldown: 2.75
+    turn_speed: 1600
+    turn_accel: 15000
+    semi_auto_delay: [0.08, 0.14]
+    stay_mid: 0.05
+    stay_far: 0.12
+    crouch_tap: 0.10
+    dodge_hop_cooldown: 2.0
     hearing_threshold: 0.03
     sound_bearing_sigma: 14
     track_forget: 10
     gauss_precharge: 0.7
     gauss_charge: 0.85
-    scope_settle: [0.2, 0.3]
+    scope_settle: [0.15, 0.22]
     throw_rate: 1.2
     throw_series: true
     tricks: true
@@ -156,26 +166,28 @@ presets:
     gauss_walls: true
     bhop_speed: 1.5
   expert:
-    recognition_delay: [0.1, 0.25]
-    peripheral_gain: 0.55
-    reacquire_delay: 0.05
+    recognition_delay: [0.08, 0.14]
+    recognition_floor: 0.10
+    peripheral_gain: 0.60
+    reacquire_delay: 0.04
     reacquire_grace: 3.0
-    aim_latency: 0.06
+    aim_latency: 0.05
     aim_model: spring_combat
     headshot: 0.75
     aim_error: [1.5, 1.5, 3.0]
-    turn_speed: 900
-    semi_auto_delay: [0.1, 0.2]
+    turn_speed: 2500
+    turn_accel: 24000
+    semi_auto_delay: [0.0, 0.05]
     stay_mid: 0.0
-    stay_far: 0.10
-    crouch_tap: 0.08
-    dodge_hop_cooldown: 1.5
+    stay_far: 0.05
+    crouch_tap: 0.12
+    dodge_hop_cooldown: 1.2
     hearing_threshold: 0.02
     sound_bearing_sigma: 10
     track_forget: 12
     gauss_precharge: 0.8
     gauss_charge: 0.9
-    scope_settle: [0.1, 0.15]
+    scope_settle: [0.08, 0.12]
     throw_rate: 1.4
     throw_series: true
     tricks: true

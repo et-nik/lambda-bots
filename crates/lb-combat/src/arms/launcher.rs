@@ -141,6 +141,7 @@ mod tests {
             prediction: Some(&prediction),
             dll: DllProfile::default(),
             gravity: 800.0,
+            deploying: false,
         };
         let throw = Throw {
             pitch: -10.0,

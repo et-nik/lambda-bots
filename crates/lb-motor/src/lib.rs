@@ -19,7 +19,7 @@ use lb_game::input::{IN_DUCK, IN_JUMP, IN_USE, direction_buttons};
 use lb_game::weapons::WeaponId;
 use smallvec::SmallVec;
 
-pub use look::{LookController, LookGoal, LookParams};
+pub use look::{LookController, LookGoal, LookParams, Urgency};
 pub use weapon::{Fire, WeaponController, WeaponIntent};
 
 /// A point to look at closer than this across is right above or below the eyes.
@@ -32,6 +32,8 @@ pub enum Prio {
     Optional = 20,
     /// The current goal.
     Goal = 50,
+    /// Something that calls for the view at once: a glimpse, a shot heard, an enemy just lost.
+    Alert = 60,
     /// Fighting and reacting to threats.
     Threat = 70,
     /// Weapon protocols that must finish.
@@ -143,6 +145,18 @@ pub struct MotorOut {
     pub commands: SmallVec<[String; 2]>,
 }
 
+/// How urgently a look granted at `prio` turns the view: aiming at an enemy, anything that calls for the view at
+/// once (alerts, threats, weapon protocols, traversals), or calm.
+fn urgency(prio: Prio, engaged: bool) -> Urgency {
+    if engaged {
+        Urgency::Engaged
+    } else if prio >= Prio::Alert {
+        Urgency::Alert
+    } else {
+        Urgency::Calm
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Motor {
     /// The view the bot sends with its commands; also what its eyes see.
@@ -173,7 +187,7 @@ impl Motor {
 
     pub fn run(&mut self, intents: &Intents, input: &MotorInput, params: &LookParams, rng: &mut Pcg32) -> MotorOut {
         let mut out = MotorOut::default();
-        if let Some((_, look)) = intents.look {
+        if let Some((prio, look)) = intents.look {
             let goal = match look {
                 LookIntent::Point { at, engaged } => {
                     let d = at - input.eye;
@@ -184,9 +198,15 @@ impl Motor {
                     if d.truncate().length() < near {
                         angles.y = self.view.y;
                     }
-                    LookGoal { angles, engaged }
+                    LookGoal {
+                        angles,
+                        urgency: urgency(prio, engaged),
+                    }
                 }
-                LookIntent::Angles(angles) => LookGoal { angles, engaged: false },
+                LookIntent::Angles(angles) => LookGoal {
+                    angles,
+                    urgency: urgency(prio, false),
+                },
             };
             let moving = input.velocity.length() > 1.0;
             self.look.update(
@@ -239,7 +259,6 @@ impl Motor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lb_config::skill::AimModel;
 
     #[test]
     fn higher_priority_wins_and_ties_keep_the_first() {
@@ -283,11 +302,7 @@ mod tests {
             on_ladder: false,
             weapon: None,
         };
-        let params = LookParams {
-            model: AimModel::Spring,
-            turn_speed: 900.0,
-            skill: 50,
-        };
+        let params = LookParams::NAV;
         let mut rng = Pcg32::new(1, 1);
         let turn = MotorInput { dt: 0.1, ..input };
         for _ in 0..10 {
@@ -328,11 +343,7 @@ mod tests {
             on_ladder: false,
             weapon: None,
         };
-        let params = LookParams {
-            model: AimModel::Spring,
-            turn_speed: 900.0,
-            skill: 50,
-        };
+        let params = LookParams::NAV;
         let mut rng = Pcg32::new(2, 2);
         // Crouching before: the long jump lets go of duck for a command first.
         intents.stance(Prio::Goal, stance(false, true));

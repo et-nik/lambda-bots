@@ -108,9 +108,9 @@ pub struct CmdOut { pub angles: Angles, pub forward: f32, pub side: f32, pub up:
 ### 1.2 Rates (each bot staggered by `phase = slot/N·period`)
 | Rate                          | Work                                                                                                                                                                                                                                                                                                   | Budget                          |
 |-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------|
-| **Every frame** (500–1000 Hz) | Ingest SelfState. Pre-gate stimuli (PAS bit + attenuation). Action fast lane: jump/longjump press edges, gauss release window, grenade release time, satchel/tripmine/use presses. Arbiter resolve. Look integrator (fixed step, §7.3). Locomotion projection. Stance FSM. Weapon controller. Encoder. | O(1), no traces, no allocations |
+| **Every frame** (500–1000 Hz) | Ingest SelfState. Pre-gate stimuli (PAS bit + attenuation). Action fast lane: jump/longjump press edges, gauss release window, grenade release time, satchel/tripmine/use presses. Arbiter resolve. Look integrator (sub-steps, §7.3). Locomotion projection. Stance FSM. Weapon controller. Encoder. | O(1), no traces, no allocations |
 | 20 Hz                         | Vision scan (≤12 traces/bot, +3 for a first look at a newcomer in view), evidence and recognition, hearing integration, damage stimuli, track filters, projectile/mine/item-spot observation (≤4 traces)                                                                                               | global traces/frame             |
-| 10 Hz                         | Combat tick: target selection, weapon policy, fire plan, fight style, throw/dodge options. Action slow lane. Watchers at 2–3 Hz.                                                                                                                                                                       |                                 |
+| 10 Hz                         | Combat tick (also on the frame an enemy is recognized, the bot is hurt or its target dies): target selection, weapon policy, fire plan, fight style, throw/dodge options. Action slow lane. Watchers at 2–3 Hz.                                                                                       |                                 |
 | 5 Hz, plus urgent triggers    | Utility: generate, prescore, shortlist, nav queries, commit                                                                                                                                                                                                                                            | nav expansions                  |
 | 2 Hz                          | Node-belief diffusion, negative observations, reappearance prediction                                                                                                                                                                                                                                  | ≤256 nodes/track, ≤4 tracks     |
 | 1–2 Hz                        | Emotions (0.5 s step), item windows, GG refresh, team-board expiry                                                                                                                                                                                                                                     |                                 |
@@ -146,7 +146,7 @@ Urgent triggers run on the next frame: a newly recognized enemy, damage taken, a
   - **D is sampled once per contact**: `U(delay_min, delay_max)` × situation factor (camp/ambush ×0.5, ported from `tasks.cpp:412-414`).
   - The contact is recognized when E ≥ 1.
   - A pending contact keeps E and D for `pending_grace` = 0.75 s, so brief LOS loss does not resample.
-- **Re-acquisition.** A lost recognized track seen again within `reacquire_grace` (1.0–3.0 s) and inside the gate (3σ + 64u) is recognized after `reacquire_delay` (0.05–0.35 s). There is no full reset.
+- **Re-acquisition.** A lost recognized track seen again within `reacquire_grace` (1.0–3.0 s) and inside the gate (3σ + 64u) is recognized after `reacquire_delay` (0.04–0.25 s), its evidence building at 0.7 of the full rate at least wherever it is in the view. There is no full reset.
 - **Anonymous cue.** Once E ≥ 0.4, emit `AnonymousCue{bearing, range_bin}` with no identity. The Vigilance layer may glance at it.
 - **Observable once recognized.** A human-visible player name (crosshair ID) makes identity legitimate on recognition. Observable fields:
   - position (σ = 0.002·d)
@@ -604,7 +604,7 @@ pub enum StanceIntent { Stand, Crouch, CrouchTap{dur: f32}, Jump(JumpKind /*Norm
 pub enum WeaponIntent { Select(WeaponId), LastInv, Fire{btn: Btn, pattern: Trigger /*Hold|Tap{min_interval}*/}, Charge, Release, Reload, Zoom(bool), Laser(bool) }
 pub enum UseIntent { Press, Hold, Release }
 ```
-- Priorities: **P100** lifecycle; **P90** mandatory traversal; **P85** mandatory weapon protocol; **P70** threat reaction (AimAndFire, dodge, damage snap); **P50** current goal; **P20** optional look.
+- Priorities: **P100** lifecycle; **P90** mandatory traversal; **P85** mandatory weapon protocol; **P70** threat reaction (AimAndFire, dodge, damage snap); **P60** alert look (an unrecognized glimpse, a lost enemy, a shot or pain heard nearby); **P50** current goal; **P20** optional look.
 - Per channel, the highest live priority wins; ties go to the incumbent.
 - Atomic groups are granted all-or-nothing.
 - Preempting a Protocol holder sends it a CancelRequest. It keeps the channel until it releases or its grace expires (≤0.3 s; gauss ≤0.6 s).
@@ -614,13 +614,15 @@ pub enum UseIntent { Press, Hold, Release }
 fast-lane actions → arbiter → Look → Locomotion (projected on the **new** yaw) → Stance → Weapon → Use → Encoder → `MotorFeedback{sent_buttons, angles, jump_at, fire_at, cmd_sent_at}`.
 
 ### 7.3 Look controller (fps-independent)
-- Fixed-step integrator at h = 1/120 s with an accumulator, interpolated per frame. The newbie model steps at exactly 90 Hz for parity.
-- Spring (port of `vision.cpp:113-209`):
-  - `acc = clamp(k·Δ − c·ω, ±A)`. Pitch uses 2k.
+- The spring integrates each frame's own dt in sub-steps of at most 1 ms, so the view moves on every frame at any server rate (at 1100 fps with 100 commands/s a fixed 1/120 s step froze it for 8 frames of 9). The newbie model steps at exactly 90 Hz for parity.
+- Spring (port of `vision.cpp:113-209`), scaled by the skill's turn acceleration A (`turn_accel`):
+  - `acc = clamp(k·Δ − c·ω, ±A)`, k = A/15, c = 2ζ√k with ζ 0.884 (yapb's 200 / 25 at A 3000). Pitch uses 2k.
   - Snap when |yaw error| < 1°.
-  - Normal: k 200, c 25, A 3000. Engaged (Hard/Expert, or any grenade aim): 300 / 20 / 3000, Expert A 3300.
-  - Reverse-facing guard when navigating (`vision.cpp:163-186`).
-  - Per-difficulty yaw rate cap: 180 / 300 / 450 / 650 / 900 °/s.
+  - Urgency from the granted priority: an aim at an enemy is Engaged, anything from P60 up is Alert (full A), lower looks are Calm (half A).
+  - Engaged on the combat model (Hard/Expert): k ×1.5, ζ 0.7.
+  - Per-difficulty A: 3000 / 5000 / 9000 / 15000 / 24000 °/s²; yaw rate cap: 300 / 600 / 1000 / 1600 / 2500 °/s. A 90° flick takes about 0.3 / 0.22 / 0.13 / 0.1 s from easy to expert.
+  - The obstacle courses and bots sent by hand (`lb do`) keep yapb's look (`LookParams::NAV`: A 3000, 900 °/s).
+  - Reverse-facing guard when navigating (`vision.cpp:163-186`): not implemented.
 - Newbie model (`vision.cpp:211-292`) for Noob: spring 13, damper 0.22, influence (.25,.17)·(100−off)/100, randomization (2, .18)·(100−off)/100, re-randomized every U(.4, 1.2) s.
 - Command viewangles equal the actual look. yapb's separate move angles (`botlib.cpp:2390-2397`) are gone.
 
@@ -648,6 +650,10 @@ fast-lane actions → arbiter → Look → Locomotion (projected on the **new** 
 ---
 
 ## 8. Styles, difficulty, emotions, RNG (`lb-styles`)
+
+The table below is the plan the presets started from. They have since been sped up to Half-Life's pace (recognition,
+its floor, aim latency, turn rate and acceleration, semi-automatic pauses, the scope's settling, fight movement): the
+shipped values are in `data/config/difficulty.yaml`, `docs/perception.md` and `docs/behavior.md`.
 
 ```yaml
 # config/ai/difficulty.yaml  (yapb shipped difficulty.cfg + combat.cpp tables + jk_botti bot_skill.cpp latency)
@@ -829,7 +835,7 @@ pub struct GunGameView { source: GgSource /*Bridge|Inferred*/, warmup: Warmup, l
 - DllProfile self-test for satchel, grenade and zoom.
 
 **Metrics:**
-- Chain t_first_evidence → t_recognized → t_decision → t_weapon_ready → t_aim_ready → t_first_shot (p50/p95 per difficulty). Normal target: p50 about 0.8–1.0 s.
+- Chain t_first_evidence → t_recognized → t_decision → t_weapon_ready → t_aim_ready → t_first_shot (p50/p95 per difficulty), new contacts apart from re-acquisitions. Targets (`crates/lb-brain/tests/reaction.rs`): an enemy coming into view near the crosshair is shot at in p50 0.10–0.16 s by an expert, 0.15–0.24 s hard, 0.18–0.36 s normal, 0.25–0.65 s easy.
 - Accuracy by weapon × distance band.
 - Goal switches/min; goals abandoned before the minimum hold.
 - stuck/min.

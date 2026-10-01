@@ -320,6 +320,7 @@ mod tests {
                     prediction: Some(&prediction),
                     dll: DllProfile::default(),
                     gravity: 800.0,
+                    deploying: false,
                 };
                 let seen = t < self.hidden_from;
                 let sight = Sight {

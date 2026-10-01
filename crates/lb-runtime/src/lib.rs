@@ -67,7 +67,7 @@ use crate::cvars::{Cv, Cvars};
 use crate::manager::{Bot, BotState, Creation, desired_bots, pick_bot_to_kick};
 use crate::names::NamePool;
 use crate::roster::{Roster, RosterFilter};
-use lb_config::skill::{DifficultyFile, Presets, SkillBand};
+use lb_config::skill::{DifficultyFile, Presets, REFLEX_RANGE, SkillBand};
 use lb_game::input::*;
 use lb_styles::{Persona, StyleId, StyleTable};
 
@@ -480,6 +480,21 @@ impl Runtime {
         )
     }
 
+    /// Bots in the game take up their personality as the roster, the skill table and `bots.reflex` have it now.
+    fn refresh_personas(&mut self) {
+        for bot in &mut self.bots {
+            if let Some(p) = self.roster.get(&bot.persona.name) {
+                let skill = p.skill_params(&self.presets).with_reflex(self.config.bots.reflex);
+                let style = (
+                    self.styles.goals(p.style),
+                    self.styles.weapons(p.style),
+                    self.styles.tricks(p.style),
+                );
+                bot.set_persona(p, skill, style);
+            }
+        }
+    }
+
     /// `lb config reload`: re-reads the main config, the skill table, the names and the profiles. File values win
     /// over earlier console changes of the same cvars; bots in the game take their updated personality at once.
     pub fn reload(&mut self, host: &mut dyn Host) -> Vec<String> {
@@ -512,6 +527,7 @@ impl Runtime {
             (Cv::Difficulty, c.roster.difficulty.clone()),
             (Cv::Style, c.roster.styles.clone()),
             (Cv::CmdRate, c.engine.cmd_rate.to_string()),
+            (Cv::Reflex, c.bots.reflex.to_string()),
             (Cv::ForceRespawn, (c.bots.force_respawn as u8).to_string()),
             (Cv::Editor, (c.access.editor_enabled as u8).to_string()),
         ];
@@ -522,16 +538,8 @@ impl Runtime {
         if !self.editor_allowed {
             self.editor = None;
         }
+        self.refresh_personas();
         for bot in &mut self.bots {
-            if let Some(p) = self.roster.get(&bot.persona.name) {
-                let skill = p.skill_params(&self.presets);
-                let style = (
-                    self.styles.goals(p.style),
-                    self.styles.weapons(p.style),
-                    self.styles.tricks(p.style),
-                );
-                bot.set_persona(p, skill, style);
-            }
             bot.driver.set_rate(self.config.engine.cmd_rate as f64);
         }
         out.push(format!("skill table: {}", self.presets_source));
@@ -551,6 +559,7 @@ impl Runtime {
             (Cv::Difficulty, c.roster.difficulty.clone()),
             (Cv::Style, c.roster.styles.clone()),
             (Cv::CmdRate, c.engine.cmd_rate.to_string()),
+            (Cv::Reflex, c.bots.reflex.to_string()),
             (Cv::ForceRespawn, (c.bots.force_respawn as u8).to_string()),
             (Cv::GameMode, "-1".to_string()),
             (Cv::GunGame, c.gungame.mode.clone()),
@@ -1910,6 +1919,14 @@ impl Runtime {
                         }
                     }
                 }
+                Cv::Reflex => match value.trim().parse::<f32>() {
+                    Ok(r) if r.is_finite() => {
+                        self.config.bots.reflex = r.clamp(REFLEX_RANGE[0], REFLEX_RANGE[1]);
+                        self.refresh_personas();
+                        tracing::info!("bots' reflexes ×{}", self.config.bots.reflex);
+                    }
+                    _ => tracing::warn!("lb_reflex `{value}`: expected a number in 0.5..2"),
+                },
                 Cv::ForceRespawn => self.config.bots.force_respawn = value.trim() != "0",
                 Cv::Editor => {
                     self.editor_allowed = value.trim() != "0";
@@ -2041,7 +2058,7 @@ impl Runtime {
                     slot,
                     generation: bot_gen,
                 };
-                let skill = persona.skill_params(&self.presets);
+                let skill = persona.skill_params(&self.presets).with_reflex(self.config.bots.reflex);
                 tracing::info!(
                     "bot {} joined (slot {slot}, #{userid}): {}, skill {}, {}",
                     persona.name,
@@ -3117,6 +3134,7 @@ fn play_step(
                 prediction: body.prediction.as_ref(),
                 dll: body.dll,
                 gravity: body.gravity,
+                deploying: bot.brain.motor.weapon.deploying(ctx.now, body.weapon),
             };
             match b.update(&hands, step.boost.is_some(), step.boost.map(|c| c.view)) {
                 Status::Running(r) => {
@@ -3158,12 +3176,10 @@ fn play_step(
         on_ladder: body.on_ladder,
         weapon: body.weapon,
     };
-    let look = lb_motor::LookParams {
-        model: lb_config::skill::AimModel::Spring,
-        turn_speed: 900.0,
-        skill: 100,
-    };
-    let out = bot.brain.motor.run(&intents, &motor_in, &look, &mut bot.rng.motor);
+    let out = bot
+        .brain
+        .motor
+        .run(&intents, &motor_in, &lb_motor::LookParams::NAV, &mut bot.rng.motor);
     bot.view = out.angles;
     out
 }
@@ -3410,7 +3426,19 @@ fn load_presets(install_dir: &std::path::Path) -> (Presets, String) {
     let path = install_dir.join("config").join("difficulty.yaml");
     match std::fs::read_to_string(&path) {
         Ok(text) => match DifficultyFile::parse(&text, &path.display().to_string()) {
-            Ok(f) => (f.presets, path.display().to_string()),
+            Ok(f) => {
+                let custom = f.presets.customized();
+                if !custom.is_empty() {
+                    tracing::warn!(
+                        "{}: {} parameters differ from the built-in skill table ({}); a file from an older version \
+                         keeps its older table: replace it to take the new one",
+                        path.display(),
+                        custom.len(),
+                        custom.join(", ")
+                    );
+                }
+                (f.presets, path.display().to_string())
+            }
             Err(e) => {
                 tracing::error!("{e}; using the built-in skill table");
                 (Presets::default(), "built-in".into())

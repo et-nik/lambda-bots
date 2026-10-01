@@ -247,10 +247,12 @@ impl Navigator {
         if cached.is_none() {
             self.dest_node = Some((dest, goal));
         }
-        // A search that ran out of budget goes on every frame; a new one at most every `REPLAN_EVERY`. A flight is
-        // flown to its end first.
+        // A search that ran out of budget goes on every frame; a new one at most every `REPLAN_EVERY`, but at once
+        // for a bot with no path after the last one went well (arrived, or a new destination). A flight is flown to
+        // its end first.
         let want = (self.follower.is_none() || self.goal != Some(goal)) && !flying;
-        if want && (self.search.is_some() || now >= self.next_plan_at) {
+        let idle = self.follower.is_none() && self.failures == 0;
+        if want && (self.search.is_some() || now >= self.next_plan_at || idle) {
             if self.search.is_none() {
                 self.next_plan_at = now + REPLAN_EVERY;
             }
@@ -474,7 +476,7 @@ impl Navigator {
             FollowStatus::Arrived => {
                 self.follower = None;
                 self.failures = 0;
-                self.next_goal_at = now + f64::from(rng.range_f32(0.2, 1.5));
+                self.next_goal_at = now + f64::from(rng.range_f32(0.0, 0.3));
             }
             FollowStatus::Replan => {
                 self.follower = None;

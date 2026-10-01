@@ -551,6 +551,7 @@ impl BotBrain {
             prediction: body.prediction.as_ref(),
             dll,
             gravity: body.gravity,
+            deploying: self.motor.weapon.deploying(body.now, body.weapon),
         }
     }
 
