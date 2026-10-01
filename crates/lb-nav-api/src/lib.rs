@@ -132,13 +132,14 @@ pub struct NavStep {
     pub free_look: bool,
 }
 
-/// A gauss boost a traversal needs now: the weapons are to charge the gauss fully, turn the view to `view`, jump and
-/// let the charge go as the bot leaves the ground. The recoil throws it the way it looks away from.
+/// A gauss boost a traversal needs now: the weapons are to turn the view to `view`, charge the gauss for `charge`
+/// seconds, jump and let the charge go as the bot leaves the ground. The recoil throws it the way it looks away from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoostCall {
     /// View angles to let the charge go along: back the way and down.
     pub view: Vec3,
-    /// Seconds the charge builds at least.
+    /// Seconds the charge builds: past a full charge when the boost takes one, otherwise exactly the share of one
+    /// its push takes (the recoil grows with the charge).
     pub charge: f32,
 }
 

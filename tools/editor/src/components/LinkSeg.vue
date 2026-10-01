@@ -2,14 +2,21 @@
 import { computed } from 'vue'
 
 import { kindColor, kindName } from '../format'
+import { useNav } from '../stores/nav'
 import { LINK, type Link, linkValid } from '../viewer/graph'
 
 /** One link as a button: its way (→ out, ← in, ⇄ both), kind and cost; a click selects it. */
 const props = defineProps<{ way: '→' | '←' | '⇄'; link: Link }>()
 defineEmits<{ pick: [] }>()
 
+const nav = useNav()
 const valid = computed(() => linkValid(props.link))
 const trusted = computed(() => (props.link.flags & LINK.TRUSTED) !== 0)
+/** The worst of the link's problems. */
+const trouble = computed(() => {
+  const all = nav.problemsOf(props.link.from, props.link.to)
+  return all.find((p) => p.level === 'error') ?? all[0] ?? null
+})
 </script>
 
 <template>
@@ -26,10 +33,19 @@ const trusted = computed(() => (props.link.flags & LINK.TRUSTED) !== 0)
     <span v-if="!valid" class="tag">off</span>
     <span v-if="trusted" class="tag">trusted</span>
     <span v-if="link.added" class="tag changed" title="Put in or changed by the overlays">changed</span>
+    <span v-if="trouble" class="trouble" :class="trouble.level" :title="trouble.why">
+      {{ trouble.level === 'error' ? '●' : '▲' }}
+    </span>
   </button>
 </template>
 
 <style scoped>
+.trouble.error {
+  color: var(--warn);
+}
+.trouble.attention {
+  color: var(--attention);
+}
 .seg {
   display: inline-flex;
   gap: 5px;

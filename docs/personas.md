@@ -34,7 +34,7 @@ Only `name` is required. Missing fields are derived from the nickname once and n
 | `weight`    | how often it joins relative to others; default 1; 0 = only on `lb add <name>`  |
 | `tags`      | free labels                                                                    |
 | `seed`      | seed of its own random habits; default: derived from the nickname              |
-| `overrides` | single skill parameters from `config/difficulty.yaml`: `{ turn_speed: 520 }`   |
+| `overrides` | single skill parameters from `config/difficulty.yaml`: `{ turn_speed: 1200 }`  |
 
 Example `profiles/roster.yaml`:
 
@@ -52,20 +52,28 @@ bots:
   - name: "Barney"
     style: rusher
     skill: hard
-    overrides: { turn_speed: 600 }
+    overrides: { turn_speed: 2000 }
 ```
 
 ## Skill
 
 Skill is a 0–100 scale with five presets at 0, 25, 50, 75 and 100. `config/difficulty.yaml` sets the parameters at
-these points: recognition time, aim latency and error, turn speed, hearing, memory, tricks, how readily long jumps
+these points: recognition time and its floor, aim latency and error, turn speed and acceleration, hearing, memory,
+tricks, how readily long jumps
 are taken (`longjump`: 0.15, 0.35, 0.6, 0.9, 1.0) and whether they are bold and dodge (`longjump_bold`,
 `longjump_dodge`, hard and expert), throwing grenades one after another until none is left (`throw_series`, hard and
 expert), shooting the gauss through walls (`gauss_walls`, hard and expert) and so on.
 Between two presets numbers are mixed linearly, so skill 62 is about halfway between normal and hard. Switches (aim
 model, tricks, bold long jumps, grenade series, dodge jumps, bunny hopping) keep the lower preset's value until the
 next point.
-`overrides` in a personality then change single parameters.
+`overrides` in a personality then change single parameters, and `bots.reflex` in `config/lambdabots.yaml` (cvar
+`lb_reflex`, 0.5–2) makes every bot that many times as quick: recognition, aim latency and the scope's settling take
+that share of the time, turns are that much faster.
+
+The presets are set for Half-Life's pace: an expert answers an enemy near its crosshair in some 0.13 s and flicks 90°
+in 0.1 s, a normal bot in 0.25–0.3 s and 0.2 s, a beginner in 0.5–1.5 s. A
+`config/difficulty.yaml` kept from an older version keeps its older, slower table: the server warns about every
+parameter that differs from the built-in one; replace the file to take the new one.
 
 `lb profile <name>` prints the resulting parameters of a personality.
 

@@ -8,6 +8,8 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use lb_config::check::{check_file, yaml_files};
 
+mod nav_try;
+
 const USAGE: &str = "usage:
   lb-cli config check <file-or-dir>...
   lb-cli nav gen <map.bsp> [--out <file.lbnav>]
@@ -16,6 +18,8 @@ const USAGE: &str = "usage:
   lb-cli nav path <map.bsp> <x,y,z> <x,y,z>
   lb-cli nav validate-overlay <map.bsp> <overlay.yaml>...
   lb-cli nav tracecheck <map.bsp> <tracedump.jsonl>
+  lb-cli nav try <map.bsp> [<test-id>...|all] [--install <dir>] [--repeat N] [--fps F]
+  lb-cli nav try <map.bsp> --to <x,y,z> [--from <x,y,z>] [--give gauss,longjump] [--tricks ...] [--radius R]
   lb-cli replay <recording.lbrec> [--console] [--keep] [--dir <dir>] [--diffs <n>]";
 
 fn main() -> ExitCode {
@@ -40,6 +44,7 @@ fn run(args: &[&str]) -> Result<bool> {
         ["nav", "path", bsp, from, to] => nav_path(Path::new(bsp), from, to),
         ["nav", "validate-overlay", bsp, files @ ..] if !files.is_empty() => validate_overlay(Path::new(bsp), files),
         ["nav", "tracecheck", bsp, dump] => trace_check(Path::new(bsp), Path::new(dump)),
+        ["nav", "try", bsp, opts @ ..] => nav_try::run(Path::new(bsp), opts),
         ["replay", file, opts @ ..] => replay(Path::new(file), opts),
         _ => bail!(USAGE),
     }

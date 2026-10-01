@@ -17,7 +17,8 @@ use lb_core::time::SimTime;
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, Stance};
 
-const SPRAY_DISTANCE: f32 = 272.0;
+/// Shotguns spray, and semi-automatic weapons are fired as fast as they go, within this distance (yapb).
+pub const SPRAY_DISTANCE: f32 = 272.0;
 /// A scope's share of the aim error.
 pub const SCOPE_STEADY: f32 = 0.5;
 /// Below the origin of a standing (and a crouched) player, a little above the floor.

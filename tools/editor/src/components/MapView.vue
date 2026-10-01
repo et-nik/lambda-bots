@@ -48,6 +48,8 @@ function syncNav() {
   if (!viewer) return
   viewer.nav.setVisible(nav.show)
   viewer.nav.setGraph(nav.model, nav.forbidden, new Set(nav.hiddenKinds), nav.hideOff, nav.focusNodes, !gizmo.value)
+  viewer.nav.setProblems(nav.problems)
+  viewer.nav.setProblemsVisible(nav.problemsShown)
   viewer.nav.setMarkup(nav.draft, nav.info?.overlay.file ?? null)
   viewer.nav.setHighlight(highlight.value)
   viewer.setFocusTarget(focusBox.value)
@@ -140,9 +142,18 @@ watch(
   [() => nav.model, () => nav.forbidden, () => nav.hiddenKinds, () => nav.hideOff, () => nav.focusNodes, () => !gizmo.value],
   ([m, f, hidden, off, focus, arrows]) => {
     viewer?.nav.setGraph(m, f, new Set(hidden), off, focus, arrows)
-    // What is lit up stands where the nodes stand now.
+    // What is lit up and marked stands where the nodes stand now.
+    viewer?.nav.setProblems(nav.problems)
     viewer?.nav.setHighlight(highlight.value)
   },
+)
+watch(
+  () => nav.problems,
+  (p) => viewer?.nav.setProblems(p),
+)
+watch(
+  () => nav.problemsShown,
+  (on) => viewer?.nav.setProblemsVisible(on),
 )
 watch([() => nav.draft, () => nav.info], () => viewer?.nav.setMarkup(nav.draft, nav.info?.overlay.file ?? null))
 watch(highlight, (h) => viewer?.nav.setHighlight(h))

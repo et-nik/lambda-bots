@@ -60,6 +60,8 @@ pub struct Bot {
     pub selftest: Option<crate::selftest::SelfTest>,
     /// `lb nav test`: the obstacle course instead of behavior.
     pub nav_test: Option<crate::nav_test::NavTest>,
+    /// `lb do`, `lb test`: a command instead of behavior.
+    pub order: Option<crate::orders::Order>,
     pub fault_on_next_frame: bool,
     pub seen_reset_hud: bool,
     pub pending_client_cmds: Vec<Vec<String>>,
@@ -121,6 +123,7 @@ impl Bot {
             sim_ms_since_test: 0.0,
             kick_attempts: 0,
             nav_test: None,
+            order: None,
             nav: lb_nav::navigator::Navigator::default(),
             brain,
             character,

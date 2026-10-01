@@ -1256,11 +1256,15 @@ mod tests {
         rec.map_starting(&mut rt, "flatland");
         assert!(rec.on());
         step(&mut rt, &mut rec, &mut server, map);
-        // Bots join 5 s into the map.
+        // Bots join 5 s into the map; at 7 s they are made quicker.
         for n in 0..1200 {
             if n == 600 {
                 let h = rt.cvars.handle_of(Cv::TelemetrySecret).unwrap();
                 server.cvars[h.0 as usize] = "hunter2-rotated".into();
+            }
+            if n == 700 {
+                let h = rt.cvars.handle_of(Cv::Reflex).unwrap();
+                server.cvars[h.0 as usize] = "1.5".into();
             }
             let frame = server.frame(n);
             step(&mut rt, &mut rec, &mut server, frame);
@@ -1282,6 +1286,10 @@ mod tests {
             }
         }
         assert_eq!(rt.bots.len(), 2, "two bots joined");
+        for b in &rt.bots {
+            let base = b.persona.skill_params(&rt.presets);
+            assert_eq!(b.character.skill, base.with_reflex(1.5), "{}", b.persona.name);
+        }
         rec.finish(&mut rt, "test over");
         let file = std::fs::read_dir(root.join("install/records"))
             .unwrap()

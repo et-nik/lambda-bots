@@ -31,6 +31,16 @@ onBeforeUnmount(() => (nav.peek = null))
       @close="nav.clearSelection()"
     />
     <p class="result" :class="{ bad: o && !o.ok }">{{ o?.message ?? 'checking…' }}</p>
+    <ul v-if="o?.refused.length" class="refused">
+      <li
+        v-for="r in o.refused"
+        :key="`${r.from}:${r.to}`"
+        @mouseenter="nav.peek = { nodes: [r.from, r.to], links: [] }"
+        @mouseleave="nav.peek = null"
+      >
+        <span class="mark">●</span><span><b>{{ r.from }} → {{ r.to }}</b> not put in: {{ r.why }}</span>
+      </li>
+    </ul>
     <p v-if="o?.nodes.length" class="nodes">
       <span class="muted">{{ o.nodes.length === 1 ? 'Node' : 'Nodes' }}</span>
       <button
@@ -76,7 +86,17 @@ onBeforeUnmount(() => (nav.peek = null))
       <label v-else-if="p.op === 'remove_link'">
         <input type="checkbox" :checked="p.both" @change="edit({ both: !p.both })" /> both ways
       </label>
-      <span v-else-if="p.op === 'add_node'" class="muted">at {{ spot(p.at) }}; the Move tool moves it</span>
+      <template v-else-if="p.op === 'add_node'">
+        <label title="Link the node with the nodes around wherever the links check out">
+          <input
+            type="checkbox"
+            :checked="p.link !== false"
+            @change="edit({ link: p.link === false ? undefined : false })"
+          />
+          auto-link
+        </label>
+        <span class="muted">at {{ spot(p.at) }}; the Move tool moves it</span>
+      </template>
       <span v-else-if="p.op === 'move_node'" class="muted">from {{ spot(p.from) }} to {{ spot(p.to) }}</span>
       <label class="note">
         Note
@@ -92,6 +112,25 @@ onBeforeUnmount(() => (nav.peek = null))
 </template>
 
 <style scoped>
+.refused {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.refused li {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0;
+}
+.refused .mark {
+  flex: none;
+  color: var(--warn);
+}
+.refused b {
+  color: var(--text-strong);
+  font-weight: 600;
+}
 .result {
   margin: 0 0 6px;
   font-size: 12px;

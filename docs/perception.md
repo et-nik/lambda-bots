@@ -22,16 +22,23 @@ A bot looks 20 times a second; bots take turns so they do not all look on the sa
    - how much of the body is visible;
    - where the player is in the view: center, middle band or edge (`peripheral_gain`);
    - how the player moves: running players are noticed sooner than players standing still or crouching;
-   - distance;
+   - distance: within the 1000 units a deathmatch fight mostly takes place at it makes no difference; further off
+     recognition slows down, to half the rate from 3000 units on;
    - cues: a muzzle flash; a sound or the damage compass pointing there within the last 2 s; being in a fight.
 
    Close by a player is plain to see: within 200 units fully, fading out by 600, it counts as running however it
    moves, and it is recognized 3.5 times sooner in the middle of the view, twice in the middle band, 1.5 times at
-   the edge. A normal bot recognizes an enemy standing 200 units in front in 0.15–0.3 s (it took 1–2 s before).
+   the edge.
 
-   At full rate, recognition takes a delay drawn once per contact from `recognition_delay`. Halfway there the bot
-   notices *something* in that direction and may glance at it, without knowing who it is. A player lost for less
-   than `reacquire_grace` seconds near where it was expected is recognized again after `reacquire_delay`.
+   At full rate, recognition takes a delay drawn once per contact from `recognition_delay`. Nobody new is recognized
+   sooner than `recognition_floor` after coming into view, however plain to see: a normal bot recognizes an enemy
+   standing 200 units in front in 0.16–0.2 s, an expert in 0.1 s. A fifth of the way there the bot notices
+   *something* in that direction and looks at it at once, without knowing who it is (`docs/behavior.md`,
+   *Attention*): a player coming into view at the edge is soon in the middle of it, where it is recognized soonest.
+   A player lost for less than `reacquire_grace` seconds near where it was expected is recognized again after
+   `reacquire_delay` wherever it is in the view, and draws no glance; nor does a teammate seen in the last 3 s about
+   where it comes into view. A recognized player out of sight for no more than 0.25 s (behind a pillar or another
+   player) is followed on without being recognized again.
 4. **What a recognized player shows:**
    - position, with a small error;
    - velocity, from successive sightings;
@@ -122,15 +129,19 @@ all this.
 
 The parameters live in `config/difficulty.yaml` and can be overridden per personality (see `docs/personas.md`):
 
-| Parameter             | noob    | easy    | normal  | hard     | expert   |
-|-----------------------|---------|---------|---------|----------|----------|
-| `recognition_delay`   | 1.5–2.0 | 1.0–1.5 | 0.5–1.0 | 0.25–0.5 | 0.1–0.25 |
-| `peripheral_gain`     | 0.35    | 0.40    | 0.45    | 0.50     | 0.55     |
-| `reacquire_delay`     | 0.35    | 0.25    | 0.15    | 0.10     | 0.05     |
-| `reacquire_grace`     | 1.0     | 1.5     | 2.0     | 2.5      | 3.0      |
-| `hearing_threshold`   | 0.07    | 0.055   | 0.04    | 0.03     | 0.02     |
-| `sound_bearing_sigma` | 35      | 28      | 20      | 14       | 10       |
-| `track_forget`        | 4       | 6       | 8       | 10       | 12       |
+| Parameter             | noob    | easy    | normal    | hard      | expert    |
+|-----------------------|---------|---------|-----------|-----------|-----------|
+| `recognition_delay`   | 0.7–1.0 | 0.4–0.6 | 0.22–0.35 | 0.14–0.22 | 0.08–0.14 |
+| `recognition_floor`   | 0.30    | 0.22    | 0.16      | 0.13      | 0.10      |
+| `peripheral_gain`     | 0.40    | 0.45    | 0.50      | 0.55      | 0.60      |
+| `reacquire_delay`     | 0.25    | 0.15    | 0.10      | 0.06      | 0.04      |
+| `reacquire_grace`     | 1.0     | 1.5     | 2.0       | 2.5       | 3.0       |
+| `hearing_threshold`   | 0.07    | 0.055   | 0.04      | 0.03      | 0.02      |
+| `sound_bearing_sigma` | 35      | 28      | 20        | 14        | 10        |
+| `track_forget`        | 4       | 6       | 8         | 10        | 12        |
+
+`bots.reflex` in `config/lambdabots.yaml` (cvar `lb_reflex`, 0.5–2) scales every bot's recognition and aim
+latencies and turns on top of its skill (`docs/behavior.md`, *Aim*).
 
 ## Inspecting
 

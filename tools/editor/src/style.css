@@ -8,6 +8,7 @@
   --accent: #ff9f1a;
   --accent-dim: #6b4617;
   --warn: #f07167;
+  --attention: #f2c94c;
   color-scheme: dark;
   font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
   color: var(--text);

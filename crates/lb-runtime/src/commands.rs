@@ -81,6 +81,18 @@ const HELP: &[(&str, &str)] = &[
         "show the config, or reload config, skill table and profiles",
     ),
     (
+        "give <name|#userid|all> <item>...",
+        "items for bots now: gauss, uranium, longjump, health, armor, a weapon or a classname (needs sv_cheats 1)",
+    ),
+    (
+        "do <name|#userid|all> go <x y z|node N|@me|@aim|place P> [radius R] [timeout T] [tricks ...] | stop",
+        "send bots to a spot, finding a jump, long jump or gauss boost where the graph has no way; others stand still",
+    ),
+    (
+        "test [list] | add <id> <spot> [from <spot>] [give ...] | remove <id> | run [<id>...] | stop | results",
+        "the map's tests (maps/<map>/tests.yaml): a bot given items goes from a start to a goal; reports in logs/tests",
+    ),
+    (
         "test motor <#userid|all> run|strafe|jump|duckjump|spin [arg]",
         "scripted motor measurement",
     ),
@@ -156,6 +168,8 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "quota" => quota(rt, host, rest),
         "config" => config(rt, host, rest),
         "test" => test(rt, host, rest),
+        "give" => crate::orders::give(rt, host, rest),
+        "do" => crate::orders::command(rt, host, rest),
         "debug" => debug(rt, host, rest),
         "record" => record(rt, rest),
         other => vec![format!("lb: unknown command `{other}`, see `lb help`")],
@@ -1147,15 +1161,17 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             owner(i.weapon.as_ref().map(|x| x.0)),
         ));
         let r = &m.reactions;
-        if r.count > 0 {
-            out.push(format!(
-                "  reactions: {} contacts answered; first glimpse to first shot mean {:.2} s, median {:.2} s, worst {:.2} s; recognition to shot mean {:.2} s",
-                r.count,
-                r.evidence_to_shot / r.count as f64,
-                r.median().unwrap_or(0.0),
-                r.worst,
-                r.recognition_to_shot / r.count as f64
-            ));
+        for (kind, r) in [("new enemies", &r.fresh), ("enemies seen again", &r.reacquired)] {
+            if r.count > 0 {
+                out.push(format!(
+                    "  reactions to {kind}: {} answered; first glimpse to first shot mean {:.2} s, median {:.2} s, worst {:.2} s; recognition to shot mean {:.2} s",
+                    r.count,
+                    r.evidence_to_shot / r.count as f64,
+                    r.median().unwrap_or(0.0),
+                    r.worst,
+                    r.recognition_to_shot / r.count as f64
+                ));
+            }
         }
     }
     out
@@ -1344,7 +1360,8 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
     let Some(p) = rt.roster.get(&name) else {
         return vec![format!("no personality named `{name}`; see `lb roster all`")];
     };
-    let k = p.skill_params(&rt.presets);
+    let reflex = rt.config.bots.reflex;
+    let k = p.skill_params(&rt.presets).with_reflex(reflex);
     let opt = |v: Option<f32>, unit: &str| v.map(|v| format!("{v:.2}{unit}")).unwrap_or_else(|| "never".into());
     let overrides = lb_config::yaml::to_string(&p.overrides).unwrap_or_default();
     vec![
@@ -1381,13 +1398,21 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             }
         ),
         format!(
-            "  skill: recognition {:.2}-{:.2} s, aim latency {:.2} s, {:?} aim, headshot {:.0}%, turn {:.0} deg/s",
+            "  skill{}: recognition {:.2}-{:.2} s (not before {:.2} s), aim latency {:.2} s, {:?} aim, headshot \
+             {:.0}%, turn {:.0} deg/s at {:.0} deg/s²",
+            if reflex == 1.0 {
+                String::new()
+            } else {
+                format!(" with reflexes ×{reflex}")
+            },
             k.recognition_delay[0],
             k.recognition_delay[1],
+            k.recognition_floor,
             k.aim_latency,
             k.aim_model,
             k.headshot * 100.0,
-            k.turn_speed
+            k.turn_speed,
+            k.turn_accel
         ),
         format!(
             "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, long jumps {:.0}% \
@@ -1424,7 +1449,7 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
     ]
 }
 
-fn find_bots(rt: &Runtime, target: Option<&str>) -> Vec<usize> {
+pub(crate) fn find_bots(rt: &Runtime, target: Option<&str>) -> Vec<usize> {
     match target {
         None | Some("all") => (0..rt.bots.len()).collect(),
         Some(t) if t.starts_with('#') => {
@@ -1570,9 +1595,7 @@ fn open_yaw(host: &mut dyn Host, origin: lb_core::Vec3) -> f32 {
 
 fn test(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     if args.first() != Some(&"motor") {
-        return vec![
-            "usage: lb test motor <#userid|all> run|strafe|jump|duckjump|spin [arg] | lb test motor stop".into(),
-        ];
+        return crate::testrun::command(rt, host, args);
     }
     if args.get(1) == Some(&"stop") {
         for b in &mut rt.bots {
@@ -1739,18 +1762,6 @@ fn trace_dump(rt: &mut Runtime, host: &mut dyn Host, n: usize) -> std::io::Resul
 }
 
 /// Weapon names for `lb weapons`: classnames without `weapon_` and the usual aliases.
-fn weapon_by_name(name: &str) -> Option<lb_game::weapons::WeaponId> {
-    use lb_game::weapons::WeaponId;
-    match name.to_ascii_lowercase().as_str() {
-        "357" | "python" => Some(WeaponId::Python),
-        "mp5" | "9mmar" => Some(WeaponId::Mp5),
-        "glock" | "9mmhandgun" => Some(WeaponId::Glock),
-        "hornet" | "hornetgun" => Some(WeaponId::Hornetgun),
-        "grenade" | "handgrenade" => Some(WeaponId::HandGrenade),
-        other => WeaponId::from_classname(other),
-    }
-}
-
 fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
     use lb_game::weapons::WeaponId;
     let describe = |rt: &Runtime| {
@@ -1799,7 +1810,7 @@ fn weapons(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
         _ => {
             let mut list = Vec::new();
             for n in &names {
-                match weapon_by_name(n) {
+                match crate::orders::weapon(n) {
                     Some(w) => list.push(w),
                     None => return vec![format!("unknown weapon `{n}`")],
                 }

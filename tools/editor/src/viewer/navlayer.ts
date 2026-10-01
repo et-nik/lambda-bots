@@ -3,7 +3,7 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 
-import type { Outcome, OverlayFile, Place, Route, Vec3 } from '../types'
+import type { Outcome, OverlayFile, Place, Problem, Route, Vec3 } from '../types'
 import { GraphModel, KIND_COLORS, type Link, linkValid, nodeColor, OFF_COLOR } from './graph'
 
 /** Pixels from the pointer a node or a link is picked within. */
@@ -26,6 +26,13 @@ const PEEK = 0xffffff
 const FOCUS_WIDTH = 2
 const FOCUS_HEAD = 9
 const FOCUS_ARROWS = 200
+/**
+ * Problems: errors and links to look at, a band this many pixels wide under a link in the graph, a dashed line this
+ * wide (by level) where one is asked for or failed and is not.
+ */
+const PROBLEM_COLOR = { error: 0xf07167, attention: 0xf2c94c }
+const PROBLEM_BAND = 4
+const PROBLEM_DASHED = { error: 3, attention: 1.5 }
 
 export interface Highlight {
   node?: number | null
@@ -149,6 +156,9 @@ export class NavLayer {
   private markup = new THREE.Group()
   private marks = new THREE.Group()
   private dragged = new THREE.Group()
+  private trouble = new THREE.Group()
+  /** The problems' bands and dashed lines, sized on screen. */
+  private troubleLines: LineSegments2[] = []
   /** Links drawn (and picked): kinds shown, and whether links that are off are. */
   private shown: (l: Link) => boolean = () => true
   /** The selection's links as arrows: their lines, and their heads with where each head's tip is and points. */
@@ -160,7 +170,7 @@ export class NavLayer {
   } | null = null
 
   constructor(scene: THREE.Scene) {
-    this.group.add(this.graph, this.markup, this.marks, this.dragged)
+    this.group.add(this.graph, this.markup, this.marks, this.dragged, this.trouble)
     scene.add(this.group)
   }
 
@@ -300,8 +310,82 @@ export class NavLayer {
     this.focusArrows = { lines, heads, tips, dirs }
   }
 
-  /** Keeps what is drawn at a size on screen (the selection's arrows) that size, for the camera now. */
+  /**
+   * Problems, seen through walls: a band in the problem's colour under a link that is in the graph (the worst of its
+   * problems), a dashed line where one is asked for or failed and is not.
+   */
+  setProblems(problems: Problem[]) {
+    this.clear(this.trouble)
+    this.troubleLines = []
+    const model = this.model
+    if (!model || !problems.length) {
+      return
+    }
+    const worst = new Map<string, Problem>()
+    const missing: Record<Problem['level'], [Vec3, Vec3][]> = { error: [], attention: [] }
+    for (const p of problems) {
+      if (p.from !== null && p.to !== null && p.from < model.nodes && p.to < model.nodes && model.find(p.from, p.to)) {
+        const key = `${p.from}:${p.to}`
+        if (worst.get(key)?.level !== 'error') worst.set(key, p)
+      } else {
+        missing[p.level].push([
+          [p.at[0], p.at[1], p.at[2]],
+          [p.at[3], p.at[4], p.at[5]],
+        ])
+      }
+    }
+    if (worst.size) {
+      const positions: number[] = []
+      const colors: number[] = []
+      const color = new THREE.Color()
+      for (const p of worst.values()) {
+        positions.push(...model.origin(p.from!), ...model.origin(p.to!))
+        color.setHex(PROBLEM_COLOR[p.level])
+        colors.push(color.r, color.g, color.b, color.r, color.g, color.b)
+      }
+      const geometry = new LineSegmentsGeometry()
+      geometry.setPositions(positions)
+      geometry.setColors(colors)
+      const bands = new LineSegments2(
+        geometry,
+        new LineMaterial({ linewidth: PROBLEM_BAND, vertexColors: true, depthTest: false, transparent: true, opacity: 0.45 }),
+      )
+      bands.renderOrder = 10
+      this.trouble.add(bands)
+      this.troubleLines.push(bands)
+    }
+    for (const level of ['attention', 'error'] as const) {
+      if (!missing[level].length) continue
+      const geometry = new LineSegmentsGeometry()
+      geometry.setPositions(missing[level].flatMap(([a, b]) => [...a, ...b]))
+      const dashed = new LineSegments2(
+        geometry,
+        new LineMaterial({
+          color: PROBLEM_COLOR[level],
+          linewidth: PROBLEM_DASHED[level],
+          dashed: true,
+          dashSize: 10,
+          gapSize: 7,
+          depthTest: false,
+          transparent: true,
+        }),
+      )
+      dashed.computeLineDistances()
+      dashed.renderOrder = level === 'error' ? 17 : 12
+      this.trouble.add(dashed)
+      this.troubleLines.push(dashed)
+    }
+  }
+
+  setProblemsVisible(on: boolean) {
+    this.trouble.visible = on
+  }
+
+  /** Keeps what is drawn at a size on screen (the selection's arrows, the problems' bands) that size. */
   fit(camera: THREE.Camera, width: number, height: number) {
+    for (const line of this.troubleLines) {
+      ;(line.material as LineMaterial).resolution.set(width, height)
+    }
     const f = this.focusArrows
     if (!f) return
     ;(f.lines.material as LineMaterial).resolution.set(width, height)
@@ -506,7 +590,7 @@ export class NavLayer {
   }
 
   dispose() {
-    for (const g of [this.graph, this.markup, this.marks, this.dragged]) {
+    for (const g of [this.graph, this.markup, this.marks, this.dragged, this.trouble]) {
       this.clear(g)
     }
     this.group.parent?.remove(this.group)

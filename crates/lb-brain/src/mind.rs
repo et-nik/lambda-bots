@@ -23,6 +23,7 @@ use lb_game::mechanics::{
     AltFire, Attack, BOLT_SPEED, DART_SPEED, Damages, ROCKET_GUIDE, ROCKET_SPEED, WeaponClass, spec,
 };
 use lb_game::self_state::Prediction;
+use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{Fire, Intents, LookIntent, LookParams, MoveIntent, Prio, StanceIntent, WeaponIntent};
@@ -36,11 +37,17 @@ use crate::attention::LookReason;
 use crate::goals::Task;
 
 const COMBAT_PERIOD: f64 = 0.1;
+/// Share of its turn acceleration the bot uses to look along the way and around.
+const CALM_LOOK: f32 = 0.5;
 const DECISION_PERIOD: f64 = 0.2;
 /// Keep looking where a lost target went for this long.
 const LOST_STARE: f64 = 1.0;
 /// Reload only after this long without an enemy in sight.
-const CALM_BEFORE_RELOAD: f64 = 2.0;
+const CALM_BEFORE_RELOAD: f64 = 1.0;
+/// Within this distance of a target in sight a weapon switch has to pay for its deploy.
+const FIGHT_RANGE: f32 = 1200.0;
+/// Hurt this recently, the bot is under fire.
+const UNDER_FIRE_FOR: f64 = 1.0;
 /// A scope comes off after this long without a target.
 const UNZOOM_AFTER: f64 = 1.5;
 /// Distance weapons are chosen for when no enemy is about.
@@ -70,7 +77,10 @@ const REACTION_SAMPLES: usize = 128;
 /// An item spot just reached is not gone to again this soon.
 const COLLECTED_REST: f64 = 3.0;
 /// A target in sight is kept at least this long.
-const TARGET_HOLD: f64 = 1.0;
+const TARGET_HOLD: f64 = 0.5;
+/// An enemy in sight that hurt the bot this recently is fought first: it counts this many times more.
+const ATTACKER_FOR: f64 = 1.0;
+const ATTACKER_WEIGHT: f32 = 2.0;
 /// Slower than this the bot stands still (for the statistics).
 const STILL_SPEED: f32 = 60.0;
 /// GunGame targets: the leader counts as if this much as far (yapb's `gungame_leader_priority` 0.25 on the squared
@@ -96,9 +106,26 @@ const SNARK_KEEP: f32 = 200.0;
 const DUEL_DISTANCES: [f32; 8] = [100.0, 200.0, 300.0, 450.0, 600.0, 800.0, 1000.0, 1300.0];
 const DUEL_EDGE: f32 = 10.0;
 
-/// How fast the bot answers an enemy: from the first glimpse and from recognition to the first shot at it.
+/// How fast the bot answers enemies new to it, and enemies it lost a moment before and saw again.
 #[derive(Clone, Debug, Default)]
 pub struct Reactions {
+    pub fresh: ReactionStats,
+    pub reacquired: ReactionStats,
+}
+
+impl Reactions {
+    fn record(&mut self, from_evidence: f64, from_recognition: f64, reacquired: bool) {
+        if reacquired {
+            self.reacquired.record(from_evidence, from_recognition);
+        } else {
+            self.fresh.record(from_evidence, from_recognition);
+        }
+    }
+}
+
+/// How fast the bot answers a kind of contact: from the first glimpse and from recognition to the first shot at it.
+#[derive(Clone, Debug, Default)]
+pub struct ReactionStats {
     pub count: u64,
     pub evidence_to_shot: f64,
     pub recognition_to_shot: f64,
@@ -107,7 +134,7 @@ pub struct Reactions {
     pub recent: std::collections::VecDeque<f64>,
 }
 
-impl Reactions {
+impl ReactionStats {
     fn record(&mut self, from_evidence: f64, from_recognition: f64) {
         self.count += 1;
         self.evidence_to_shot += from_evidence;
@@ -368,6 +395,12 @@ impl Mind {
     pub fn last_enemy_seen(&self) -> SimTime {
         self.last_enemy_seen
     }
+
+    /// Picks the target and the weapon on the next frame rather than at the next combat tick: an enemy was just
+    /// recognized or the target died.
+    pub(crate) fn wake_combat(&mut self) {
+        self.next_combat = SimTime::ZERO;
+    }
 }
 
 pub(crate) fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &mut Mind) {
@@ -483,6 +516,8 @@ impl BotBrain {
         let look = LookParams {
             model: ch.skill.aim_model,
             turn_speed: ch.skill.turn_speed,
+            turn_accel: ch.skill.turn_accel,
+            calm: CALM_LOOK,
             skill: ch.level,
         };
         self.motor.run(&self.intents, &input, &look, &mut rng.motor)
@@ -490,12 +525,20 @@ impl BotBrain {
 
     fn combat_tick(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
+        let attacker = self
+            .beliefs
+            .last_damage
+            .filter(|d| now.since(d.t) <= ATTACKER_FOR)
+            .and_then(|d| crate::damage_dealer(&self.beliefs, &d, body.eye))
+            .filter(|t| t.state == TrackState::Visible)
+            .map(|t| t.who);
         let m = &mut self.mind;
         if let Some(d) = self.beliefs.last_damage
             && m.seen_damage != Some(d.t)
         {
             m.seen_damage = Some(d.t);
             m.urgent = true;
+            m.next_combat = now;
         }
         if now < m.next_combat {
             return;
@@ -509,13 +552,20 @@ impl BotBrain {
         }
         .and_then(|k| self.beliefs.track(k))
         .filter(|t| now.since(t.last_seen) <= lb_combat::arms::scope::LOST_HOLD);
-        // A target in sight is kept for a second at least: turning to another and back loses both.
+        // A target in sight is kept for a moment at least: turning to another and back loses both. Whoever shoots the
+        // bot meanwhile is turned to at once.
         let held = previous
-            .filter(|_| now.since(m.target_since) < TARGET_HOLD)
+            .filter(|k| now.since(m.target_since) < TARGET_HOLD && attacker.is_none_or(|a| a == *k))
             .and_then(|k| self.beliefs.track(k))
             .filter(|t| t.state == TrackState::Visible);
         let grudge = self.last_killer;
-        let favor = |t: &EnemyTrack| gungame_favor(body.gungame.as_ref(), t, grudge);
+        let favor = |t: &EnemyTrack| {
+            let mut f = gungame_favor(body.gungame.as_ref(), t, grudge);
+            if Some(t.who) == attacker {
+                f.weight *= ATTACKER_WEIGHT;
+            }
+            f
+        };
         let seen = match (scoped, held) {
             (Some(t), _) | (None, Some(t)) => (t.state == TrackState::Visible).then_some(t.who),
             (None, None) => target::select(self.beliefs.enemies(), body.origin, now, previous, &favor),
@@ -571,7 +621,8 @@ impl BotBrain {
                 0.0
             }
         };
-        let choice = policy::choose(
+        let fighting = track.is_some_and(|t| t.state == TrackState::Visible) && distance <= FIGHT_RANGE;
+        let choice = policy::choose_with(
             &body.arsenal,
             body.weapon,
             &t,
@@ -579,6 +630,11 @@ impl BotBrain {
             &body.damages,
             &like,
             body.fallback(),
+            if fighting {
+                policy::FIGHT_KEEP_MARGIN
+            } else {
+                policy::KEEP_MARGIN
+            },
         );
         if m.choice != Some(choice) {
             if let Choice::Use(w) = choice {
@@ -928,7 +984,7 @@ impl BotBrain {
                     distance,
                     m.arms.double,
                     ch.aim_sigma(distance),
-                    m.click_interval,
+                    click(m, distance),
                 );
                 let shot = shot_of(w, mode.attack, body.zoomed());
                 let Some(aim) = m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat) else {
@@ -955,6 +1011,13 @@ impl BotBrain {
                                 toggle
                             }
                             None => {
+                                let reacquired = self
+                                    .perception
+                                    .vision
+                                    .contacts
+                                    .iter()
+                                    .find(|c| c.who == t.who)
+                                    .is_some_and(|c| c.reacquired);
                                 let shot = Aimed {
                                     view: self.motor.view,
                                     target: t,
@@ -963,6 +1026,7 @@ impl BotBrain {
                                     aim,
                                     distance,
                                     in_hand,
+                                    reacquired,
                                 };
                                 shoot(m, &shot, &self.beliefs, nav, body, rng)
                             }
@@ -1051,7 +1115,7 @@ impl BotBrain {
                     .and_then(|w| body.armed(w))
                     .filter(|a| {
                         let clip = spec(a.id).clip;
-                        a.can_reload() && a.clip.is_some_and(|c| c * 4 < clip || c < 5)
+                        a.can_reload() && a.clip.is_some_and(|c| c * 2 < clip || c < 5)
                     });
                 if calm && let Some(a) = low {
                     if body.weapon == Some(a.id) && !m.reloading(now) {
@@ -1189,6 +1253,7 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         enemy: t.pos,
         enemy_facing: t.traits.facing,
         enemy_faces_me: target::faces(t, body.origin),
+        under_fire: m.seen_damage.is_some_and(|d| now.since(d) <= UNDER_FIRE_FOR),
         approach: body.health.clamp(0.0, 100.0) * ch.aggression,
         weapon: body.weapon.map_or(WeaponClass::Melee, |w| spec(w).class),
         reloading: m.reloading(now),
@@ -1233,6 +1298,8 @@ struct Aimed<'a> {
     aim: Vec3,
     distance: f32,
     in_hand: bool,
+    /// The target was seen again moments after it was lost, rather than new to the bot.
+    reacquired: bool,
 }
 
 /// Where the game launches `w`'s projectile from when looking along `view`, and how far along the view it must fly
@@ -1327,7 +1394,8 @@ fn shoot(
     if engaged {
         if m.answered != Some((t.who, t.recognized_at)) {
             m.answered = Some((t.who, t.recognized_at));
-            m.reactions.record(now.since(t.noticed_at), now.since(t.recognized_at));
+            m.reactions
+                .record(now.since(t.noticed_at), now.since(t.recognized_at), a.reacquired);
         }
         let loaded = body.armed(w).is_some_and(|a| a.clip.is_none_or(|c| c > 0));
         if w == WeaponId::Rpg && loaded && m.arms.guide.is_none_or(|(until, _, _)| now >= until) {
@@ -1351,8 +1419,18 @@ fn shoot(
             Fire::None
         },
         trigger: mode.trigger,
-        interval: m.click_interval.max(mode.cycle),
+        interval: click(m, distance).max(mode.cycle),
         reload: false,
+    }
+}
+
+/// Seconds between clicks of the semi-automatic weapon of choice at a target `distance` away: a human pause far off,
+/// as fast as it goes up close (yapb).
+fn click(m: &Mind, distance: f32) -> f32 {
+    if distance > lb_combat::aim::SPRAY_DISTANCE {
+        m.click_interval
+    } else {
+        0.0
     }
 }
 
@@ -1362,10 +1440,10 @@ impl BotBrain {
             let prio = match a.reason {
                 LookReason::Enemy(_) => None,
                 LookReason::Damage => Some(Prio::Threat),
-                LookReason::Lost(_) => Some(Prio::Goal),
-                LookReason::Expect(_) | LookReason::Danger | LookReason::Glimpse | LookReason::Sound(_) => {
-                    Some(Prio::Optional)
+                LookReason::Glimpse | LookReason::Lost(_) | LookReason::Sound(SoundKind::Shot | SoundKind::Pain) => {
+                    Some(Prio::Alert)
                 }
+                LookReason::Expect(_) | LookReason::Danger | LookReason::Sound(_) => Some(Prio::Optional),
             };
             if let Some(prio) = prio {
                 self.intents.look(

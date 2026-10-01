@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 use crate::profiles::STYLE_IDS;
-use crate::skill::SkillBand;
+use crate::skill::{REFLEX_RANGE, SkillBand};
 use crate::yaml;
 
 pub const KIND: &str = "main";
@@ -106,6 +106,9 @@ pub struct BotsConfig {
     pub respawn_delay: [f32; 2],
     /// Seconds without progress before an irrecoverably stuck bot uses `kill`.
     pub stuck_kill_time: f32,
+    /// How quick every bot is, on top of its skill: 2 recognizes and aims in half the time and turns twice as fast,
+    /// 0.5 the other way round (`SkillParams::with_reflex`).
+    pub reflex: f32,
 }
 
 impl Default for BotsConfig {
@@ -133,6 +136,7 @@ impl Default for BotsConfig {
             force_respawn: true,
             respawn_delay: [0.3, 1.2],
             stuck_kill_time: 20.0,
+            reflex: 1.0,
         }
     }
 }
@@ -462,6 +466,9 @@ impl MainConfig {
         }
         if self.bots.respawn_delay[0] > self.bots.respawn_delay[1] || self.bots.respawn_delay[0] < 0.0 {
             return err("bots.respawn_delay", "must be [min, max] with 0 <= min <= max");
+        }
+        if !(REFLEX_RANGE[0]..=REFLEX_RANGE[1]).contains(&self.bots.reflex) {
+            return err("bots.reflex", "must be in 0.5..=2");
         }
         if self.quota.join_interval[0] > self.quota.join_interval[1] {
             return err("quota.join_interval", "must be [min, max] with min <= max");

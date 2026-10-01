@@ -15,7 +15,7 @@ schema: lambdabots/profiles@1
 #   weight     how often it is picked to join, relative to others (default 1; 0 = only `lb add <name>`)
 #   tags       free labels
 #   seed       seed of its own random habits (default: from the nickname)
-#   overrides  single skill parameters from config/difficulty.yaml, e.g. { turn_speed: 520 }
+#   overrides  single skill parameters from config/difficulty.yaml, e.g. { turn_speed: 1200 }
 #
 # Personalities the server created for nicknames from names/<language>.yaml live in data/profiles.yaml;
 # copy an entry here to take it over. An entry here wins over one with the same name there.
@@ -34,6 +34,6 @@ schema: lambdabots/profiles@1
 #   - name: "Barney"
 #     style: rusher
 #     skill: hard
-#     overrides: { turn_speed: 600 }
+#     overrides: { turn_speed: 2000 }
 
 bots:

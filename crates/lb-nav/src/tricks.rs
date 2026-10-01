@@ -114,8 +114,8 @@ pub fn boost_eye(origin: Vec3) -> Vec3 {
     origin + Vec3::Z * (EYE_HEIGHT + 3.0)
 }
 
-/// The contract of a boost on the way from `from` onto node `to` of the graph.
-fn leap_spec(graph: &NavGraph, from: Vec3, to: NodeId, flight: f32, damage: f32) -> TraversalSpec {
+/// The contract of a boost on the way from `from` onto node `to` of the graph, a full charge's `push`.
+fn leap_spec(graph: &NavGraph, from: Vec3, to: NodeId, push: f32, flight: f32, damage: f32) -> TraversalSpec {
     TraversalSpec {
         entry: Anchor {
             origin: from,
@@ -126,6 +126,7 @@ fn leap_spec(graph: &NavGraph, from: Vec3, to: NodeId, flight: f32, damage: f32)
         action: Action::GaussBoost {
             pitch: LEAP_PITCH,
             robustness: 1.0,
+            push,
         },
         needs: Needs {
             health: BOOST_HEALTH.max(damage + BOOST_HEALTH_AFTER),
@@ -232,7 +233,11 @@ pub fn leap_along(
             continue;
         }
         let at = path.iter().skip(next).position(|&n| n == landing).map(|i| i + next);
-        return Some((leap_spec(graph, input.origin, landing, v.flight, damage), landing, at));
+        return Some((
+            leap_spec(graph, input.origin, landing, push, v.flight, damage),
+            landing,
+            at,
+        ));
     }
     None
 }

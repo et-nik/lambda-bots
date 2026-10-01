@@ -41,7 +41,9 @@ const rows = computed<Row[]>(() => {
       linkValid(out) === linkValid(back) &&
       out.added === back.added &&
       ((out.flags ^ back.flags) & LINK.TRUSTED) === 0 &&
-      Math.abs(out.cost - back.cost) < 0.005
+      Math.abs(out.cost - back.cost) < 0.005 &&
+      !nav.problemsOf(props.n, r.to).length &&
+      !nav.problemsOf(r.to, props.n).length
   }
   return [...byNode.values()]
 })

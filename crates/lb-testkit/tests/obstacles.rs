@@ -180,6 +180,24 @@ fn describe(o: &Outcome) -> String {
 }
 
 #[test]
+fn a_bot_with_no_way_to_follow_plans_one_at_once() {
+    let (g, a, b) = door_graph(None);
+    let mut c = Course::new(door_world(), Game::default(), g);
+    let mut bot = CourseBot::new(c.graph.node(a).origin, 100.0);
+    c.place(&mut bot);
+    let far = c.graph.node(b).origin;
+    let near = c.graph.node(a).origin + Vec3::new(-100.0, 0.0, 0.0);
+    c.frame(&mut bot, far, 10.0);
+    assert!(bot.nav.follower.is_some(), "the long way round");
+    // A spot close by in the open is walked to straight, with no way to follow...
+    c.frame(&mut bot, near, 10.0);
+    assert!(bot.nav.follower.is_none());
+    // ...and somewhere far off again gets its way on the next frame, not half a second after the last plan.
+    c.frame(&mut bot, far, 10.0);
+    assert!(bot.nav.follower.is_some(), "planned at once");
+}
+
+#[test]
 fn touch_door_opens_when_walked_into() {
     let (g, a, b) = door_graph(Some(Interaction::Touch {
         model: DOOR,
@@ -576,6 +594,7 @@ fn a_gauss_boost_gets_the_bot_onto_a_ledge() {
         Some(Action::GaussBoost {
             pitch: 34.0,
             robustness: 1.0,
+            push: 1000.0,
         }),
     );
     let mut c = Course::new(w, Game::default(), g.build());
@@ -608,6 +627,7 @@ fn a_gauss_boost_gets_the_bot_onto_a_ledge() {
                 Some(Action::GaussBoost {
                     pitch: 34.0,
                     robustness: 1.0,
+                    push: 1000.0,
                 }),
             );
             g.build()

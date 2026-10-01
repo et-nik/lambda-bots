@@ -70,6 +70,12 @@ impl WeaponController {
         self.pending.is_some() || now < self.deploy_until
     }
 
+    /// The trigger stays off this frame for a weapon switch: [`busy`](Self::busy), or `current`, the weapon
+    /// `CurWeapon` confirmed, came in since the last update and its deploy is about to start.
+    pub fn deploying(&self, now: SimTime, current: Option<WeaponId>) -> bool {
+        self.busy(now) || (current.is_some() && current != self.confirmed)
+    }
+
     /// A weapon the game lately would not switch to: the bot fights with another meanwhile.
     pub fn refused(&self, now: SimTime) -> Option<WeaponId> {
         self.refused

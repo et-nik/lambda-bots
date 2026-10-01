@@ -95,7 +95,10 @@ pub struct Target {
 }
 
 const OUT_OF_BAND: f32 = 0.35;
-const KEEP_MARGIN: f32 = 1.2;
+/// The weapon in hand counts this much more against flip-flopping between two about as good.
+pub const KEEP_MARGIN: f32 = 1.2;
+/// In a fight a switch costs the deploy, half a second without a shot: the weapon in hand counts this much more.
+pub const FIGHT_KEEP_MARGIN: f32 = 1.5;
 /// The crossbow is fired zoomed from here on (a hitscan bolt: an unzoomed one is slow enough to step away from);
 /// closer, where a target crosses the zoomed view too fast, it fires bolts.
 pub const XBOW_ZOOM_FROM: f32 = 250.0;
@@ -196,6 +199,21 @@ pub fn choose(
     like: &dyn Fn(WeaponId) -> f32,
     fallback: WeaponId,
 ) -> Choice {
+    choose_with(weapons, current, t, underwater, damages, like, fallback, KEEP_MARGIN)
+}
+
+/// As [`choose`], the weapon in hand counting `keep` times more ([`KEEP_MARGIN`], [`FIGHT_KEEP_MARGIN`]).
+#[allow(clippy::too_many_arguments)]
+pub fn choose_with(
+    weapons: &[Armed],
+    current: Option<WeaponId>,
+    t: &Target,
+    underwater: bool,
+    damages: &Damages,
+    like: &dyn Fn(WeaponId) -> f32,
+    fallback: WeaponId,
+    keep: f32,
+) -> Choice {
     let usable = |a: &&Armed| {
         let s = spec(a.id);
         s.class != WeaponClass::Throwable && (s.underwater || !underwater) && like(a.id) > 0.0
@@ -207,7 +225,7 @@ pub fn choose(
             v *= OUT_OF_BAND;
         }
         if Some(a.id) == current {
-            v *= KEEP_MARGIN;
+            v *= keep;
         }
         v + f32::from(s.rank) * 1e-3
     };
@@ -282,6 +300,35 @@ mod tests {
             ANY,
             WeaponId::Crowbar,
         )
+    }
+
+    #[test]
+    fn in_a_fight_the_weapon_in_hand_has_to_be_clearly_worse_to_be_put_away() {
+        let kit = [
+            armed(WeaponId::Crowbar, -1, 0),
+            armed(WeaponId::Glock, 17, 68),
+            armed(WeaponId::Mp5, 50, 100),
+        ];
+        let d = Damages::default();
+        let t = at(500.0, 10.0);
+        assert!(spec(WeaponId::Glock).in_band(t.distance) && spec(WeaponId::Mp5).in_band(t.distance));
+        // The MP5 does 1.3 times as well as the glock here.
+        let (glock, mp5) = (score(&kit[1], &t, &d), score(&kit[2], &t, &d));
+        let like = move |w: WeaponId| if w == WeaponId::Mp5 { 1.3 * glock / mp5 } else { 1.0 };
+        let choose = |keep| {
+            choose_with(
+                &kit,
+                Some(WeaponId::Glock),
+                &t,
+                false,
+                &d,
+                &like,
+                WeaponId::Crowbar,
+                keep,
+            )
+        };
+        assert_eq!(choose(KEEP_MARGIN), Choice::Use(WeaponId::Mp5));
+        assert_eq!(choose(FIGHT_KEEP_MARGIN), Choice::Use(WeaponId::Glock));
     }
 
     #[test]

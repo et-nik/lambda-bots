@@ -1154,11 +1154,23 @@ const TAKEOFF_LEAD: f32 = 16.0;
 const TAKEOFF_ACROSS: [f32; 2] = [16.0, 10.0];
 /// A long jump link's run-up starts this far behind the takeoff at most (the check ran up 16 units).
 const RUN_UP: f32 = 32.0;
-/// Seconds a gauss boost charges before it goes: a full charge and a little more.
+/// Seconds a gauss boost charges before it goes when it takes a full charge: a full charge and a little more.
 pub const BOOST_CHARGE: f32 = 1.6;
-/// A boost has thrown the bot once it flies up and along faster than these.
-const BOOST_UP: f32 = 250.0;
-const BOOST_ALONG: f32 = 300.0;
+/// A boost has thrown the bot once it flies along faster than this share of the push's part along, and this much.
+const BOOST_ALONG: (f32, f32) = (0.4, 30.0);
+/// A boost is let go standing this near its takeoff, moving slower than this.
+const BOOST_TAKEOFF: (f32, f32) = (6.0, 30.0);
+
+/// Seconds to charge the gauss for a boost of `push` when a charged shot does up to `damage`: a full charge and a
+/// little more when it takes a full one (or the damage is not known), exactly the share it takes otherwise.
+pub fn boost_charge(push: f32, damage: f32) -> f32 {
+    let full = 5.0 * damage;
+    if full <= 0.0 || push >= 0.98 * full {
+        BOOST_CHARGE
+    } else {
+        lb_kin::tricks::charge_for(push, full)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrickPhase {
@@ -1378,9 +1390,9 @@ impl TrickExec {
         (NavStep::hold(level), ExecStatus::Running)
     }
 
-    /// A gauss boost: stop at the entry, stand there while the weapons draw the gauss, charge it, turn round and
-    /// jump letting the charge go; then steer the flight onto the exit.
-    fn boost(&mut self, c: &mut ExecCtx<'_>, pitch: f32) -> (NavStep, ExecStatus) {
+    /// A gauss boost: stop at the entry, stand there while the weapons draw the gauss, turn round, charge it for
+    /// the `push` and jump letting the charge go; then steer the flight onto the exit.
+    fn boost(&mut self, c: &mut ExecCtx<'_>, pitch: f32, push: f32) -> (NavStep, ExecStatus) {
         let i = c.input;
         let now = i.now;
         let a = c.spec.entry.origin;
@@ -1393,8 +1405,10 @@ impl TrickExec {
         for _ in 0..3 {
             match self.phase {
                 TrickPhase::Approach | TrickPhase::Back => {
+                    // Settled right at the takeoff: the check flew from there, and a boost barely over an edge
+                    // does not clear it from a few units further on.
                     let left = flat(a - i.origin).length();
-                    if left < 12.0 && flat(i.velocity).length() < 60.0 && i.on_ground {
+                    if left < BOOST_TAKEOFF.0 && flat(i.velocity).length() < BOOST_TAKEOFF.1 && i.on_ground {
                         self.set(TrickPhase::Takeoff, now);
                         continue;
                     }
@@ -1406,7 +1420,8 @@ impl TrickExec {
                     return (step, ExecStatus::Running);
                 }
                 TrickPhase::Takeoff => {
-                    let launched = airborne && i.velocity.z > BOOST_UP && flat(i.velocity).dot(dir) > BOOST_ALONG;
+                    let along = BOOST_ALONG.0 * push * lb_core::dmath::cos(pitch.to_radians()) + BOOST_ALONG.1;
+                    let launched = airborne && flat(i.velocity).dot(dir) > along;
                     if launched {
                         tracing::info!(
                             "gauss boost thrown from {:.0} {:.0} {:.0} at {:.0} up, {:.0} along, for {:.0} {:.0} {:.0}",
@@ -1456,7 +1471,7 @@ impl TrickExec {
                     let mut step = NavStep::hold(ahead);
                     step.boost = Some(BoostCall {
                         view,
-                        charge: BOOST_CHARGE,
+                        charge: boost_charge(push, i.tricks.gauss_damage),
                     });
                     return (step, ExecStatus::Waiting);
                 }
@@ -1543,7 +1558,7 @@ impl Exec {
             ) => e.tick(c, model, aim, crowbar),
             (Exec::Push(e), Action::Push { dir, jump_at, hold, .. }) => e.tick(c, dir, jump_at, hold),
             (Exec::LongJump(e), Action::LongJump { .. }) => e.longjump(c),
-            (Exec::GaussBoost(e), Action::GaussBoost { pitch, .. }) => e.boost(c, pitch),
+            (Exec::GaussBoost(e), Action::GaussBoost { pitch, push, .. }) => e.boost(c, pitch, push),
             _ => (
                 NavStep::hold(c.to.origin),
                 ExecStatus::Failed(FailReason::ControllerFailure),

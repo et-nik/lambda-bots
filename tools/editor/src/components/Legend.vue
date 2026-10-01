@@ -19,6 +19,11 @@ const legend = computed(() => {
   return { kinds, off }
 })
 
+const problems = computed(() => {
+  const errors = nav.problems.filter((p) => p.level === 'error').length
+  return { all: nav.problems.length, errors }
+})
+
 const graphTitle = computed(() => {
   const m = nav.model
   if (!m) return nav.loading ? 'The graph is loading' : 'No graph'
@@ -33,6 +38,16 @@ const graphTitle = computed(() => {
       Graph<span v-if="nav.loading" class="muted"> loading…</span>
     </button>
     <template v-if="nav.show">
+      <button
+        v-if="problems.all"
+        class="problems"
+        :class="{ hidden: !nav.problemsShown }"
+        :aria-pressed="nav.problemsShown"
+        :title="`${problems.errors} errors, ${problems.all - problems.errors} to look at: red and yellow in the view, listed in the Navigation tab; click to ${nav.problemsShown ? 'hide' : 'show'} them in the view`"
+        @click="nav.showProblems(!nav.problemsShown)"
+      >
+        <i :class="problems.errors ? 'error' : 'attention'" />Problems {{ problems.all }}
+      </button>
       <button
         class="only"
         :class="{ on: nav.onlySelected }"
@@ -106,6 +121,12 @@ i {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+}
+i.error {
+  background: var(--warn);
+}
+i.attention {
+  background: var(--attention);
 }
 .muted {
   font-weight: normal;

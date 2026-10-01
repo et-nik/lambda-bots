@@ -55,6 +55,8 @@ pub struct Hands<'a> {
     pub dll: DllProfile,
     /// `sv_gravity`.
     pub gravity: f32,
+    /// The bot's own wait for a weapon just switched to is not over: its trigger stays off whatever the game says.
+    pub deploying: bool,
 }
 
 impl Hands<'_> {
@@ -78,6 +80,7 @@ impl Hands<'_> {
     /// `w` is in hand and past its deploy.
     pub fn ready(&self, w: WeaponId) -> bool {
         self.weapon == Some(w)
+            && !self.deploying
             && self
                 .prediction
                 .is_none_or(|p| p.current == Some(w) && p.next_attack <= 0.0)

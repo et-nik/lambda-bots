@@ -11,9 +11,14 @@ use lb_core::Vec3;
 use lb_kin::Physics;
 use lb_nav::graph::{LinkKind, NavGraph, NavLink, NodeId};
 use lb_nav::store::GraphKey;
+use lb_nav::validate::{WalkCheck, walk_check};
 use lb_navgen::mapload::{self, OVERLAYS};
 use lb_navgen::patch::{self, Outcome};
+use lb_worldq::HullKind;
+use rustc_hash::FxHashMap;
 use serde::Serialize;
+
+use crate::problems::{self, Problem};
 
 /// Graphs of maps kept at once (each keeps its world for checking changes): a page open on an older graph of a map
 /// than the one opened last keeps working on its own.
@@ -44,13 +49,22 @@ pub struct NavMap {
     world: Mutex<BspWorld>,
     mech: Mechanisms,
     last: Mutex<Option<(String, Arc<Patched>)>>,
+    /// How far walking a link falls off a ledge on the way, by where its ends stand (and crouched or not).
+    falls: Mutex<FxHashMap<FallKey, Option<f32>>>,
 }
 
-/// The graph with the overlays applied, and what each of their patches did.
+type FallKey = ([u32; 3], [u32; 3], bool);
+
+/// Walking a link falls further than this on the way: more than a step down.
+const FALL: f32 = 20.0;
+
+/// The graph with the overlays applied, what each of their patches did, and what in it the page flags (but the
+/// test runs, read as the files change).
 pub struct Patched {
     pub graph: NavGraph,
     pub editor: Vec<Outcome>,
     pub overlay: Vec<Outcome>,
+    pub problems: Vec<Problem>,
     /// The graph with the planner's landmarks, made the first time a route asks: previews do without.
     routable: std::sync::OnceLock<NavGraph>,
 }
@@ -92,7 +106,47 @@ impl NavMap {
             world: Mutex::new(world),
             mech,
             last: Mutex::new(None),
+            falls: Mutex::new(FxHashMap::default()),
         })
+    }
+
+    /// The walk and crouch links of `g` that fall further than a step off a ledge on the way, and how far: checked
+    /// once a link, as its ends stand.
+    fn falls(&self, g: &NavGraph) -> Vec<(NodeId, NodeId, f32)> {
+        let bits = |v: lb_core::Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        let mut cache = self.falls.lock().expect("no panics while locked");
+        let mut world = self.world.lock().expect("no panics while locked");
+        let mut out = Vec::new();
+        for n in 0..g.len() as NodeId {
+            for l in g.links(n) {
+                let crouch = l.kind == LinkKind::Crouch;
+                if !l.valid() || !(crouch || l.kind == LinkKind::Walk) {
+                    continue;
+                }
+                let (a, b) = (g.node(n), g.node(l.to));
+                let fall = *cache
+                    .entry((bits(a.origin), bits(b.origin), crouch))
+                    .or_insert_with(|| {
+                        let (from, to, hull) = if crouch {
+                            (
+                                lb_nav::classify::crouch_origin(a),
+                                lb_nav::classify::crouch_origin(b),
+                                HullKind::Crouch,
+                            )
+                        } else {
+                            (a.origin, b.origin, HullKind::Stand)
+                        };
+                        match walk_check(&mut *world, from, to, hull) {
+                            WalkCheck::Drop(h) if h > FALL => Some(h),
+                            _ => None,
+                        }
+                    });
+                if let Some(h) = fall {
+                    out.push((n, l.to, h));
+                }
+            }
+        }
+        out
     }
 
     /// The player physics changes are checked with: the server's, the graph was made with; else the defaults.
@@ -117,11 +171,17 @@ impl NavMap {
         };
         let mut editor_out = report.outcomes;
         let overlay_out = editor_out.split_off(split);
+        let mut found = problems::for_changes(&graph, &editor.nav.patches, &editor_out, "editor");
+        if let Some(o) = overlay {
+            found.extend(problems::for_changes(&graph, &o.nav.patches, &overlay_out, "overlay"));
+        }
+        found.extend(problems::for_links(&graph, &self.falls(&graph)));
         let p = Arc::new(Patched {
             graph,
             routable: std::sync::OnceLock::new(),
             editor: editor_out,
             overlay: overlay_out,
+            problems: found,
         });
         *self.last.lock().expect("no panics while locked") = Some((key, p.clone()));
         p
@@ -270,14 +330,21 @@ pub struct Preview {
     pub removed: Vec<u32>,
     pub editor: Vec<Outcome>,
     pub overlay: Vec<Outcome>,
+    /// What the page flags, errors first.
+    pub problems: Vec<Problem>,
 }
 
 fn same(a: &NavLink, b: &NavLink) -> bool {
     a.to == b.to && a.kind == b.kind && a.flags == b.flags
 }
 
-pub fn preview(base: &NavGraph, p: &Patched) -> Preview {
+/// What the overlays change in `base`, with what the page flags: `p`'s problems and `tested`, those the test runs
+/// found.
+pub fn preview(base: &NavGraph, p: &Patched, tested: Vec<Problem>) -> Preview {
     let g = &p.graph;
+    let mut found = p.problems.clone();
+    found.extend(tested);
+    problems::sort(&mut found);
     let mut out = Preview {
         nodes: Vec::new(),
         moved: Vec::new(),
@@ -285,6 +352,7 @@ pub fn preview(base: &NavGraph, p: &Patched) -> Preview {
         removed: Vec::new(),
         editor: p.editor.clone(),
         overlay: p.overlay.clone(),
+        problems: found,
     };
     for n in base.len()..g.len() {
         push_node(&mut out.nodes, g, n);
@@ -683,7 +751,7 @@ mod tests {
         });
         let p = nav.patched(&editor, None);
         assert!(p.editor[0].ok);
-        let diff = preview(&nav.base, &p);
+        let diff = preview(&nav.base, &p, Vec::new());
         assert_eq!(diff.removed, vec![a, b]);
         assert!(diff.added.is_empty() && diff.nodes.is_empty() && diff.moved.is_empty());
         assert!(
@@ -705,7 +773,7 @@ mod tests {
             to: step.to_array(),
             note: String::new(),
         });
-        let moved = preview(&nav.base, &nav.patched(&moving, None));
+        let moved = preview(&nav.base, &nav.patched(&moving, None), Vec::new());
         assert!(moved.editor[1].ok, "{:?}", moved.editor[1]);
         assert_eq!(
             (moved.moved.len(), moved.moved[0]),

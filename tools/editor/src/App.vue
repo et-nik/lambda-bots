@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import ChangeList from './components/ChangeList.vue'
 import MapInfo from './components/MapInfo.vue'
 import MapView from './components/MapView.vue'
 import NavPanel from './components/NavPanel.vue'
@@ -24,6 +25,10 @@ watch(
     if (s !== null) nav.clearSelection()
   },
 )
+// A save that found the file changed asks there what to keep, and what went wrong with the changes shows there.
+watch([() => nav.conflict, () => nav.error], ([conflict, error]) => {
+  if (conflict || error) nav.showChanges(true)
+})
 
 let uninstall = () => {}
 onMounted(() => {
@@ -37,11 +42,14 @@ onBeforeUnmount(() => uninstall())
   <div class="app">
     <TopBar />
     <main class="main">
-      <MapView />
+      <div class="stage">
+        <MapView />
+        <ChangeList v-if="nav.draft && nav.changesShown" class="drawer" @close="nav.showChanges(false)" />
+      </div>
       <section class="side">
         <nav class="tabs" role="tablist">
           <button role="tab" :aria-selected="tab === 'nav'" :class="{ on: tab === 'nav' }" @click="tab = 'nav'">
-            Navigation<span v-if="nav.dirty" class="dot" title="Unsaved changes">•</span>
+            Navigation
           </button>
           <button role="tab" :aria-selected="tab === 'map'" :class="{ on: tab === 'map' }" @click="tab = 'map'">
             Map
@@ -75,6 +83,19 @@ onBeforeUnmount(() => uninstall())
   grid-template-columns: 1fr 360px;
   min-height: 0;
 }
+.stage {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+.drawer {
+  max-height: min(260px, 35vh);
+  overflow: auto;
+  padding: 0 12px 10px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
 .side {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -97,10 +118,6 @@ onBeforeUnmount(() => uninstall())
 .tabs button.on {
   color: var(--text-strong);
   box-shadow: inset 0 -2px 0 var(--accent);
-}
-.dot {
-  color: var(--accent);
-  margin-left: 4px;
 }
 .pane {
   min-height: 0;

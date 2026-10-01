@@ -12,8 +12,8 @@ use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_knowledge::{
-    BeliefParams, Beliefs, ChargerSpot, Chargers, DamageStimulus, Explosives, ItemSpot, Items, PlayerKey, PublicEvent,
-    Watch,
+    BeliefParams, Beliefs, ChargerSpot, Chargers, DamageStimulus, EnemyTrack, Explosives, ItemSpot, Items, PlayerKey,
+    PublicEvent, Relation, Watch,
 };
 use lb_motor::{Intents, Motor};
 use lb_nav_api::{MapView, NodeId};
@@ -168,6 +168,9 @@ impl BotBrain {
         match e {
             PublicEvent::Death { victim, killer, .. } => {
                 self.perception.vision.forget(*victim);
+                if self.mind.target.is_some_and(|k| k.slot == *victim) {
+                    self.mind.wake_combat();
+                }
                 if *killer == Some(self.slot) {
                     self.mind.mood.on_kill();
                 }
@@ -235,6 +238,15 @@ impl BotBrain {
         );
         for s in &self.last_vision.sightings {
             self.beliefs.on_sighting(s);
+        }
+        // An enemy just recognized is aimed at on this very frame.
+        if self
+            .last_vision
+            .sightings
+            .iter()
+            .any(|s| s.first && s.relation == Relation::Enemy)
+        {
+            self.mind.wake_combat();
         }
         for c in &self.last_vision.cues {
             self.beliefs.on_cue(c);
@@ -352,22 +364,9 @@ impl BotBrain {
         Some((t.who, map.node_origin(m) + Vec3::Z * 8.0))
     }
 
-    /// Where damage just taken came from, as far as the bot can tell: an enemy in sight that fired lately, in the
-    /// direction the damage compass shows.
+    /// Where damage just taken came from, as far as the bot can tell: see [`damage_dealer`].
     pub fn damage_source(&self, d: &DamageStimulus, eye: Vec3) -> Option<Vec3> {
-        let bearing = d.bearing?;
-        self.beliefs
-            .enemies()
-            .filter(|t| d.t.since(t.last_seen) <= 0.5)
-            .filter(|t| t.traits.fired_at.is_some_and(|f| d.t.since(f) <= 1.5))
-            .map(|t| {
-                let to = t.pos - eye;
-                let off = lb_core::math::angle_diff(lb_core::dmath::atan2(to.y, to.x).to_degrees(), bearing).abs();
-                (t.pos, off)
-            })
-            .filter(|(_, off)| *off <= 45.0)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(p, _)| p)
+        damage_dealer(&self.beliefs, d, eye).map(|t| t.pos)
     }
 
     /// Seconds since the bot last saw or heard an enemy (long when it never did).
@@ -383,6 +382,24 @@ impl BotBrain {
     pub fn attention(&mut self, now: SimTime, eye: Vec3) -> Option<Attention> {
         attention::pick(self, now, eye)
     }
+}
+
+/// Who dealt damage just taken, as far as the bot can tell: an enemy in sight that fired lately, in the direction the
+/// damage compass shows.
+pub fn damage_dealer<'a>(beliefs: &'a Beliefs, d: &DamageStimulus, eye: Vec3) -> Option<&'a EnemyTrack> {
+    let bearing = d.bearing?;
+    beliefs
+        .enemies()
+        .filter(|t| d.t.since(t.last_seen) <= 0.5)
+        .filter(|t| t.traits.fired_at.is_some_and(|f| d.t.since(f) <= 1.5))
+        .map(|t| {
+            let to = t.pos - eye;
+            let off = lb_core::math::angle_diff(lb_core::dmath::atan2(to.y, to.x).to_degrees(), bearing).abs();
+            (t, off)
+        })
+        .filter(|(_, off)| *off <= 45.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(t, _)| t)
 }
 
 /// Where an enemy would come into view from `at` when none is known: the busiest place in sight within
