@@ -90,14 +90,15 @@ pub struct WeaponLikes {
 }
 
 /// How readily a style takes tricks, as chances: long jumps along straight stretches of the way (with the module),
-/// long jumps at an enemy, gauss jumps on the way, satchels thrown from a jump. The difficulty's `tricks` switch
-/// lets the last three happen at all.
+/// long jumps at an enemy, gauss jumps on the way, satchels and grenades thrown from a jump. The difficulty's
+/// `tricks` switch lets the last four happen at all.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrickLikes {
     pub longjump: f32,
     pub lj_attack: f32,
     pub gauss_jump: f32,
     pub satchel_jump: f32,
+    pub grenade_jump: f32,
 }
 
 /// Trait ranges, goal weights, weapon likes and tricks of every style: the built-in values with
@@ -175,6 +176,7 @@ impl StyleTable {
         k.lj_attack = tricks.lj_attack.unwrap_or(k.lj_attack);
         k.gauss_jump = tricks.gauss_jump.unwrap_or(k.gauss_jump);
         k.satchel_jump = tricks.satchel_jump.unwrap_or(k.satchel_jump);
+        k.grenade_jump = tricks.grenade_jump.unwrap_or(k.grenade_jump);
     }
 }
 
@@ -198,16 +200,18 @@ impl StyleId {
 
 impl StyleId {
     /// Tricks of the style (design §8): rushers leap at enemies, controllers gauss-jump and long jump about the map,
-    /// trappers and rushers throw satchels from a jump, snipers hardly ever.
+    /// trappers and rushers throw satchels and grenades from a jump, snipers hardly ever.
     #[rustfmt::skip]
     pub fn trick_likes(self) -> TrickLikes {
-        let t = |longjump, lj_attack, gauss_jump, satchel_jump| TrickLikes { longjump, lj_attack, gauss_jump, satchel_jump };
+        let t = |longjump, lj_attack, gauss_jump, satchel_jump, grenade_jump| {
+            TrickLikes { longjump, lj_attack, gauss_jump, satchel_jump, grenade_jump }
+        };
         match self {
-            StyleId::Balanced =>   t(0.8, 0.6, 0.33, 0.4),
-            StyleId::Rusher =>     t(0.8, 1.0, 0.33, 0.6),
-            StyleId::Sniper =>     t(0.8, 0.6, 0.33, 0.2),
-            StyleId::Controller => t(1.0, 0.6, 0.5, 0.4),
-            StyleId::Trapper =>    t(0.8, 0.6, 0.33, 0.7),
+            StyleId::Balanced =>   t(0.8, 0.6, 0.33, 0.4, 0.5),
+            StyleId::Rusher =>     t(0.8, 1.0, 0.33, 0.6, 0.7),
+            StyleId::Sniper =>     t(0.8, 0.6, 0.33, 0.2, 0.3),
+            StyleId::Controller => t(1.0, 0.6, 0.5, 0.4, 0.5),
+            StyleId::Trapper =>    t(0.8, 0.6, 0.33, 0.7, 0.6),
         }
     }
 }

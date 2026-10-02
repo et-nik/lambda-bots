@@ -1215,6 +1215,8 @@ impl Runtime {
         let mut snapshots = Vec::new();
         host.snapshot_entities(kind_mask(&[KIND_PROJECTILE, KIND_MINE]), &mut snapshots);
         self.projectile_entities.clear();
+        // Gone off this frame: the entity stays a moment, hidden, where it burst.
+        let mut bursts: Vec<(u16, Vec3)> = Vec::new();
         for e in &snapshots {
             let kind = *self
                 .projectile_kinds
@@ -1224,6 +1226,7 @@ impl Runtime {
             let v = |x: LbVec3| Vec3::new(x.x, x.y, x.z);
             self.launch_seen(e.ent.index, kind, e.model_id, e.owner.index, v(e.origin), v(e.velocity));
             if e.effects & EF_NODRAW != 0 {
+                bursts.push((e.ent.index, v(e.origin)));
                 continue;
             }
             self.projectile_entities.push(ProjectileEntity {
@@ -1252,21 +1255,26 @@ impl Runtime {
                 })
                 .collect();
             watch::mines(self, &laid);
-            let row = arms_stats::Row::plain(WeaponId::Satchel);
-            let satchels: Vec<_> = self
+            let (satchel, grenade) = (
+                arms_stats::Row::plain(WeaponId::Satchel),
+                arms_stats::Row::plain(WeaponId::HandGrenade),
+            );
+            let thrown: Vec<_> = self
                 .projectile_entities
                 .iter()
-                .filter(|p| p.kind == ProjectileKind::Satchel)
-                .map(|p| {
-                    let owner = self
-                        .launched
-                        .get(&p.index)
-                        .filter(|l| l.row == row)
-                        .map_or(p.owner, |l| l.owner);
-                    (p.index, owner, p.origin, p.velocity)
+                .filter_map(|p| {
+                    let launched = self.launched.get(&p.index);
+                    let what = match p.kind {
+                        ProjectileKind::Satchel => "satchel",
+                        ProjectileKind::Grenade if launched.is_some_and(|l| l.row == grenade) => "grenade",
+                        _ => return None,
+                    };
+                    let row = if what == "satchel" { satchel } else { grenade };
+                    let owner = launched.filter(|l| l.row == row).map_or(p.owner, |l| l.owner);
+                    Some((what, p.index, owner, p.origin, p.velocity))
                 })
                 .collect();
-            watch::satchels(self, &satchels);
+            watch::thrown(self, &thrown, &bursts);
         }
     }
 

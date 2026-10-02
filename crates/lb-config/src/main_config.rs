@@ -397,6 +397,8 @@ pub struct TricksConfig {
     pub gauss_boost: bool,
     /// Satchels thrown from a jump and set off in flight.
     pub satchel_jump: bool,
+    /// Hand grenades thrown from a jump (a long jump with the module) at an enemy far off or above.
+    pub grenade_jump: bool,
 }
 
 impl Default for TricksConfig {
@@ -406,6 +408,7 @@ impl Default for TricksConfig {
             gauss_jump: true,
             gauss_boost: true,
             satchel_jump: true,
+            grenade_jump: true,
         }
     }
 }

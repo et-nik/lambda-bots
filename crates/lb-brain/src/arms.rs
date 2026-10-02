@@ -2,11 +2,15 @@
 //! it (ten times a second, from what the bot believes), and dodging what it sees about to blow up.
 //!
 //! - **Throws:** three times a second at the nearest enemy in sight, or lost up to 3 s ago with its position still
-//!   tight: a grenade 300–1000 units away when a throw lands there and the blast spares the bot, a satchel at one in
+//!   tight: a grenade 300–1000 units away when a planned throw hurts it and the blast spares the bot, a satchel at one in
 //!   sight 350–550 away (800 with the long jump module) with a clear line to it, a snark at 150–800 likewise. A
 //!   grenade that fits is thrown almost always, a satchel or a snark more rarely (the chance per look is the kind's
 //!   base times the skill's `throw_rate`); a grenade rests the arm about a second, a satchel 3–6 s. With no gun but
 //!   the crowbar, throws are the weapon (yapb's grenade war).
+//! - **A grenade at an enemy** is planned to go off where the enemy will be ([`lb_combat::grenade`]): the flight and
+//!   the bounces the game gives it, cooked so it bursts on the tick it gets there. It goes as players throw it: on
+//!   the run at the enemy (or where one is expected) from 340 units, from a jump at one 500 or more away or above (skills
+//!   with tricks, as often as the style likes; from a long jump with the module), the bot backing off after it.
 //! - **A satchel at an enemy** goes as players throw it: on the run at the enemy (from a jump for skills with tricks,
 //!   as often as the style likes; from a long jump at one 550–800 away with the module), the bot backing off after
 //!   it, and set off as it comes by the enemy. Thrown from where the bot stands it would fly some 200 units and lie
@@ -39,6 +43,7 @@ use lb_combat::arms::throw::{Barrage, Kind, Thrower};
 use lb_combat::arms::{Hands, Request, Status};
 use lb_combat::ballistics;
 use lb_combat::fight::drops;
+use lb_combat::grenade::{self, Aim};
 use lb_combat::policy::XBOW_UNZOOM;
 use lb_core::dmath;
 use lb_core::math::view_angle_vectors;
@@ -61,13 +66,25 @@ use crate::trail::TrailPlan;
 
 /// Throw windows (horizontal distance).
 const GRENADE_BAND: [f32; 2] = [300.0, 1000.0];
+/// A grenade at an enemy this far away goes on the run, from this far from a jump (or at an enemy this far above).
+const GRENADE_RUN_MIN: f32 = 340.0;
+const GRENADE_JUMP_MIN: f32 = 500.0;
+const GRENADE_JUMP_ABOVE: f32 = 48.0;
+/// How fast where an enemy may be spreads while the grenade is out (units a second): in sight, and lost a while.
+const GRENADE_SPREAD: f32 = 110.0;
+const GRENADE_SPREAD_LOST: f32 = 130.0;
+/// A grenade is thrown only when its plan should do this much damage (it costs little: a bot carries up to ten).
+const GRENADE_WORTH: f32 = 10.0;
+/// After a grenade on the run the bot backs off from where it went this long, as players do.
+const GRENADE_BACK_OFF: f64 = 0.6;
+/// The bot runs at about this speed when it lets go on the run.
+const GRENADE_RUN_SPEED: f32 = 270.0;
 const SNARK_BAND: [f32; 2] = [200.0, 1000.0];
 const LOB_BAND: [f32; 2] = [300.0, 700.0];
 /// A throw's blast must land at least this far from the thrower.
 const SELF_CLEAR: f32 = 300.0;
-/// With nothing but throws, closer ones are worth it (the blast spares 250 units; a near grenade is the risk taken).
+/// With nothing but throws, closer ones are worth it (the plan still keeps the blast off the bot).
 const WAR_GRENADE_MIN: f32 = 220.0;
-const WAR_SELF_CLEAR: f32 = 280.0;
 /// Seconds before a quick throw leaves the hand (the game's least).
 const WAR_LEAD: f32 = 0.5;
 /// An MP5 grenade bursts on the first thing it touches and the bot moves on while it flies: it must land further off,
@@ -640,6 +657,18 @@ pub(crate) fn ahead(t: &EnemyTrack, now: SimTime, secs: f32) -> Vec3 {
 }
 
 /// The damage satchels lying at `charges`, `damage` each, would do together to a player at `p` (walls not reckoned).
+/// What a grenade at `t` is planned at: where it is and goes, how far off that may already be and how fast it
+/// spreads while the grenade is out.
+fn grenade_aim(t: &EnemyTrack, now: SimTime) -> Aim {
+    let seen = t.state == TrackState::Visible;
+    Aim {
+        pos: t.pos,
+        vel: if t.velocity_known(now) { t.vel } else { Vec3::ZERO },
+        sigma: t.sigma.min(THROW_TRACK_SIGMA),
+        spread: if seen { GRENADE_SPREAD } else { GRENADE_SPREAD_LOST },
+    }
+}
+
 fn satchel_damage(charges: &[Vec3], p: Vec3, damage: f32) -> f32 {
     let radius = blast_radius(damage);
     charges
@@ -1227,12 +1256,34 @@ impl BotBrain {
             Vec3::ZERO
         };
         let floor = t.pos + lead - Vec3::Z * 32.0;
+        let mut planned = None;
         let (kind, throw) = match way {
             Way::Grenade => {
-                let solved = ballistics::grenade(nav, body.eye, body.velocity, floor, body.gravity, body.dll, 2.4);
-                let clear = if war { WAR_SELF_CLEAR } else { SELF_CLEAR };
-                match solved {
-                    Some(s) if floor.distance(body.origin) >= clear => (Kind::Grenade, s),
+                // Planned to burst where the enemy will be; on the run, with the run in the throw.
+                let aim = grenade_aim(t, now);
+                let run = body.on_ground && body.waterlevel < 2 && d >= GRENADE_RUN_MIN;
+                let velocity = if run {
+                    (t.pos - body.origin).truncate().normalize_or_zero().extend(0.0) * GRENADE_RUN_SPEED
+                } else {
+                    body.velocity
+                };
+                let plan = grenade::plan(
+                    nav,
+                    body.eye,
+                    body.origin,
+                    velocity,
+                    &aim,
+                    body.gravity,
+                    body.dll,
+                    0.0,
+                    0.0,
+                    None,
+                );
+                match plan {
+                    Some(p) if p.damage >= GRENADE_WORTH => {
+                        planned = Some((aim, p, run));
+                        (Kind::Grenade, p.throw)
+                    }
                     _ => {
                         self.mind.arms.series = false;
                         return false;
@@ -1252,6 +1303,22 @@ impl BotBrain {
         };
         let target = if kind == Kind::Snark { t.pos } else { floor };
         let mut thrower = Thrower::new(kind, target, throw, now);
+        if let Some((aim, plan, run)) = planned {
+            thrower = thrower.planned(aim, plan);
+            if run {
+                // From a jump at an enemy far off or above, as often as the style likes; with the module a long jump.
+                let jump = ch.skill.tricks
+                    && body.tricks.grenade_jump
+                    && (d >= GRENADE_JUMP_MIN || above >= GRENADE_JUMP_ABOVE)
+                    && rng.combat.next_f32() < ch.tricks.grenade_jump;
+                let leap = jump && body.has_longjump && body.tricks.longjump && d >= GRENADE_JUMP_MIN;
+                thrower = match (jump, leap) {
+                    (true, true) => thrower.from_leap(),
+                    (true, false) => thrower.from_jump(),
+                    (false, _) => thrower.on_the_run(),
+                };
+            }
+        }
         if way == Way::Airburst {
             // As often as the style likes jumps.
             let jump = jumps && rng.combat.next_f32() < ch.tricks.satchel_jump;
@@ -1265,7 +1332,7 @@ impl BotBrain {
         if seen {
             thrower = thrower.quick();
         }
-        self.mind.arms.throw_aim = (way == Way::Airburst).then_some(t.who);
+        self.mind.arms.throw_aim = matches!(way, Way::Airburst | Way::Grenade).then_some(t.who);
         self.mind.arms.landed = 0;
         self.mind.arms.active = Some(Active::Throw(thrower));
         let rest = match kind {
@@ -1309,18 +1376,44 @@ impl BotBrain {
                 continue;
             }
             let off = Vec2::new(rng.combat.range_f32(-1.0, 1.0), rng.combat.range_f32(-1.0, 1.0)) * BLIND_SCATTER;
-            let floor = spot + off.extend(0.0) - Vec3::Z * 32.0;
-            if floor.distance(body.origin) < SELF_CLEAR {
+            let aim = Aim {
+                pos: spot + off.extend(0.0),
+                vel: Vec3::ZERO,
+                sigma: BLIND_SCATTER,
+                spread: GRENADE_SPREAD_LOST,
+            };
+            if aim.pos.distance(body.origin) < SELF_CLEAR {
                 continue;
             }
-            let Some(throw) = ballistics::grenade(nav, body.eye, body.velocity, floor, body.gravity, body.dll, 2.4)
-            else {
+            let run = body.on_ground && (aim.pos - body.origin).truncate().length() >= GRENADE_RUN_MIN;
+            let velocity = if run {
+                (aim.pos - body.origin).truncate().normalize_or_zero().extend(0.0) * GRENADE_RUN_SPEED
+            } else {
+                body.velocity
+            };
+            let Some(plan) = grenade::plan(
+                nav,
+                body.eye,
+                body.origin,
+                velocity,
+                &aim,
+                body.gravity,
+                body.dll,
+                0.0,
+                0.0,
+                None,
+            )
+            .filter(|p| p.damage >= GRENADE_WORTH) else {
                 continue;
             };
             self.mind.arms.throw_aim = None;
             self.mind.arms.landed = 0;
-            // Uncooked: it lies there a while for whoever comes, and a throw that came back leaves time to run.
-            self.mind.arms.active = Some(Active::Throw(Thrower::new(Kind::Grenade, floor, throw, now).quick()));
+            // Cooked to burst as it gets there: whoever comes through has no time to get away from it.
+            let mut thrower = Thrower::new(Kind::Grenade, plan.target, plan.throw, now).planned(aim, plan);
+            if run {
+                thrower = thrower.on_the_run();
+            }
+            self.mind.arms.active = Some(Active::Throw(thrower));
             self.mind.arms.series = ch.skill.throw_series && grenades > 1;
             self.mind.arms.stats.blind += 1;
             self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(GRENADE_REST[0], GRENADE_REST[1]));
@@ -1498,7 +1591,8 @@ impl BotBrain {
                 .any(|t| t.pos.distance(body.origin) < near);
             let status = match &mut active {
                 Active::Throw(t) => {
-                    // A satchel at an enemy in sight goes where the enemy is going, led by the satchel's flight.
+                    // A grenade's plan follows the enemy in sight; a satchel at an enemy in sight goes where the enemy
+                    // is going, led by the satchel's flight.
                     if let Some(e) = self
                         .mind
                         .arms
@@ -1506,12 +1600,16 @@ impl BotBrain {
                         .and_then(|k| self.beliefs.track(k))
                         .filter(|e| e.state == TrackState::Visible)
                     {
-                        let lead = if e.velocity_known(now) {
-                            e.vel.truncate().extend(0.0) * ((e.pos - body.origin).truncate().length() / SATCHEL_RUN)
+                        if t.kind == Kind::Grenade {
+                            t.retarget(grenade_aim(e, now));
                         } else {
-                            Vec3::ZERO
-                        };
-                        t.target = e.pos + lead - Vec3::Z * 32.0;
+                            let lead = if e.velocity_known(now) {
+                                e.vel.truncate().extend(0.0) * ((e.pos - body.origin).truncate().length() / SATCHEL_RUN)
+                            } else {
+                                Vec3::ZERO
+                            };
+                            t.target = e.pos + lead - Vec3::Z * 32.0;
+                        }
                     }
                     let status = t.update(&hands, nav);
                     // Each satchel of a pile is noted as it leaves the hand.
@@ -1869,11 +1967,47 @@ impl BotBrain {
     fn finished(&mut self, active: &Active, body: &Body, rng: &mut BotRng) {
         let now = body.now;
         let aim = self.mind.arms.throw_aim.take();
+        let enemy = aim
+            .and_then(|k| self.beliefs.track(k))
+            .map(|e| (e.pos, e.vel, e.state == TrackState::Visible, e.who.userid));
         let stats = &mut self.mind.arms.stats;
         match active {
             Active::Throw(t) => match t.kind {
                 Kind::Grenade => {
                     stats.grenades += 1;
+                    if let (Some(p), Some(goes_off)) = (t.plan(), t.goes_off()) {
+                        let (pos, vel, seen, userid) = enemy.unwrap_or((p.target, Vec3::ZERO, false, 0));
+                        tracing::info!(
+                            "grenade thrown {}{}: view {:.1} {:.1}, the pin out {:.2} s, to burst in {:.1} s at {:.0} {:.0} {:.0}, the enemy expected {:.0} off it at {:.0} {:.0} {:.0}, {:.0} damage expected; the enemy #{userid} at {:.0} {:.0} {:.0} vel {:.0} {:.0}{}",
+                            t.way(),
+                            if t.forced() { ", forced by the fuse" } else { "" },
+                            p.throw.pitch,
+                            p.throw.yaw,
+                            p.release_held,
+                            goes_off.since(now),
+                            p.burst.x,
+                            p.burst.y,
+                            p.burst.z,
+                            p.burst.distance(p.target),
+                            p.target.x,
+                            p.target.y,
+                            p.target.z,
+                            p.damage,
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            vel.x,
+                            vel.y,
+                            if seen { ", in sight" } else { "" }
+                        );
+                    }
+                    // Players back off at once after a grenade thrown on the run.
+                    if t.ran_at() {
+                        let away = (body.origin - t.target).truncate().normalize_or_zero();
+                        if away != Vec2::ZERO {
+                            self.mind.arms.dodge = Some((now + GRENADE_BACK_OFF, away));
+                        }
+                    }
                     // Its blast is kept away from until it goes off, seen or not, and the target is not closed in on.
                     if let Some(goes_off) = t.goes_off() {
                         self.explosives

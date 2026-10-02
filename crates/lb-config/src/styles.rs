@@ -58,7 +58,7 @@ pub struct StyleWeapons {
 }
 
 /// How readily the style takes tricks, as chances 0..1: long jumps along straight stretches of the way, long jumps
-/// at an enemy, gauss jumps on the way, satchels thrown from a jump.
+/// at an enemy, gauss jumps on the way, satchels and grenades thrown from a jump.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct StyleTricks {
@@ -70,6 +70,8 @@ pub struct StyleTricks {
     pub gauss_jump: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub satchel_jump: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grenade_jump: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -147,6 +149,7 @@ impl StyleFile {
             ("tricks.lj_attack", t.lj_attack),
             ("tricks.gauss_jump", t.gauss_jump),
             ("tricks.satchel_jump", t.satchel_jump),
+            ("tricks.grenade_jump", t.grenade_jump),
         ] {
             if v.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
                 return Err(bad(name, "must be a chance in 0..=1".into()));

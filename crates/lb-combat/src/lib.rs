@@ -7,6 +7,7 @@ pub mod arms;
 pub mod ballistics;
 pub mod fight;
 pub mod fire;
+pub mod grenade;
 pub mod policy;
 pub mod target;
 
