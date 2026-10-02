@@ -111,6 +111,10 @@ pub struct GameState {
     pub rules_verdict: Option<DllProfile>,
     /// The button a bot was seen to set its satchels off with in the game, and which bot; kept over map changes.
     pub satchel_checked: Option<(lb_game::mechanics::Attack, String)>,
+    /// How hard grenades leave the hand here, as the bots' own throws showed it (kept over map changes), and the
+    /// throws so far that looked classic and fast.
+    pub grenade_checked: Option<lb_game::dll::GrenadeSpeed>,
+    pub grenade_votes: (u32, u32),
     /// Respawn times the bots timed on this server (items, weapons, ammo), kept in `data/learned/respawn.json`.
     pub respawns: [lb_knowledge::Learned; 3],
 }
@@ -882,6 +886,9 @@ impl Runtime {
         if let Some((detonate, _)) = &self.game.satchel_checked {
             dll.set_satchel_detonate(*detonate);
         }
+        if let Some(speed) = self.game.grenade_checked {
+            dll.grenade = speed;
+        }
         if self.game.dll.kind != dll.kind || self.game.dll.detected != dll.detected {
             tracing::info!(
                 "weapon rules: {} ({})",
@@ -1309,6 +1316,9 @@ impl Runtime {
             .get(&index)
             .filter(|l| l.row == row && now.since(l.seen) <= f64::from(LAUNCHED_MEMORY))
             .map(|l| (l.owner, l.first));
+        if known.is_none() && row == Row::plain(WeaponId::HandGrenade) {
+            self.learn_grenade_speed(owner, velocity);
+        }
         self.launched.insert(
             index,
             Launched {
@@ -1436,6 +1446,69 @@ impl Runtime {
                     );
                 }
             }
+        }
+    }
+
+    /// A bot's grenade first seen, a moment after it left the hand: its speed off the bot's own velocity, at the view
+    /// pitch the bot let it go with, tells the classic throw from the 2023 update's. A few throws that agree set the
+    /// server's grenade speed for every bot, for the rest of the session; a throw that bounced at once, or one the
+    /// two rules throw alike, says nothing.
+    fn learn_grenade_speed(&mut self, owner: u16, velocity: Vec3) {
+        use lb_game::dll::GrenadeSpeed;
+        const FRESH: f64 = 0.2;
+        const APART: f32 = 80.0;
+        const SURE: u32 = 3;
+        let now = self.now;
+        let Some(slot) = self.player_slot(owner) else {
+            return;
+        };
+        let Some(bot) = self.bots.iter_mut().find(|b| b.id.slot == slot) else {
+            return;
+        };
+        let Some((at, pitch, thrower)) = bot.brain.mind.arms.grenade_launch.take() else {
+            return;
+        };
+        if now.since(at) > FRESH {
+            return;
+        }
+        let throw_pitch = if pitch < 0.0 {
+            -10.0 + pitch * (80.0 / 90.0)
+        } else {
+            -10.0 + pitch * (100.0 / 90.0)
+        };
+        let along = lb_core::dmath::cos(throw_pitch.to_radians());
+        let speed = |k: f32, cap: f32| ((90.0 - throw_pitch) * k).min(cap) * along;
+        let (classic, fast) = (speed(4.0, 500.0), speed(6.5, 1000.0));
+        let own = (velocity - thrower).truncate().length();
+        if fast - classic < APART || own > fast + APART || own < classic - APART {
+            return;
+        }
+        let votes = &mut self.game.grenade_votes;
+        if (own - classic).abs() < (own - fast).abs() {
+            votes.0 += 1;
+        } else {
+            votes.1 += 1;
+        }
+        let (c, f) = *votes;
+        let seen = if c >= SURE && c >= 3 * f {
+            GrenadeSpeed::Classic
+        } else if f >= SURE && f >= 3 * c {
+            GrenadeSpeed::Fast
+        } else {
+            return;
+        };
+        if self.game.grenade_checked != Some(seen) {
+            self.game.grenade_checked = Some(seen);
+            if self.game.dll.grenade != seen {
+                tracing::warn!(
+                    "grenades leave the hand here at the {} speed, not {}: switched for this session ({c} throws looked classic, {f} fast)",
+                    seen.as_str(),
+                    self.game.dll.grenade.as_str()
+                );
+            } else {
+                tracing::info!("grenade speed checked by the bots' throws: {}", seen.as_str());
+            }
+            self.game.dll.grenade = seen;
         }
     }
 

@@ -343,6 +343,7 @@ mod tests {
         kind: DllKind::Bugfixed,
         detected: true,
         satchel: lb_game::dll::SatchelButtons::PrimaryThrows,
+        grenade: lb_game::dll::GrenadeSpeed::Fast,
     };
 
     fn lands(t: &Throw, gravity: f32, target: Vec3) -> f32 {

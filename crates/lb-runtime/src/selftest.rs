@@ -369,6 +369,11 @@ impl SelfTest {
             } else {
                 kind.satchel_buttons()
             },
+            grenade: match classic_grenade {
+                Some(true) => lb_game::dll::GrenadeSpeed::Classic,
+                Some(false) => lb_game::dll::GrenadeSpeed::Fast,
+                None => kind.grenade_speed(),
+            },
         };
         if let Some(b) = self.detonated_with {
             dll.set_satchel_detonate(b);

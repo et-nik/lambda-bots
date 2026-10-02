@@ -175,6 +175,16 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "compat" => {
             let mut out: Vec<String> = rt.compat.to_yaml().lines().map(String::from).collect();
             out.push(format!("satchel_buttons: {}", rt.satchel_buttons()));
+            let (c, f) = rt.game.grenade_votes;
+            out.push(format!(
+                "grenade_speed: {} ({}; {c} of the bots' throws looked classic, {f} fast)",
+                rt.game.dll.grenade.as_str(),
+                if rt.game.grenade_checked.is_some() {
+                    "checked by the bots' throws"
+                } else {
+                    "not checked in the game yet"
+                }
+            ));
             out
         }
         "add" => add(rt, host, rest),

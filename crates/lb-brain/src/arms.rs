@@ -357,6 +357,9 @@ pub struct Arms {
     pub last_failure: Option<&'static str>,
     /// The button that set this bot's satchels off, for the server to learn its satchel buttons from.
     pub satchel_fact: Option<Attack>,
+    /// When the bot let its last grenade go, with the view pitch and its velocity then: what the grenade does as it
+    /// leaves tells the server's grenade speed.
+    pub grenade_launch: Option<(SimTime, f32, Vec3)>,
     /// The side the bot last turned to round a beam, kept until then.
     pub(crate) beam_side: Option<(SimTime, f32)>,
     /// The satchels out: whom they were thrown at and when they go off anyway.
@@ -1975,6 +1978,7 @@ impl BotBrain {
             Active::Throw(t) => match t.kind {
                 Kind::Grenade => {
                     stats.grenades += 1;
+                    self.mind.arms.grenade_launch = t.launch().map(|(pitch, velocity)| (now, pitch, velocity));
                     if let (Some(p), Some(goes_off)) = (t.plan(), t.goes_off()) {
                         let (pos, vel, seen, userid) = enemy.unwrap_or((p.target, Vec3::ZERO, false, 0));
                         tracing::info!(

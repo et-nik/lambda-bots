@@ -5,7 +5,9 @@
 //!   Valve's 2023 update and BugfixedHL-Rebased swapped that: the primary throws, the secondary sets them off (and in
 //!   the 2023 update does nothing with none out).
 //! - **Hand grenade speed.** `(90 − pitch′) × 4`, at most 500, in the classic SDK; `× 6.5`, at most 1000, since
-//!   the 2023 update and in BugfixedHL-Rebased.
+//!   the 2023 update and in BugfixedHL-Rebased. Builds of BugfixedHL-Rebased from before it took the update in
+//!   throw the classic way with its own satchel buttons, so the speed is a profile fact of its own: the bots tell it
+//!   from how fast their own grenades leave the hand.
 //!
 //! BugfixedHL-Rebased is told by its own cvars. Anything else is taken to throw grenades by the 2023 update, as
 //! current mods do (hlsdk-portable among them), and to work satchels the classic way, as yapb did; the config can
@@ -59,6 +61,33 @@ pub enum SatchelButtons {
     PrimaryThrows,
 }
 
+/// How hard the hand grenade is thrown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrenadeSpeed {
+    /// `(90 − pitch′) × 4`, at most 500: the classic SDK.
+    Classic,
+    /// `(90 − pitch′) × 6.5`, at most 1000: Valve's 2023 update.
+    Fast,
+}
+
+impl GrenadeSpeed {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GrenadeSpeed::Classic => "classic (×4, at most 500)",
+            GrenadeSpeed::Fast => "the 2023 update's (×6.5, at most 1000)",
+        }
+    }
+}
+
+impl DllKind {
+    pub fn grenade_speed(self) -> GrenadeSpeed {
+        match self {
+            DllKind::Classic => GrenadeSpeed::Classic,
+            DllKind::Bugfixed | DllKind::Valve25 => GrenadeSpeed::Fast,
+        }
+    }
+}
+
 /// How the server's DLL works the weapons that differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DllProfile {
@@ -66,6 +95,7 @@ pub struct DllProfile {
     /// Detected rather than named in the config.
     pub detected: bool,
     pub satchel: SatchelButtons,
+    pub grenade: GrenadeSpeed,
 }
 
 impl Default for DllProfile {
@@ -82,16 +112,19 @@ impl DllProfile {
                 kind,
                 detected: false,
                 satchel: kind.satchel_buttons(),
+                grenade: kind.grenade_speed(),
             },
             None if bugfixed_cvars => DllProfile {
                 kind: DllKind::Bugfixed,
                 detected: true,
                 satchel: SatchelButtons::PrimaryThrows,
+                grenade: GrenadeSpeed::Fast,
             },
             None => DllProfile {
                 kind: DllKind::Valve25,
                 detected: true,
                 satchel: SatchelButtons::SecondaryThrows,
+                grenade: GrenadeSpeed::Fast,
             },
         }
     }
@@ -111,9 +144,9 @@ impl DllProfile {
 
     /// Hand grenade throw speed per degree of the throw angle below straight up, and its cap.
     pub fn grenade_speed(self) -> (f32, f32) {
-        match self.kind {
-            DllKind::Bugfixed | DllKind::Valve25 => (6.5, 1000.0),
-            DllKind::Classic => (4.0, 500.0),
+        match self.grenade {
+            GrenadeSpeed::Fast => (6.5, 1000.0),
+            GrenadeSpeed::Classic => (4.0, 500.0),
         }
     }
 
@@ -129,6 +162,17 @@ impl DllProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_grenade_speed_is_a_fact_of_its_own() {
+        let mut bhl = DllProfile::resolve("auto", true);
+        assert_eq!(bhl.grenade_speed(), (6.5, 1000.0));
+        // An old BugfixedHL-Rebased: classic grenades, its own satchel buttons.
+        bhl.grenade = GrenadeSpeed::Classic;
+        assert_eq!(bhl.grenade_speed(), (4.0, 500.0));
+        assert_eq!(bhl.satchel_throw(), Attack::Primary);
+        assert_eq!(DllProfile::resolve("classic", false).grenade_speed(), (4.0, 500.0));
+    }
 
     #[test]
     fn detection_and_buttons() {

@@ -496,6 +496,13 @@ In a game, the bots check the satchel buttons as they use them, and what one bot
 - a throw press that does nothing is followed by the other button;
 - a throw with charges out, and a throw press that sets them off instead, show which button is which.
 
+The grenade speed is checked the same way, by the bots' own throws: a grenade first seen a moment after it left the
+hand is as fast off the bot's own velocity, at the view pitch it was let go with, as one rule or the other throws it.
+Three throws that agree (three times as many as the other way) set it for every bot, for the session; a throw the two
+rules throw alike, or one that bounced at once, does not count. Builds of BugfixedHL-Rebased from before it took the
+2023 update in throw the classic way with its own satchel buttons (seen on a GunGame server on 2026-10-02: the grenades
+left at two thirds of the planned speed and burst some 175 units short).
+
 What was found is kept over map changes; `lb compat` shows the buttons, where they come from and who checked them.
 
 ## Tricks

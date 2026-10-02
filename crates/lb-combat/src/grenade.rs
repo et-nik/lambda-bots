@@ -350,6 +350,8 @@ fn plan_with(
     let guess = (soonest - held) + (aim.pos - eye).truncate().length() / 800.0;
     let mut lead = aim.at(guess);
     let mut best: Option<Candidate> = None;
+    // The best of the coarse pass, kept should the fine pass around it find none.
+    let mut coarse: Option<Candidate> = None;
     let mut pitches: Vec<f32> = match near {
         Some(p) => (-3..=3).map(|i| p + i as f32 * FINE_STEP * 2.0).collect(),
         None => {
@@ -424,15 +426,15 @@ fn plan_with(
                 best = Some(c);
             }
         }
-        let b = best.as_ref()?;
         if pass == 0 {
+            let b = best.take()?;
             lead = aim.at(b.held - held + b.tick as f32 * THINK);
             let p = b.pitch;
             pitches = (-3..=3).map(|i| p + i as f32 * FINE_STEP).collect();
-            best = None;
+            coarse = Some(b);
         }
     }
-    best.map(|c| Plan {
+    best.or(coarse).map(|c| Plan {
         throw: Throw {
             pitch: c.pitch,
             yaw: c.yaw,

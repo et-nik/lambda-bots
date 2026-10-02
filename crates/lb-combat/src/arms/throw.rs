@@ -180,6 +180,8 @@ pub struct Thrower {
     burst: Option<(Vec3, SimTime)>,
     /// Let go only because the fuse was running out.
     forced: bool,
+    /// The view pitch and the bot's velocity as a grenade was let go.
+    launch: Option<(f32, Vec3)>,
     /// Where the satchels thrown so far should land.
     pub landings: Vec<Vec3>,
     /// The satchel button that throws here, once one did or the one the DLL profile names did nothing.
@@ -215,6 +217,7 @@ impl Thrower {
             planned: None,
             burst: None,
             forced: false,
+            launch: None,
             landings: Vec::new(),
             button: None,
             pressed_out: false,
@@ -322,6 +325,11 @@ impl Thrower {
                 dir,
                 speed: RUN_UP_SPEED,
             })
+    }
+
+    /// The view pitch and the bot's velocity as the grenade was let go: the game throws it with them.
+    pub fn launch(&self) -> Option<(f32, Vec3)> {
+        self.launch
     }
 
     /// How it is thrown: from a stand, on the run, from a jump or a long jump.
@@ -582,8 +590,16 @@ impl Thrower {
                 let go = held >= deadline || (go && fresh);
                 if go {
                     self.phase = Phase::Released { at: now };
+                    self.launch = Some((h.view.x, h.velocity));
                     if let Some(p) = &self.planned {
-                        self.burst = Some((p.plan.burst, now + f64::from(p.plan.throw.flight)));
+                        // Let go by the fuse on a plan gone stale: it bursts on the tick the fuse left gives it.
+                        let flight = if self.forced && p.fallback.is_none() {
+                            let fuse = (GRENADE_FUSE - held).max(0.0);
+                            ((fuse / grenade::THINK).ceil() + 1.0) * grenade::THINK
+                        } else {
+                            p.plan.throw.flight
+                        };
+                        self.burst = Some((p.plan.burst, now + f64::from(flight)));
                     }
                     return Status::Running(Request {
                         weapon: Some(hold(w)),
