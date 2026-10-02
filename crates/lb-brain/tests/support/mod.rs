@@ -193,6 +193,7 @@ pub fn body(now: SimTime, dt: f32, weapon: Option<WeaponId>) -> Body {
         armor: 0.0,
         has_longjump: false,
         on_ground: true,
+        ducked: false,
         on_ladder: false,
         underwater: false,
         waterlevel: 0,

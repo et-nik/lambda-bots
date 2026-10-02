@@ -83,6 +83,14 @@ pub struct Bot {
     pub carried: Option<[i32; 4]>,
     /// Looks for the bot seeming stuck (an enemy in front unseen, a target not fought, standing still).
     pub stall: crate::stall::StallWatch,
+    /// The GunGame level the bot's kit was last the tripmines on: the glock left with every mine out is still that
+    /// level's.
+    pub mines_level: Option<i32>,
+    /// `lb gg mines`: a GunGame level played on a server with none (the stand); when mines were last handed back, and
+    /// how many it carried and since when.
+    pub drill: Option<lb_game::gungame::Kit>,
+    pub drill_gave: SimTime,
+    pub drill_count: (i32, SimTime),
 }
 
 impl Bot {
@@ -132,6 +140,10 @@ impl Bot {
             zoomed_at: None,
             carried: None,
             stall: crate::stall::StallWatch::default(),
+            mines_level: None,
+            drill: None,
+            drill_gave: SimTime::ZERO,
+            drill_count: (0, SimTime::ZERO),
         }
     }
 

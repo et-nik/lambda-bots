@@ -1,8 +1,8 @@
 //! Fire control: pull the trigger when the view is on the target closely enough (yapb `focusEnemy`), the target is
 //! within the weapon's reach, and no blast would reach the shooter; semi-automatic weapons are clicked at a human
 //! cadence. The secondary attack is used where it pays: the glock's rapid fire when it lands more bullets a second
-//! than aimed single shots (up close), the hornet gun's darts up close, both shotgun barrels at a few steps (half the
-//! time, as yapb); the crossbow's scope is snapped on for single far shots (`arms::scope`).
+//! than aimed single shots (up close), the hornet gun's darts up close, both shotgun barrels up close (and half the
+//! time a little farther); the crossbow's scope is snapped on for single far shots (`arms::scope`).
 
 use lb_core::Vec3;
 use lb_core::math::view_angle_vectors;
@@ -92,12 +92,14 @@ pub struct Mode {
 /// Hornet darts this close, with at least `DARTS_HORNETS` hornets.
 const DARTS_UNDER: f32 = 250.0;
 const DARTS_HORNETS: i32 = 4;
-/// Both barrels between these distances.
-const DOUBLE_BAND: [f32; 2] = [32.0, 300.0];
+/// Both barrels always this close; farther, up to `DOUBLE_UNDER`, when rolled (`roll_double`).
+const DOUBLE_ALWAYS: f32 = 300.0;
+const DOUBLE_UNDER: f32 = 500.0;
 
-/// How to fire `a` at `distance`; `double` allows both shotgun barrels for this shot. `aim_sigma` is the bot's aim
-/// error there (units) and `click` its pause between single shots: the glock's rapid fire, held down at five shots a
-/// second in a cone ten times wider, is taken where it lands more bullets a second than the clicked aimed shots.
+/// How to fire `a` at `distance`; `double` allows both shotgun barrels a little farther than they are always fired
+/// (`DOUBLE_ALWAYS`). `aim_sigma` is the bot's aim error there (units) and `click` its pause between single shots:
+/// the glock's rapid fire, held down at five shots a second in a cone ten times wider, is taken where it lands more
+/// bullets a second than the clicked aimed shots.
 pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32, click: f32) -> Mode {
     let s = spec(a.id);
     let primary = Mode {
@@ -124,7 +126,7 @@ pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32, click: f32) 
             cycle,
         },
         AltFire::Double { cycle, .. }
-            if double && (DOUBLE_BAND[0]..=DOUBLE_BAND[1]).contains(&distance) && a.clip.is_some_and(|c| c >= 2) =>
+            if (distance <= DOUBLE_ALWAYS || double && distance <= DOUBLE_UNDER) && a.clip.is_some_and(|c| c >= 2) =>
         {
             Mode {
                 attack: Attack::Secondary,
@@ -136,7 +138,7 @@ pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32, click: f32) 
     }
 }
 
-/// Whether the shotgun's next shot uses both barrels: half the time, as yapb.
+/// Whether the shotgun's next shot beyond `DOUBLE_ALWAYS` uses both barrels: half the time.
 pub fn roll_double(rng: &mut Pcg32) -> bool {
     rng.next_f32() < 0.5
 }
@@ -217,8 +219,15 @@ mod tests {
             Attack::Primary,
             "one shell left"
         );
-        assert_eq!(mode(&shotgun(8), 150.0, false, 10.0, 0.75).attack, Attack::Primary);
-        assert_eq!(mode(&shotgun(8), 500.0, true, 10.0, 0.75).attack, Attack::Primary);
+        assert_eq!(
+            mode(&shotgun(8), 150.0, false, 10.0, 0.75).attack,
+            Attack::Secondary,
+            "always up close"
+        );
+        assert_eq!(mode(&shotgun(8), 20.0, false, 10.0, 0.75).attack, Attack::Secondary);
+        assert_eq!(mode(&shotgun(8), 400.0, true, 10.0, 0.75).attack, Attack::Secondary);
+        assert_eq!(mode(&shotgun(8), 400.0, false, 10.0, 0.75).attack, Attack::Primary);
+        assert_eq!(mode(&shotgun(8), 700.0, true, 10.0, 0.75).attack, Attack::Primary);
         assert!(
             !zoom_wanted(WeaponId::Crossbow, Some(900.0), false),
             "the scope protocol puts it on"

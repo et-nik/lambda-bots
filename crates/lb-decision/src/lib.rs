@@ -12,7 +12,9 @@
 //!
 //! GunGame (`Situation::gungame`) changes a few: weapons and ammo are not picked up (the plugin blocks it), a bot
 //! with the crowbar alone (the last level, the warmup) hunts the enemies it lost, and on the tripmine level, where
-//! nothing hurts a player but the mines, it lays them rather than engaging and gets away from enemies close by.
+//! nothing hurts a player but the mines, it lays them rather than engaging (trails mostly, a mine on a wall close by
+//! now and then, with enemies in sight further off) and gets away from enemies close by, unless they come at a trail it
+//! watches.
 
 #![forbid(unsafe_code)]
 
@@ -32,12 +34,14 @@ use lb_styles::GoalAffinity;
 use smallvec::SmallVec;
 
 /// A trap to lay: a tripmine on one of the map's mine spots, a pile of satchels at the chokepoint an ambush spot
-/// watches, or a satchel or two where an enemy is expected (`Situation::lure`), watched from out of their blast.
+/// watches, a satchel or two where an enemy is expected (`Situation::lure`), watched from out of their blast, or a
+/// trail of mines dropped on the run and watched from where their blast wounds but does not kill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
     Mine(u16),
     Satchels(u16),
     Loose,
+    Trail,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -118,8 +122,9 @@ pub struct Situation<'a> {
     pub trap_ready: bool,
     /// The trap followed now is under way: its mine being laid, or its satchels thrown and watched.
     pub trap_under_way: bool,
-    /// Mines the bot knows of, its own and seen ones: no trap next to one.
+    /// Mines the bot knows of, its own and seen ones: no trap next to one; and how many of them are its own.
     pub mines: &'a [Vec3],
+    pub own_mines: usize,
     /// Its own satchels lie somewhere.
     pub charges_out: bool,
     /// Where an enemy is expected, for satchels to wait for it by.
@@ -214,11 +219,24 @@ const LURE_WEIGHT: f32 = 0.45;
 const LURE_RANGE: f32 = 1200.0;
 /// A GunGame bot with only the crowbar hunts a lost enemy with at least this weight (yapb's knife level desire 70).
 const KNIFE_HUNT: f32 = 0.7;
-/// On the tripmine level: enemies in sight this close are got away from, with at least this weight; mine spots are
-/// liked this much (a balanced trapper's is 1), and one is laid again this soon after the last.
+/// On the tripmine level trails are all the bot does, one after another, nothing else taken up meanwhile (a player
+/// does so): one weighs this, and a bot that cannot lay one gets away from enemies in sight this close, or seen there
+/// this recently (the bot running from one has it behind), with at least this weight.
+const MINES_TRAIL: f32 = 0.9;
 const MINES_EVADE: f32 = 700.0;
+const MINES_EVADE_LINGER: f64 = 2.0;
 const MINES_RETREAT: f32 = 0.6;
-const MINES_TRAP: f32 = 1.5;
+/// On the tripmine level sounds are gone to see about this much less.
+const MINES_INVESTIGATE: f32 = 0.4;
+/// A trail takes this many mines carried at least: on the tripmine level (fewer, and an old trail of the bot's own is
+/// set off first to get its mines back), and elsewhere.
+const MINES_TRAIL_MINES: i32 = 3;
+const TRAIL_MINES: i32 = 4;
+/// Out of GunGame a trail's weight is this times the style's liking for traps; it is held this long once chosen.
+const TRAIL_LIKE: f32 = 0.45;
+const TRAIL_HOLD: f32 = 25.0;
+/// Guns that set a mine off.
+const MINE_GUNS: [WeaponId; 4] = [WeaponId::Python, WeaponId::Glock, WeaponId::Mp5, WeaponId::Gauss];
 /// Weapons to hold a spot with: long sightlines, close by a chokepoint.
 const LONG_GUNS: [WeaponId; 4] = [WeaponId::Crossbow, WeaponId::Python, WeaponId::Gauss, WeaponId::Rpg];
 const CLOSE_GUNS: [WeaponId; 4] = [WeaponId::Shotgun, WeaponId::Mp5, WeaponId::Egon, WeaponId::Gauss];
@@ -358,7 +376,11 @@ fn investigations(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
         {
             continue;
         }
-        let w = 0.6 * (0.3 + h.strength) * (1.0 - age / life) * (0.5 + aggr) * s.affinity.investigate;
+        let mut w = 0.6 * (0.3 + h.strength) * (1.0 - age / life) * (0.5 + aggr) * s.affinity.investigate;
+        // On the tripmine level a sound is where an enemy is, with nothing to fight it with: mines are laid instead.
+        if s.kit() == Some(Kit::Mines) {
+            w *= MINES_INVESTIGATE;
+        }
         if w < INVESTIGATE_THRESHOLD {
             continue;
         }
@@ -383,7 +405,8 @@ fn investigations(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
 
 fn camps(s: &Situation<'_>, out: &mut Vec<Goal>) {
     let Some(map) = s.map else { return };
-    if !s.camp_ready || !s.calm(CAMP_CALM) || s.health < CAMP_HEALTH {
+    // On the tripmine level the glock hurts nobody: no spot is held with it.
+    if !s.camp_ready || !s.calm(CAMP_CALM) || s.health < CAMP_HEALTH || s.kit() == Some(Kit::Mines) {
         return;
     }
     let suit = |kind: CampKind| match kind {
@@ -474,30 +497,37 @@ fn controls(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
 
 fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     let Some(map) = s.map else { return };
+    let mines_level = s.kit() == Some(Kit::Mines);
     // Under way, the trap goes on until it is over, its satchels out and its rest begun: only a higher rank takes
-    // over.
+    // over; on the tripmine level nothing does.
     if let Some(GoalKind::PlantTrap(trap)) = current
         && s.trap_under_way
     {
         out.push(Goal {
             kind: GoalKind::PlantTrap(trap),
-            rank: 1,
+            rank: if mines_level { 3 } else { 1 },
             weight: 1.0,
             hold: 0.0,
         });
         return;
     }
-    // On the tripmine level mines are the only weapon: laid whenever no enemy is in sight.
-    let mines_level = s.kit() == Some(Kit::Mines);
-    let ready = if mines_level {
-        s.beliefs.visible_enemies().next().is_none()
-    } else {
-        s.calm(TRAP_CALM) && s.affinity.trap > 0.0
-    };
-    if !s.trap_ready || !ready {
+    // On the tripmine level mines are the only weapon: one trail after another, enemies about or not.
+    if mines_level {
+        let can = s.carried(WeaponId::Tripmine) >= MINES_TRAIL_MINES || s.own_mines > 0;
+        if s.trap_ready && can && s.armed_with(&MINE_GUNS) {
+            out.push(Goal {
+                kind: GoalKind::PlantTrap(Trap::Trail),
+                rank: 1,
+                weight: MINES_TRAIL,
+                hold: TRAIL_HOLD,
+            });
+        }
         return;
     }
-    let like = if mines_level { MINES_TRAP } else { s.affinity.trap };
+    if !(s.trap_ready && s.calm(TRAP_CALM) && s.affinity.trap > 0.0) {
+        return;
+    }
+    let like = s.affinity.trap;
     if s.carried(WeaponId::Satchel) >= 1
         && !s.charges_out
         && let Some(at) = s.lure.filter(|p| p.distance(s.origin) <= LURE_RANGE)
@@ -541,6 +571,17 @@ fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
             });
         }
     }
+    if s.carried(WeaponId::Tripmine) >= TRAIL_MINES && s.armed_with(&MINE_GUNS) {
+        let w = TRAIL_LIKE * s.affinity.trap;
+        if w >= TRAP_THRESHOLD {
+            out.push(Goal {
+                kind: GoalKind::PlantTrap(Trap::Trail),
+                rank: 1,
+                weight: w.min(1.0),
+                hold: TRAIL_HOLD,
+            });
+        }
+    }
     if s.carried(WeaponId::Satchel) >= 2 && !s.charges_out {
         let best = map
             .camp_spots()
@@ -570,17 +611,21 @@ fn traps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     }
 }
 
+/// On the tripmine level, an enemy in sight within `range`, or seen there a moment ago.
+fn mines_threat(s: &Situation<'_>, range: f32) -> bool {
+    s.beliefs.enemies().any(|t| {
+        (t.state == TrackState::Visible || s.now.since(t.last_seen) <= MINES_EVADE_LINGER)
+            && t.pos.distance(s.origin) < range
+    })
+}
+
 /// All goal candidates in this situation, `current` the goal followed now.
 pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     out.clear();
     let aggr = s.aggression.clamp(0.0, 1.0);
     let mines_level = s.kit() == Some(Kit::Mines);
     let mut retreat = retreat_weight(s);
-    if mines_level
-        && s.beliefs
-            .visible_enemies()
-            .any(|t| t.pos.distance(s.origin) < MINES_EVADE)
-    {
+    if mines_level && mines_threat(s, MINES_EVADE) {
         retreat = retreat.max(MINES_RETREAT);
     }
     if retreat >= RETREAT_THRESHOLD {
@@ -695,6 +740,10 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
     controls(s, current, out);
     camps(s, out);
     traps(s, current, out);
+    // On the tripmine level a trail is the way away from an enemy too.
+    if mines_level && out.iter().any(|g| g.kind == GoalKind::PlantTrap(Trap::Trail)) {
+        out.retain(|g| g.kind != GoalKind::Retreat);
+    }
     out.push(Goal {
         kind: GoalKind::Roam,
         rank: 0,
@@ -909,6 +958,7 @@ mod tests {
             trap_ready: true,
             trap_under_way: false,
             mines: &[],
+            own_mines: 0,
             charges_out: false,
             lure: None,
             gungame: None,
@@ -1067,6 +1117,15 @@ mod tests {
         assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::Retreat);
         s.gungame = gungame(900, &[WeaponId::Rpg]);
         assert_eq!(Decider::default().decide(&s, &mut rng).kind, GoalKind::Engage(key));
+        // Running from it, the bot has it behind: still got away from a moment after, not turned back to.
+        for (t, away) in [(1.5, true), (3.0, false)] {
+            let mut b = b.clone();
+            b.update(SimTime(t), &p);
+            let mut s = situation(t, &b, None, &KIT, 100.0, Some(key), &none);
+            s.gungame = gungame(900, &[WeaponId::Tripmine, WeaponId::Glock]);
+            let g = Decider::default().decide(&s, &mut rng);
+            assert_eq!(g.kind == GoalKind::Retreat, away, "{t} s after: {g:?}");
+        }
     }
 
     #[test]
@@ -1298,6 +1357,207 @@ mod tests {
             lure,
             "nowhere an enemy is expected"
         );
+    }
+
+    /// A map with one busy wall for a tripmine 300 units away and one ambush spot.
+    struct MineWall([lb_nav_api::MineSpot; 1], [lb_nav_api::CampSpot; 1]);
+
+    impl MineWall {
+        fn new() -> MineWall {
+            MineWall(
+                [lb_nav_api::MineSpot {
+                    node: 0,
+                    stand: Vec3::new(300.0, 0.0, 0.0),
+                    wall: Vec3::new(300.0, 60.0, -16.0),
+                    normal: Vec3::NEG_Y,
+                    beam_end: Vec3::new(300.0, -60.0, -16.0),
+                    flow: 0.8,
+                    corner: false,
+                }],
+                [lb_nav_api::CampSpot {
+                    node: 0,
+                    pos: Vec3::new(200.0, 0.0, 0.0),
+                    kind: CampKind::Ambush,
+                    watch: [0.0, 90.0],
+                    pitch: 0.0,
+                    range: 400.0,
+                    score: 1.0,
+                    guards: None,
+                }],
+            )
+        }
+    }
+
+    impl MapView for MineWall {
+        fn node_count(&self) -> usize {
+            1
+        }
+        fn node_origin(&self, _n: lb_nav_api::NodeId) -> Vec3 {
+            self.0[0].stand
+        }
+        fn nearest_node(&self, _p: Vec3, _max: f32) -> Option<lb_nav_api::NodeId> {
+            Some(0)
+        }
+        fn for_each_link(&self, _n: lb_nav_api::NodeId, _f: &mut dyn FnMut(lb_nav_api::NodeId, f32)) {}
+        fn visible(&self, _a: lb_nav_api::NodeId, _b: lb_nav_api::NodeId) -> bool {
+            false
+        }
+        fn for_each_visible(&self, _n: lb_nav_api::NodeId, _f: &mut dyn FnMut(lb_nav_api::NodeId)) {}
+        fn flow(&self, _n: lb_nav_api::NodeId) -> f32 {
+            0.8
+        }
+        fn exposure(&self, _n: lb_nav_api::NodeId) -> f32 {
+            0.0
+        }
+        fn transit(&self, _n: lb_nav_api::NodeId) -> bool {
+            false
+        }
+        fn danger(&self, _n: lb_nav_api::NodeId) -> f32 {
+            0.0
+        }
+        fn danger_from(&self, _n: lb_nav_api::NodeId) -> Option<lb_nav_api::NodeId> {
+            None
+        }
+        fn camp_spots(&self) -> &[lb_nav_api::CampSpot] {
+            &self.1
+        }
+        fn mine_spots(&self) -> &[lb_nav_api::MineSpot] {
+            &self.0
+        }
+        fn chokepoints(&self) -> &[lb_nav_api::NodeId] {
+            &[]
+        }
+    }
+
+    const MINES_KIT: [Armed; 2] = [
+        Armed {
+            id: WeaponId::Tripmine,
+            clip: None,
+            reserve: Some(10),
+            reserve2: None,
+        },
+        Armed {
+            id: WeaponId::Glock,
+            clip: Some(17),
+            reserve: Some(68),
+            reserve2: None,
+        },
+    ];
+
+    #[test]
+    fn on_the_tripmine_level_one_trail_follows_another_enemies_about_or_not() {
+        let map = MineWall::new();
+        let calm = Beliefs::default();
+        let none = |_| 0.0;
+        let mut s = situation(30.0, &calm, None, &MINES_KIT, 100.0, None, &none);
+        s.map = Some(&map);
+        s.gungame = gungame(700, &[WeaponId::Tripmine, WeaponId::Glock]);
+        let mut d = Decider::default();
+        assert_eq!(
+            d.decide(&s, &mut Pcg32::new(1, 1)).kind,
+            GoalKind::PlantTrap(Trap::Trail)
+        );
+        // No mine on a wall, no spot held with the glock (which hurts nobody there).
+        assert!(
+            !d.last
+                .iter()
+                .any(|g| matches!(g.kind, GoalKind::Camp(_) | GoalKind::PlantTrap(Trap::Mine(_)))),
+            "{:?}",
+            d.last
+        );
+        let p = BeliefParams {
+            track_forget: 8.0,
+            maxspeed: 300.0,
+        };
+        let few = [
+            Armed {
+                id: WeaponId::Tripmine,
+                clip: None,
+                reserve: Some(1),
+                reserve2: None,
+            },
+            MINES_KIT[1],
+        ];
+        for x in [900.0, 300.0] {
+            let mut b = Beliefs::default();
+            b.on_sighting(&sighting(30.0, Vec3::new(x, 0.0, 0.0)));
+            b.update(SimTime(30.0), &p);
+            let key = PlayerKey { slot: 3, userid: 30 };
+            let mut s = situation(30.0, &b, None, &MINES_KIT, 100.0, Some(key), &none);
+            s.map = Some(&map);
+            s.gungame = gungame(700, &[WeaponId::Tripmine, WeaponId::Glock]);
+            let pick = |s: &Situation<'_>| Decider::default().decide(s, &mut Pcg32::new(3, 3)).kind;
+            // A trail is the way away from it too.
+            assert_eq!(pick(&s), GoalKind::PlantTrap(Trap::Trail), "enemy {x} away");
+            // One mine and none of its own lying about: no trail, away from an enemy close by.
+            s.weapons = &few;
+            assert_eq!(pick(&s) == GoalKind::Retreat, x < 700.0, "enemy {x} away, one mine");
+            // Its own lying about: an old trail is set off to get them back.
+            s.own_mines = 3;
+            assert_eq!(
+                pick(&s),
+                GoalKind::PlantTrap(Trap::Trail),
+                "enemy {x} away, its mines out"
+            );
+        }
+        // Under way, nothing takes over, an enemy close by or not.
+        let mut b = Beliefs::default();
+        b.on_sighting(&sighting(30.0, Vec3::new(200.0, 0.0, 0.0)));
+        b.update(SimTime(30.0), &p);
+        let key = PlayerKey { slot: 3, userid: 30 };
+        let mut s = situation(30.0, &b, None, &MINES_KIT, 20.0, Some(key), &none);
+        s.map = Some(&map);
+        s.gungame = gungame(700, &[WeaponId::Tripmine, WeaponId::Glock]);
+        let mut d = Decider::default();
+        assert_eq!(
+            d.decide(&s, &mut Pcg32::new(3, 3)).kind,
+            GoalKind::PlantTrap(Trap::Trail)
+        );
+        s.trap_under_way = true;
+        s.trap_ready = false;
+        let g = d.decide(&s, &mut Pcg32::new(3, 3));
+        assert_eq!(g.kind, GoalKind::PlantTrap(Trap::Trail), "{:?}", d.last);
+        assert_eq!(d.last.len(), 2, "the trail and roaming: {:?}", d.last);
+    }
+
+    #[test]
+    fn out_of_gungame_a_trail_takes_mines_and_a_gun_and_suits_a_trapper() {
+        let map = MineWall::new();
+        let calm = Beliefs::default();
+        let none = |_| 0.0;
+        let trail = |kit: &[Armed], trap: f32| {
+            let mut s = situation(30.0, &calm, None, kit, 100.0, None, &none);
+            s.map = Some(&map);
+            s.affinity.trap = trap;
+            let mut d = Decider::default();
+            d.decide(&s, &mut Pcg32::new(5, 5));
+            d.last
+                .iter()
+                .find(|g| g.kind == GoalKind::PlantTrap(Trap::Trail))
+                .map(|g| g.weight)
+        };
+        let with = |mines: i32, glock: i32| {
+            [
+                KIT[0],
+                Armed {
+                    id: WeaponId::Glock,
+                    clip: Some(glock),
+                    reserve: Some(glock),
+                    reserve2: None,
+                },
+                Armed {
+                    id: WeaponId::Tripmine,
+                    clip: None,
+                    reserve: Some(mines),
+                    reserve2: None,
+                },
+            ]
+        };
+        let balanced = trail(&with(5, 17), 0.4).expect("a balanced bot with five mines");
+        let trapper = trail(&with(5, 17), 2.0).expect("a trapper");
+        assert!(trapper > balanced, "{trapper} {balanced}");
+        assert_eq!(trail(&with(3, 17), 2.0), None, "three mines are not a trail");
+        assert_eq!(trail(&with(5, 0), 2.0), None, "nothing to set them off with");
     }
 
     #[test]

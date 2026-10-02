@@ -35,8 +35,8 @@ const HELP: &[(&str, &str)] = &[
         "the obstacle course: a bot carries out special links (lift, jump, drop, ladder, door, ...)",
     ),
     (
-        "map [spots|mines|danger]",
-        "the map as bots know it: chokepoints, spots to hold, tripmine spots, where bots get hurt",
+        "map [spots|mines|lanes|danger]",
+        "the map as bots know it: chokepoints, spots to hold, tripmine spots, lanes for trails, where bots get hurt",
     ),
     (
         "vision [name|#userid]",
@@ -54,6 +54,14 @@ const HELP: &[(&str, &str)] = &[
     (
         "gg",
         "GunGame as the bots see it: every player's level from the scoreboard, the leader, what each bot's level gave it",
+    ),
+    (
+        "watch [name|#userid] [off] | watch off",
+        "write what a player does to the log: moves, view and weapon 20 times a second, shots, mines, the room around",
+    ),
+    (
+        "gg mines <name|#userid|all> [off] | mines off",
+        "bots play GunGame's tripmine level on a server with no GunGame: mines handed back as they go (needs sv_cheats 1)",
     ),
     (
         "weapons [all|melee|<weapon>...] [give]",
@@ -132,7 +140,10 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "brain" => brain(rt, rest),
         "profile" => profile(rt, rest),
         "status" => status(rt),
-        "gg" => gungame(rt),
+        "gg" => match rest {
+            ["mines", args @ ..] => gungame_mines(rt, host, args),
+            _ => gungame(rt),
+        },
         "weapons" => weapons(rt, rest),
         "items" => items(rt, rest),
         "selftest" => selftest(rt, host, rest),
@@ -172,6 +183,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "do" => crate::orders::command(rt, host, rest),
         "debug" => debug(rt, host, rest),
         "record" => record(rt, rest),
+        "watch" => watch(rt, rest),
         other => vec![format!("lb: unknown command `{other}`, see `lb help`")],
     }
 }
@@ -301,10 +313,20 @@ fn gungame_text(rt: &Runtime, board: &lb_game::gungame::Board, b: &crate::manage
 
 fn gungame(rt: &Runtime) -> Vec<String> {
     let Some(board) = rt.gungame_board() else {
-        return vec![format!(
+        let drilled: Vec<&str> = rt
+            .bots
+            .iter()
+            .filter(|b| b.drill.is_some())
+            .map(|b| b.persona.name.as_str())
+            .collect();
+        let mut out = vec![format!(
             "not a GunGame match (mode {:?}); lb_gungame auto|on|off",
             rt.game.mode
         )];
+        if !drilled.is_empty() {
+            out.push(format!("  on the tripmine level (emulated): {}", drilled.join(", ")));
+        }
+        return out;
     };
     let name = |slot: u8| rt.clients.get(slot).map(|c| c.name.clone()).unwrap_or_default();
     let mut out = vec![format!(
@@ -340,6 +362,108 @@ fn gungame(rt: &Runtime) -> Vec<String> {
         ));
     }
     out
+}
+
+/// `lb gg mines`: bots play GunGame's tripmine level on a server with no GunGame (the stand): tripmines and a glock
+/// only, the mines handed back as they go off, the way the plugin does.
+fn gungame_mines(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
+    let (who, on) = match args {
+        [] => return vec!["usage: lb gg mines <name|#userid|all> [off] | lb gg mines off".into()],
+        ["off"] => ("all".to_string(), false),
+        [name @ .., "off"] => (name.join(" "), false),
+        name => (name.join(" "), true),
+    };
+    let bots = find_bots(rt, Some(&who));
+    if bots.is_empty() {
+        return vec![format!("no bot `{who}`")];
+    }
+    if on {
+        if rt.gungame_board().is_some() {
+            return vec!["a GunGame match is on: its levels are the plugin's".into()];
+        }
+        if !crate::orders::cheats(rt, host) {
+            return vec![crate::orders::CHEATS_OFF.into()];
+        }
+    }
+    for &i in &bots {
+        rt.bots[i].drill = on.then_some(lb_game::gungame::Kit::Mines);
+    }
+    let names: Vec<&str> = bots.iter().map(|&i| rt.bots[i].persona.name.as_str()).collect();
+    vec![format!(
+        "{}: {}",
+        names.join(", "),
+        if on {
+            "the tripmine level: mines and a glock, the mines handed back as they go off"
+        } else {
+            "back to the game's own weapons"
+        }
+    )]
+}
+
+/// `lb watch`: a player's moves, view, weapon, shots and mines go to the log (to study how people play).
+fn watch(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
+    let name = |rt: &Runtime, slot: u8| rt.clients.get(slot).map(|c| c.name.clone()).unwrap_or_default();
+    let (who, on) = match args {
+        [] => {
+            if rt.watched.is_empty() {
+                return vec!["nobody is watched".into()];
+            }
+            let names: Vec<String> = rt
+                .watched
+                .iter()
+                .map(|w| format!("{} (#{})", name(rt, w.slot), w.userid))
+                .collect();
+            return vec![format!("watched: {}", names.join(", "))];
+        }
+        ["off"] => {
+            rt.watched.clear();
+            return vec!["nobody is watched now".into()];
+        }
+        [name @ .., "off"] => (name.join(" "), false),
+        name => (name.join(" "), true),
+    };
+    let who = who.as_str();
+    let players: Vec<(u8, i32)> = rt
+        .clients
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.connected)
+        .map(|(slot, c)| (slot as u8, c.userid))
+        .collect();
+    let exact: Vec<(u8, i32)> = players
+        .iter()
+        .copied()
+        .filter(|&(slot, userid)| {
+            who.strip_prefix('#').and_then(|u| u.parse().ok()) == Some(userid)
+                || name(rt, slot).eq_ignore_ascii_case(who)
+        })
+        .collect();
+    let found = if exact.is_empty() {
+        let low = who.to_lowercase();
+        players
+            .into_iter()
+            .filter(|&(slot, _)| name(rt, slot).to_lowercase().contains(&low))
+            .collect()
+    } else {
+        exact
+    };
+    let [(slot, userid)] = found[..] else {
+        return vec![format!("`{who}`: {} players match", found.len())];
+    };
+    rt.watched.retain(|w| w.slot != slot);
+    if on {
+        rt.watched.push(crate::watch::Watched::new(slot, userid));
+    }
+    vec![format!(
+        "{} (#{userid}): {}",
+        name(rt, slot),
+        if on {
+            "watched, see `watch #` lines in the log"
+        } else {
+            "no longer watched"
+        }
+    )]
 }
 
 fn perf(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
@@ -795,6 +919,7 @@ fn goal_text(rt: &Runtime, b: &crate::manager::Bot, kind: lb_decision::GoalKind)
             lb_decision::Trap::Mine(i) => format!("trap: tripmine at spot {i}"),
             lb_decision::Trap::Satchels(i) => format!("trap: satchels from spot {i}"),
             lb_decision::Trap::Loose => "trap: satchels where an enemy is expected".into(),
+            lb_decision::Trap::Trail => "trap: a trail of mines".into(),
         },
         k => k.as_str().to_string(),
     }
@@ -807,13 +932,14 @@ fn map_knowledge(rt: &Runtime, args: &[&str]) -> Vec<String> {
     let at = |p: lb_core::Vec3| format!("{:.0} {:.0} {:.0}", p.x, p.y, p.z);
     let n = t.origins.len();
     let mut out = vec![format!(
-        "{n} places, {} pairs in sight of each other ({:.1}%), {} chokepoints, {} spots to hold, {} tripmine spots; \
-         worked out in {} ms",
+        "{n} places, {} pairs in sight of each other ({:.1}%), {} chokepoints, {} spots to hold, {} tripmine spots, \
+         {} lanes for tripmine trails; worked out in {} ms",
         t.stats.pairs,
         200.0 * t.stats.pairs as f64 / (n * n.saturating_sub(1)).max(1) as f64,
         t.chokes.len(),
         t.camps.len(),
         t.mines.len(),
+        t.lanes.len(),
         t.stats.millis
     )];
     let x = rt.experience.as_ref();
@@ -845,6 +971,19 @@ fn map_knowledge(rt: &Runtime, args: &[&str]) -> Vec<String> {
                 ));
             }
         }
+        Some("lanes") => {
+            for (i, l) in t.lanes.iter().enumerate() {
+                out.push(format!(
+                    "  {i}: from {} toward {:.0}°, {:.0} u, room {:.0} left {:.0} right, flow {:.2}",
+                    at(l.start),
+                    lb_core::dmath::atan2(l.dir.y, l.dir.x).to_degrees(),
+                    l.length,
+                    l.room[0],
+                    l.room[1],
+                    l.flow
+                ));
+            }
+        }
         Some("danger") => match x {
             Some(x) => {
                 for (node, d) in x.worst(15) {
@@ -866,7 +1005,7 @@ fn map_knowledge(rt: &Runtime, args: &[&str]) -> Vec<String> {
         _ => {
             let learned = x.map_or(0, |x| x.worst(usize::MAX).len());
             out.push(format!(
-                "experience: bots got hurt at {learned} places{}; `lb map spots|mines|danger` for the lists",
+                "experience: bots got hurt at {learned} places{}; `lb map spots|mines|lanes|danger` for the lists",
                 if x.is_some_and(|x| x.changed) {
                     " (not saved yet)"
                 } else {
@@ -920,6 +1059,26 @@ fn task_text(t: &lb_brain::goals::Task, now: lb_core::time::SimTime) -> String {
             (Some(_), None) => format!("satchels thrown at {}", at(*spot)),
             (None, None) => format!("on the way to throw satchels at {}", at(*spot)),
         },
+        Task::Trail(t) => {
+            use lb_brain::trail::TrailPhase;
+            let way = lb_core::dmath::atan2(t.dir.y, t.dir.x).to_degrees();
+            match (t.phase, t.until) {
+                (TrailPhase::Watch, Some(u)) if now < u => {
+                    format!(
+                        "watching the trail from {} {:.1} s more",
+                        at(t.stand.unwrap_or_default()),
+                        u.since(now)
+                    )
+                }
+                (TrailPhase::Watch, _) => "the watch is over: setting it off".into(),
+                (TrailPhase::Off, _) => match t.stand {
+                    Some(w) => format!("on the way to watch the trail from {}", at(w)),
+                    None => "running on past the trail".into(),
+                },
+                (TrailPhase::Run, _) => format!("laying a trail along its lane toward {way:.0}°"),
+                (TrailPhase::Approach, _) => format!("going to a lane at {} toward {way:.0}°", at(t.start)),
+            }
+        }
     }
 }
 
@@ -1142,6 +1301,31 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         if !st.satchel_offs.is_empty() {
             let e: Vec<String> = st.satchel_offs.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
             out.push(format!("  satchels set off: {}", e.join("; ")));
+        }
+        if st.trails > 0 || arms.trail.is_some() || !st.shot_whys.is_empty() {
+            let why: Vec<String> = st.shot_whys.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
+            let plan = arms.trail.as_ref().map_or_else(
+                || "none now".to_string(),
+                |p| {
+                    format!(
+                        "{} dropped of {}, {} lying{}",
+                        p.dropped,
+                        p.wanted,
+                        p.mines.len(),
+                        if p.blow_at.is_some() { ", being set off" } else { "" }
+                    )
+                },
+            );
+            out.push(format!(
+                "  trails: {} laid, {} mines dropped on the run, {} left lying; this one: {} (last look for the next \
+                 mine: {}); mines shot: {}",
+                st.trails,
+                st.dropped,
+                st.trails_left,
+                plan,
+                if arms.drop_why.is_empty() { "-" } else { arms.drop_why },
+                if why.is_empty() { "-".into() } else { why.join("; ") }
+            ));
         }
         if !st.scope_ends.is_empty() {
             let e: Vec<String> = st.scope_ends.iter().map(|(w, n)| format!("{w} ×{n}")).collect();

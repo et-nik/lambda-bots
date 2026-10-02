@@ -64,7 +64,8 @@ damage at the distance and the guns their style and personality favour. They use
 the whole arsenal the way the game works it: the gauss charged and let go on target, the crossbow's scope snapped on
 and kept until the kill, guided rockets, the MP5's grenades, cooked hand grenades, piles of satchels set off from out
 of their blast and satchels thrown from a jump and set off as they come by the enemy, tripmines across corridors,
-snarks one by one or all of them at an enemy close by; and they run from grenades, rockets and snarks they see coming.
+snarks one by one or all of them at an enemy close by, trails of mines dropped on the run and shot as an enemy comes
+by them; and they run from grenades, rockets and snarks they see coming.
 In GunGame they read everyone's level from the scoreboard, fight only with what their level gave them and go after
 the leader.
 Details and the `lb brain` decision trace: `docs/behavior.md`.
@@ -110,8 +111,10 @@ run them from their own console.
 | `lb record [start [s]\|stop]`          | record the next map for `lb-cli replay`                         |
 | `lb vision [name]`                     | what bots see, hear and remember                                |
 | `lb brain [name]`                      | goals, candidates, target, weapon, reactions, weapon prediction |
-| `lb map [spots\|mines\|danger]`        | the map as bots know it and where they got hurt                 |
+| `lb map [spots\|mines\|lanes\|danger]` | the map as bots know it and where they got hurt                 |
 | `lb gg`                                | GunGame: every player's level, the leader, each bot's kit       |
+| `lb gg mines <name\|all> [off]`        | play GunGame's tripmine level on a stand (needs `sv_cheats 1`)  |
+| `lb watch [name\|#userid] [off]`       | log what a player does: moves, view, weapon, shots, mines       |
 | `lb perf [reset\|bots]`                | core time per frame, bot command timing                         |
 | `lb compat`                            | server compatibility profile                                    |
 | `lb config show\|reload`               | show the config, or reload config and profiles                  |

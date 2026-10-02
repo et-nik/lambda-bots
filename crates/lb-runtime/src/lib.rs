@@ -22,6 +22,7 @@ pub mod roster;
 pub mod selftest;
 pub mod stall;
 pub mod testrun;
+mod watch;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -262,6 +263,8 @@ pub struct Runtime {
     steps: StepSynth,
     /// Last weapon event of every slot, for the muzzle flash a viewer may see.
     last_shot: Vec<Option<SimTime>>,
+    /// Players whose every move goes to the log (`lb watch`).
+    watched: Vec<watch::Watched>,
     /// Weapon shown by an interned `weaponmodel` string.
     weapon_models: FxHashMap<u16, Option<WeaponId>>,
     /// The ReHLDS `SV_StartSound` hook reports every sound, footsteps included.
@@ -282,6 +285,7 @@ pub struct Runtime {
     explosions_now: Vec<Vec3>,
     /// Where players spawn on this map; `None` until the map is loaded.
     pub spawns: Option<Arc<Vec<Vec3>>>,
+    pub ladders: Option<Arc<Vec<Vec3>>>,
     /// The map's wall chargers; `None` until the map is loaded.
     pub chargers: Option<Arc<Vec<lb_knowledge::ChargerSpot>>>,
     /// Charger faces as the server draws them, refreshed with the items.
@@ -415,6 +419,7 @@ impl Runtime {
             public_now: Vec::new(),
             steps: StepSynth::default(),
             last_shot: Vec::new(),
+            watched: Vec::new(),
             weapon_models: FxHashMap::default(),
             sound_hook: false,
             item_spots: None,
@@ -427,6 +432,7 @@ impl Runtime {
             launched: FxHashMap::default(),
             explosions_now: Vec::new(),
             spawns: None,
+            ladders: None,
             chargers: None,
             charger_entities: Vec::new(),
             weapons_allowed: u32::MAX,
@@ -688,6 +694,7 @@ impl Runtime {
         self.launched.clear();
         self.explosions_now.clear();
         self.spawns = None;
+        self.ladders = None;
         self.chargers = None;
         self.charger_entities.clear();
         self.nav_status = format!("loading the graph for {name}");
@@ -1012,6 +1019,9 @@ impl Runtime {
             );
         }
         self.clients_now = frame.clients;
+        if !self.watched.is_empty() {
+            watch::tick(self, host);
+        }
         let force_respawn = self.config.bots.force_respawn;
         let delay = self.config.bots.respawn_delay;
         let now = self.now;
@@ -1044,10 +1054,12 @@ impl Runtime {
                     self.item_spots = Some(loaded.items);
                     for bot in &mut self.bots {
                         bot.brain.spawns = loaded.spawns.to_vec();
+                        bot.brain.ladders = loaded.ladders.to_vec();
                         bot.brain.set_chargers(&loaded.chargers);
                     }
                     tracing::info!("{map}: {} wall chargers", loaded.chargers.len());
                     self.spawns = Some(loaded.spawns);
+                    self.ladders = Some(loaded.ladders);
                     self.chargers = Some(loaded.chargers);
                     let max_clients = self.map.as_ref().map_or(32, |m| m.max_clients);
                     tracing::info!(
@@ -1135,6 +1147,63 @@ impl Runtime {
         if self.now >= self.next_projectiles_at || self.now + 1.0 < self.next_projectiles_at {
             self.next_projectiles_at = self.now + lb_perception::vision::PERIOD;
             self.refresh_projectiles(host);
+            self.drill_upkeep();
+        }
+    }
+
+    /// `lb gg mines`: the bot's mines are handed back as the GunGame plugin does (ten out at most; five carried here,
+    /// the game's limit): one at once for each laid, the rest once its count has kept still a moment (not to hide one
+    /// fewer from a bot that just pressed); and its glock kept loaded.
+    fn drill_upkeep(&mut self) {
+        const OUT_MOST: i32 = 10;
+        const GIVE_EVERY: f64 = 0.3;
+        const STILL: f64 = 0.6;
+        let now = self.now;
+        if self.bots.iter().any(|b| b.drill.is_some()) && self.gungame_board().is_some() {
+            tracing::info!(
+                "a GunGame match is on: the tripmine level of `lb gg mines` ends, its levels are the plugin's"
+            );
+            for bot in &mut self.bots {
+                bot.drill = None;
+                bot.mines_level = None;
+            }
+            return;
+        }
+        let row = arms_stats::Row::plain(WeaponId::Tripmine);
+        for bot in &mut self.bots {
+            if bot.drill != Some(lb_game::gungame::Kit::Mines) || bot.state != BotState::Alive {
+                continue;
+            }
+            let slot = u16::from(bot.id.slot);
+            let out = self
+                .launched
+                .values()
+                .filter(|l| l.row == row && l.owner == slot && now.since(l.seen) <= 0.2)
+                .count() as i32;
+            let carried = arsenal(&bot.self_state, &self.game.weapons);
+            let has = |w: WeaponId| carried.iter().find(|a| a.id == w);
+            let mines = has(WeaponId::Tripmine).and_then(|a| a.reserve).unwrap_or(0);
+            let laid = mines < bot.drill_count.0;
+            if mines != bot.drill_count.0 {
+                bot.drill_count = (mines, now);
+            }
+            let calm = now.since(bot.drill_count.1) >= STILL && now.since(bot.drill_gave) >= GIVE_EVERY;
+            let give =
+                if mines < lb_game::mechanics::carry_max(WeaponId::Tripmine).min(OUT_MOST - out) && (laid || calm) {
+                    Some("weapon_tripmine")
+                } else if !calm {
+                    None
+                } else if has(WeaponId::Glock).is_none() {
+                    Some("weapon_9mmhandgun")
+                } else if has(WeaponId::Glock).and_then(|a| a.reserve).unwrap_or(0) < 34 {
+                    Some("ammo_9mmclip")
+                } else {
+                    None
+                };
+            if let Some(item) = give {
+                bot.pending_client_cmds.push(vec!["give".into(), item.into()]);
+                bot.drill_gave = now;
+            }
         }
     }
 
@@ -1142,6 +1211,7 @@ impl Runtime {
     fn refresh_projectiles(&mut self, host: &mut dyn Host) {
         use lb_game::entities::{KIND_MINE, KIND_PROJECTILE, kind_mask};
         const EF_NODRAW: u32 = 128;
+        const SOLID_NOT: u8 = 0;
         let mut snapshots = Vec::new();
         host.snapshot_entities(kind_mask(&[KIND_PROJECTILE, KIND_MINE]), &mut snapshots);
         self.projectile_entities.clear();
@@ -1163,7 +1233,25 @@ impl Runtime {
                 velocity: v(e.velocity),
                 angles: v(e.angles),
                 owner: e.owner.index,
+                armed: kind == ProjectileKind::Tripmine && e.solid != SOLID_NOT,
             });
+        }
+        if !self.watched.is_empty() {
+            let row = arms_stats::Row::plain(WeaponId::Tripmine);
+            let laid: Vec<_> = self
+                .projectile_entities
+                .iter()
+                .filter(|p| p.kind == ProjectileKind::Tripmine)
+                .map(|p| {
+                    let owner = self
+                        .launched
+                        .get(&p.index)
+                        .filter(|l| l.row == row)
+                        .map_or(p.owner, |l| l.owner);
+                    (p.index, owner, p.origin, p.angles, p.armed)
+                })
+                .collect();
+            watch::mines(self, &laid);
         }
     }
 
@@ -1763,7 +1851,12 @@ impl Runtime {
                 self.stats.dropped_events += dropped_records as u64;
             }
             RawEvent::Sound(s) => self.on_sound(&s),
-            RawEvent::Playback(p) => self.on_playback(&p),
+            RawEvent::Playback(p) => {
+                if !self.watched.is_empty() {
+                    watch::on_playback(self, &p);
+                }
+                self.on_playback(&p);
+            }
             RawEvent::RegisterMsg { .. } | RawEvent::PrecacheEvent { .. } => {}
             RawEvent::Entity(_) => {}
         }
@@ -2086,6 +2179,9 @@ impl Runtime {
                 }
                 if let Some(spawns) = &self.spawns {
                     bot.brain.spawns = spawns.to_vec();
+                }
+                if let Some(ladders) = &self.ladders {
+                    bot.brain.ladders = ladders.to_vec();
                 }
                 if let Some(chargers) = &self.chargers {
                     bot.brain.set_chargers(chargers);
@@ -2846,9 +2942,14 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
     let b = &state.body;
     let arsenal = arsenal(state, ctx.registry);
     let ammo_need = Ammo::ALL.map(|a| ammo_need(state, ctx.registry, a));
-    let gungame = ctx
-        .gungame
-        .map(|board| lb_game::gungame::GunGame::new(board, bot.id.slot, b.weapons_mask));
+    // A GunGame match on, its levels are the plugin's whatever `lb gg mines` set before.
+    let gungame = match (ctx.gungame, bot.drill) {
+        (Some(board), _) => {
+            Some(lb_game::gungame::GunGame::new(board, bot.id.slot, b.weapons_mask).keep_mines(bot.mines_level))
+        }
+        (None, Some(kit)) => Some(lb_game::gungame::GunGame::drill(bot.id.slot, kit)),
+        (None, None) => None,
+    };
     lb_brain::Body {
         now: ctx.now,
         dt: (ctx.frame_ms / 1000.0) as f32,
@@ -2860,6 +2961,7 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
         armor: b.armor,
         has_longjump: b.has_longjump,
         on_ground: b.flags & lb_game::self_state::FL_ONGROUND != 0,
+        ducked: b.flags & lb_game::self_state::FL_DUCKING != 0,
         on_ladder: b.movetype == lb_game::self_state::MOVETYPE_FLY,
         underwater: b.waterlevel >= 3,
         waterlevel: b.waterlevel,
@@ -3203,6 +3305,10 @@ fn behave(
     budgets: &mut nav::Budgets,
 ) -> lb_motor::MotorOut {
     let body = body_of(bot, ctx);
+    bot.mines_level = body
+        .gungame
+        .filter(|g| ctx.gungame.is_some() && g.kit == lb_game::gungame::Kit::Mines)
+        .map(|g| g.level);
     let input = nav_input(bot, ctx, &body);
     bot.brain.motor.view = bot.view;
     let calm = bot.brain.calm_for(ctx.now) > CALM_BEFORE_KILL;

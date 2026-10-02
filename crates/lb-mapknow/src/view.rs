@@ -2,7 +2,7 @@
 
 use lb_core::Vec3;
 use lb_nav::NavGraph;
-use lb_nav_api::{CampSpot, MapView, MineSpot, NodeId};
+use lb_nav_api::{CampSpot, Lane, MapView, MineSpot, NodeId};
 
 use crate::experience::Experience;
 use crate::tactics::MapTactics;
@@ -71,6 +71,10 @@ impl MapView for MapKnowledge<'_> {
 
     fn mine_spots(&self) -> &[MineSpot] {
         &self.tactics.mines
+    }
+
+    fn lanes(&self) -> &[Lane] {
+        &self.tactics.lanes
     }
 
     fn chokepoints(&self) -> &[NodeId] {

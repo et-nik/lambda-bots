@@ -3,8 +3,9 @@
 //! - **Its own satchels:** where it threw them (the solved landing point), moved to where it sees them, flying or
 //!   lying (each by its entity once seen); gone when they go off or when the bot dies (the game removes a dead
 //!   player's satchels).
-//! - **Tripmines:** its own where it placed them, and any it has seen (the mine or its beam) with the beam's line;
-//!   forgotten when an explosion goes off at the mine.
+//! - **Tripmines:** its own where it placed them, and any it has seen (the mine or its beam) with the beam's line,
+//!   where it is seen; forgotten when an explosion goes off at the mine (the game bursts it out along the way the
+//!   mine faces) and when it is not there where the bot looks for it.
 //! - **Projectiles** in flight or lying about that it sees: where they are and how they move, and for grenades,
 //!   rockets and satchels where they are going to blow up.
 //! - **Its own hand grenades:** where each should come down and when it goes off (the bot pulled the pin), seen or
@@ -30,6 +31,8 @@ pub struct ProjectileSighting {
     pub own: bool,
     /// A tripmine's beam: its direction and where it ends.
     pub beam: Option<(Vec3, Vec3)>,
+    /// A tripmine's beam is on: it is armed.
+    pub armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +79,19 @@ pub struct Mine {
     pub seen: SimTime,
     /// When navigation was last told to keep off the beam.
     pub avoided_at: Option<SimTime>,
+    /// How a player gets past the beam, once its line was looked along.
+    pub pass: Option<BeamPass>,
+}
+
+/// How a player gets past a tripmine's beam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BeamPass {
+    /// It stands up from a mine on the floor: walked round, with room beside it.
+    Around,
+    /// High enough over the floor to duck under.
+    Under,
+    /// Neither: the way keeps off it.
+    Blocked,
 }
 
 /// A predicted explosion: where, how far it reaches, and roughly when.
@@ -102,6 +118,14 @@ const CHARGE_CARRY: f32 = 0.2;
 const JUST_THROWN: f64 = 0.5;
 /// An explosion this close to a mine or charge set it off.
 const BLOWN_WITH: f32 = 64.0;
+/// A tripmine bursts out along the way it faces ((damage − 24) × 0.6 off its wall, some 68 units past the mine at 150
+/// damage): an explosion this close to that line, this long, was the mine going off.
+const MINE_BURST_LINE: f32 = 96.0;
+const MINE_BURST_SLACK: f32 = 32.0;
+/// A mine that moved this much on a sighting has its beam told to navigation again.
+const MINE_MOVED: f32 = 4.0;
+/// A mine seen with its beam off is not taken for armed before the next look.
+const ARMING_LOOK: f64 = 0.05;
 /// Faster than this when first seen: an MP5 grenade.
 const CONTACT_GRENADE: f32 = 650.0;
 const GRENADE_RADIUS: f32 = 250.0;
@@ -127,6 +151,17 @@ pub struct Explosives {
     pub flying: Vec<Flying>,
     pub own_grenades: Vec<OwnGrenade>,
     pub heard: Vec<HeardGrenade>,
+    /// Beams of mines forgotten that navigation was told to keep off: to be lifted.
+    pub lifted: Vec<(Vec3, Vec3)>,
+}
+
+impl Mine {
+    /// An explosion at `pos` was this mine going off, or set it off.
+    fn blown_by(&self, pos: Vec3) -> bool {
+        let dir = if self.dir == Vec3::ZERO { Vec3::Z } else { self.dir };
+        let along = (pos - self.pos).dot(dir).clamp(0.0, MINE_BURST_LINE);
+        self.pos.distance(pos) <= BLOWN_WITH || (self.pos + dir * along).distance(pos) <= MINE_BURST_SLACK
+    }
 }
 
 /// A hand grenade heard bouncing: where the last bounce seemed to be, 1σ of that, and when.
@@ -186,7 +221,7 @@ impl Explosives {
     }
 
     pub fn placed_mine(&mut self, pos: Vec3, dir: Vec3, now: SimTime) {
-        self.mines.retain(|m| m.pos.distance(pos) > SAME_SPOT);
+        self.forget_mines(|m| m.pos.distance(pos) <= SAME_SPOT);
         self.mines.push(Mine {
             pos,
             dir,
@@ -195,6 +230,7 @@ impl Explosives {
             armed_at: now + f64::from(TRIPMINE_ARM),
             seen: now,
             avoided_at: None,
+            pass: None,
         });
     }
 
@@ -238,22 +274,40 @@ impl Explosives {
             }
             ProjectileKind::Tripmine => {
                 let (dir, end) = s.beam.map_or((Vec3::ZERO, None), |(d, e)| (d, Some(e)));
-                match self.mines.iter_mut().find(|m| m.pos.distance(s.pos) <= SAME_SPOT) {
+                let known = self.mines.iter().position(|m| m.pos.distance(s.pos) <= SAME_SPOT);
+                match known.map(|i| &mut self.mines[i]) {
                     Some(m) => {
                         m.seen = s.t;
+                        // Armed when its beam is seen to come on; not before a look that shows it off.
+                        m.armed_at = if s.armed {
+                            m.armed_at.min(s.t)
+                        } else {
+                            m.armed_at.max(s.t + ARMING_LOOK)
+                        };
+                        // Where it is seen: its own were where the bot aimed, a few units off.
+                        let moved = s.pos - m.pos;
+                        if moved.length() > MINE_MOVED
+                            && let (Some(_), Some(old)) = (m.avoided_at.take(), m.beam_end)
+                        {
+                            self.lifted.push((m.pos, old));
+                        }
+                        m.pos = s.pos;
+                        m.beam_end = m.beam_end.map(|e| e + moved);
                         if end.is_some() {
                             m.dir = dir;
                             m.beam_end = end;
                         }
                     }
+                    // A mine seen with its beam off arms within 2.5 s.
                     None => self.mines.push(Mine {
                         pos: s.pos,
                         dir,
                         beam_end: end,
                         own: s.own,
-                        armed_at: s.t,
+                        armed_at: if s.armed { s.t } else { s.t + f64::from(TRIPMINE_ARM) },
                         seen: s.t,
                         avoided_at: None,
+                        pass: None,
                     }),
                 }
             }
@@ -313,10 +367,33 @@ impl Explosives {
 
     /// An explosion was seen or heard at `pos`: what lay there is gone.
     pub fn on_explosion(&mut self, pos: Vec3) {
-        self.mines.retain(|m| m.pos.distance(pos) > BLOWN_WITH);
+        self.forget_mines(|m| m.blown_by(pos));
         self.charges.retain(|c| c.pos.distance(pos) > BLOWN_WITH);
         self.flying.retain(|f| f.pos.distance(pos) > BLOWN_WITH);
         self.heard.retain(|h| h.at.distance(pos) > HEARD_SAME);
+    }
+
+    /// The bot looked where a mine should be and it is not there (set off out of earshot, or taken away).
+    pub fn mine_missing(&mut self, pos: Vec3) {
+        self.forget_mines(|m| m.pos.distance(pos) <= SAME_SPOT);
+    }
+
+    /// Its own mines are gone: a GunGame level left (the plugin sets them all off).
+    pub fn forget_own_mines(&mut self) {
+        self.forget_mines(|m| m.own);
+    }
+
+    fn forget_mines(&mut self, gone: impl Fn(&Mine) -> bool) {
+        let lifted = &mut self.lifted;
+        self.mines.retain(|m| {
+            if !gone(m) {
+                return true;
+            }
+            if let (Some(_), Some(end)) = (m.avoided_at, m.beam_end) {
+                lifted.push((m.pos, end));
+            }
+            false
+        });
     }
 
     /// The bot died: the game removes its satchels.
@@ -427,6 +504,7 @@ mod tests {
             vel,
             own,
             beam: None,
+            armed: kind == ProjectileKind::Tripmine && !own,
         }
     }
 
@@ -535,6 +613,95 @@ mod tests {
         assert_eq!(e.mines.len(), 1, "mines stay where they are");
         e.on_explosion(Vec3::new(10.0, 100.0, 0.0));
         assert!(e.mines.is_empty());
+    }
+
+    #[test]
+    fn a_mine_is_forgotten_by_its_own_burst_out_along_the_way_it_faces() {
+        let mut e = Explosives::default();
+        // On the floor at z = 0 (8 up), and on a wall at x = 500 facing -x; the game bursts each 75.6 off its surface.
+        e.placed_mine(Vec3::new(0.0, 0.0, 8.0), Vec3::Z, SimTime(1.0));
+        e.placed_mine(Vec3::new(492.0, 0.0, 20.0), Vec3::NEG_X, SimTime(1.0));
+        e.placed_mine(Vec3::new(0.0, 200.0, 8.0), Vec3::Z, SimTime(1.0));
+        e.on_explosion(Vec3::new(0.0, 0.0, 75.6));
+        e.on_explosion(Vec3::new(500.0 - 75.6, 0.0, 20.0));
+        assert_eq!(e.mines.len(), 1, "{:?}", e.mines);
+        assert_eq!(e.mines[0].pos, Vec3::new(0.0, 200.0, 8.0), "one 200 units off stays");
+    }
+
+    #[test]
+    fn a_mine_moves_to_where_it_is_seen_and_goes_when_it_is_not_there() {
+        let mut e = Explosives::default();
+        e.placed_mine(Vec3::new(100.0, 0.0, 8.0), Vec3::Z, SimTime(1.0));
+        e.mines[0].beam_end = Some(Vec3::new(100.0, 0.0, 200.0));
+        e.mines[0].avoided_at = Some(SimTime(3.5));
+        e.on_sighting(&seen(
+            ProjectileKind::Tripmine,
+            50,
+            Vec3::new(106.0, 0.0, 8.0),
+            Vec3::ZERO,
+            false,
+            4.0,
+        ));
+        assert_eq!(e.mines.len(), 1);
+        let m = e.mines[0];
+        assert_eq!(m.pos, Vec3::new(106.0, 0.0, 8.0));
+        assert!(m.own, "still its own");
+        assert_eq!(m.beam_end, Some(Vec3::new(106.0, 0.0, 200.0)));
+        assert_eq!(m.avoided_at, None, "its beam is told again from where it is");
+        assert_eq!(e.lifted, [(Vec3::new(100.0, 0.0, 8.0), Vec3::new(100.0, 0.0, 200.0))]);
+        e.lifted.clear();
+        e.mines[0].avoided_at = Some(SimTime(4.1));
+        e.mine_missing(Vec3::new(110.0, 0.0, 8.0));
+        assert!(e.mines.is_empty());
+        assert_eq!(e.lifted.len(), 1, "its beam lifted");
+    }
+
+    #[test]
+    fn a_mine_seen_just_placed_arms_later_and_its_neighbour_is_not_taken_for_it() {
+        let mut e = Explosives::default();
+        e.placed_mine(Vec3::new(0.0, 0.0, 8.0), Vec3::Z, SimTime(1.0));
+        // The next mine of a trail, a stride on, seen before the bot noted it.
+        let mut s = seen(
+            ProjectileKind::Tripmine,
+            52,
+            Vec3::new(100.0, 0.0, 8.0),
+            Vec3::ZERO,
+            true,
+            1.1,
+        );
+        s.beam = Some((Vec3::Z, Vec3::new(100.0, 0.0, 200.0)));
+        s.armed = false;
+        e.on_sighting(&s);
+        assert_eq!(e.mines.len(), 2, "{:?}", e.mines);
+        assert_eq!(
+            e.mines[0].pos,
+            Vec3::new(0.0, 0.0, 8.0),
+            "the first one stays where it is"
+        );
+        assert_eq!(
+            e.mines[1].armed_at,
+            SimTime(1.1 + f64::from(TRIPMINE_ARM)),
+            "its beam off: it arms later"
+        );
+    }
+
+    #[test]
+    fn its_own_mines_go_with_a_gungame_level() {
+        let mut e = Explosives::default();
+        e.placed_mine(Vec3::new(0.0, 0.0, 8.0), Vec3::Z, SimTime(1.0));
+        let mut s = seen(
+            ProjectileKind::Tripmine,
+            51,
+            Vec3::new(400.0, 0.0, 8.0),
+            Vec3::ZERO,
+            false,
+            1.0,
+        );
+        s.beam = Some((Vec3::Z, Vec3::new(400.0, 0.0, 200.0)));
+        e.on_sighting(&s);
+        e.forget_own_mines();
+        assert_eq!(e.mines.len(), 1);
+        assert!(!e.mines[0].own);
     }
 
     #[test]

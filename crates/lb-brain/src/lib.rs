@@ -6,6 +6,7 @@ pub mod arms;
 pub mod attention;
 pub mod goals;
 pub mod mind;
+pub mod trail;
 pub mod tricks;
 
 use lb_core::Vec3;
@@ -62,6 +63,8 @@ pub struct BotBrain {
     pub explosives: Explosives,
     /// Where players spawn on this map (static map knowledge): no mines there.
     pub spawns: Vec<Vec3>,
+    /// The map's places on ladders: no mine dropped at their foot, its beam would run up the ladder.
+    pub ladders: Vec<Vec3>,
     pub params: PerceptionParams,
     /// Output of the latest vision tick.
     pub last_vision: VisionOutput,
@@ -105,6 +108,7 @@ impl BotBrain {
             chargers: None,
             explosives: Explosives::default(),
             spawns: Vec::new(),
+            ladders: Vec::new(),
             params,
             last_vision: VisionOutput::default(),
             mind: Mind::default(),
@@ -299,10 +303,22 @@ impl BotBrain {
         vis: &dyn VisSets,
         tracer: &mut dyn Tracer,
     ) {
-        let mut seen = Vec::new();
-        lb_perception::projectiles::look(now, viewer, entities, &self.explosives, vis, tracer, &mut seen);
+        let (mut seen, mut missing) = (Vec::new(), Vec::new());
+        lb_perception::projectiles::look(
+            now,
+            viewer,
+            entities,
+            &self.explosives,
+            vis,
+            tracer,
+            &mut seen,
+            &mut missing,
+        );
         for s in &seen {
             self.explosives.on_sighting(s);
+        }
+        for p in missing {
+            self.explosives.mine_missing(p);
         }
     }
 

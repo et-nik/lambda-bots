@@ -19,6 +19,7 @@ scored:
 | `control`     | 1    | an item worth having comes back soon (armor, the long jump, a big gun)       | its value × how well the wait fits: up to 8 s is as good as any, none beyond 25 s |
 | `camp`        | 1    | calm for 3 s, 50 health or more, a gun for the spot                          | the spot's score × (1.1 − aggression) × a travel penalty; counts only above 0.15  |
 | `trap`        | 1    | calm for 5 s, carrying tripmines or two satchels or more                     | the spot's traffic (or score) × a travel penalty; counts only above 0.15          |
+|               |      | (a trail: four mines or more and a gun to set them off)                      | (a trail: 0.45 × the style's `trap`)                                              |
 | `roam`        | 0    | always                                                                       | 0.2                                                                               |
 
 The weights are multiplied by the style's goal weights (`config/styles/*.yaml`, see `docs/personas.md`); holding
@@ -32,9 +33,9 @@ goal is held for a while: 1 s for `engage`, 3 s for `hunt`, 2 s for `retreat`, u
 `investigate`, the time to get there and hold for `camp` and `trap`, the time until the item is back for `control`,
 and 5 s for `roam`. A higher rank takes over at once. The same rank takes over only when its weight beats the
 current one by 15% plus 0.05. Going from `retreat` back to `engage` needs a 25% margin. A trap under way (a mine
-being laid, satchels thrown and watched) goes on until it is over: only a higher rank takes over. A goal that fails
-(no path, stuck) is not picked again for 8–15 s; a spot held is not held again for 50–70 s (15–25 s for a style fond
-of it).
+being laid, satchels thrown and watched, a trail from its run on) goes on until it is over: only a higher rank takes
+over; on the GunGame tripmine level a trail goes on from the moment it is taken up, and nothing takes over. A goal that fails (no path, stuck) is not picked again for 8–15 s, and a trap broken off waits 8 s; a spot
+held is not held again for 50–70 s (15–25 s for a style fond of it).
 
 Item values:
 - **Health** below 85 and **armor** below 90: the less the bot has, the more it wants them.
@@ -71,6 +72,11 @@ few tens of them on the standard maps; `lb map` shows it):
 - **Walls for tripmines:** across busy corridors (the beam at 20 units above the floor trips standing and crouching
   players alike) and just past turns, where a player rounds the corner into the beam (yapb's corner mines, worked out
   ahead for the whole map). None within 256 units of a spawn point.
+- **Lanes** for tripmine trails: straight stretches of level floor a player runs along, looked along eight ways from
+  every place, a 32-unit step at a time while a running player gets on (up a stair step, onto a floor no more than 12
+  units higher or lower, dry, with 84 units of room above for a floor mine's blast); 576–1024 units long, the first
+  384 of them (where the mines go) clear of spawn points, with the room beside them measured. The busiest 512 are kept,
+  those the same way starting 128 units apart at least.
 - **Cover:** asked for when a bot backs off, a place out of sight of where the threat is and of every place next to it,
   that the bot gets to before the threat could, not where bots got hurt, with more than one way out. A live trace from
   the threat's eye makes sure (crates, doors).
@@ -128,8 +134,35 @@ comes back. Controllers do it most.
 ## Traps
 
 When calm, a bot with tripmines puts one on a wall of the map's mine spots near it: it walks to where the wall is in
-reach, looks at the spot and lays the mine, then steps along the wall out of where the beam will be (it arms in
-2.5 s). With two satchels or more it goes up to the chokepoint an ambush spot 350 units or more
+reach, looks at the spot and lays the mine with one press (never a second one onto the same spot, whether the count of
+mines shows it at once or not), then steps along the wall out of where the beam will be (it arms in 2.5 s).
+
+**A trail of mines**, laid the way a GunGame player lays it (one was watched doing it on the stand): the bot takes a
+lane of the map (a straight stretch of level floor, see *Knowing the map*) it stands on, or the start of one it reaches
+soonest (8 s of running at most), not along a known mine, and only one where the trail laid along it leaves a place to
+watch it from out of its blast without passing it (no lane into a dead end); one heading toward an enemy it believes
+about, one down a corridor with no room either side costs it more, a busy one less. There, the tripmine in hand, it
+runs along the lane at full speed with the view 40° down along it and presses as soon as the game takes a press (once
+every 0.3 s; a press the game did not take leaves no mine in the bot's memory): each mine goes down where the game's
+placement trace meets the floor, some 75 units ahead, and the bot runs over it long before it arms; at a run they lie
+some 85 units apart, each one's blast setting the next off (a mine on the floor bursts some 77 units up; no mine where
+a ceiling lower than that would swallow the blast, nor in water, by a spawn point, at the foot of a ladder (its beam
+would run up it), by another mine, with a player in front, or with the bot not running along the lane). Five mines
+(fewer when it has to get away from a blast: the trail ends where it got to), then on along the lane for 1 s and off
+to a place by the graph 450–800 units from every mine of it (out of its blast), not back past its last one if there is
+such a place, never by another mine of it, in sight of the last one, one it runs to at full speed in a straight line
+(as a player does) rather than by the graph's way; one back past the trail only on such a run keeping 250 units off
+it (out of most of its blast, should someone set it off meanwhile), and one where the blast only wounds it only on such
+a run, as the last resort. With none (or none reached within 5 s) the trail is left lying and the
+bot goes its way. While it steps off it stops for nothing but an enemy by a mine. There it stands with the gun to set the
+trail off in hand, the view on the mine nearest an enemy it believes about, else on the last one. A mine is shot as soon as
+an enemy comes by the trail (see *Explosives*); nobody by it 0.5–1.5 s after its mines armed, on the GunGame tripmine
+level, where the plugin hands mines back as they go off, the bot shoots the last mine anyway and lays the next trail at
+once; elsewhere, after 6–10 s, it leaves the trail lying as a trap. A mine is in the bot's memory from the moment it is
+pressed for. On the tripmine level a bot left with fewer than three mines (its old trails lying about) first goes to
+watch the nearest one of its own and sets it off, to get the mines back.
+
+With two satchels or more it goes up to the chokepoint an ambush spot 350 units or more
 away watches (a satchel flies some 200 units), throws two to four at it, and watches them crouched from the spot for
 12–20 s, out of their blast, with the satchel radio in hand: they go off the moment an enemy is in their blast, and
 after 60–90 s with nobody by them. Trappers lay traps every 10–18 s; others at most every 20–30 s and rarely.
@@ -375,9 +408,28 @@ twice as likely, and grenades from 220 units (yapb's grenade war).
 
 **Tripmines.** When quiet (no enemy for 5 s) and walking along a corridor at most 300 units wide, now and then (at
 most once in 20–30 s) the bot lays a mine on the nearer wall within 90 units, so its beam runs across the corridor;
-never within 256 units of a spawn point nor within 96 of another mine. A known mine, its own or anyone's, 400–1200
-units away is shot (with the 357, the glock, the MP5 or the gauss) when an enemy is within 140 units of it; an
-enemy's mine ahead of a quiet bot is shot to clear the way. Shooting a mine credits the shooter.
+never within 256 units of a spawn point nor within 96 of another mine.
+
+A mine is shot (with the 357, the glock, the MP5 or the gauss; armed, in sight, 800 units away at most) when what it
+sets off is worth it and spares the bot: a mine's blast (150 damage, 375 units, bursting 68 units out of its wall or
+floor) sets off every mine it reaches, so the bot reckons the whole chain: what its blasts together do to an enemy (to
+the enemy's middle) and to itself (to the nearest of its body, with a clear line from each blast, its armor taking up
+to 0.8 of each). The game traces a blast to a random point of a player between its chest and its eyes, and on the head
+triples it: the bot takes the worst blast for one on its head. It gives a wound at most (60 health, 25 left, 40 where a
+suicide costs a kill), and nothing at all to clear an enemy's mine out of the way; and none while it lays a trail. It
+shoots
+- at an enemy 80 damage or more from the chain where it will be 0.6 s on, the mine nearest it;
+- at a step, a jump, pain, a shot, a weapon or a pickup heard within 160 units of one of its own mines in the last
+  second (in team games, only a sound tied to an enemy);
+- at its trail after the watch with nobody by it (the GunGame tripmine level);
+- on the GunGame tripmine level, short of mines (fewer than three), at an old one of its own lying 15 s with nobody
+  about, to get it back (taking 10 at most);
+- at an enemy's mine ahead of it when quiet.
+
+While it shoots it looks again ten times a second whether it is still spared, and stops if not; once the mine went
+off, it keeps out of the rest of the chain's blasts for 1.5 s (a mine sets the next off 0.1–0.3 s after the blast
+reaches it). Shooting a mine credits the shooter. A mine stops a bullet only once armed: a mine is taken for armed when
+its beam is seen on (its own, 2.5 s after it laid it).
 
 **Dodging.** A grenade the bot sees coming down near it (its own too) or hears bouncing near it, an MP5 grenade
 about to land, a rocket passing within 160 units or an enemy satchel lying close make it run from the blast for half
@@ -394,8 +446,21 @@ owner too), is run from: shooting at a small hopping snark wastes time, a bot on
 short. The run takes the legs only, so the bot keeps fighting. With the egon in hand the bot burns the snark instead,
 when no player in sight is closer than 300 units.
 
-**Tripmine beams** the bot knows of (its own and those it has seen) keep its paths off them, and any move that would
-take it into one (strafing and dodging included) is stopped.
+**Tripmine beams** the bot knows of (its own and those it has seen), armed or about to be, are got past the way a
+player does, whatever moves the bot (a path, strafing, a dodge): a beam running 42 units or more over the floor is
+ducked under (the bot waits until it is down in the crouched box, which the game gives only once a duck is over); any
+other is walked round: where it runs at body height (the foot of one standing up from the floor, a stretch of one
+slanting up a ramp, a low one across the way to its end) the bot's box keeps 8 units off it, by the way nearest the one
+asked for (turned up to a little past square to it), on the floor and with room for the box. A low beam is not jumped:
+at a careful pace a jump clears it by a few units, if at all. Near a beam the bot slows to 160 units a second (a turn
+at a run takes it wide), reckons its way from where its run carries it first, and looks along it as far as it would
+slide; where no way does, it brakes by pushing against its run (a player stops so in some ten units, letting go takes
+fifty) — also when told to stand still. Paths keep off the beams the bot cannot get past (one standing up with no way
+round, a low one across the way), and a path passing within 64 units of any other costs 1.5 s more: a detour of a few
+hundred units is taken rather than go by a mine anyone may set off (told once the bot is 256 units off the mine, not to
+turn it back along the way it is on). A bot standing in the beam of one of its own about to arm (within 1.5 s) gets out
+of it, whatever a weapon of its asks: armed with the bot in it, the mine goes off as it moves. Paths are let through
+again where a mine went off.
 
 **Game DLLs differ** in how satchels and grenades are worked: in the classic SDK the secondary attack always throws a
 satchel and the primary sets off the ones out, and a grenade thrown level leaves at 400 units per second; since
@@ -525,10 +590,17 @@ The bots know a GunGame match the way a player does: from the scoreboard and fro
   with a gun that reaches further, in on a gun that does better far off.
 - **The levels.**
   - The crowbar alone: a lost enemy is hunted with at least 0.7 weight, as yapb's knife level.
-  - Tripmines: no enemy is engaged or hunted, one in sight closer than 700 units is got away from, and mines go down
-    whenever no enemy is in sight: the map's mine spots (liked 1.5 times as much as a balanced trapper does, the next
-    2–4 s after the last) and across the way the bot walks every 3–6 s. A mine is shot with the glock when an enemy
-    is by it. On the other levels a mine is not shot at an enemy: its blast hurts nobody for a player on another level.
+  - Tripmines: no enemy is engaged or hunted, nor aimed at (nothing hurts but the mines: the view is the trail's and
+    the goal's, the tripmine in hand, or the glock once every mine is out), and sounds are gone to see about much less
+    (40%). Trails are all the bot lays there, one after another, enemies about or not (a trail is the way away from
+    one too), and nothing else is taken up while one is under way: no mine on a wall, none along the way. Only a bot
+    that cannot lay one (fewer than three mines and none of its own lying about) gets away from an enemy in sight
+    closer than 700 units, or seen there in the last 2 s (the bot running from it has it behind), never to cover back
+    past its own mines, and when found in its cover it runs on to other cover rather than strafe. No spot is held with
+    the glock. A mine is shot with the glock when an enemy is by it. With every mine out the game takes the tripmine
+    away; the glock left is still the tripmine level's. On the other levels a mine is not shot at an enemy: its blast
+    hurts nobody for a player on another level; and on a level change the plugin sets off a player's mines, so the
+    bot forgets its own.
 - **Moods.** Two levels or more behind the leader a bot is 0.2 more aggressive; leading, 0.15 more afraid; in the
   warmup, where it has nothing to lose, 0.3 more aggressive and 0.3 less afraid, and it leaps at enemies twice as
   readily.
@@ -543,8 +615,9 @@ The bots know a GunGame match the way a player does: from the scoreboard and fro
 Behavior asks for what it wants on five channels (look, movement, stance, weapon, use key), and the highest
 priority on each wins:
 - **Traversal (90):** jumps, long jumps, boost flights and ladders on the path.
-- **Protocol (85):** a weapon's own sequence: a charging gauss, a gauss boost, a pulled pin, a throw, a mine placed,
-  satchels set off, a rocket guided; a long jump to dodge. A shot at an enemy never breaks it.
+- **Protocol (85):** a weapon's own sequence: a charging gauss, a gauss boost, a pulled pin, a throw, a mine placed or
+  dropped on the run, satchels set off, a mine shot, a rocket guided; a long jump to dodge; out of the beam of its own
+  mine about to arm. A shot at an enemy never breaks it.
 - **Threat (70):** aiming and firing at an enemy in sight, turning toward damage, dodging a blast.
 - **Alert (60):** a look at what calls for it at once: a glimpse, an enemy lost a moment ago, a shot or a cry of
   pain nearby. It wins over the goal's looks (a spot held, a sound seen about, a charger), never over aiming, a weapon
@@ -580,6 +653,8 @@ A look from Alert up is turned at the bot's full turn acceleration; a goal's loo
   enemy they are let go at, the satchel radio waiting for an enemy watches the charge nearest to where one is
   believed to be, and a satchel flying at an enemy is watched together with it. Otherwise the bot looks along its
   path while its gun comes out; the aim comes back with the gun.
+- **Laying a trail** the bot looks along its run at the floor ahead (40° down) and holds it (a glance at a shot or a
+  cry waits: the run is short), and watching it looks at the mine an enemy would come by.
 
 ## Inspecting
 
@@ -593,6 +668,8 @@ A look from Alert up is turned at the bot's full turn acceleration; a goal's loo
 - the target and the weapon choice;
 - the weapon protocols: what runs now, throws, launched grenades, mines, detonations, gauss charges fired and dumped,
   dodges, and failures by reason;
+- its trails: laid, mines dropped on the run, trails left lying, the one under way (mines dropped and lying) and why
+  the last look found no spot for the next mine, and the mines shot by why;
 - the tricks (see *Tricks*);
 - which priority owns each channel;
 - reaction times: from the first glimpse of an enemy, and from recognizing it, to the first shot at it, for enemies
@@ -614,8 +691,8 @@ their decisions:
 - standing still for 2 s: the goal or weapon protocol, who asked for the movement and whether the way it asked for is
   open, a step up or blocked (by a player, the world or a brush entity), what navigation does, the target.
 
-`lb map [spots|mines|danger]` prints what the bots know of the map: how many places see each other, the chokepoints,
-the spots to hold, the walls for tripmines and where the bots got hurt most.
+`lb map [spots|mines|lanes|danger]` prints what the bots know of the map: how many places see each other, the
+chokepoints, the spots to hold, the walls for tripmines, the lanes for trails and where the bots got hurt most.
 
 `lb list` shows every bot's goal. With telemetry on, the `frame` messages carry every bot's goal, candidates,
 target and firing state. The observer (`tools/observer`) colors bots by goal and shows the candidates of the
@@ -631,5 +708,12 @@ For weapon tests on a stand server started with `sv_cheats 1`:
   feed, the tricks, and the stalls by cause.
 - `lb selftest` checks the game DLL's weapon rules with one bot while the others stand still.
 - `lb items <item>…` hands items out on every spawn (`lb items longjump`; `lb items none` stops it).
+- `lb gg mines <name|#userid|all>` has bots play GunGame's tripmine level on a server with no GunGame: only the
+  tripmines and the glock, everything else as on that level, the mines handed back as they go off the way the plugin
+  does (ten out at most; five carried, the game's limit); `lb gg mines off` ends it, and so does a GunGame match. `lb gg` lists them.
+- `lb watch <name|#userid>` writes what a player does to the log, to study how people play (the tripmine trail was
+  taken from a human so): twenty times a second where it is, how it moves, where it looks and what it holds; four
+  times a second the room around it (eight ways at waist height) and where everyone else is; each shot with what the
+  line along its view meets, and each of its tripmines as it is laid and goes. `lb watch off` stops it.
   `scripts/stand/tricks-scenarios.sh` runs the tricks this way (the long jump module with the map's weapons, the
   gauss alone, both, and the map's weapons alone as the control), with hard bots.

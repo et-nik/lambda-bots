@@ -56,10 +56,12 @@ pub struct LinkFailure {
     pub at: f64,
 }
 
-/// One bot's blocked links.
+/// One bot's blocked links, and those it would rather not take: they pass by something deadly it can get past (a
+/// tripmine's beam it can walk round), dearer to plan along by some seconds until then.
 #[derive(Clone, Debug, Default)]
 pub struct KnownChanges {
     links: FxHashMap<(NodeId, NodeId), LinkFailure>,
+    shunned: FxHashMap<(NodeId, NodeId), (f32, f64)>,
 }
 
 /// A failure is remembered this long after its block ends, so repeats grow the next block.
@@ -100,26 +102,54 @@ impl KnownChanges {
         }
     }
 
+    /// The link passes by a hazard: `extra` seconds dearer until `until` (the most of what is there already).
+    pub fn shun(&mut self, from: NodeId, to: NodeId, extra: f32, until: f64) {
+        let e = self.shunned.entry((from, to)).or_insert((extra, until));
+        e.0 = e.0.max(extra);
+        e.1 = e.1.max(until);
+    }
+
+    /// The hazard by the link is gone.
+    pub fn unshun(&mut self, from: NodeId, to: NodeId) {
+        self.shunned.remove(&(from, to));
+    }
+
+    /// The hazard across the link is gone: its block is lifted (blocks for other reasons stay).
+    pub fn lift(&mut self, from: NodeId, to: NodeId) {
+        if self
+            .links
+            .get(&(from, to))
+            .is_some_and(|f| f.reason == FailReason::Hazard)
+        {
+            self.links.remove(&(from, to));
+        }
+    }
+
     pub fn blocked(&self, from: NodeId, to: NodeId, now: f64) -> bool {
         self.links.get(&(from, to)).is_some_and(|f| now < f.until)
     }
 
-    /// Extra planning cost of the link: infinite while blocked.
+    /// Extra planning cost of the link: infinite while blocked, some seconds while shunned.
     pub fn penalty(&self, from: NodeId, to: NodeId, now: f64) -> f32 {
         if self.blocked(from, to, now) {
             f32::INFINITY
         } else {
-            0.0
+            self.shunned
+                .get(&(from, to))
+                .filter(|(_, until)| now < *until)
+                .map_or(0.0, |(extra, _)| *extra)
         }
     }
 
     /// Forgets failures long past.
     pub fn expire(&mut self, now: f64) {
         self.links.retain(|_, f| now < f.until + MEMORY);
+        self.shunned.retain(|_, (_, until)| now < *until);
     }
 
     pub fn clear(&mut self) {
         self.links.clear();
+        self.shunned.clear();
     }
 
     /// Links blocked now, with their failure.
@@ -202,6 +232,22 @@ mod tests {
     }
 
     #[test]
+    fn a_link_by_a_hazard_costs_more_until_it_is_gone_and_a_block_still_shuts_it() {
+        let mut k = KnownChanges::default();
+        k.shun(1, 2, 1.5, 60.0);
+        k.shun(1, 2, 1.0, 30.0);
+        assert_eq!(k.penalty(1, 2, 10.0), 1.5, "the most of two");
+        assert!(!k.blocked(1, 2, 10.0));
+        k.avoid(1, 2, 10.0, 20.0);
+        assert!(k.penalty(1, 2, 15.0).is_infinite());
+        k.expire(61.0);
+        assert_eq!(k.penalty(1, 2, 61.0), 0.0);
+        k.shun(3, 4, 1.5, 100.0);
+        k.unshun(3, 4);
+        assert_eq!(k.penalty(3, 4, 0.0), 0.0);
+    }
+
+    #[test]
     fn a_hazard_takes_over_the_blocks_it_extends() {
         let mut k = KnownChanges::default();
         k.fail(1, 2, FailReason::TemporarilyOccupied, 0.0);
@@ -217,6 +263,10 @@ mod tests {
                 ((3, 4), FailReason::GeometryInvalid, 120.0)
             ]
         );
+        k.lift(1, 2);
+        k.lift(3, 4);
+        assert!(!k.blocked(1, 2, 1.0), "the hazard is gone");
+        assert!(k.blocked(3, 4, 1.0), "the other block stays");
     }
 
     #[test]

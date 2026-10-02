@@ -71,6 +71,20 @@ pub struct MineSpot {
     pub corner: bool,
 }
 
+/// A straight stretch of level floor to lay a tripmine trail along at a run: from `start` (player origin) along `dir`
+/// for `length` units, clear for a running player, dry, with room above for a floor mine's blast.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Lane {
+    pub node: NodeId,
+    pub start: Vec3,
+    pub dir: Vec2,
+    pub length: f32,
+    /// Free room to the left and to the right of its first stretch, where the mines go.
+    pub room: [f32; 2],
+    /// How much players pass along it, 0..1.
+    pub flow: f32,
+}
+
 /// The map as an experienced player knows it. Static knowledge worked out from the map once, plus what the bots
 /// learned by playing it; nothing here tells where anyone is now.
 pub trait MapView {
@@ -97,6 +111,10 @@ pub trait MapView {
     fn danger_from(&self, n: NodeId) -> Option<NodeId>;
     fn camp_spots(&self) -> &[CampSpot];
     fn mine_spots(&self) -> &[MineSpot];
+    /// Straight stretches of floor to lay a tripmine trail along.
+    fn lanes(&self) -> &[Lane] {
+        &[]
+    }
     /// Narrow places many players pass, busiest first.
     fn chokepoints(&self) -> &[NodeId];
 }
@@ -210,6 +228,11 @@ pub trait NavService: Tracer {
     fn available(&self) -> bool;
     /// Keeps paths off the line `a → b` at body height for `seconds` (a tripmine's beam the bot knows of).
     fn avoid_line(&mut self, _a: Vec3, _b: Vec3, _seconds: f32) {}
+    /// Paths passing within `radius` of the line `a → b` at body height cost `extra` seconds more for `seconds` (a
+    /// tripmine's beam the bot can get past but would rather keep away from); the path followed now is left alone.
+    fn shun_line(&mut self, _a: Vec3, _b: Vec3, _radius: f32, _extra: f32, _seconds: f32) {}
+    /// Paths may cross the line `a → b` again, and pass by it: the mine is gone.
+    fn clear_line(&mut self, _a: Vec3, _b: Vec3) {}
     /// What the bot may do on the way from now on.
     fn set_tricks(&mut self, _tricks: Tricks) {}
     /// Where a long jump taken now looking along `view` comes down, if it comes down safely: on a floor or in

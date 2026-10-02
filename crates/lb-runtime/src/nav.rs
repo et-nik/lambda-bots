@@ -59,6 +59,8 @@ pub struct LoadedMap {
     pub items: Arc<Vec<ItemSpot>>,
     /// Where players spawn.
     pub spawns: Arc<Vec<Vec3>>,
+    /// The graph's places on ladders.
+    pub ladders: Arc<Vec<Vec3>>,
     /// Wall chargers and where to stand to use them.
     pub chargers: Arc<Vec<lb_knowledge::ChargerSpot>>,
     pub mechs: Arc<MapMechs>,
@@ -307,10 +309,21 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
         Err(_) => None,
     };
     let world = graph.is_ok().then(|| Box::new(world));
+    let ladders: Vec<Vec3> = graph.as_ref().map_or_else(
+        |_| Vec::new(),
+        |g| {
+            g.nodes
+                .iter()
+                .filter(|n| n.flags.contains(lb_nav::graph::NodeFlags::LADDER))
+                .map(|n| n.origin)
+                .collect()
+        },
+    );
     Ok(LoadedMap {
         vis,
         items: Arc::new(items),
         spawns: Arc::new(spawns),
+        ladders: Arc::new(ladders),
         chargers: Arc::new(chargers),
         mechs,
         graph,
@@ -710,6 +723,19 @@ impl NavService for BotNavService<'_, '_> {
         if let Some(graph) = self.graph {
             let now = self.input.now;
             self.nav.avoid_line(graph, a, b, now, now + f64::from(seconds));
+        }
+    }
+
+    fn shun_line(&mut self, a: Vec3, b: Vec3, radius: f32, extra: f32, seconds: f32) {
+        if let Some(graph) = self.graph {
+            let until = self.input.now + f64::from(seconds);
+            self.nav.shun_line(graph, a, b, radius, extra, until);
+        }
+    }
+
+    fn clear_line(&mut self, a: Vec3, b: Vec3) {
+        if let Some(graph) = self.graph {
+            self.nav.clear_line(graph, a, b);
         }
     }
 

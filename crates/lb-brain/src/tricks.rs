@@ -195,9 +195,11 @@ impl BotBrain {
             && body.waterlevel < 2
             && calm;
         let bold = ch.skill.longjump_bold;
+        // Dropping a trail's mines takes the ground: no long jumps along the way meanwhile.
+        let laying = self.mind.arms.trail.as_ref().is_some_and(|p| p.laying(now));
         let told = Tricks {
             longjump,
-            runway: longjump && self.mind.tricks.runway,
+            runway: longjump && self.mind.tricks.runway && !laying,
             runway_bold: bold,
             runway_hurt: if bold && body.health > HURT_HEALTH {
                 body.health - HURT_LEFT
@@ -481,7 +483,7 @@ impl BotBrain {
                     | GoalKind::Camp(_)
                     | GoalKind::PlantTrap(_)
             )
-        );
+        ) && self.mind.arms.trail.as_ref().is_none_or(|p| !p.laying(now));
         let hands = self.hands(body);
         let uranium = hands.reserve(WeaponId::Gauss);
         let calm = self.beliefs.visible_enemies().next().is_none()
@@ -638,6 +640,7 @@ mod tests {
             armor: 0.0,
             has_longjump: true,
             on_ground: true,
+            ducked: false,
             on_ladder: false,
             underwater: false,
             waterlevel: 0,

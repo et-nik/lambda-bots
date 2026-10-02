@@ -8,14 +8,15 @@
 //!   chokepoint), each with the directions worth watching;
 //! - walls to set tripmines on, the beam across a busy corridor or just behind a turn (yapb's
 //!   `checkCornerTripminePlant`), never near where players spawn.
+//! - lanes: straight stretches of level floor to lay a tripmine trail along at a run.
 
 use std::time::Instant;
 
 use lb_bsp::{BspWorld, MapVis};
 use lb_core::{Vec2, Vec3, dmath};
 use lb_nav::{NavGraph, NodeFlags};
-use lb_nav_api::{CampKind, CampSpot, MineSpot, NodeId};
-use lb_worldq::TraceQuery;
+use lb_nav_api::{CampKind, CampSpot, Lane, MineSpot, NodeId};
+use lb_worldq::{HullKind, TraceQuery, contents};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +25,7 @@ use crate::paths;
 use crate::vis::VisTable;
 
 /// Bump whenever the same graph and map would give other tactics.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Eye above the player origin, standing and crouched.
 const EYE_STAND: f32 = 28.0;
@@ -64,6 +65,26 @@ const MINES: usize = 48;
 const CORNER_PAST: f32 = 45.0;
 const CORNER_PROBE: f32 = 80.0;
 const CORNER_BEAM: f32 = 250.0;
+/// Lanes are looked along this many ways from every node a player stands at, a step of this many units at a time
+/// while a running player gets on: up a stair step of `STEP_UP` at most, then down onto a floor no more than
+/// `LANE_RISE` above or below (the lane stays about level). Kept this long at least, looked along this far at most.
+const LANE_WAYS: usize = 8;
+const LANE_STEP: f32 = 32.0;
+const STEP_UP: f32 = 18.0;
+const LANE_RISE: f32 = 12.0;
+const LANE_MIN: f32 = 576.0;
+const LANE_MAX: f32 = 1024.0;
+/// A floor mine's blast needs this much room over the floor (it bursts some 77 units up).
+const LANE_HEADROOM: f32 = 84.0;
+/// The mines go along a lane's first stretch: nowhere near where players spawn, and the room beside it is measured
+/// there, this far at most, every this many steps.
+const LANE_LAY: f32 = 384.0;
+const LANE_SPAWN_CLEAR: f32 = 160.0;
+const LANE_ROOM: f32 = 256.0;
+const LANE_ROOM_EVERY: usize = 4;
+/// Lanes the same way start this far apart at least; this many at most, the busiest first.
+const LANE_SPACING: f32 = 128.0;
+const LANES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpotStats {
@@ -96,6 +117,8 @@ pub struct MapTactics {
     pub chokes: Vec<NodeId>,
     pub camps: Vec<CampSpot>,
     pub mines: Vec<MineSpot>,
+    #[serde(default)]
+    pub lanes: Vec<Lane>,
     pub stats: TacticsStats,
     #[serde(skip)]
     pub grid: NodeGrid,
@@ -214,6 +237,7 @@ impl MapTactics {
             chokes: Vec::new(),
             camps: Vec::new(),
             mines: Vec::new(),
+            lanes: Vec::new(),
             stats: TacticsStats::default(),
             grid,
         };
@@ -225,9 +249,11 @@ impl MapTactics {
             .collect();
         let (mines, mine_traces) = t.find_mines(graph, world, &floors, &eyes, &near_spawn);
         t.mines = mines;
+        let (lanes, lane_traces) = t.find_lanes(world, &crouch, spawns);
+        t.lanes = lanes;
         t.stats = TacticsStats {
             millis: started.elapsed().as_millis() as u64,
-            traces: traces + mine_traces,
+            traces: traces + mine_traces + lane_traces,
             pairs: t.vis.pairs(),
         };
         t
@@ -506,6 +532,120 @@ impl MapTactics {
     }
 }
 
+impl MapTactics {
+    /// Lanes: from every node a player stands at, the straight run along each of `LANE_WAYS` ways while a running
+    /// player gets on over level floor; the long ones kept, those the same way spaced out, the busiest first.
+    fn find_lanes(&self, world: &BspWorld, crouch: &[bool], spawns: &[Vec3]) -> (Vec<Lane>, u64) {
+        let n = self.origins.len();
+        let found: Vec<(Vec<Lane>, u64)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                if self.transit[i] || crouch[i] {
+                    return (Vec::new(), 0);
+                }
+                let mut traces = 0u64;
+                let mut tr = |q: &TraceQuery| {
+                    traces += 1;
+                    world.trace_shared(q)
+                };
+                let o = self.origins[i];
+                let mut out = Vec::new();
+                for k in 0..LANE_WAYS {
+                    let dir = dir_of(k as f32 * 360.0 / LANE_WAYS as f32);
+                    let mut path = vec![o];
+                    while ((path.len() - 1) as f32) * LANE_STEP < LANE_MAX {
+                        let Some(next) = lane_step(&mut tr, world, path[path.len() - 1], dir) else {
+                            break;
+                        };
+                        path.push(next);
+                    }
+                    let length = (path.len() - 1) as f32 * LANE_STEP;
+                    if length < LANE_MIN {
+                        continue;
+                    }
+                    let lay = &path[..=(LANE_LAY / LANE_STEP) as usize];
+                    if lay
+                        .iter()
+                        .any(|p| spawns.iter().any(|s| s.distance(*p) < LANE_SPAWN_CLEAR))
+                    {
+                        continue;
+                    }
+                    let across = Vec3::new(-dir.y, dir.x, 0.0);
+                    let mut room = [LANE_ROOM; 2];
+                    for p in lay.iter().step_by(LANE_ROOM_EVERY) {
+                        for (side, r) in [across, -across].into_iter().zip(room.iter_mut()) {
+                            *r = r.min(tr(&TraceQuery::line(*p, *p + side * LANE_ROOM)).fraction * LANE_ROOM);
+                        }
+                    }
+                    let near: Vec<f32> = path
+                        .iter()
+                        .step_by(LANE_ROOM_EVERY)
+                        .filter_map(|p| self.nearest_standing(*p, LANE_SPACING))
+                        .map(|m| self.flow[m as usize])
+                        .collect();
+                    out.push(Lane {
+                        node: i as NodeId,
+                        start: o,
+                        dir: dir.truncate(),
+                        length,
+                        room,
+                        flow: near.iter().sum::<f32>() / near.len().max(1) as f32,
+                    });
+                }
+                (out, traces)
+            })
+            .collect();
+        let traces = found.iter().map(|f| f.1).sum();
+        let mut all: Vec<Lane> = found.into_iter().flat_map(|f| f.0).collect();
+        all.sort_by(|a, b| {
+            b.flow
+                .total_cmp(&a.flow)
+                .then(b.length.total_cmp(&a.length))
+                .then(a.node.cmp(&b.node))
+        });
+        let mut out: Vec<Lane> = Vec::new();
+        for l in all {
+            if out.len() == LANES {
+                break;
+            }
+            let apart = |o: &Lane| o.dir.dot(l.dir) < 0.99 || o.start.distance(l.start) >= LANE_SPACING;
+            if out.iter().all(apart) {
+                out.push(l);
+            }
+        }
+        (out, traces)
+    }
+}
+
+/// One step of a lane on from the player origin `p` along `dir`: the next origin, where a running player gets over a
+/// floor no higher or lower than `LANE_RISE`, dry, with room above it for a floor mine's blast.
+fn lane_step(
+    tr: &mut dyn FnMut(&TraceQuery) -> lb_worldq::Trace,
+    world: &BspWorld,
+    p: Vec3,
+    dir: Vec3,
+) -> Option<Vec3> {
+    let up = Vec3::Z * STEP_UP;
+    let next = p + dir * LANE_STEP;
+    let go = tr(&TraceQuery::hull(p + up, next + up, HullKind::Stand));
+    if go.start_solid || go.fraction < 1.0 {
+        return None;
+    }
+    let down = tr(&TraceQuery::hull(
+        next + up,
+        next - Vec3::Z * (LANE_RISE + 1.0),
+        HullKind::Stand,
+    ));
+    if down.start_solid || down.fraction >= 1.0 || down.normal.z < 0.7 || (down.end.z - p.z).abs() > LANE_RISE {
+        return None;
+    }
+    let at = down.end;
+    if tr(&TraceQuery::line(at, at + Vec3::Z * (LANE_HEADROOM - FLOOR_STAND))).fraction < 1.0 {
+        return None;
+    }
+    (world.point_contents_shared(at - Vec3::Z * (FLOOR_STAND - 2.0)) == contents::EMPTY).then_some(at)
+}
+
 /// A wall within `reach` of `from` along `dir` that holds a tripmine whose beam crosses the way: upright, and the
 /// beam along its normal meets the other side within `beam_max`. Returns the wall point, its normal and where the
 /// beam ends.
@@ -588,5 +728,51 @@ mod tests {
         let (a, b) = (t(&mut made), t(&mut read));
         assert_eq!(a.stats.pairs, b.stats.pairs);
         assert_eq!(a.vis, b.vis);
+    }
+
+    /// Lanes run where a player laid tripmine trails on crossfire on the stand: across the yard and along its edges,
+    /// down the tunnel under it (the first mine of each, where it went down, and the way the player ran).
+    #[test]
+    fn lanes_run_where_a_player_lays_trails() {
+        let Some(maps) = lb_bsp::test_maps_dir() else { return };
+        let Ok(bsp) = std::fs::read(maps.join("crossfire.bsp")) else {
+            return;
+        };
+        let mut world = BspWorld::load(&bsp).unwrap();
+        let mech = Mechanisms::from_world(&world);
+        let generated = lb_navgen::generate(&mut world, &mech, &lb_navgen::GenOptions::default(), "test");
+        lb_navgen::site::rest_poses(&mut world, &mech);
+        let vis = MapVis::build(&world.bsp);
+        let started = Instant::now();
+        let t = MapTactics::build(&generated.graph, &world, &vis, &[], &[]);
+        eprintln!(
+            "{} lanes, tactics in {:?}, {} traces",
+            t.lanes.len(),
+            started.elapsed(),
+            t.stats.traces
+        );
+        let trails = [
+            ((-521.0, 243.0, -1688.0), 0.0),
+            ((-406.0, 225.0, -1688.0), 0.0),
+            ((-502.0, -391.0, -1848.0), 180.0),
+            ((-538.0, 1042.0, -1688.0), -90.0),
+            ((-517.0, 847.0, -1688.0), -90.0),
+            ((453.0, 691.0, -1848.0), 168.0),
+            ((-856.0, 1071.0, -1528.0), -90.0),
+        ];
+        for ((x, y, z), yaw) in trails {
+            // The mine lies 8 units over the floor, the player's origin 36.
+            let first = Vec3::new(x, y, z + 28.0);
+            let way = dir_of(yaw).truncate();
+            let on = t.lanes.iter().find(|l| {
+                let rel = (first - l.start).truncate();
+                let along = rel.dot(l.dir);
+                l.dir.dot(way) > 0.9
+                    && (first.z - l.start.z).abs() < 24.0
+                    && rel.perp_dot(l.dir).abs() < 96.0
+                    && (-160.0..=l.length - 400.0).contains(&along)
+            });
+            assert!(on.is_some(), "no lane for the trail at {first} heading {yaw}");
+        }
     }
 }
