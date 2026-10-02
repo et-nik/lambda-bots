@@ -1159,6 +1159,15 @@ impl Runtime {
         const GIVE_EVERY: f64 = 0.3;
         const STILL: f64 = 0.6;
         let now = self.now;
+        if self.bots.iter().any(|b| b.drill.is_some()) && self.gungame_board().is_some() {
+            tracing::info!(
+                "a GunGame match is on: the tripmine level of `lb gg mines` ends, its levels are the plugin's"
+            );
+            for bot in &mut self.bots {
+                bot.drill = None;
+            }
+            return;
+        }
         let row = arms_stats::Row::plain(WeaponId::Tripmine);
         for bot in &mut self.bots {
             if bot.drill != Some(lb_game::gungame::Kit::Mines) || bot.state != BotState::Alive {
@@ -2932,11 +2941,13 @@ fn body_of(bot: &Bot, ctx: &DriveCtx<'_>) -> lb_brain::Body {
     let b = &state.body;
     let arsenal = arsenal(state, ctx.registry);
     let ammo_need = Ammo::ALL.map(|a| ammo_need(state, ctx.registry, a));
-    let gungame = match bot.drill {
-        Some(kit) => Some(lb_game::gungame::GunGame::drill(bot.id.slot, kit)),
-        None => ctx.gungame.map(|board| {
-            lb_game::gungame::GunGame::new(board, bot.id.slot, b.weapons_mask).keep_mines(bot.mines_level)
-        }),
+    // A GunGame match on, its levels are the plugin's whatever `lb gg mines` set before.
+    let gungame = match (ctx.gungame, bot.drill) {
+        (Some(board), _) => {
+            Some(lb_game::gungame::GunGame::new(board, bot.id.slot, b.weapons_mask).keep_mines(bot.mines_level))
+        }
+        (None, Some(kit)) => Some(lb_game::gungame::GunGame::drill(bot.id.slot, kit)),
+        (None, None) => None,
     };
     lb_brain::Body {
         now: ctx.now,

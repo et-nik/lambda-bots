@@ -372,14 +372,20 @@ impl BotBrain {
         );
     }
 
-    /// Ten times a second while a trail is laid: drops the next mine as soon as the tripmine is ready, on a floor fit
-    /// for one: not by a spawn point, a ladder, another mine or a player in sight, under a ceiling high enough for the
-    /// blast, out of water.
+    /// Every frame of the run (and ten times a second with the other weapons): drops the next mine once the game takes
+    /// a press, on a floor fit for one, looked at right then: not by a spawn point, a ladder, another mine or a player
+    /// in sight, under a ceiling high enough for the blast, out of water.
     pub(crate) fn trail_drop(&mut self, body: &Body, nav: &mut dyn NavService) -> bool {
         let Some(plan) = self.mind.arms.trail.as_ref() else {
             return false;
         };
-        if !plan.laying(body.now) {
+        if !plan.laying(body.now) || self.mind.arms.busy() {
+            return false;
+        }
+        let h = self.hands(body);
+        let w = WeaponId::Tripmine;
+        if !h.ready(w) || h.predicted(w).is_some_and(|p| p.next_primary > 0.0) {
+            self.mind.arms.drop_why = "the tripmine not ready";
             return false;
         }
         match self.drop_spot(body, nav) {
@@ -823,7 +829,7 @@ impl BotBrain {
             }
             let next = match task.phase {
                 TrailPhase::Approach => self.trail_approach(body, nav, &task, rng),
-                TrailPhase::Run => self.trail_run(body, &task, &plan, rng),
+                TrailPhase::Run => self.trail_run(body, nav, &task, &plan, rng),
                 TrailPhase::Off => self.trail_off(body, ch, map, nav, &task, &plan, rng),
                 TrailPhase::Watch => self.trail_watch(body, ch, &task, &plan, rng),
             };
@@ -944,7 +950,14 @@ impl BotBrain {
     /// Along the lane at full speed, the view down along it, a mine dropped as soon as the tripmine is ready (the
     /// arms drop them); on past the last one once all are down, the pocket is empty, the lane runs out, the run took
     /// too long or the bot had to get away from a blast.
-    fn trail_run(&mut self, body: &Body, task: &TrailTask, plan: &TrailPlan, rng: &mut BotRng) -> Option<TrailPhase> {
+    fn trail_run(
+        &mut self,
+        body: &Body,
+        nav: &mut dyn NavService,
+        task: &TrailTask,
+        plan: &TrailPlan,
+        rng: &mut BotRng,
+    ) -> Option<TrailPhase> {
         let now = body.now;
         let dropping = matches!(self.mind.arms.active, Some(Active::Drop(_)));
         let along = (body.origin - task.start).truncate().dot(task.dir);
@@ -980,6 +993,7 @@ impl BotBrain {
         }
         self.run_along(body, task, along);
         self.lay(body, task.dir);
+        self.trail_drop(body, nav);
         None
     }
 
@@ -1462,6 +1476,14 @@ mod tests {
         BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill))
     }
 
+    /// The tripmine in hand long since, past its deploy.
+    fn drawn(brain: &mut BotBrain) {
+        brain
+            .motor
+            .weapon
+            .update(SimTime(-10.0), Some(WeaponId::Tripmine), None, &mut SmallVec::new());
+    }
+
     /// Carrying `mines` tripmines and a loaded glock, the tripmine in hand; on the tripmine level when `level`.
     fn miner_with(t: f64, level: bool, mines: i32) -> Body {
         let mut b = body(t);
@@ -1749,6 +1771,7 @@ mod tests {
     #[test]
     fn mines_go_down_ahead_of_the_run_as_fast_as_the_tripmine_allows() {
         let mut brain = brain();
+        drawn(&mut brain);
         let mut plan = TrailPlan::new(5);
         plan.dir = Vec2::X;
         brain.mind.arms.trail = Some(plan);
@@ -1779,6 +1802,7 @@ mod tests {
     #[test]
     fn no_mine_drops_by_a_spawn_point_a_ladder_another_mine_or_under_a_low_ceiling() {
         let drops = |brain: &mut BotBrain, nav: &mut dyn NavService| {
+            drawn(brain);
             if brain.mind.arms.trail.is_none() {
                 brain.mind.arms.trail = Some(TrailPlan::new(5));
             }
@@ -1815,8 +1839,32 @@ mod tests {
         back.mind.arms.trail = Some(plan);
         let mut b = running(1.0, 0.0);
         b.velocity = Vec3::new(-270.0, 0.0, 0.0);
+        drawn(&mut back);
         assert!(!back.trail_drop(&b, &mut Open));
         assert_eq!(back.mind.arms.drop_why, "not running along the way");
+        // While the tripmine's clock runs from the last press none is planned: the spot is looked at as it goes down.
+        let mut early = brain();
+        drawn(&mut early);
+        let mut plan = TrailPlan::new(5);
+        plan.dir = Vec2::X;
+        plan.lay_until = SimTime(1.3);
+        early.mind.arms.trail = Some(plan);
+        let mut b = running(1.0, 0.0);
+        let mut p = lb_game::self_state::Prediction {
+            current: Some(WeaponId::Tripmine),
+            primary_ammo: 5,
+            ..Default::default()
+        };
+        p.weapons[WeaponId::Tripmine as usize] = Some(lb_game::self_state::PredictedWeapon {
+            next_primary: 0.2,
+            ..Default::default()
+        });
+        b.prediction = Some(p);
+        assert!(!early.trail_drop(&b, &mut Open));
+        assert_eq!(early.mind.arms.drop_why, "the tripmine not ready");
+        p.weapons[WeaponId::Tripmine as usize] = None;
+        b.prediction = Some(p);
+        assert!(early.trail_drop(&b, &mut Open), "taken now");
     }
 
     #[test]

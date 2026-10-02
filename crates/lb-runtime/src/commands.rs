@@ -368,12 +368,12 @@ fn gungame(rt: &Runtime) -> Vec<String> {
 /// only, the mines handed back as they go off, the way the plugin does.
 fn gungame_mines(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     let (who, on) = match args {
-        ["off"] => ("all", false),
-        [who] => (*who, true),
-        [who, "off"] => (*who, false),
-        _ => return vec!["usage: lb gg mines <name|#userid|all> [off] | lb gg mines off".into()],
+        [] => return vec!["usage: lb gg mines <name|#userid|all> [off] | lb gg mines off".into()],
+        ["off"] => ("all".to_string(), false),
+        [name @ .., "off"] => (name.join(" "), false),
+        name => (name.join(" "), true),
     };
-    let bots = find_bots(rt, Some(who));
+    let bots = find_bots(rt, Some(&who));
     if bots.is_empty() {
         return vec![format!("no bot `{who}`")];
     }
@@ -419,10 +419,10 @@ fn watch(rt: &mut Runtime, args: &[&str]) -> Vec<String> {
             rt.watched.clear();
             return vec!["nobody is watched now".into()];
         }
-        [who] => (*who, true),
-        [who, "off"] => (*who, false),
-        _ => return vec!["usage: lb watch [name|#userid] [off] | lb watch off".into()],
+        [name @ .., "off"] => (name.join(" "), false),
+        name => (name.join(" "), true),
     };
+    let who = who.as_str();
     let players: Vec<(u8, i32)> = rt
         .clients
         .slots
@@ -1302,7 +1302,7 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             let e: Vec<String> = st.satchel_offs.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
             out.push(format!("  satchels set off: {}", e.join("; ")));
         }
-        if st.trails > 0 || !st.shot_whys.is_empty() {
+        if st.trails > 0 || arms.trail.is_some() || !st.shot_whys.is_empty() {
             let why: Vec<String> = st.shot_whys.iter().map(|(w, n)| format!("{w} ×{n}")).collect();
             let plan = arms.trail.as_ref().map_or_else(
                 || "none now".to_string(),

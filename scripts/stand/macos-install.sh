@@ -30,9 +30,10 @@ cmake --build --preset "$PRESET"
 
 DEST="$GAME/addons/lambdabots"
 mkdir -p "$DEST/bin" "$DEST/logs"
-# A new file, not one rewritten in place: macOS kills a process that maps a rewritten dylib (Code Signature Invalid).
-rm -f "$DEST/bin/lambdabots_mm.dylib"
-cp "$ROOT/build/$PRESET/lambdabots_mm.dylib" "$DEST/bin/"
+# A new file renamed into place, not one rewritten in place: macOS kills a process that maps a rewritten dylib (Code
+# Signature Invalid). The old one stays if the copy fails.
+cp "$ROOT/build/$PRESET/lambdabots_mm.dylib" "$DEST/bin/lambdabots_mm.dylib.new"
+mv -f "$DEST/bin/lambdabots_mm.dylib.new" "$DEST/bin/lambdabots_mm.dylib"
 if [[ $LINK_CONFIG -eq 1 ]]; then
     for d in config names profiles maps; do
         rm -rf "${DEST:?}/$d"

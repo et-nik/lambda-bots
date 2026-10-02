@@ -148,7 +148,7 @@ placement trace meets the floor, some 75 units ahead, and the bot runs over it l
 some 85 units apart, each one's blast setting the next off (a mine on the floor bursts some 77 units up; no mine where
 a ceiling lower than that would swallow the blast, nor in water, by a spawn point, at the foot of a ladder (its beam
 would run up it), by another mine, with a player in front, or with the bot not running along the lane). Five mines
-(fewer when it has to get away from a blast: the trail ends where it got to), then on along the lane for 0.7 s and off
+(fewer when it has to get away from a blast: the trail ends where it got to), then on along the lane for 1 s and off
 to a place by the graph 450–800 units from every mine of it (out of its blast), not back past its last one if there is
 such a place, never by another mine of it, in sight of the last one, one it runs to at full speed in a straight line
 (as a player does) rather than by the graph's way; one back past the trail only on such a run keeping 250 units off
@@ -710,7 +710,7 @@ For weapon tests on a stand server started with `sv_cheats 1`:
 - `lb items <item>…` hands items out on every spawn (`lb items longjump`; `lb items none` stops it).
 - `lb gg mines <name|#userid|all>` has bots play GunGame's tripmine level on a server with no GunGame: only the
   tripmines and the glock, everything else as on that level, the mines handed back as they go off the way the plugin
-  does (ten out at most; five carried, the game's limit); `lb gg mines off` ends it. `lb gg` lists them.
+  does (ten out at most; five carried, the game's limit); `lb gg mines off` ends it, and so does a GunGame match. `lb gg` lists them.
 - `lb watch <name|#userid>` writes what a player does to the log, to study how people play (the tripmine trail was
   taken from a human so): twenty times a second where it is, how it moves, where it looks and what it holds; four
   times a second the room around it (eight ways at waist height) and where everyone else is; each shot with what the
