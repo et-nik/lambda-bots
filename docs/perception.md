@@ -57,7 +57,9 @@ by kind: a rocket's glow 3000 units, a crossbow bolt 1500, a grenade 1200, a tri
 a hornet 800. They must be in the PVS and the view frustum with a clear line to them. What it sees is where they are
 and how they move; a grenade coming down, an MP5 grenade and a rocket are followed to where they will blow up, and
 forgotten 0.4 s after they leave the view (a satchel or a snark lying about after 10 s). A tripmine in view shows its
-beam: the line it faces, traced once to the first wall. Mines are remembered until an explosion goes off at them.
+beam: the line it faces, traced once to the first wall, and whether it is on (the mine armed). Mines are remembered
+until an explosion goes off at them (the game bursts it out along the way the mine faces, some 68 units past it), or
+until the bot looks where one should be and it is not there (one such look per look).
 
 The bot knows its own satchels and mines as its own: it threw or placed them and remembers where; seeing them moves
 them to where they are. The game removes a dead player's satchels, and so does the bot's memory.

@@ -121,9 +121,16 @@ impl PartialOrd for Open {
 
 /// Seconds of running from `from` to every place within `max` seconds (infinite beyond).
 pub fn travel(map: &dyn MapView, from: NodeId, max: f32) -> Vec<f32> {
+    travel_tree(map, from, max).0
+}
+
+/// As [`travel`], with the place each one is reached from on the quickest way (`NodeId::MAX` for `from` and the
+/// places out of reach).
+pub fn travel_tree(map: &dyn MapView, from: NodeId, max: f32) -> (Vec<f32>, Vec<NodeId>) {
     let mut cost = vec![f32::INFINITY; map.node_count()];
+    let mut prev = vec![NodeId::MAX; map.node_count()];
     let Some(c0) = cost.get_mut(from as usize) else {
-        return cost;
+        return (cost, prev);
     };
     *c0 = 0.0;
     let mut open = BinaryHeap::new();
@@ -136,11 +143,12 @@ pub fn travel(map: &dyn MapView, from: NodeId, max: f32) -> Vec<f32> {
             let next = c + t;
             if next <= max && next < cost[to as usize] {
                 cost[to as usize] = next;
+                prev[to as usize] = node;
                 open.push(Open { cost: next, node: to });
             }
         });
     }
-    cost
+    (cost, prev)
 }
 
 /// Where a lost player may be.

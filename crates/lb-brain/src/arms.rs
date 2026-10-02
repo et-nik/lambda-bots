@@ -15,11 +15,12 @@
 //!   not close in on the target while its grenade or rocket is on the way.
 //! - **Satchels** go off when an enemy is within 160 units of one and closer to it than the bot; a bot too close to
 //!   be spared backs off first.
-//! - **Tripmines** are shot when an enemy is within 140 units of one 400–1200 units away; a known enemy mine ahead is
-//!   shot to clear the way when nothing else goes on. When quiet the bot now and then lays a mine across a corridor it
-//!   walks along, never near a spawn point and not next to another mine. On the GunGame tripmine level, where mines
-//!   are the weapon, it lays them every few seconds whenever no enemy is in sight; elsewhere in GunGame a mine is not
-//!   shot at an enemy (the plugin keeps its blast off other players).
+//! - **Tripmines** are shot (see [`crate::trail`]) when an enemy is by one, what the whole chain it sets off would do
+//!   to the enemy and to the bot reckoned; a known enemy mine ahead is shot to clear the way when nothing else goes
+//!   on. When quiet the bot now and then lays a mine across a corridor it walks along, never near a spawn point and
+//!   not next to another mine; a trail drops them on the floor on the run. On the GunGame tripmine level, where mines
+//!   are the weapon, it lays them with enemies in sight further off; elsewhere in GunGame a mine is not shot at an
+//!   enemy (the plugin keeps its blast off other players).
 //! - **Dodge:** a grenade coming down (its own too), an MP5 grenade landing or a rocket passing near the bot makes it
 //!   run away from the blast (yapb ran toward it), checking for ledges.
 //! - **Gauss:** its charge runs whenever the gauss is in hand; nothing else starts while it charges.
@@ -28,13 +29,14 @@ use lb_combat::arms::boost::GaussBoost;
 use lb_combat::arms::detonate::{Airburst, Burst, MineShot, SatchelTrigger};
 use lb_combat::arms::gauss::{Gauss, GaussInput};
 use lb_combat::arms::launcher::Lob;
-use lb_combat::arms::mine::Planter;
+use lb_combat::arms::mine::{FloorPlanter, Planter};
 use lb_combat::arms::scope::{LOST_HOLD as SCOPE_LOST_HOLD, Scope, Sight};
 use lb_combat::arms::throw::{Barrage, Kind, Thrower};
 use lb_combat::arms::{Hands, Request, Status};
 use lb_combat::ballistics;
 use lb_combat::fight::drops;
 use lb_combat::policy::XBOW_UNZOOM;
+use lb_core::dmath;
 use lb_core::math::view_angle_vectors;
 use lb_core::rng::BotRng;
 use lb_core::time::SimTime;
@@ -44,13 +46,14 @@ use lb_game::gungame::Kit;
 use lb_game::mechanics::{Attack, WeaponClass, blast_radius, spec};
 use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
-use lb_knowledge::{EnemyTrack, HypothesisKind, PlayerKey, Relation, TrackState};
+use lb_knowledge::{BeamPass, EnemyTrack, HypothesisKind, PlayerKey, Relation, TrackState};
 use lb_motor::{LookIntent, MoveIntent, Prio, StanceIntent, WeaponIntent};
 use lb_nav_api::NavService;
 use lb_worldq::{Trace, TraceQuery, Tracer};
 
 use crate::BotBrain;
 use crate::mind::{Body, Character};
+use crate::trail::TrailPlan;
 
 /// Throw windows (horizontal distance).
 const GRENADE_BAND: [f32; 2] = [300.0, 1000.0];
@@ -169,19 +172,17 @@ const SNARK_HOLD: f64 = 3.0;
 /// A satchel just thrown is still in the air, not where it lands: none is set off for this long after a throw (but
 /// one flying by the enemy, which is watched).
 const SATCHEL_SETTLE: f64 = 1.0;
-const MINE_VICTIM: f32 = 140.0;
-/// Far enough to be spared a mine's blast, near enough to hit its small box.
-const MINE_SHOT_BAND: [f32; 2] = [400.0, 800.0];
 /// A corridor this wide at most gets a mine; its nearer wall must be this close.
 const CORRIDOR: f32 = 300.0;
 const WALL_NEAR: f32 = 90.0;
 const MINE_SPACING: f32 = 96.0;
-/// Seconds before another mine is laid along the way; on the GunGame tripmine level, where mines are the weapon.
+/// Seconds before another mine is laid along the way.
 const MINE_REST: [f32; 2] = [20.0, 30.0];
-const MINES_LEVEL_REST: [f32; 2] = [3.0, 6.0];
-const SPAWN_CLEAR: f32 = 256.0;
+/// On the tripmine level only an enemy in sight this close stops a mine going down.
+const MINES_NEAR: f32 = 700.0;
+pub(crate) const SPAWN_CLEAR: f32 = 256.0;
 /// Quiet this long before laying a mine or clearing one.
-const QUIET: f64 = 5.0;
+pub(crate) const QUIET: f64 = 5.0;
 /// A dodge lasts this long once started; a run from a snark is renewed while it is near.
 const DODGE_FOR: f64 = 0.5;
 /// A long jump away from a blast lands this much further off it than the bot stands.
@@ -195,13 +196,55 @@ const SNARK_OVER_PLAYER: f32 = 300.0;
 /// Navigation keeps off a known beam this long, told again after `BEAM_REPORT`.
 const BEAM_AVOID: f32 = 60.0;
 const BEAM_REPORT: f64 = 30.0;
+/// A path passing this close to a beam the bot can get past costs this many seconds more (a detour of a few hundred
+/// units is taken rather than go by a mine anyone may set off), told once the bot is this far from the mine.
+const SHUN_RADIUS: f32 = 64.0;
+const SHUN_COST: f32 = 1.5;
+const SHUN_FROM: f32 = 256.0;
 const BEAM_LENGTH: f32 = 2048.0;
+/// The bot's own fresh mines: navigation keeps off their beams from this long before they arm (once the bot has run
+/// on from them), and a bot standing in one gets out of it while it arms within this.
+const OWN_BEAM_SOON: f64 = 1.5;
+/// A beam this high over the floor where it crosses the way is ducked under (a crouched player is 36 tall), a lower
+/// one is not got past (a jump over it at a careful pace clears it by a few units, if at all); its floor is looked for
+/// this far below it.
+const DUCK_UNDER: f32 = 42.0;
+const FLOOR_BELOW: f32 = 256.0;
+/// A body walking round a beam keeps its box this far off it (16 touches it; a turn takes the bot wider of the way it
+/// asked for for a moment); its way round is looked along this far, at this height over its middle (over steps and
+/// ramps) by its middle and both its sides, in steps of this.
+const BEAM_KEEP: f32 = 24.0;
+const BEAM_TOUCH: f32 = 17.0;
+const ROOM_AHEAD: f32 = 48.0;
+const ROOM_HEIGHT: f32 = 20.0;
+const ROOM_SIDE: f32 = 15.0;
+const BEAM_STEP: f32 = 8.0;
+/// Ways round a beam: turned this many degrees more each time either side of the way asked for, up to a little past
+/// square to it (further back is navigation's to find), the side taken last first while it was taken within this.
+const BEAM_TURN: f32 = 25.0;
+const BEAM_TURNS: u32 = 4;
+const BEAM_SIDE_FOR: f64 = 0.6;
+/// Near a beam (its way passing this close to one within this, or a beam to duck under within reach) the bot goes
+/// no faster than this: a turn at a run takes it wide, a run stops late. Its run carries it this long before a turn
+/// takes; slower than this it has stopped. Braking, it pushes against its run (some ten units from a run instead of
+/// sliding fifty).
+const GOVERN_GAP: f32 = 40.0;
+const GOVERN_REACH: f32 = 160.0;
+const CAREFUL: f32 = 160.0;
+const DRIFT: f32 = 0.08;
+const SLIDE: f32 = 40.0;
+/// A high beam is ducked under from this far before it (ducking takes 0.4 s).
+const DUCK_FROM: f32 = 130.0;
+/// Closer than this to a high beam (beyond where its run would carry it) the bot waits until it is down.
+const DUCKED_NEAR: f32 = 40.0;
 const DODGE_MARGIN: f32 = 40.0;
 
 #[derive(Clone, Debug)]
 pub enum Active {
     Throw(Thrower),
     Mine(Planter),
+    /// A mine dropped on the floor on the run (a trail).
+    Drop(FloorPlanter),
     Lob(Lob),
     Detonate(SatchelTrigger),
     Airburst(Airburst),
@@ -216,6 +259,7 @@ impl Active {
         match self {
             Active::Throw(t) => t.kind.as_str(),
             Active::Mine(_) => "tripmine",
+            Active::Drop(_) => "trail mine",
             Active::Lob(_) => "m203",
             Active::Detonate(_) => "detonate",
             Active::Airburst(_) => "satchel in flight",
@@ -244,6 +288,12 @@ pub struct ArmsStats {
     pub satchel_offs: Vec<(&'static str, u32)>,
     pub barrages: u32,
     pub mine_shots: u32,
+    /// Why mines were shot.
+    pub shot_whys: Vec<(&'static str, u32)>,
+    /// Trails laid; mines dropped on the run; trails left lying with nobody by them.
+    pub trails: u32,
+    pub dropped: u32,
+    pub trails_left: u32,
     pub dodges: u32,
     /// Runs from snarks.
     pub snark_runs: u32,
@@ -267,6 +317,14 @@ impl ArmsStats {
         }
     }
 
+    fn shot(&mut self, why: &'static str) {
+        self.mine_shots += 1;
+        match self.shot_whys.iter_mut().find(|(w, _)| *w == why) {
+            Some(e) => e.1 += 1,
+            None => self.shot_whys.push((why, 1)),
+        }
+    }
+
     fn failure(&mut self, protocol: &'static str, why: &'static str) {
         self.failed += 1;
         match self.failures.iter_mut().find(|(p, w, _)| *p == protocol && *w == why) {
@@ -284,6 +342,8 @@ pub struct Arms {
     pub last_failure: Option<&'static str>,
     /// The button that set this bot's satchels off, for the server to learn its satchel buttons from.
     pub satchel_fact: Option<Attack>,
+    /// The side the bot last turned to round a beam, kept until then.
+    pub(crate) beam_side: Option<(SimTime, f32)>,
     /// The satchels out: whom they were thrown at and when they go off anyway.
     satchels: Option<SatchelPlan>,
     /// Why the satchels being set off go off.
@@ -326,9 +386,21 @@ pub struct Arms {
     /// When a way to dump a charge was last looked for, and the view angles found.
     dump_way: Option<(SimTime, Option<Vec3>)>,
     /// Running from a blast until then, along this direction.
-    dodge: Option<(SimTime, Vec2)>,
+    pub(crate) dodge: Option<(SimTime, Vec2)>,
     /// A mine just laid on a wall with this normal: the bot steps along the wall, out of where its beam will be.
     step_off: Option<Vec3>,
+    /// The trail being laid or watched.
+    pub trail: Option<TrailPlan>,
+    /// Why the mine being shot is shot; the most of its health the bot gives to the chain it sets off, the chain's
+    /// mines (where each is and the way it faces), and when the bot looks again whether it is still spared.
+    pub(crate) shot_why: &'static str,
+    pub(crate) shot_spare: f32,
+    pub(crate) shot_chain: smallvec::SmallVec<[(Vec3, Vec3); 16]>,
+    pub(crate) shot_check: SimTime,
+    /// A chain set off goes off until then, mine by mine: its blasts are kept out of.
+    pub(crate) blowing: Option<(SimTime, smallvec::SmallVec<[Vec3; 16]>)>,
+    /// Why the last look for where a trail's next mine goes found none.
+    pub drop_why: &'static str,
 }
 
 impl Arms {
@@ -395,9 +467,110 @@ const ON_TARGET_MIN: f32 = 0.4;
 const BEAM_LOOKAHEAD: f32 = 0.3;
 const BLAST_LOOKAHEAD: f32 = 0.3;
 
+/// Where a mine's beam ends: as traced, or for one of the bot's own not traced yet, the way it faces.
+fn beam_of(m: &lb_knowledge::explosives::Mine) -> Option<Vec3> {
+    m.beam_end
+        .or_else(|| (m.own && m.dir != Vec3::ZERO).then(|| m.pos + m.dir * BEAM_LENGTH))
+}
+
+/// How the beam from `a` to `b` is got past: walked round when it stands up from the floor, ducked under when it runs
+/// high enough over the floor (at its middle), else not at all (walked round its end when it has one in the open).
+fn beam_pass(tracer: &mut dyn Tracer, a: Vec3, b: Vec3) -> BeamPass {
+    let d = b - a;
+    if d.z.abs() > d.truncate().length() {
+        return BeamPass::Around;
+    }
+    let mid = a + d * 0.5;
+    let floor = tracer.trace(&TraceQuery::line(mid, mid - Vec3::Z * FLOOR_BELOW));
+    if floor.fraction < 1.0 && mid.z - floor.end.z >= DUCK_UNDER {
+        BeamPass::Under
+    } else {
+        BeamPass::Blocked
+    }
+}
+
+/// How the bot gets past a mine's beam: one standing up from the floor is walked round (unless no room was found
+/// beside it), others as their line showed, kept off until it was looked along.
+fn pass_of(m: &lb_knowledge::explosives::Mine) -> BeamPass {
+    let default = if m.dir.z.abs() > 0.7 {
+        BeamPass::Around
+    } else {
+        BeamPass::Blocked
+    };
+    m.pass.unwrap_or(default)
+}
+
+/// How far along a move from `origin` along `dir` (unit) its line meets the beam from `a` to `b` at body height,
+/// within `reach`.
+fn crossing(origin: Vec3, dir: Vec2, reach: f32, a: Vec3, b: Vec3) -> Option<f32> {
+    let p = origin.truncate();
+    let r = dir * reach;
+    let s = (b - a).truncate();
+    let denom = r.perp_dot(s);
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    let q = a.truncate() - p;
+    let t = q.perp_dot(s) / denom;
+    let u = q.perp_dot(r) / denom;
+    let z = a.z + (b.z - a.z) * u.clamp(0.0, 1.0);
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) && (z - origin.z).abs() <= 36.0).then_some(t * reach)
+}
+
+/// How far a player running at `speed` slides once it lets go (sv_friction 4, sv_stopspeed 100).
+fn stopping(speed: f32) -> f32 {
+    (speed - 100.0).max(0.0) / 4.0 + speed.min(100.0).powi(2) / 800.0
+}
+
+/// The stretch of the beam from `a` to `b` within the height of a body at `origin` (`half` its half height), flat.
+fn beam_slice(origin: Vec3, half: f32, a: Vec3, b: Vec3) -> Option<(Vec2, Vec2)> {
+    let (lo, hi) = (origin.z - half, origin.z + half);
+    let d = b - a;
+    if d.z.abs() < 1e-3 {
+        return (lo..=hi).contains(&a.z).then(|| (a.truncate(), b.truncate()));
+    }
+    let (t0, t1) = (((lo - a.z) / d.z).clamp(0.0, 1.0), ((hi - a.z) / d.z).clamp(0.0, 1.0));
+    let (p, q) = (a + d * t0.min(t1), a + d * t0.max(t1));
+    if p.z.max(q.z) < lo - 0.5 || p.z.min(q.z) > hi + 0.5 {
+        return None;
+    }
+    Some((p.truncate(), q.truncate()))
+}
+
+/// How far the box of a player at `c` is from the flat stretch `p → q`, the way a box is (the larger of the two axes):
+/// under 16 it touches it.
+fn box_gap(c: Vec2, p: Vec2, q: Vec2) -> f32 {
+    let off = |t: f32| {
+        let o = p + (q - p) * t - c;
+        o.x.abs().max(o.y.abs())
+    };
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        if off(a) <= off(b) {
+            hi = b;
+        } else {
+            lo = a;
+        }
+    }
+    off((lo + hi) * 0.5)
+}
+
+/// The point of `p → q` nearest `c`.
+fn nearest_on(c: Vec2, p: Vec2, q: Vec2) -> Vec2 {
+    let s = q - p;
+    p + s * ((c - p).dot(s) / s.length_squared().max(1e-6)).clamp(0.0, 1.0)
+}
+
 /// A player standing at `p` touches the beam from `a` to `b`.
 fn near_beam(p: Vec3, a: Vec3, b: Vec3) -> bool {
     let s = (b - a).truncate();
+    // A beam standing up from a mine on the floor: touched at its foot, from the floor up to its top.
+    if s.length_squared() < 1.0 {
+        return (a.truncate() - p.truncate()).length() <= 20.0
+            && p.z + 36.0 >= a.z.min(b.z)
+            && p.z - 36.0 <= a.z.max(b.z);
+    }
     let len = s.length_squared().max(1e-6);
     let u = ((p - a).truncate().dot(s) / len).clamp(0.0, 1.0);
     let on = a + (b - a) * u;
@@ -457,12 +630,12 @@ pub(crate) fn crowded(
 }
 
 /// An enemy in sight, or lost half a second ago with a tight position: sure enough to set off a trap on.
-fn fresh(t: &EnemyTrack, now: SimTime) -> bool {
+pub(crate) fn fresh(t: &EnemyTrack, now: SimTime) -> bool {
     t.state == TrackState::Visible || (t.age(now) <= 0.5 && t.sigma < 60.0)
 }
 
 /// Where the enemy will be `secs` from now, going on as it goes (where it is when its motion is not known).
-fn ahead(t: &EnemyTrack, now: SimTime, secs: f32) -> Vec3 {
+pub(crate) fn ahead(t: &EnemyTrack, now: SimTime, secs: f32) -> Vec3 {
     if t.velocity_known(now) {
         t.pos + t.vel * secs
     } else {
@@ -517,7 +690,7 @@ fn backfire(tracer: &mut dyn Tracer, eye: Vec3, dir: Vec3, hit: &Trace) -> f32 {
 }
 
 /// How many of the throwable `w` the bot carries and may use.
-fn carried(body: &Body, w: WeaponId) -> i32 {
+pub(crate) fn carried(body: &Body, w: WeaponId) -> i32 {
     if body.allows(w) {
         body.arsenal
             .iter()
@@ -580,7 +753,7 @@ impl BotBrain {
         if satchel_out == Some(1) && self.detonation(body, rng) {
             return;
         }
-        if self.mine_shot(body, nav) {
+        if self.mine_shots(body, nav) || self.trail_drop(body, nav) {
             return;
         }
         if self.lob(body, nav, rng) {
@@ -596,11 +769,25 @@ impl BotBrain {
     }
 
     /// Tells navigation of every armed tripmine beam the bot knows of (its own mines' beams are traced once), again
-    /// before the last word runs out.
+    /// before the last word runs out; the beams of mines gone are lifted (and the others told again: a link may have
+    /// been under two).
     fn keep_off_beams(&mut self, body: &Body, nav: &mut dyn NavService) {
         let now = body.now;
+        if !self.explosives.lifted.is_empty() {
+            for (a, b) in std::mem::take(&mut self.explosives.lifted) {
+                nav.clear_line(a, b);
+            }
+            for m in &mut self.explosives.mines {
+                m.avoided_at = None;
+            }
+        }
         for m in &mut self.explosives.mines {
-            if now < m.armed_at || m.avoided_at.is_some_and(|t| now.since(t) < BEAM_REPORT) {
+            let from = if m.own {
+                SimTime(m.armed_at.0 - OWN_BEAM_SOON)
+            } else {
+                m.armed_at
+            };
+            if now < from || m.avoided_at.is_some_and(|t| now.since(t) < BEAM_REPORT) {
                 continue;
             }
             let end = match m.beam_end {
@@ -612,7 +799,15 @@ impl BotBrain {
                 }
                 None => continue,
             };
-            nav.avoid_line(m.pos, end, BEAM_AVOID);
+            // Beams the bot cannot get past (see `beam_guard`) keep the way off them; paths by the others cost more,
+            // told once the bot is off from the mine (not to turn it back along the way it is on).
+            if *m.pass.get_or_insert_with(|| beam_pass(nav, m.pos, end)) == BeamPass::Blocked {
+                nav.avoid_line(m.pos, end, BEAM_AVOID);
+            } else if m.pos.distance(body.origin) >= SHUN_FROM {
+                nav.shun_line(m.pos, end, SHUN_RADIUS, SHUN_COST, BEAM_AVOID);
+            } else {
+                continue;
+            }
             m.avoided_at = Some(now);
         }
     }
@@ -867,40 +1062,6 @@ impl BotBrain {
         }
         self.mind.arms.active = Some(Active::Barrage(Barrage::new(t.who, now)));
         self.mind.arms.next_barrage = now + f64::from(rng.combat.range_f32(THROW_REST[0], THROW_REST[1]));
-        true
-    }
-
-    fn mine_shot(&mut self, body: &Body, nav: &mut dyn NavService) -> bool {
-        let now = body.now;
-        let gun = [WeaponId::Python, WeaponId::Glock, WeaponId::Mp5, WeaponId::Gauss]
-            .into_iter()
-            .find(|w| body.arsenal.iter().any(|a| a.id == *w && a.loaded()) && body.allows(*w));
-        let Some(gun) = gun else { return false };
-        let calm = self.calm_for(now) >= QUIET;
-        // In GunGame a mine's blast hurts others only for a player on the tripmine level.
-        let victims = body.gungame.is_none_or(|g| g.kit == Kit::Mines);
-        let heading = body.velocity.truncate().normalize_or_zero();
-        let target = self.explosives.mines.iter().find_map(|m| {
-            if now < m.armed_at {
-                return None;
-            }
-            let d = m.pos.distance(body.eye);
-            if !(MINE_SHOT_BAND[0]..=MINE_SHOT_BAND[1]).contains(&d) || d < blast_radius(body.damages.tripmine) + 25.0 {
-                return None;
-            }
-            let victim = victims
-                && self
-                    .beliefs
-                    .enemies()
-                    .any(|t| fresh(t, now) && t.pos.distance(m.pos) <= MINE_VICTIM);
-            let in_the_way = calm && !m.own && heading.dot((m.pos - body.origin).truncate().normalize_or_zero()) > 0.7;
-            (victim || in_the_way).then_some(m.pos)
-        });
-        let Some(mine) = target else { return false };
-        if nav.trace(&TraceQuery::line(body.eye, mine)).fraction < 0.9 {
-            return false;
-        }
-        self.mind.arms.active = Some(Active::Shoot(MineShot::new(mine, gun, now)));
         true
     }
 
@@ -1177,12 +1338,13 @@ impl BotBrain {
     }
 
     /// Puts a tripmine on the wall at `wall` (the trap goal brought the bot where it reaches it).
-    pub(crate) fn plant_mine(&mut self, wall: Vec3, normal: Vec3, now: SimTime) -> bool {
+    pub(crate) fn plant_mine(&mut self, wall: Vec3, normal: Vec3, body: &Body) -> bool {
         if self.mind.arms.busy() {
             return false;
         }
+        let now = body.now;
         self.mind.arms.active = Some(Active::Mine(Planter::new(wall, normal, now)));
-        self.mind.arms.next_mine = self.mind.arms.next_mine.max(now + 20.0);
+        self.mind.arms.next_mine = self.mind.arms.next_mine.max(now + f64::from(MINE_REST[0]));
         true
     }
 
@@ -1219,17 +1381,15 @@ impl BotBrain {
             return;
         }
         self.mind.arms.next_mine = now + f64::from(rng.combat.range_f32(1.5, 3.0));
-        // On the GunGame tripmine level mines are the weapon: laid on any way, with no enemy in sight.
-        let mines_level = body.gungame.is_some_and(|g| g.kit == Kit::Mines);
+        // On the GunGame tripmine level mines go down in trails only, as a player lays them there.
+        if body.gungame.is_some_and(|g| g.kit == Kit::Mines) {
+            return;
+        }
         let walking = matches!(
             self.mind.goal.map(|g| g.kind),
             Some(GoalKind::Roam | GoalKind::CollectItem(_))
-        ) || (mines_level && !matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::PlantTrap(_))));
-        let quiet = if mines_level {
-            self.beliefs.visible_enemies().next().is_none()
-        } else {
-            self.calm_for(now) >= QUIET
-        };
+        );
+        let quiet = self.calm_for(now) >= QUIET;
         let speed = body.velocity.truncate().length();
         if !walking
             || speed < 100.0
@@ -1274,8 +1434,7 @@ impl BotBrain {
             return;
         }
         self.mind.arms.active = Some(Active::Mine(Planter::new(spot, normal, now)));
-        let rest = if mines_level { MINES_LEVEL_REST } else { MINE_REST };
-        self.mind.arms.next_mine = now + f64::from(rng.combat.range_f32(rest[0], rest[1]));
+        self.mind.arms.next_mine = now + f64::from(rng.combat.range_f32(MINE_REST[0], MINE_REST[1]));
     }
 
     /// Every frame: the gauss charge, the running protocol and a rocket in flight get their say at `Prio::Protocol`.
@@ -1334,7 +1493,16 @@ impl BotBrain {
             }
         }
         if let Some(mut active) = self.mind.arms.active.take() {
-            let in_sight = self.beliefs.visible_enemies().next().is_some();
+            // On the tripmine level an enemy in sight further off does not keep a mine from going down.
+            let near = if body.gungame.is_some_and(|g| g.kit == Kit::Mines) {
+                MINES_NEAR
+            } else {
+                f32::INFINITY
+            };
+            let in_sight = self
+                .beliefs
+                .visible_enemies()
+                .any(|t| t.pos.distance(body.origin) < near);
             let status = match &mut active {
                 Active::Throw(t) => {
                     let status = t.update(&hands, nav);
@@ -1355,7 +1523,25 @@ impl BotBrain {
                 }
                 // Laying a mine with an enemy in sight is left for later.
                 Active::Mine(_) if in_sight => Status::Failed("an enemy came into sight"),
-                Active::Mine(p) => p.update(&hands, nav),
+                // A mine pressed for is remembered at once: the count of mines may show it late, or never.
+                Active::Mine(p) => {
+                    let status = p.update(&hands, nav);
+                    if !p.noted
+                        && let Some(at) = p.pressed_at()
+                    {
+                        p.noted = true;
+                        self.explosives.placed_mine(p.mine(), p.normal, at);
+                    }
+                    status
+                }
+                Active::Drop(p) => {
+                    let heading = match self.mind.arms.trail.as_ref().map(|t| t.dir) {
+                        Some(dir) if dir != Vec2::ZERO => dir,
+                        _ => body.velocity.truncate().normalize_or_zero(),
+                    };
+                    // Remembered once the game took the press (`finished`): a press it did not take leaves no mine.
+                    p.update(&hands, nav, heading)
+                }
                 Active::Lob(l) => {
                     let gravity = body.gravity * lb_game::mechanics::PROJECTILE_GRAVITY;
                     let landing = ballistics::position_at(l.throw.start, l.throw.velocity, gravity, l.throw.flight);
@@ -1417,10 +1603,12 @@ impl BotBrain {
                     b.update(&hands, call.is_some(), call.map(|c| c.view))
                 }
                 Active::Shoot(s) => {
-                    if self.explosives.mines.iter().any(|m| m.pos.distance(s.mine) < 24.0) {
-                        s.update(&hands, self.mind.click_interval.max(spec(s.weapon).cycle))
-                    } else {
+                    if !self.explosives.mines.iter().any(|m| m.pos.distance(s.mine) < 24.0) {
                         Status::Done
+                    } else if now >= self.mind.arms.shot_check && !self.shot_spared(body, nav) {
+                        Status::Failed("the bot came into the chain's blast")
+                    } else {
+                        s.update(&hands, self.mind.click_interval.max(spec(s.weapon).cycle))
                     }
                 }
             };
@@ -1716,9 +1904,19 @@ impl BotBrain {
             },
             Active::Mine(p) => {
                 stats.mines += 1;
-                self.explosives.placed_mine(p.mine(), p.normal, now);
+                if !p.noted {
+                    self.explosives
+                        .placed_mine(p.mine(), p.normal, p.pressed_at().unwrap_or(now));
+                }
                 // Out of the beam's way before it arms (see `dodge`).
                 self.mind.arms.step_off = Some(p.normal);
+            }
+            Active::Drop(p) => {
+                stats.mines += 1;
+                stats.dropped += 1;
+                if let Some((pos, dir)) = p.mine() {
+                    self.trail_dropped(pos, dir, p.pressed_at().unwrap_or(now));
+                }
             }
             Active::Lob(l) => {
                 stats.lobs += 1;
@@ -1761,7 +1959,11 @@ impl BotBrain {
                     }
                 }
             }
-            Active::Shoot(_) => stats.mine_shots += 1,
+            Active::Shoot(_) => {
+                let why = self.mind.arms.shot_why;
+                self.mind.arms.stats.shot(why);
+                self.chain_set_off(body);
+            }
             Active::GaussBoost(_) => self.mind.tricks.stats.boosts_fired += 1,
             Active::Scope(sc) => {
                 stats.scoped += sc.shots;
@@ -1874,27 +2076,169 @@ impl BotBrain {
         )
     }
 
-    /// Every frame, after everything else asked to move: a move that would take the bot into the beam of an armed
-    /// tripmine it knows of (its own included) is stopped. Paths keep off beams; this also covers strafing and
-    /// dodging, which do not follow paths.
-    pub(crate) fn beam_guard(&mut self, body: &Body) {
+    /// Every frame, after everything else asked to move: a move toward the beam of a tripmine the bot knows of (armed,
+    /// or about to be) gets past it the way a player does: ducking under a high one; round any other by the way nearest
+    /// the one asked for that keeps the bot's box off it (where
+    /// the beam runs at body height: the foot of one standing up from the floor, a stretch of one slanting up a ramp),
+    /// on the floor and clear of walls. Near a beam the bot goes at a careful pace, and the way is reckoned from where
+    /// its run carries it first; where no way does, it brakes hard (pushing against its run, as a player does). A beam
+    /// standing up with no way round is told to navigation, which keeps paths off the others it cannot get past.
+    /// Strafing and dodging, which do not follow paths, are covered too, and so is a bot sliding to a stop.
+    pub(crate) fn beam_guard(&mut self, body: &Body, nav: &mut dyn NavService) {
         let now = body.now;
         let Some((prio, mv)) = self.intents.movement else {
             return;
         };
-        if prio >= Prio::Traversal || mv.speed <= 0.0 || mv.dir == Vec2::ZERO {
+        if prio >= Prio::Traversal {
             return;
         }
-        let ahead = body.origin + (mv.dir.normalize_or_zero() * mv.speed * BEAM_LOOKAHEAD).extend(0.0);
-        let into = self.explosives.mines.iter().any(|m| {
-            now >= m.armed_at
-                && m.beam_end.is_some_and(|end| {
-                    (1..=3).any(|k| near_beam(body.origin.lerp(ahead, k as f32 / 3.0), m.pos, end))
-                        && !near_beam(body.origin, m.pos, end)
-                })
-        });
-        if into {
-            self.intents.movement(Prio::Protocol, lb_combat::arms::stop());
+        let velocity = body.velocity.truncate();
+        let run = velocity.length();
+        let asked = mv.speed > 0.0 && mv.dir != Vec2::ZERO;
+        if !asked && run < SLIDE {
+            return;
+        }
+        // Standing still, the way it slides.
+        let dir = if asked { mv.dir.normalize() } else { velocity / run };
+        let half = if body.ducked { 18.0 } else { 36.0 };
+        let (mut duck, mut brake, mut careful) = (false, false, false);
+        let mut walls: smallvec::SmallVec<[(usize, Vec2, Vec2); 8]> = smallvec::SmallVec::new();
+        for (i, m) in self.explosives.mines.iter().enumerate() {
+            let Some(end) = beam_of(m).filter(|_| now.since(m.armed_at) > -OWN_BEAM_SOON) else {
+                continue;
+            };
+            let inside = near_beam(body.origin, m.pos, end);
+            match pass_of(m) {
+                BeamPass::Around | BeamPass::Blocked => {
+                    if let Some((p, q)) = beam_slice(body.origin, half, m.pos, end) {
+                        walls.push((i, p, q));
+                    }
+                }
+                BeamPass::Under => {
+                    let at = crossing(body.origin, dir, DUCK_FROM, m.pos, end);
+                    careful |= at.is_some();
+                    if inside || at.is_some() {
+                        duck = true;
+                    }
+                    // Ducking takes a moment: not into the beam before the bot is down.
+                    let room = stopping(run) + DUCKED_NEAR;
+                    if !body.ducked && (inside || at.is_some_and(|t| t <= room)) {
+                        brake = true;
+                    }
+                }
+            }
+        }
+        let mut steer = None;
+        if !walls.is_empty() {
+            let here = body.origin.truncate();
+            // Where its run carries the bot before a turn takes, then along a way: as far as the move goes before it
+            // is looked at again, or as far as the bot would slide.
+            let drift = velocity * DRIFT;
+            let reach = (mv.speed * BEAM_LOOKAHEAD).max(stopping(run)) + BEAM_STEP;
+            let steps = (reach / BEAM_STEP).ceil() as u32;
+            let path = |d: Vec2, k: u32| here + drift + d * (k as f32 * BEAM_STEP);
+            let gaps: smallvec::SmallVec<[f32; 8]> = walls
+                .iter()
+                .map(|&(_, p, q)| box_gap(here, p, q).min(box_gap(here + drift, p, q)))
+                .collect();
+            // Carried clear of every beam, then each step out of reach of every beam, or no nearer one already too
+            // near than now.
+            let carried = gaps.iter().all(|&g| g >= BEAM_TOUCH);
+            let fits = |d: Vec2| {
+                carried
+                    && (1..=steps).all(|k| {
+                        let at = path(d, k);
+                        walls.iter().zip(&gaps).all(|(&(_, p, q), &now_gap)| {
+                            let g = box_gap(at, p, q);
+                            g >= BEAM_KEEP || g >= now_gap - 0.5
+                        })
+                    })
+            };
+            let near = |d: Vec2| {
+                let steps = (GOVERN_REACH / BEAM_STEP) as u32;
+                (0..=steps).any(|k| walls.iter().any(|&(_, p, q)| box_gap(path(d, k), p, q) < GOVERN_GAP))
+            };
+            if !fits(dir) {
+                let (nearest, _) = walls
+                    .iter()
+                    .zip(&gaps)
+                    .min_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(w, g)| (*w, *g))
+                    .unwrap_or((walls[0], 0.0));
+                // Away from the side the nearest beam is on, or the side taken last.
+                let toward = nearest_on(here, nearest.1, nearest.2) - here;
+                let away = if toward.perp_dot(dir) > 0.0 { 1.0 } else { -1.0 };
+                let first = self
+                    .mind
+                    .arms
+                    .beam_side
+                    .filter(|(until, _)| now < *until)
+                    .map_or(away, |(_, s)| s);
+                let room = |d: Vec2, nav: &mut dyn NavService| {
+                    let along = (d * reach.min(ROOM_AHEAD)).extend(0.0);
+                    let side = Vec3::new(-d.y, d.x, 0.0) * ROOM_SIDE;
+                    [-1.0, 0.0, 1.0].into_iter().all(|k| {
+                        let from = body.origin + Vec3::Z * ROOM_HEIGHT + side * k;
+                        clear_line(nav, from, from + along)
+                    }) && !drops(nav, body.origin, d * mv.speed.max(SLIDE))
+                };
+                let way = if asked {
+                    (1..=BEAM_TURNS)
+                        .flat_map(|k| [(first, k), (-first, k)])
+                        .map(|(side, k)| {
+                            let (sin, cos) = dmath::sin_cos((side * BEAM_TURN * k as f32).to_radians());
+                            (side, Vec2::new(dir.x * cos - dir.y * sin, dir.x * sin + dir.y * cos))
+                        })
+                        .find(|&(_, d)| fits(d) && room(d, nav))
+                } else {
+                    None
+                };
+                match way {
+                    Some((side, d)) => {
+                        steer = Some(d);
+                        self.mind.arms.beam_side = Some((now + BEAM_SIDE_FOR, side));
+                    }
+                    None => {
+                        brake = true;
+                        let m = &mut self.explosives.mines[nearest.0];
+                        if asked && pass_of(m) == BeamPass::Around {
+                            m.pass = Some(BeamPass::Blocked);
+                            m.avoided_at = None;
+                        }
+                    }
+                }
+            }
+            careful |= asked && near(steer.unwrap_or(dir));
+        }
+        if duck {
+            self.intents.stance(
+                Prio::Protocol,
+                StanceIntent {
+                    jump: false,
+                    duck,
+                    longjump: false,
+                },
+            );
+        }
+        let way = if brake {
+            Some(if run > SLIDE {
+                MoveIntent {
+                    dir: -velocity / run,
+                    speed: body.maxspeed,
+                }
+            } else {
+                lb_combat::arms::stop()
+            })
+        } else if asked && (steer.is_some() || careful) {
+            Some(MoveIntent {
+                dir: steer.unwrap_or(dir),
+                speed: if careful { mv.speed.min(CAREFUL) } else { mv.speed },
+            })
+        } else {
+            None
+        };
+        if let Some(m) = way {
+            self.intents.movement(Prio::Protocol, m);
         }
     }
 
@@ -1921,7 +2265,8 @@ impl BotBrain {
             .blasts(body.now, body.gravity, floor)
             .filter(|b| b.kind == lb_game::entities::ProjectileKind::Grenade)
             .map(|b| (b.at, b.radius));
-        for (at, radius) in grenades.chain(rocket) {
+        let chain: smallvec::SmallVec<[(Vec3, f32); 16]> = self.chain_blasts(body).map(|b| (b.at, b.radius)).collect();
+        for (at, radius) in grenades.chain(rocket).chain(chain) {
             let off = (body.origin - at).truncate();
             if (off + velocity * BLAST_LOOKAHEAD).length() >= radius + DODGE_MARGIN {
                 continue;
@@ -1941,9 +2286,36 @@ impl BotBrain {
     }
 
     /// Every frame: run from a blast about to go off near the bot (a skilled one with the module long jumps away),
-    /// and out of the beam of a mine it just laid.
+    /// and out of the beam of a mine it just laid, or of one of its own about to arm (whatever a protocol would have
+    /// the bot do: armed with the bot in it, the mine goes off as it moves).
     pub(crate) fn dodge(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
+        let arming = self.explosives.mines.iter().find_map(|m| {
+            let end = beam_of(m)?;
+            (m.own && now < m.armed_at && now.since(m.armed_at) > -OWN_BEAM_SOON && near_beam(body.origin, m.pos, end))
+                .then_some((m.pos, end))
+        });
+        if let Some((a, b)) = arming {
+            let s = b - a;
+            let on = a + s * ((body.origin - a).dot(s) / s.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            let (forward, _, _) = view_angle_vectors(self.motor.view);
+            let away = (body.origin - on)
+                .truncate()
+                .try_normalize()
+                .unwrap_or_else(|| forward.truncate().normalize_or(Vec2::X));
+            if let Some(dir) = [away, Vec2::new(-away.y, away.x), Vec2::new(away.y, -away.x)]
+                .into_iter()
+                .find(|d| !drops(nav, body.origin, *d * body.maxspeed))
+            {
+                self.intents.movement(
+                    Prio::Protocol,
+                    MoveIntent {
+                        dir,
+                        speed: body.maxspeed,
+                    },
+                );
+            }
+        }
         if let Some(normal) = self.mind.arms.step_off.take() {
             // Along the wall, the way the bot faces, or back the other way from a drop.
             let (forward, _, _) = view_angle_vectors(self.motor.view);
@@ -1961,10 +2333,12 @@ impl BotBrain {
             }
         }
         let floor = body.origin.z - 36.0;
+        let chain: smallvec::SmallVec<[lb_knowledge::Blast; 16]> = self.chain_blasts(body).collect();
         let threat = self
             .explosives
             .blasts(now, body.gravity, floor)
             .chain(self.explosives.rocket_at(body.eye))
+            .chain(chain)
             .filter(|b| b.at.distance(body.origin) < b.radius + DODGE_MARGIN)
             .min_by(|a, b| a.at.distance(body.origin).total_cmp(&b.at.distance(body.origin)));
         if let Some(b) = threat {
@@ -2004,7 +2378,7 @@ impl BotBrain {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use lb_combat::Armed;
     use lb_config::skill::Presets;
@@ -2014,7 +2388,7 @@ mod tests {
     use lb_worldq::{Trace, contents};
 
     /// Open floor at z = -36 everywhere.
-    struct Open;
+    pub(crate) struct Open;
 
     impl Tracer for Open {
         fn trace(&mut self, q: &TraceQuery) -> Trace {
@@ -2048,7 +2422,7 @@ mod tests {
         }
     }
 
-    fn character() -> Character {
+    pub(crate) fn character() -> Character {
         Character {
             skill: Presets::default().at(100),
             level: 100,
@@ -2060,7 +2434,7 @@ mod tests {
         }
     }
 
-    fn body(now: f64) -> Body {
+    pub(crate) fn body(now: f64) -> Body {
         Body {
             now: SimTime(now),
             dt: 0.01,
@@ -2072,6 +2446,7 @@ mod tests {
             armor: 0.0,
             has_longjump: false,
             on_ground: true,
+            ducked: false,
             on_ladder: false,
             underwater: false,
             waterlevel: 0,
@@ -2096,7 +2471,7 @@ mod tests {
         }
     }
 
-    fn seen(t: f64, pos: Vec3) -> Sighting {
+    pub(crate) fn seen(t: f64, pos: Vec3) -> Sighting {
         Sighting {
             who: PlayerKey { slot: 5, userid: 50 },
             relation: Relation::Enemy,
@@ -2142,7 +2517,7 @@ mod tests {
         None
     }
 
-    fn params() -> BeliefParams {
+    pub(crate) fn params() -> BeliefParams {
         BeliefParams {
             track_forget: 12.0,
             maxspeed: 300.0,
@@ -2474,6 +2849,439 @@ mod tests {
     }
 
     #[test]
+    fn on_the_tripmine_level_no_mine_is_aimed_at_an_enemy() {
+        use lb_game::gungame::GunGame;
+        let enemy = Vec3::new(900.0, 100.0, 0.0);
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.mind.arms.next_mine = SimTime(100.0);
+        let mut rng = BotRng::new(7, 7);
+        for i in 0..10 {
+            let t = f64::from(i) * 0.1;
+            let mut sight = seen(t, enemy);
+            sight.first = i == 0;
+            brain.beliefs.on_sighting(&sight);
+            brain.update(SimTime(t), &params(), None, None);
+            let mut b = body(t);
+            b.arsenal.retain(|a| a.id != WeaponId::HandGrenade);
+            b.arsenal.push(Armed::new(WeaponId::Tripmine, None, Some(5)));
+            b.weapon = Some(WeaponId::Tripmine);
+            b.gungame = Some(GunGame::drill(1, Kit::Mines));
+            b.allowed = Kit::Mines.weapons();
+            brain.act(&b, &character(), &mut Open, None, &mut rng);
+        }
+        assert_eq!(
+            brain.mind.choice,
+            Some(lb_combat::policy::Choice::Use(WeaponId::Tripmine))
+        );
+        assert!(
+            !matches!(brain.intents.look, Some((Prio::Threat, _))),
+            "{:?}",
+            brain.intents.look
+        );
+        assert_eq!(brain.mind.hold_fire, Some("mines are laid, not fired"));
+    }
+
+    /// Open floor, with somewhere to run to away from any threat: 500 units along -x.
+    struct Away;
+
+    impl Tracer for Away {
+        fn trace(&mut self, q: &TraceQuery) -> Trace {
+            Open.trace(q)
+        }
+
+        fn point_contents(&mut self, p: Vec3) -> i32 {
+            Open.point_contents(p)
+        }
+    }
+
+    impl NavService for Away {
+        fn go_to(&mut self, dest: Vec3) -> (NavStatus, Option<NavStep>) {
+            let mut step = NavStep::hold(dest);
+            step.move_dir = dest.truncate().normalize_or_zero();
+            step.speed = 300.0;
+            (NavStatus::Moving, Some(step))
+        }
+        fn roam(&mut self, _rng: &mut Pcg32) -> Option<NavStep> {
+            None
+        }
+        fn away_from(&mut self, _threat: Vec3) -> Option<Vec3> {
+            Some(Vec3::new(-500.0, 0.0, 0.0))
+        }
+        fn available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn on_the_tripmine_level_a_bot_found_in_its_cover_runs_on_not_back_past_its_mines() {
+        use lb_game::gungame::GunGame;
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.mind.task = Some(crate::goals::Task::Hide {
+            dest: Vec3::ZERO,
+            threat: Vec3::new(200.0, 0.0, 0.0),
+            at: SimTime(0.5),
+            arrived: true,
+        });
+        brain.beliefs.on_sighting(&seen(1.0, Vec3::new(150.0, 0.0, 0.0)));
+        brain.update(SimTime(1.0), &params(), None, None);
+        let mut b = body(1.0);
+        b.arsenal.push(Armed::new(WeaponId::Tripmine, None, Some(5)));
+        b.gungame = Some(GunGame::drill(1, Kit::Mines));
+        b.allowed = Kit::Mines.weapons();
+        brain.intents.clear();
+        brain.retreat(&b, &character(), &mut Away, &mut BotRng::new(3, 3));
+        let (_, mv) = brain.intents.movement.expect("running");
+        assert!(mv.dir.x < -0.9 && mv.speed > 100.0, "{mv:?}");
+        assert!(matches!(
+            brain.mind.task,
+            Some(crate::goals::Task::Hide { arrived: false, .. })
+        ));
+        // Not back past a mine of its own lying that way.
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.mind.task = Some(crate::goals::Task::Hide {
+            dest: Vec3::ZERO,
+            threat: Vec3::new(200.0, 0.0, 0.0),
+            at: SimTime(0.5),
+            arrived: true,
+        });
+        brain
+            .explosives
+            .placed_mine(Vec3::new(-200.0, 30.0, -28.0), Vec3::Z, SimTime(-5.0));
+        brain.beliefs.on_sighting(&seen(1.0, Vec3::new(150.0, 0.0, 0.0)));
+        brain.update(SimTime(1.0), &params(), None, None);
+        brain.intents.clear();
+        brain.retreat(&b, &character(), &mut Away, &mut BotRng::new(3, 3));
+        assert!(
+            brain.intents.movement.is_none_or(|(_, mv)| mv.dir.x > -0.5),
+            "{:?}",
+            brain.intents.movement
+        );
+    }
+
+    #[test]
+    fn a_bot_gets_out_of_its_own_mines_beam_before_it_arms_and_keeps_out() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        // Dropped under the bot: it arms 2.5 s after.
+        brain
+            .explosives
+            .placed_mine(Vec3::new(5.0, 0.0, -28.0), Vec3::Z, SimTime(0.0));
+        let mut rng = BotRng::new(1, 1);
+        brain.intents.clear();
+        brain.dodge(&body(0.5), &character(), &mut Open, &mut rng);
+        assert!(brain.intents.movement.is_none(), "not about to arm yet");
+        brain.intents.clear();
+        brain.dodge(&body(1.5), &character(), &mut Open, &mut rng);
+        let (prio, mv) = brain.intents.movement.expect("out of it");
+        assert_eq!(prio, Prio::Protocol, "whatever a protocol wants");
+        assert!(mv.speed > 100.0 && mv.dir.x < -0.9, "{mv:?}");
+        // Out of it, a move back at it goes round its foot, even before it arms.
+        let mut b = body(1.6);
+        b.origin.x = -60.0;
+        brain.intents.clear();
+        brain.intents.movement(
+            Prio::Goal,
+            MoveIntent {
+                dir: Vec2::X,
+                speed: 300.0,
+            },
+        );
+        brain.beam_guard(&b, &mut Open);
+        let (_, mv) = brain.intents.movement.expect("a move");
+        assert!(mv.speed > 100.0 && mv.dir.y.abs() > 0.3, "round it: {mv:?}");
+    }
+
+    /// A floor at z = -36, with walls at y = ±`half` and a ceiling at `ceiling` when given.
+    struct Room {
+        half: Option<f32>,
+        ceiling: Option<f32>,
+    }
+
+    impl Tracer for Room {
+        fn trace(&mut self, q: &TraceQuery) -> Trace {
+            let d = q.end - q.start;
+            let mut hits: Vec<(f32, Vec3)> = Vec::new();
+            let mut plane = |at: f32, from: f32, to: f32, normal: Vec3| {
+                if (from - at) * (to - at) < 0.0 {
+                    hits.push(((at - from) / (to - from), normal));
+                }
+            };
+            plane(-36.0, q.start.z, q.end.z, Vec3::Z);
+            if let Some(c) = self.ceiling {
+                plane(c, q.start.z, q.end.z, Vec3::NEG_Z);
+            }
+            if let Some(h) = self.half {
+                plane(h, q.start.y, q.end.y, Vec3::NEG_Y);
+                plane(-h, q.start.y, q.end.y, Vec3::Y);
+            }
+            match hits.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+                Some((f, normal)) => {
+                    let mut t = Trace::clear(q.start + d * f);
+                    t.fraction = f;
+                    t.normal = normal;
+                    t
+                }
+                None => Trace::clear(q.end),
+            }
+        }
+
+        fn point_contents(&mut self, _p: Vec3) -> i32 {
+            contents::EMPTY
+        }
+    }
+
+    impl NavService for Room {
+        fn go_to(&mut self, dest: Vec3) -> (NavStatus, Option<NavStep>) {
+            (NavStatus::Moving, Some(NavStep::hold(dest)))
+        }
+        fn roam(&mut self, _rng: &mut Pcg32) -> Option<NavStep> {
+            None
+        }
+        fn away_from(&mut self, _threat: Vec3) -> Option<Vec3> {
+            None
+        }
+        fn available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_beam_is_walked_round_ducked_under_or_kept_off_as_it_runs() {
+        let mut open = Room {
+            half: None,
+            ceiling: None,
+        };
+        let across = |z: f32| (Vec3::new(0.0, -60.0, z), Vec3::new(0.0, 60.0, z));
+        assert_eq!(
+            beam_pass(&mut open, Vec3::new(0.0, 0.0, -28.0), Vec3::new(0.0, 0.0, 200.0)),
+            BeamPass::Around,
+            "standing up from the floor"
+        );
+        let (a, b) = across(14.0);
+        assert_eq!(beam_pass(&mut open, a, b), BeamPass::Under, "50 over the floor");
+        let (a, b) = across(-16.0);
+        assert_eq!(beam_pass(&mut open, a, b), BeamPass::Blocked, "20 over the floor");
+    }
+
+    #[test]
+    fn a_bot_ducks_under_a_high_beam_keeps_off_a_low_one_and_goes_round_one_standing_up() {
+        let guard = |pos: Vec3, end: Vec3, nav: &mut Room, airborne: bool| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            let dir = (end - pos).normalize();
+            brain.explosives.placed_mine(pos, dir, SimTime(-10.0));
+            brain.explosives.mines[0].own = false;
+            let mut b = body(1.0);
+            b.on_ground = !airborne;
+            brain.keep_off_beams(&b, nav);
+            brain.intents.clear();
+            brain.intents.movement(
+                Prio::Goal,
+                MoveIntent {
+                    dir: Vec2::X,
+                    speed: 270.0,
+                },
+            );
+            brain.beam_guard(&b, nav);
+            brain
+        };
+        let mut open = Room {
+            half: None,
+            ceiling: None,
+        };
+        // Across the way 100 ahead, 50 over the floor: ducked under, the move kept at a careful pace.
+        let b = guard(
+            Vec3::new(100.0, -60.0, 14.0),
+            Vec3::new(100.0, 60.0, 14.0),
+            &mut open,
+            false,
+        );
+        assert!(matches!(b.intents.stance, Some((Prio::Protocol, s)) if s.duck && !s.jump));
+        let (_, mv) = b.intents.movement.unwrap();
+        assert!(mv.dir == Vec2::X && mv.speed == CAREFUL, "{mv:?}");
+        // 20 over the floor 50 ahead: not jumped, the way turned off it.
+        let b = guard(
+            Vec3::new(50.0, -60.0, -16.0),
+            Vec3::new(50.0, 60.0, -16.0),
+            &mut open,
+            false,
+        );
+        assert!(b.intents.stance.is_none_or(|(_, s)| !s.jump));
+        let (_, mv) = b.intents.movement.unwrap();
+        assert!(mv.dir.x < 0.5, "{mv:?}");
+        // A high one close by while still standing: wait until down.
+        let b = guard(
+            Vec3::new(30.0, -60.0, 14.0),
+            Vec3::new(30.0, 60.0, 14.0),
+            &mut open,
+            false,
+        );
+        assert_eq!(b.intents.movement.map(|(_, m)| m.speed), Some(0.0));
+        assert!(matches!(b.intents.stance, Some((Prio::Protocol, s)) if s.duck));
+        // Standing up from the floor 60 ahead: round it.
+        let b = guard(
+            Vec3::new(60.0, 0.0, -28.0),
+            Vec3::new(60.0, 0.0, 200.0),
+            &mut open,
+            false,
+        );
+        let (_, mv) = b.intents.movement.unwrap();
+        assert!(mv.speed == CAREFUL && mv.dir.y.abs() > 0.3, "{mv:?}");
+        // With no room beside it the bot stops, and the way is told to keep off it.
+        let mut narrow = Room {
+            half: Some(20.0),
+            ceiling: None,
+        };
+        let b = guard(
+            Vec3::new(60.0, 0.0, -28.0),
+            Vec3::new(60.0, 0.0, 200.0),
+            &mut narrow,
+            false,
+        );
+        assert_eq!(b.intents.movement.map(|(_, m)| m.speed), Some(0.0));
+        assert_eq!(b.explosives.mines[0].pass, Some(BeamPass::Blocked));
+    }
+
+    /// The bot running at `wish` from `from` for `frames` hundredths of a second with the game's ground movement
+    /// (friction 4 below a stop speed of 100, acceleration 10), its moves past the beam guard; where it went, and
+    /// whether its box ever met the stretch of a beam at its height.
+    fn run_by(brain: &mut BotBrain, nav: &mut Room, from: Vec3, wish: Vec2, frames: usize) -> (Vec3, Option<Vec3>) {
+        let dt = 0.01;
+        let (mut at, mut v) = (from, wish * 270.0);
+        let mut met = None;
+        for i in 0..frames {
+            let mut b = body(1.0 + i as f64 * f64::from(dt));
+            b.origin = at;
+            b.eye = at + Vec3::Z * 28.0;
+            b.velocity = v.extend(0.0);
+            brain.keep_off_beams(&b, nav);
+            brain.intents.clear();
+            brain.intents.movement(
+                Prio::Goal,
+                MoveIntent {
+                    dir: wish,
+                    speed: 270.0,
+                },
+            );
+            brain.beam_guard(&b, nav);
+            let (_, mv) = brain.intents.movement.unwrap();
+            let speed = v.length();
+            if speed > 0.1 {
+                v *= (1.0 - dt * 4.0 * speed.max(100.0) / speed).max(0.0);
+            }
+            let wishdir = mv.dir.normalize_or_zero();
+            let add = mv.speed - v.dot(wishdir);
+            if add > 0.0 {
+                v += wishdir * add.min(10.0 * dt * mv.speed);
+            }
+            at += (v * dt).extend(0.0);
+            for m in &brain.explosives.mines {
+                let end = beam_of(m).unwrap();
+                if let Some((p, q)) = beam_slice(at, 36.0, m.pos, end)
+                    && box_gap(at.truncate(), p, q) < 16.0
+                {
+                    met.get_or_insert(at);
+                }
+            }
+        }
+        (at, met)
+    }
+
+    #[test]
+    fn a_bot_walking_at_the_foot_of_a_beam_never_touches_it_and_gets_past() {
+        let mut open = Room {
+            half: None,
+            ceiling: None,
+        };
+        for foot in [
+            Vec3::new(60.0, 4.0, -28.0),
+            Vec3::new(30.0, -10.0, -28.0),
+            Vec3::new(18.0, 0.0, -28.0),
+        ] {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            brain.explosives.placed_mine(foot, Vec3::Z, SimTime(-10.0));
+            brain.explosives.mines[0].own = false;
+            // Coming up to it at a run, as a bot does.
+            let (at, met) = run_by(&mut brain, &mut open, Vec3::new(-100.0, 0.0, 0.0), Vec2::X, 160);
+            assert_eq!(met, None, "foot {foot:?}");
+            assert!(at.x > foot.x + 40.0, "got past it: {at:?} (foot {foot:?})");
+        }
+        // A mine on a ramp: its beam slants up through body height over 37 units of the way.
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .placed_mine(Vec3::new(80.0, 6.0, -28.0), Vec3::new(0.5, 0.0, 0.866), SimTime(-10.0));
+        brain.explosives.mines[0].own = false;
+        let (at, met) = run_by(&mut brain, &mut open, Vec3::ZERO, Vec2::X, 120);
+        assert_eq!(brain.explosives.mines[0].pass, Some(BeamPass::Around));
+        assert_eq!(met, None);
+        assert!(at.x > 160.0, "got past it: {at:?}");
+    }
+
+    #[test]
+    fn a_bot_running_at_a_beam_it_cannot_get_past_never_slides_into_it() {
+        // Across the way at body height under a ceiling too low to jump it: walked along to its end and round.
+        let mut low = Room {
+            half: None,
+            ceiling: Some(60.0),
+        };
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .placed_mine(Vec3::new(120.0, -60.0, 0.0), Vec3::Y, SimTime(-10.0));
+        brain.explosives.mines[0].own = false;
+        brain.explosives.mines[0].beam_end = Some(Vec3::new(120.0, 60.0, 0.0));
+        let (at, met) = run_by(&mut brain, &mut low, Vec3::ZERO, Vec2::X, 200);
+        assert_eq!(brain.explosives.mines[0].pass, Some(BeamPass::Blocked));
+        assert_eq!(met, None);
+        assert!(at.x > 150.0, "round its end: {at:?}");
+        // Between walls it spans: the bot stops short of it.
+        let mut shut = Room {
+            half: Some(64.0),
+            ceiling: Some(60.0),
+        };
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .placed_mine(Vec3::new(120.0, -64.0, 0.0), Vec3::Y, SimTime(-10.0));
+        brain.explosives.mines[0].own = false;
+        brain.explosives.mines[0].beam_end = Some(Vec3::new(120.0, 64.0, 0.0));
+        let (at, met) = run_by(&mut brain, &mut shut, Vec3::ZERO, Vec2::X, 200);
+        assert_eq!(met, None);
+        assert!(at.x < 120.0 - 16.0, "{at:?}");
+        // Told to stand still while running at the foot of one: it pushes against its run rather than slide on.
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .placed_mine(Vec3::new(50.0, 0.0, -28.0), Vec3::Z, SimTime(-10.0));
+        brain.explosives.mines[0].own = false;
+        let mut b = body(1.0);
+        b.velocity = Vec3::new(300.0, 0.0, 0.0);
+        brain.keep_off_beams(&b, &mut low);
+        brain.intents.clear();
+        brain.intents.movement(Prio::Goal, lb_combat::arms::stop());
+        brain.beam_guard(&b, &mut low);
+        let (prio, mv) = brain.intents.movement.unwrap();
+        assert!(prio == Prio::Protocol && mv.dir.x < -0.99 && mv.speed > 200.0, "{mv:?}");
+    }
+
+    #[test]
+    fn a_trap_over_keeps_its_rest_and_one_given_up_waits_a_little() {
+        use lb_decision::Trap;
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        let mut rng = BotRng::new(1, 1);
+        brain.mind.trap_rest_until = SimTime(6.0);
+        brain.left_goal(GoalKind::PlantTrap(Trap::Mine(0)), &character(), SimTime(5.0), &mut rng);
+        assert_eq!(brain.mind.trap_rest_until, SimTime(6.0), "over: its task done");
+        brain.mind.task = Some(crate::goals::Task::Trap {
+            trap: Trap::Mine(0),
+            mines_before: 0,
+            started: None,
+            until: None,
+        });
+        brain.left_goal(GoalKind::PlantTrap(Trap::Mine(0)), &character(), SimTime(5.0), &mut rng);
+        assert_eq!(brain.mind.trap_rest_until, SimTime(13.0), "given up");
+    }
+
+    #[test]
     fn snarks_are_run_from_unless_the_egon_is_in_hand() {
         use lb_knowledge::ProjectileSighting;
         let snark = |brain: &mut BotBrain, t: f64| {
@@ -2485,6 +3293,7 @@ mod tests {
                 vel: Vec3::new(-200.0, 0.0, 0.0),
                 own: false,
                 beam: None,
+                armed: false,
             });
         };
         let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));

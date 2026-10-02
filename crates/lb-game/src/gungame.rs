@@ -160,6 +160,26 @@ impl GunGame {
         }
     }
 
+    /// The kit as the bot knows it on `mines_level`, the level its kit was last the tripmines on: with every mine out
+    /// the game takes the tripmine away, and the glock left in hand is still the tripmine level's.
+    pub fn keep_mines(mut self, mines_level: Option<i32>) -> GunGame {
+        if self.kit == Kit::Gun(WeaponId::Glock) && mines_level == Some(self.level) {
+            self.kit = Kit::Mines;
+        }
+        self
+    }
+
+    /// A level played on a server with no GunGame (`lb gg mines` on the stand): nobody else on the board.
+    pub fn drill(slot: u8, kit: Kit) -> GunGame {
+        GunGame {
+            board: Board::new([], 1, false),
+            slot,
+            level: 0,
+            kit,
+            warmup: false,
+        }
+    }
+
     pub fn leads(&self) -> bool {
         self.board.leader == Some(self.slot)
     }
@@ -249,6 +269,23 @@ mod tests {
         assert_eq!(crushed.level(3), Some(10), "kills on the level are not the next one");
         let tie = Board::new([(5, 100, 1), (2, 100, 1)], 100, true);
         assert_eq!(tie.leader, Some(2), "a full tie goes to the lower slot");
+    }
+
+    #[test]
+    fn the_tripmine_level_stays_with_every_mine_out() {
+        use WeaponId::*;
+        let b = Board::new([(1, 712, 3), (2, 400, 5)], 100, false);
+        let out = GunGame::new(&b, 1, mask(&[Crowbar, Glock]));
+        assert_eq!(out.kit, Kit::Gun(Glock));
+        assert_eq!(
+            out.keep_mines(Some(7)).kit,
+            Kit::Mines,
+            "the mines level, every mine out"
+        );
+        assert_eq!(out.keep_mines(Some(6)).kit, Kit::Gun(Glock), "the glock level after it");
+        assert_eq!(out.keep_mines(None).kit, Kit::Gun(Glock));
+        let drill = GunGame::drill(3, Kit::Mines);
+        assert!(drill.kit == Kit::Mines && !drill.warmup && !drill.descore() && drill.behind() == 0);
     }
 
     #[test]

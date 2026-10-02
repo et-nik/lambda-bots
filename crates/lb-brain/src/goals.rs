@@ -6,8 +6,9 @@
 //!   threat would come;
 //! - **camp:** a spot held for a while, watching one way and the other (crouched at an ambush);
 //! - **control:** an item about to come back is waited for close by, out of the way, and taken when it is back;
-//! - **trap:** a tripmine put on a wall across a busy way, or satchels thrown at a chokepoint from close by and
-//!   watched from an ambush spot out of their blast until someone comes by them.
+//! - **trap:** a tripmine put on a wall across a busy way, satchels thrown at a chokepoint from close by and watched
+//!   from an ambush spot out of their blast until someone comes by them, or a trail of mines dropped on the run and
+//!   watched (see [`crate::trail`]).
 
 use lb_combat::fight::FightInput;
 use lb_core::Vec3;
@@ -21,6 +22,7 @@ use lb_nav_api::{CampKind, MapView, NavService, NavStatus, NodeId};
 
 use crate::BotBrain;
 use crate::mind::{Body, Character, apply_step};
+use crate::trail::{TrailPhase, TrailTask};
 
 /// A search place is chosen again this often, and this soon once the bot is there.
 const SEARCH_EVERY: f64 = 1.5;
@@ -34,23 +36,27 @@ const VANTAGE_REACH: f32 = 1200.0;
 /// A sound seen about is not gone to again (it is old news by then).
 const INVESTIGATED_REST: f64 = 10.0;
 const COVER_REPLAN: f64 = 2.0;
+/// On the tripmine level a bot found in its cover looks for other cover this often at most.
+const COVER_AGAIN: f64 = 1.0;
 /// A threat that moved this far since cover was chosen makes the bot look again.
 const COVER_MOVED: f32 = 400.0;
+/// On the tripmine level a way to cover is not taken past a mine of the bot's own this close to it (on the same floor).
+const PAST_MINE: f32 = 96.0;
+const PAST_MINE_HEIGHT: f32 = 128.0;
 /// At a spot within this, across.
 const AT_SPOT: f32 = 32.0;
 const CAMP_FOR: [f32; 2] = [6.0, 10.0];
 const AMBUSH_FOR: [f32; 2] = [8.0, 14.0];
 /// A style this fond of a kind of spot holds it half as long again, and rests less between spots.
-const FOND: f32 = 1.5;
+pub(crate) const FOND: f32 = 1.5;
 const CAMP_LOOK: [f32; 2] = [1.5, 4.0];
 const CAMP_REST: [f32; 2] = [50.0, 70.0];
 const FOND_CAMP_REST: [f32; 2] = [15.0, 25.0];
-const TRAP_REST: [f32; 2] = [20.0, 30.0];
-const FOND_TRAP_REST: [f32; 2] = [10.0, 18.0];
-/// On the GunGame tripmine level mines are the weapon: the next spot is gone to soon.
-const MINES_LEVEL_TRAP_REST: [f32; 2] = [2.0, 4.0];
-/// After a trap given up.
+pub(crate) const TRAP_REST: [f32; 2] = [20.0, 30.0];
+pub(crate) const FOND_TRAP_REST: [f32; 2] = [10.0, 18.0];
+/// After a trap given up; on the tripmine level, where mines are all the bot has, this long.
 const TRAP_GIVE_UP_REST: f64 = 8.0;
+pub(crate) const MINES_LEVEL_GIVE_UP_REST: [f32; 2] = [1.0, 2.0];
 /// Satchels thrown as a trap are watched this long, with the radio up (renewed while at the spot).
 const SATCHEL_GUARD: [f32; 2] = [12.0, 20.0];
 const RADIO_WATCH: f64 = 0.3;
@@ -114,6 +120,8 @@ pub enum Task {
         watch: Option<Vec3>,
         until: Option<SimTime>,
     },
+    /// A trail of mines (`Trap::Trail`).
+    Trail(TrailTask),
 }
 
 impl Task {
@@ -131,6 +139,12 @@ impl Task {
             Task::Lure { until: Some(_), .. } => "lure, watching",
             Task::Lure { thrown: Some(_), .. } => "lure, thrown",
             Task::Lure { .. } => "lure, on the way",
+            Task::Trail(t) => match t.phase {
+                TrailPhase::Approach => "trail, going to its lane",
+                TrailPhase::Run => "trail, laying",
+                TrailPhase::Off => "trail, stepping off",
+                TrailPhase::Watch => "trail, watching",
+            },
         }
     }
 }
@@ -153,7 +167,7 @@ fn watch_spot(map: &dyn MapView, spot: Vec3, me: Vec3) -> Option<Vec3> {
     best.map(|(p, _)| p)
 }
 
-fn at_spot(body: &Body, p: Vec3) -> bool {
+pub(crate) fn at_spot(body: &Body, p: Vec3) -> bool {
     (body.origin - p).truncate().length() <= AT_SPOT && (body.origin.z - p.z).abs() <= 48.0
 }
 
@@ -170,7 +184,7 @@ fn time_to(from: &[f32], map: &dyn MapView, n: NodeId, me: Vec3) -> f32 {
 }
 
 /// Running speed the graph's travel times assume.
-const RUN: f32 = 300.0;
+pub(crate) const RUN: f32 = 300.0;
 
 /// The place that sees most of where a lost enemy may be, less a little for how far it is to run there.
 fn search_spot(map: &dyn MapView, spread: &Spread, me: Vec3) -> Option<Vec3> {
@@ -223,7 +237,7 @@ fn vantage(map: &dyn MapView, pos: Vec3, me: Vec3) -> Option<Vec3> {
 }
 
 impl BotBrain {
-    fn stand_still(&mut self) {
+    pub(crate) fn stand_still(&mut self) {
         self.intents.movement(
             Prio::Goal,
             MoveIntent {
@@ -233,11 +247,11 @@ impl BotBrain {
         );
     }
 
-    fn look_at(&mut self, at: Vec3) {
+    pub(crate) fn look_at(&mut self, at: Vec3) {
         self.intents.look(Prio::Goal, LookIntent::Point { at, engaged: false });
     }
 
-    fn walk(&mut self, dest: Vec3, body: &Body, nav: &mut dyn NavService) -> NavStatus {
+    pub(crate) fn walk(&mut self, dest: Vec3, body: &Body, nav: &mut dyn NavService) -> NavStatus {
         let (status, step) = nav.go_to(dest);
         if let Some(step) = step {
             apply_step(&mut self.intents, &step, body.eye, &mut self.mind);
@@ -245,13 +259,13 @@ impl BotBrain {
         status
     }
 
-    fn give_up(&mut self, now: SimTime, rng: &mut BotRng) {
+    pub(crate) fn give_up(&mut self, now: SimTime, rng: &mut BotRng) {
         self.mind.decider.fail(now, &mut rng.decision);
         self.mind.urgent = true;
         self.mind.task = None;
     }
 
-    fn done(&mut self) {
+    pub(crate) fn done(&mut self) {
         self.mind.decider.complete();
         self.mind.urgent = true;
         self.mind.task = None;
@@ -358,6 +372,9 @@ impl BotBrain {
 
     pub(crate) fn retreat(&mut self, body: &Body, ch: &Character, nav: &mut dyn NavService, rng: &mut BotRng) {
         let now = body.now;
+        // On the tripmine level there is nothing to fight back with: the bot runs on, dropping mines for whoever
+        // follows (see `escape_trail`).
+        let mines_level = body.gungame.is_some_and(|g| g.kit == lb_game::gungame::Kit::Mines);
         let threat = self
             .beliefs
             .enemies()
@@ -389,11 +406,17 @@ impl BotBrain {
             _ => true,
         };
         if replan {
-            let dest = nav.cover_from(threat);
-            if dest.is_some() {
+            // On the tripmine level not back past its own mines (the way it ran, dropping them).
+            let clear = |p: &Vec3| !mines_level || !self.past_own_mines(body.origin, *p);
+            let dest = nav.cover_from(threat).filter(clear);
+            let dest = match dest {
+                Some(d) => Some((d, true)),
+                None => nav.away_from(threat).filter(clear).map(|d| (d, false)),
+            };
+            if dest.is_some_and(|(_, cover)| cover) {
                 self.mind.stats.covers += 1;
             }
-            match dest.or_else(|| nav.away_from(threat)) {
+            match dest.map(|(d, _)| d) {
                 Some(dest) => {
                     self.mind.task = Some(Task::Hide {
                         dest,
@@ -423,6 +446,34 @@ impl BotBrain {
                 .enemies()
                 .filter(|t| t.state == TrackState::Visible)
                 .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)));
+            // On the tripmine level, found there: off to other cover (looked for once a second at most; away from the
+            // enemy meanwhile).
+            if let Some(t) = found
+                && mines_level
+            {
+                let enemy = t.pos;
+                let since = match &self.mind.task {
+                    Some(Task::Hide { at, .. }) => *at,
+                    _ => now,
+                };
+                let clear = |p: &Vec3| !self.past_own_mines(body.origin, *p);
+                let cover = if now.since(since) >= COVER_AGAIN {
+                    nav.cover_from(enemy).filter(clear)
+                } else {
+                    None
+                };
+                let at = if cover.is_some() { now } else { since };
+                if let Some(dest) = cover.or_else(|| nav.away_from(enemy).filter(clear)) {
+                    self.mind.task = Some(Task::Hide {
+                        dest,
+                        threat: enemy,
+                        at,
+                        arrived: false,
+                    });
+                    self.walk(dest, body, nav);
+                }
+                return;
+            }
             if let Some(t) = found {
                 let input = FightInput {
                     approach: 0.0,
@@ -455,6 +506,17 @@ impl BotBrain {
             NavStatus::NoPath => self.give_up(now, rng),
             NavStatus::Moving => {}
         }
+    }
+
+    /// The straight way from `from` to `to` passes by a mine of the bot's own, armed or about to be.
+    fn past_own_mines(&self, from: Vec3, to: Vec3) -> bool {
+        let (a, b) = (from.truncate(), to.truncate());
+        let s = b - a;
+        self.explosives.mines.iter().filter(|m| m.own).any(|m| {
+            let p = m.pos.truncate();
+            let t = ((p - a).dot(s) / s.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            (a + s * t).distance(p) < PAST_MINE && (m.pos.z - from.z.min(to.z)).abs() < PAST_MINE_HEIGHT
+        })
     }
 
     pub(crate) fn camp(
@@ -630,6 +692,9 @@ impl BotBrain {
             let fond = ch.affinity.trap >= FOND;
             return self.lure(body, map, nav, rng, if fond { FOND_TRAP_REST } else { TRAP_REST });
         }
+        if trap == Trap::Trail {
+            return self.trail(body, ch, map, nav, rng);
+        }
         if !matches!(&self.mind.task, Some(Task::Trap { trap: t, .. }) if *t == trap) {
             self.mind.task = Some(Task::Trap {
                 trap,
@@ -648,13 +713,7 @@ impl BotBrain {
             return;
         };
         let fond = ch.affinity.trap >= FOND;
-        let rest = if body.gungame.is_some_and(|g| g.kit == lb_game::gungame::Kit::Mines) {
-            MINES_LEVEL_TRAP_REST
-        } else if fond {
-            FOND_TRAP_REST
-        } else {
-            TRAP_REST
-        };
+        let rest = if fond { FOND_TRAP_REST } else { TRAP_REST };
         match trap {
             Trap::Mine(i) => {
                 let Some(spot) = map.mine_spots().get(i as usize).copied() else {
@@ -681,13 +740,13 @@ impl BotBrain {
                     return;
                 }
                 self.stand_still();
-                if self.plant_mine(spot.wall, spot.normal, now)
+                if self.plant_mine(spot.wall, spot.normal, body)
                     && let Some(Task::Trap { started, .. }) = self.mind.task.as_mut()
                 {
                     *started = Some(now);
                 }
             }
-            Trap::Loose => {}
+            Trap::Loose | Trap::Trail => {}
             Trap::Satchels(i) => {
                 let Some((spot, choke)) = map
                     .camp_spots()
@@ -843,7 +902,8 @@ impl BotBrain {
         }
     }
 
-    /// When a goal is left: spots are not held again for a while, and a trap given up waits a little.
+    /// When a goal is left: spots are not held again for a while, and a trap given up waits a little (one that was
+    /// over has set its own rest, its task done).
     pub(crate) fn left_goal(&mut self, old: GoalKind, ch: &Character, now: SimTime, rng: &mut BotRng) {
         match old {
             GoalKind::Camp(_) => {
@@ -851,8 +911,26 @@ impl BotBrain {
                 let rest = if fond { FOND_CAMP_REST } else { CAMP_REST };
                 self.mind.camp_rest_until = now + f64::from(rng.decision.range_f32(rest[0], rest[1]));
             }
-            GoalKind::PlantTrap(_) => {
-                self.mind.trap_rest_until = self.mind.trap_rest_until.max(now + TRAP_GIVE_UP_REST);
+            GoalKind::PlantTrap(trap) => {
+                let mines_level = self.mind.kit == Some(lb_game::gungame::Kit::Mines);
+                if self.mind.task.is_some() {
+                    let rest = if mines_level {
+                        f64::from(
+                            rng.decision
+                                .range_f32(MINES_LEVEL_GIVE_UP_REST[0], MINES_LEVEL_GIVE_UP_REST[1]),
+                        )
+                    } else {
+                        TRAP_GIVE_UP_REST
+                    };
+                    self.mind.trap_rest_until = self.mind.trap_rest_until.max(now + rest);
+                }
+                // Its mines lie on as the bot's own; no more are dropped for it.
+                if trap == Trap::Trail {
+                    if let Some(Task::Trail(t)) = &self.mind.task {
+                        tracing::debug!("trail broken off while {}", t.phase.as_str());
+                    }
+                    self.mind.arms.trail = None;
+                }
             }
             GoalKind::ControlItem(_) => self.item_focus = None,
             _ => {}

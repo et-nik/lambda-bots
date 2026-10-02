@@ -167,6 +167,8 @@ pub struct Body {
     pub armor: f32,
     pub has_longjump: bool,
     pub on_ground: bool,
+    /// Down in the crouched player's box (the game takes the box down only once a duck is over).
+    pub ducked: bool,
     pub on_ladder: bool,
     pub underwater: bool,
     /// 0 dry, 1 feet, 2 waist, 3 head under water.
@@ -327,6 +329,8 @@ pub struct Mind {
     path_look: Option<Vec3>,
     /// Navigation wants this point shot at (an obstacle to break), with the crowbar when set.
     nav_fire: Option<(Vec3, bool)>,
+    /// The way's step this frame must not be disturbed (a jump, a ladder): no mine is dropped.
+    pub(crate) nav_mandatory: bool,
     /// The contact already shot at: player and when it was recognized.
     answered: Option<(PlayerKey, SimTime)>,
     pub reactions: Reactions,
@@ -364,7 +368,7 @@ pub struct Mind {
     /// keep it off at and the one to close in to.
     pub(crate) duel: Option<(PlayerKey, f32, f32)>,
     /// What the bot's GunGame level gave it, on the last frame.
-    kit: Option<Kit>,
+    pub(crate) kit: Option<Kit>,
 }
 
 impl Mind {
@@ -439,6 +443,7 @@ pub(crate) fn apply_step(intents: &mut Intents, step: &NavStep, eye: Vec3, m: &m
     }
     m.nav_fire = step.fire_at.map(|at| (at, step.melee));
     m.nav_boost = step.boost;
+    m.nav_mandatory = step.mandatory;
     m.path_look = Some(step.look_at);
 }
 
@@ -463,13 +468,17 @@ impl BotBrain {
         if std::mem::take(&mut self.hurt) {
             self.mind.mood.on_hurt(body.health);
         }
-        // A GunGame level changed in the bot's hands: what its old weapons were doing is over.
+        // A GunGame level changed in the bot's hands: what its old weapons were doing is over, and the plugin sets
+        // off the mines of a tripmine level left.
         let kit = body.gungame.map(|g| g.kit);
         if kit != self.mind.kit {
             if self.mind.kit.is_some() {
                 self.mind.arms.reset();
                 self.mind.next_combat = now;
                 self.mind.urgent = true;
+            }
+            if self.mind.kit == Some(Kit::Mines) && kit.is_some() {
+                self.explosives.forget_own_mines();
             }
             self.mind.kit = kit;
         }
@@ -502,7 +511,7 @@ impl BotBrain {
         self.aim_and_fire(body, ch, nav, rng);
         self.snark_defense(body, nav);
         self.vigilance(body);
-        self.beam_guard(body);
+        self.beam_guard(body, nav);
         self.blast_guard(body);
         let input = lb_motor::MotorInput {
             now,
@@ -693,9 +702,12 @@ impl BotBrain {
                     ..
                 }) => until.is_none_or(|u| now < u),
                 Some(Task::Lure { thrown, until, .. }) => thrown.is_some() && until.is_none_or(|u| now < u),
+                // On the tripmine level a trail goes on from the moment it is taken up.
+                Some(Task::Trail(t)) => t.phase != crate::trail::TrailPhase::Approach || m.kit == Some(Kit::Mines),
                 _ => false,
             },
             mines: &mines,
+            own_mines: self.explosives.mines.iter().filter(|x| x.own).count(),
             charges_out: !self.explosives.charges.is_empty(),
             lure: self.expect.map(|(_, p)| p).or(self.approach),
             gungame: body.gungame,
@@ -720,6 +732,7 @@ impl BotBrain {
         let now = body.now;
         self.mind.nav_fire = None;
         self.mind.nav_boost = None;
+        self.mind.nav_mandatory = false;
         // A long jump or a boost of the way in the air: steered onto its landing whatever the goal is now.
         if let Some(step) = nav.flight() {
             self.intents.movement(
@@ -972,8 +985,16 @@ impl BotBrain {
         m.firing = false;
         m.hold_fire = None;
         // With a throwable in hand the view stays on the enemy while the gun comes out; a throw turns to its own arc
-        // and the satchel radio watches its charges over it (their protocols' looks come first).
+        // and the satchel radio watches its charges over it (their protocols' looks come first). On the tripmine level
+        // nothing is fired at anyone: the view and the weapon are the goal's and the mines'.
+        let mines = m.choice == Some(Choice::Use(WeaponId::Tripmine));
         match (track, m.choice) {
+            (Some(t), Some(_)) if mines && t.state == TrackState::Visible => {
+                m.target_at = now;
+                m.hold_fire = Some("mines are laid, not fired");
+                self.intents
+                    .weapon(Prio::Optional, WeaponIntent::hold(mines_in_hand(body)));
+            }
             (Some(t), Some(choice)) if t.state == TrackState::Visible => {
                 m.target_at = now;
                 let distance = t.pos.distance(body.eye);
@@ -1045,7 +1066,7 @@ impl BotBrain {
                 };
                 self.intents.weapon(Prio::Threat, intent);
             }
-            (Some(t), _) if now.since(t.last_seen) <= LOST_STARE => {
+            (Some(t), _) if !mines && now.since(t.last_seen) <= LOST_STARE => {
                 if t.state == TrackState::Visible {
                     m.hold_fire = Some("no weapon chosen");
                 }
@@ -1111,8 +1132,11 @@ impl BotBrain {
                         0.0
                     }
                 };
+                // On the tripmine level the glock only sets mines off: it is kept loaded for that.
+                let glock = mines.then(|| body.armed(WeaponId::Glock)).flatten();
                 let low = policy::preferred(&body.arsenal, &t, &body.damages, &like)
                     .and_then(|w| body.armed(w))
+                    .or(glock)
                     .filter(|a| {
                         let clip = spec(a.id).clip;
                         a.can_reload() && a.clip.is_some_and(|c| c * 2 < clip || c < 5)
@@ -1128,11 +1152,23 @@ impl BotBrain {
                             ..WeaponIntent::hold(a.id)
                         },
                     );
+                } else if mines {
+                    self.intents
+                        .weapon(Prio::Optional, WeaponIntent::hold(mines_in_hand(body)));
                 } else if let Some(w) = weapon_choice {
                     self.intents.weapon(Prio::Optional, WeaponIntent::hold(w));
                 }
             }
         }
+    }
+}
+
+/// What a bot on the tripmine level holds when nothing asks for a weapon: a mine, or with every one out the glock.
+fn mines_in_hand(body: &Body) -> WeaponId {
+    if body.armed(WeaponId::Tripmine).is_some() {
+        WeaponId::Tripmine
+    } else {
+        WeaponId::Glock
     }
 }
 

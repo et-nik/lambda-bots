@@ -425,6 +425,38 @@ impl Navigator {
         blocked.len()
     }
 
+    /// Makes the links that pass within `radius` of the line `a → b` at body height `extra` seconds dearer to plan
+    /// along until `until` (a tripmine's beam the bot can get past but would rather not go by). The path followed
+    /// now is left alone. Returns how many links.
+    pub fn shun_line(&mut self, graph: &NavGraph, a: Vec3, b: Vec3, radius: f32, extra: f32, until: f64) -> usize {
+        let mut n = 0;
+        for (i, node) in graph.nodes.iter().enumerate() {
+            for l in graph.links(i as NodeId) {
+                if passes_near(node.origin, graph.node(l.to).origin, a, b, radius) {
+                    self.known.shun(i as NodeId, l.to, extra, until);
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Lifts the blocks [`avoid_line`](Self::avoid_line) put on the links across the line `a → b`, and what
+    /// [`shun_line`](Self::shun_line) put on the links by it: the mine is gone.
+    pub fn clear_line(&mut self, graph: &NavGraph, a: Vec3, b: Vec3) {
+        for (i, n) in graph.nodes.iter().enumerate() {
+            for l in graph.links(i as NodeId) {
+                let m = graph.node(l.to).origin;
+                if passes_near(n.origin, m, a, b, SHUN_REACH) {
+                    self.known.unshun(i as NodeId, l.to);
+                }
+                if crosses(n.origin, m, a, b) {
+                    self.known.lift(i as NodeId, l.to);
+                }
+            }
+        }
+    }
+
     /// A node to fall back to: well away from `threat`, not too far from the bot.
     pub fn away_from(ctx: &NavCtx<'_>, origin: Vec3, threat: Vec3) -> Option<Vec3> {
         let here = origin.distance(threat);
@@ -558,11 +590,58 @@ const BODY_HALF_HEIGHT: f32 = 36.0;
 /// A player standing this close to the line across touches it.
 const BODY_RADIUS: f32 = 16.0;
 
+/// The farthest a link may pass from a line it is shunned for and still be let go when the line is cleared.
+const SHUN_REACH: f32 = 128.0;
+
+/// A player walking from `p` to `q` (origins) comes within `radius` of the line `a → b` (flat), where it runs at
+/// body height.
+fn passes_near(p: Vec3, q: Vec3, a: Vec3, b: Vec3, radius: f32) -> bool {
+    let (p2, q2, a2, b2) = (p.truncate(), q.truncate(), a.truncate(), b.truncate());
+    let (r, s) = (q2 - p2, b2 - a2);
+    let at_height = |t: f32, u: f32| {
+        let body = p.z + (q.z - p.z) * t;
+        let line = a.z + (b.z - a.z) * u;
+        (line - body).abs() <= BODY_HALF_HEIGHT
+            || (s.length_squared() < 1.0
+                && body + BODY_HALF_HEIGHT >= a.z.min(b.z)
+                && body - BODY_HALF_HEIGHT <= a.z.max(b.z))
+    };
+    let on = |x: lb_core::Vec2, from: lb_core::Vec2, d: lb_core::Vec2| {
+        ((x - from).dot(d) / d.length_squared().max(1e-6)).clamp(0.0, 1.0)
+    };
+    // The nearest points: where they cross, or an end of one against the other.
+    let denom = r.perp_dot(s);
+    if denom.abs() > 1e-6 {
+        let t = (a2 - p2).perp_dot(s) / denom;
+        let u = (a2 - p2).perp_dot(r) / denom;
+        if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) && at_height(t, u) {
+            return true;
+        }
+    }
+    let pairs = [
+        (0.0, on(p2, a2, s)),
+        (1.0, on(q2, a2, s)),
+        (on(a2, p2, r), 0.0),
+        (on(b2, p2, r), 1.0),
+    ];
+    pairs
+        .into_iter()
+        .any(|(t, u)| (p2 + r * t).distance(a2 + s * u) <= radius && at_height(t, u))
+}
+
 /// A player walking from `p` to `q` (origins) touches the line `a → b`.
 fn crosses(p: Vec3, q: Vec3, a: Vec3, b: Vec3) -> bool {
     let (p2, q2, a2, b2) = (p.truncate(), q.truncate(), a.truncate(), b.truncate());
     let r = q2 - p2;
     let s = b2 - a2;
+    // A beam standing up from a mine on the floor: crossed by walking past its foot.
+    if s.length_squared() < 1.0 {
+        let t = ((a2 - p2).dot(r) / r.length_squared().max(1e-6)).clamp(0.0, 1.0);
+        let body = p.z + (q.z - p.z) * t;
+        return (p2 + r * t).distance(a2) <= BODY_RADIUS
+            && body + BODY_HALF_HEIGHT >= a.z.min(b.z)
+            && body - BODY_HALF_HEIGHT <= a.z.max(b.z);
+    }
     let denom = r.perp_dot(s);
     let at_height = |t: f32, u: f32| {
         let body = p.z + (q.z - p.z) * t;
@@ -618,6 +697,52 @@ mod line_tests {
         assert!(
             crosses(Vec3::new(-50.0, 0.0, 0.0), Vec3::new(-10.0, 0.0, 0.0), beam.0, beam.1),
             "stops on it"
+        );
+    }
+
+    #[test]
+    fn passes_near_a_beam_within_a_reach_at_body_height() {
+        // A mine on the floor at z = -36 (8 up), its beam up to a ceiling at 100.
+        let up = (Vec3::new(0.0, 50.0, -28.0), Vec3::new(0.0, 50.0, 100.0));
+        let (p, q) = (Vec3::new(-100.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 0.0));
+        assert!(passes_near(p, q, up.0, up.1, 64.0));
+        assert!(!passes_near(p, q, up.0, up.1, 40.0));
+        let above = (Vec3::new(0.0, 50.0, 172.0), Vec3::new(0.0, 50.0, 300.0));
+        assert!(!passes_near(p, q, above.0, above.1, 64.0), "a floor above");
+        // Across the way, and along it off to the side.
+        let across = (Vec3::new(0.0, -100.0, 10.0), Vec3::new(0.0, 100.0, 10.0));
+        assert!(passes_near(p, q, across.0, across.1, 1.0));
+        let along = (Vec3::new(-50.0, 60.0, 10.0), Vec3::new(50.0, 60.0, 10.0));
+        assert!(passes_near(p, q, along.0, along.1, 64.0) && !passes_near(p, q, along.0, along.1, 50.0));
+    }
+
+    #[test]
+    fn walks_past_the_foot_of_a_beam_standing_up_from_the_floor() {
+        // A mine on the floor at z = -36 (8 up), its beam up to a ceiling at 100; players' origins are 36 up.
+        let beam = (Vec3::new(0.0, 0.0, -28.0), Vec3::new(0.0, 0.0, 100.0));
+        assert!(crosses(
+            Vec3::new(-300.0, 5.0, 0.0),
+            Vec3::new(300.0, 5.0, 0.0),
+            beam.0,
+            beam.1
+        ));
+        assert!(
+            !crosses(
+                Vec3::new(-300.0, 40.0, 0.0),
+                Vec3::new(300.0, 40.0, 0.0),
+                beam.0,
+                beam.1
+            ),
+            "beside it"
+        );
+        assert!(
+            !crosses(
+                Vec3::new(-300.0, 0.0, 180.0),
+                Vec3::new(300.0, 0.0, 180.0),
+                beam.0,
+                beam.1
+            ),
+            "on the floor above"
         );
     }
 }
