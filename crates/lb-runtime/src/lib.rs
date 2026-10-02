@@ -1252,11 +1252,19 @@ impl Runtime {
                 })
                 .collect();
             watch::mines(self, &laid);
+            let row = arms_stats::Row::plain(WeaponId::Satchel);
             let satchels: Vec<_> = self
                 .projectile_entities
                 .iter()
                 .filter(|p| p.kind == ProjectileKind::Satchel)
-                .map(|p| (p.index, p.owner, p.origin, p.velocity))
+                .map(|p| {
+                    let owner = self
+                        .launched
+                        .get(&p.index)
+                        .filter(|l| l.row == row)
+                        .map_or(p.owner, |l| l.owner);
+                    (p.index, owner, p.origin, p.velocity)
+                })
                 .collect();
             watch::satchels(self, &satchels);
         }
