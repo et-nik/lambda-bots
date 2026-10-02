@@ -1980,7 +1980,7 @@ impl BotBrain {
                         tracing::info!(
                             "grenade thrown {}{}: view {:.1} {:.1}, the pin out {:.2} s, to burst in {:.1} s at {:.0} {:.0} {:.0}, the enemy expected {:.0} off it at {:.0} {:.0} {:.0}, {:.0} damage expected; the enemy #{userid} at {:.0} {:.0} {:.0} vel {:.0} {:.0}{}",
                             t.way(),
-                            if t.forced() { ", forced by the fuse" } else { "" },
+                            t.forced().map_or(String::new(), |f| format!(", {f}")),
                             p.throw.pitch,
                             p.throw.yaw,
                             p.release_held,

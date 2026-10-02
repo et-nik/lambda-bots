@@ -112,7 +112,7 @@ const PLAN_FULL: f64 = 0.3;
 /// The bot runs at this speed at the throw, as it is planned before the run-up.
 const RUN_EXPECTED: f32 = 270.0;
 /// A planned grenade leaves within this of the pin time asked: later, the blast would come a tick late.
-const RELEASE_WINDOW: f32 = 0.035;
+const RELEASE_WINDOW: f32 = 0.05;
 /// Thrown on the run, the satchel leaves once the bot runs at the target this fast and the throw lands within this
 /// of it; not so by then, or with the target this close, it stays in hand (it would go off by the thrower).
 const RUN_UP_SPEED: f32 = 320.0;
@@ -139,7 +139,8 @@ enum Phase {
 }
 
 /// A grenade planned at `aim` as `plan` (made at `made`); planned again last at `at`, over all pitches at `full`.
-/// `dumped`: no throw at the enemy could be had as the fuse ran low, it goes where its blast is farthest off.
+/// `fallback`: no throw at the enemy could be had as the fuse ran low; it goes where the enemy most likely is round
+/// a corner (`"behind cover"`), else where its blast is farthest off (`"dumped"`).
 #[derive(Clone, Debug)]
 struct Planned {
     aim: Aim,
@@ -147,7 +148,7 @@ struct Planned {
     made: SimTime,
     at: SimTime,
     full: SimTime,
-    dumped: bool,
+    fallback: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -232,7 +233,7 @@ impl Thrower {
             made: self.started,
             at: self.started,
             full: self.started,
-            dumped: false,
+            fallback: None,
         }));
         self.throw = plan.throw;
         self.target = plan.target;
@@ -287,10 +288,13 @@ impl Thrower {
         self.leap
     }
 
-    /// Let go only because the fuse was running out, or where the blast was farthest off with no throw at the
-    /// enemy to be had.
-    pub fn forced(&self) -> bool {
-        self.forced || self.planned.as_ref().is_some_and(|p| p.dumped)
+    /// Let go only because the fuse was running out (`Some("forced by the fuse")`), or on a fallback with no throw
+    /// at the enemy to be had (`Some("behind cover")`, `Some("dumped")`).
+    pub fn forced(&self) -> Option<&'static str> {
+        self.planned
+            .as_ref()
+            .and_then(|p| p.fallback)
+            .or(self.forced.then_some("forced by the fuse"))
     }
 
     /// While a planned grenade cooks before its run-up: back from the target along a slant when it is close, across
@@ -446,7 +450,7 @@ impl Thrower {
                             made => made,
                         };
                         if let Some(p) = made
-                            && !pl.dumped
+                            && pl.fallback.is_none()
                         {
                             pl.plan = p;
                             pl.made = now;
@@ -456,13 +460,23 @@ impl Thrower {
                     }
                     // Nothing to throw at to be had while the fuse runs low (the bot boxed in, the enemy come
                     // close): away from the bot, as far as it goes.
-                    if !pl.dumped && held >= deadline - DUMP_BEFORE && now.since(pl.made) > DUMP_STALE {
-                        if let Some(p) = grenade::dump(tracer, h.eye, h.origin, h.velocity, h.gravity, h.dll, held) {
+                    if pl.fallback.is_none() && held >= deadline - DUMP_BEFORE && now.since(pl.made) > DUMP_STALE {
+                        // Where the enemy most likely is round the corner, else away from the bot.
+                        let aim = pl.aim;
+                        let to = grenade::plan_behind_cover(
+                            tracer, h.eye, h.origin, h.velocity, &aim, h.gravity, h.dll, held,
+                        )
+                        .map(|p| (p, "behind cover"))
+                        .or_else(|| {
+                            grenade::dump(tracer, h.eye, h.origin, h.velocity, h.gravity, h.dll, held)
+                                .map(|p| (p, "dumped"))
+                        });
+                        pl.fallback = Some(to.map_or("dumped", |t| t.1));
+                        if let Some((p, _)) = to {
                             pl.plan = p;
                             pl.made = now;
                             self.throw = p.throw;
                         }
-                        pl.dumped = true;
                     }
                 } else if now.since(self.resolved_at) >= RESOLVE || airborne {
                     // In the air the velocity the throw carries changes fast: solved every frame.
@@ -476,7 +490,7 @@ impl Thrower {
                 let (cook, late) = match &self.planned {
                     Some(p) => (
                         p.plan.release_held,
-                        !p.dumped && held > p.plan.release_held + RELEASE_WINDOW,
+                        p.fallback.is_none() && held > p.plan.release_held + RELEASE_WINDOW,
                     ),
                     _ if self.quick => (GRENADE_MIN_COOK, false),
                     _ => (
@@ -484,7 +498,7 @@ impl Thrower {
                         false,
                     ),
                 };
-                if !run || self.planned.as_ref().is_some_and(|p| p.dumped) {
+                if !run || self.planned.as_ref().is_some_and(|p| p.fallback.is_some()) {
                     self.run_from = None;
                 } else if held >= cook - GRENADE_RUN_UP || self.jumped.is_some() {
                     self.run_from.get_or_insert(now);
@@ -512,12 +526,12 @@ impl Thrower {
                     self.leap = false;
                     self.jumped = None;
                 }
-                let dumped = self.planned.as_ref().is_some_and(|p| p.dumped);
+                let dumped = self.planned.as_ref().is_some_and(|p| p.fallback.is_some());
                 let go = if held >= deadline {
                     true
                 } else if dumped {
-                    // Away as soon as the view is on it, whatever the run.
-                    steady
+                    // Once the view is on it, whatever the run.
+                    steady && held >= cook
                 } else if late {
                     // Its tick is gone (the view was not on the throw in time): the plan takes the next one.
                     false
@@ -563,7 +577,7 @@ impl Thrower {
                 let fresh = self
                     .planned
                     .as_ref()
-                    .is_none_or(|p| p.dumped || now.since(p.made) <= PLAN_FRESH);
+                    .is_none_or(|p| p.fallback.is_some() || now.since(p.made) <= PLAN_FRESH);
                 self.forced = held >= deadline && !(go && fresh);
                 let go = held >= deadline || (go && fresh);
                 if go {

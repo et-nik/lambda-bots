@@ -349,18 +349,40 @@ twice as likely, and grenades from 220 units (yapb's grenade war).
 - **Grenades with no enemy known.** Now and then (a chance of 0.03 per weighing, times `throw_rate` and the style's
   liking: about every 10 s for a normal bot) one goes where an enemy is expected, 350–1000 units away and up to 48
   units off the spot: where a lost enemy would come into view, else a sound heard in the last 4 s, else the busiest
-  place in sight at the edge of what the bot sees (a doorway, a corner: where players come into view from). Cooked,
-  so it goes off soon after landing.
+  place in sight at the edge of what the bot sees (a doorway, a corner: where players come into view from). Planned
+  like any grenade (below), so it bursts as it gets there; on the run when the spot is 340 units off or more.
 - **A series** (skills with `throw_series`: hard and expert). Once a grenade goes, the rest follow one after another,
   0.3 s after each other as the game hands over the next grenade, at the enemy or where one is expected, until none
   is left; the grenade stays in hand between them. An enemy in sight within 250 units ends the series for the gun, as
   does a grenade that finds nowhere to go.
-- **Hand grenade**, 300–1000 units away: the throw is solved for the target with the game's own rule (the view's pitch
-  sets the throw's angle and speed, the bot's own velocity is added) and checked for walls along the arc; its blast
-  must land 300 units or more from the bot. The bot pulls the pin (holds the primary attack; the game's own clock
-  tells when the pin came out), cooks it so it goes off soon after landing, turns to the throw, stops for the last
-  moment and lets go. At an enemy in sight it throws as soon as the game allows, uncooked, where the enemy will be.
-  **Once the pin is out the grenade is always thrown**, at the latest shortly before the fuse runs out.
+- **Hand grenade**, 300–1000 units away, is planned to go off where the enemy will be, with the game's own rules
+  (`lb_combat::grenade`). The view's pitch sets the throw's angle and speed and the bot's own velocity is added
+  (`CHandGrenade::WeaponIdle`); the grenade falls at half gravity, a hit keeps the velocity along the surface and turns
+  back a fifth of the rest, and once it rolls each touch of the floor keeps 0.8 of its speed; it thinks every 0.1 s
+  from the throw and bursts on the think after the one that finds its fuse (three seconds from the pin) run out, so
+  how long the pin was out at the throw picks the 0.1 s tick it bursts on; the blast is lifted 45.6 units off a floor
+  close under it and does 100 damage less 0.4 a unit to the player's box, out to 250 units, with a clear line only.
+  The plan tries view pitches, each aimed so the grenade heads where the enemy will be (half its motion followed, for
+  0.6 s at most: players turn), flies each throw through the world tick by tick with traces, and weighs each tick it
+  could burst on by the damage it would do there, the enemy's place blurred by how long the grenade is out (110 units
+  a second for one in sight, 130 for one lost) and the throw worth less the longer it waits (`e^(−wait/2.5 s)`); a
+  blast within 300 units of the bot is never planned. A plan worth 10 damage or more is thrown. Cooked to burst as it
+  gets there, it leaves no time to run from it: the pin stays out some 2.3–2.6 s for a throw 400–700 units off.
+  The plan is made again as the bot and the enemy move (ten times a second, every 0.03 s in the air and in the last
+  moments before the throw), and the grenade leaves only on a plan made with the velocity the bot has then, within the
+  0.06 s that give its tick. Measured on the stand against the game's own blasts: the time to the tick, the point
+  within some 50 units.
+  - **On the run, as players throw** (recorded from the user's play on 2026-10-02: mostly running at the enemy at
+    250–300 units a second or from a jump, the grenade flying 650–950 units a second nearly flat, a back-pedal right
+    after). While it cooks the bot keeps moving: back from the enemy along a slant within 650 units, across further off
+    (never toward a drop). From 340 units off it runs at the enemy for the last 0.35 s and lets go running at it, the
+    run in the throw; from a jump (skills with tricks, `grenade_jump` as often as the style likes, at an enemy 500 or
+    more away or 48 above; a long jump with the module) it lets go 0.28 s after the feet leave the ground, near the top.
+    Right after a throw on the run it backs off from where it went for 0.6 s.
+  - **Once the pin is out the grenade is always thrown**, by 2.6 s at the latest (it then bursts 0.5 s after the throw
+    at the soonest). With no plan to be had for 0.15 s as that nears (the enemy round a corner, or close), it goes
+    where the enemy most likely is round the corner (its place blurred 150 units more, no clear line asked), else
+    where its blast is farthest from the bot.
 - **A pile of satchels**, 150–400 units away with a clear line to the spot, at an enemy out of sight or one in sight
   coming this way: two to four of them (as many as the bot carries) thrown one after another at the spot, as fast as
   the game allows (a second apart); then the bot backs off out of their blast.

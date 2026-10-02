@@ -17,8 +17,10 @@
 //! The plan tries view pitches, each aimed so the grenade heads at where the enemy will be, flies each throw through
 //! the world tick by tick, and weighs every tick it could burst at by the damage it would do there: the enemy where
 //! its motion takes it, blurred by how far it may have turned since the throw (the longer the grenade is out, the
-//! more), less what waiting longer with the pin out costs. Cooked so it bursts as it gets there, a grenade leaves no
-//! time to run from it.
+//! more), and the less the longer the throw waits with the pin out (the enemy may get away meanwhile). Cooked so it
+//! bursts as it gets there, a grenade leaves no time to run from it. With no throw at the enemy to be had as the fuse
+//! runs low, it goes where the enemy most likely is round a corner ([`plan_behind_cover`]), else where its blast is
+//! farthest from the bot ([`dump`]).
 
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3, dmath};
@@ -30,14 +32,15 @@ use crate::ballistics::{Throw, grenade_launch};
 
 /// The grenade's think interval: it bursts on one of these ticks after the throw.
 pub const THINK: f32 = 0.1;
-/// Longest the pin stays out: the grenade must be well out of the hand by the three seconds.
+/// Longest the pin stays out: the grenade must be well out of the hand by the three seconds, and burst no sooner
+/// than 0.5 s after the throw (sooner, the least slip of the throw brings the blast onto the thrower).
 pub const LATEST: f32 = 2.6;
 pub const DAMAGE: f32 = 100.0;
 pub const RADIUS: f32 = 250.0;
-/// The game throws on its idle frame after the button is let go: this long after, at most.
-const LET_GO: f32 = 0.02;
-/// The fuse is aimed this far inside its 0.1 s tick, clear of both edges.
-const TICK_MARGIN: f32 = 0.03;
+/// The game throws on its idle frame after the button is let go: this long after, at most (a command every 10 ms).
+const LET_GO: f32 = 0.01;
+/// The fuse is aimed this far inside its 0.1 s tick, clear of both edges: the throw has 0.06 s to go in.
+const TICK_MARGIN: f32 = 0.015;
 /// Bounces: the part of the velocity into the surface turned back (2 − the grenade's friction 0.8).
 const OVERBOUNCE: f32 = 1.2;
 const FLOOR_NORMAL: f32 = 0.7;
@@ -57,8 +60,9 @@ const BODY_HALF: f32 = 16.0;
 /// the stand's measures a full lead did no better than none.
 const LEAD: f32 = 0.5;
 const PREDICT_FOR: f32 = 0.6;
-/// What a second more with the pin out costs, in damage: the bot holds a grenade instead of a gun.
-const WAIT_COST: f32 = 3.0;
+/// Waiting with the pin out, the enemy may get away (out of the line of every blast, round a corner): a throw that
+/// waits `w` seconds more is worth `e^(−w / WAIT_KEEP)` of its damage.
+const WAIT_KEEP: f32 = 2.5;
 /// The bot keeps this far from its own blast.
 pub const SELF_SAFE: f32 = RADIUS + 50.0;
 /// View pitches tried (down positive): every few degrees, then finer around the best.
@@ -67,6 +71,8 @@ const PITCH_STEP: f32 = 4.0;
 const FINE_STEP: f32 = 0.75;
 /// Candidates checked for the floor under the blast and a clear line to the enemy.
 const VERIFY: usize = 4;
+/// An enemy gone out of the line of every blast (round a corner) is reckoned this much further off where it was.
+const BEHIND_COVER: f32 = 150.0;
 
 /// What the grenade is thrown at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -299,6 +305,45 @@ pub fn plan(
     ready: f32,
     near: Option<f32>,
 ) -> Option<Plan> {
+    plan_with(tracer, eye, me, velocity, aim, sv_gravity, dll, held, ready, near, true)
+}
+
+/// A grenade that must go soon at an enemy no blast has a clear line to (gone round a corner): as [`plan`], with
+/// where it may be blurred further and no line asked for, so it goes where the enemy most likely is.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_behind_cover(
+    tracer: &mut dyn Tracer,
+    eye: Vec3,
+    me: Vec3,
+    velocity: Vec3,
+    aim: &Aim,
+    sv_gravity: f32,
+    dll: DllProfile,
+    held: f32,
+) -> Option<Plan> {
+    let blurred = Aim {
+        sigma: aim.sigma + BEHIND_COVER,
+        ..*aim
+    };
+    plan_with(
+        tracer, eye, me, velocity, &blurred, sv_gravity, dll, held, held, None, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_with(
+    tracer: &mut dyn Tracer,
+    eye: Vec3,
+    me: Vec3,
+    velocity: Vec3,
+    aim: &Aim,
+    sv_gravity: f32,
+    dll: DllProfile,
+    held: f32,
+    ready: f32,
+    near: Option<f32>,
+    line: bool,
+) -> Option<Plan> {
     let soonest = ready.max(held);
     let last_tick = ((GRENADE_FUSE - soonest) / THINK).floor() as u32 + 2;
     // The yaw heads for where the enemy will be about when the grenade gets there; once more for the best found.
@@ -339,7 +384,7 @@ pub fn plan(
                 }
                 let target = aim.at(wait + flight);
                 let damage = expected_damage(point, target, aim.sigma + aim.spread * flight);
-                let score = damage - WAIT_COST * wait;
+                let score = damage * dmath::exp(-wait / WAIT_KEEP);
                 if damage > 0.0 && top.as_ref().is_none_or(|c| score > c.score) {
                     top = Some(Candidate {
                         pitch,
@@ -365,13 +410,15 @@ pub fn plan(
                 continue;
             }
             let body = c.target + Vec3::Z * BODY_UP;
-            let tr = tracer.trace(&TraceQuery::line(burst + Vec3::Z, body));
-            if tr.fraction < 1.0 && tr.end.distance(body) > BODY_HALF {
-                continue;
+            if line {
+                let tr = tracer.trace(&TraceQuery::line(burst + Vec3::Z, body));
+                if tr.fraction < 1.0 && tr.end.distance(body) > BODY_HALF {
+                    continue;
+                }
             }
             let flight = c.tick as f32 * THINK;
             c.damage = expected_damage(burst, c.target, aim.sigma + aim.spread * flight);
-            c.score = c.damage - WAIT_COST * (c.held - held);
+            c.score = c.damage * dmath::exp(-(c.held - held) / WAIT_KEEP);
             c.point.at = burst;
             if c.damage > 0.0 && best.as_ref().is_none_or(|b| c.score > b.score) {
                 best = Some(c);

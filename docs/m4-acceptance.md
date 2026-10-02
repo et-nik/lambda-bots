@@ -392,7 +392,7 @@ boosts*). The owner's choices for this sub-stage:
 - **Skill and styles** as the plan says: from the normal preset up (long jumps on the way for everyone), with the
   styles' chances; the satchel from a jump goes by the same switch.
 - **Health:** 60 to start a gauss jump, 40 left after its landing.
-- **Switches:** `tricks` in `config/lambdabots.yaml` (`longjump`, `gauss_jump`, `gauss_boost`, `satchel_jump`).
+- **Switches:** `tricks` in `config/lambdabots.yaml` (`longjump`, `gauss_jump`, `gauss_boost`, `satchel_jump`, `grenade_jump`).
 - **Stand:** dm_snow with the module and the gauss given on spawn, plus the offline courses.
 
 **The graphs.** Long jump links are made only where every takeoff of the check lands (a long jump near its full reach
