@@ -1,6 +1,7 @@
 //! `lb watch`: what a player does, written to the log to study how people play. Twenty times a second where they
 //! are, how they move, where they look and what they hold; four times a second the room around them and where the
-//! others are; their shots with what the shot met, and their tripmines as they are laid and go.
+//! others are; their shots with what the shot met, their tripmines as they are laid and go, and their satchels as
+//! they are thrown, come to rest and go off.
 
 use lb_core::Vec3;
 use lb_core::time::SimTime;
@@ -26,7 +27,16 @@ pub(crate) struct Watched {
     next_room: SimTime,
     /// Its tripmines on the map by entity index: when each was first seen.
     mines: FxHashMap<u16, SimTime>,
+    /// Its satchels out by entity index.
+    satchels: FxHashMap<u16, Satchel>,
     shots: Vec<Shot>,
+}
+
+struct Satchel {
+    thrown: SimTime,
+    from: Vec3,
+    at: Vec3,
+    lying: bool,
 }
 
 struct Shot {
@@ -43,6 +53,7 @@ impl Watched {
             next: SimTime::ZERO,
             next_room: SimTime::ZERO,
             mines: FxHashMap::default(),
+            satchels: FxHashMap::default(),
             shots: Vec::new(),
         }
     }
@@ -222,6 +233,84 @@ pub(crate) fn mines(rt: &mut Runtime, laid: &[(u16, u16, Vec3, Vec3, bool)]) {
             let here = laid.iter().any(|l| l.0 == *index && l.1 == slot);
             if !here {
                 tracing::info!("watch #{userid} mine #{index} gone after {:.1} s", now.since(*at));
+            }
+            here
+        });
+    }
+}
+
+/// After the projectiles are refreshed: the watched players' satchels (index, owner, origin, velocity) thrown, come to
+/// rest and gone, how far the player and the nearest other player were from each as it went.
+pub(crate) fn satchels(rt: &mut Runtime, out: &[(u16, u16, Vec3, Vec3)]) {
+    let now = rt.now;
+    let clients = &rt.clients_now;
+    for w in &mut rt.watched {
+        let Some(me) = clients.iter().find(|c| c.slot == w.slot) else {
+            continue;
+        };
+        let (slot, userid) = (u16::from(w.slot), w.userid);
+        for &(index, _, origin, velocity) in out.iter().filter(|s| s.1 == slot) {
+            let Some(s) = w.satchels.get_mut(&index) else {
+                let v = view(me);
+                tracing::info!(
+                    "watch #{userid} satchel #{index} thrown: at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0}; the player at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0} view {:.1} {:.1}",
+                    origin.x,
+                    origin.y,
+                    origin.z,
+                    velocity.x,
+                    velocity.y,
+                    velocity.z,
+                    me.origin.x,
+                    me.origin.y,
+                    me.origin.z,
+                    me.velocity.x,
+                    me.velocity.y,
+                    me.velocity.z,
+                    v.x,
+                    v.y
+                );
+                w.satchels.insert(
+                    index,
+                    Satchel {
+                        thrown: now,
+                        from: origin,
+                        at: origin,
+                        lying: false,
+                    },
+                );
+                continue;
+            };
+            s.at = origin;
+            if !s.lying && velocity.length() < 1.0 {
+                s.lying = true;
+                tracing::info!(
+                    "watch #{userid} satchel #{index} lies at {:.0} {:.0} {:.0} after {:.1} s, {:.0} units from where it was first seen, the player {:.0} off",
+                    origin.x,
+                    origin.y,
+                    origin.z,
+                    now.since(s.thrown),
+                    origin.distance(s.from),
+                    origin.distance(me.origin)
+                );
+            }
+        }
+        w.satchels.retain(|index, s| {
+            let here = out.iter().any(|o| o.0 == *index && o.1 == slot);
+            if !here {
+                let other = clients
+                    .iter()
+                    .filter(|c| u16::from(c.slot) != slot && c.state == ClientState::Spawned && c.deadflag == 0)
+                    .map(|c| c.origin.distance(s.at))
+                    .fold(f32::INFINITY, f32::min);
+                tracing::info!(
+                    "watch #{userid} satchel #{index} gone after {:.1} s at {:.0} {:.0} {:.0}: the player {:.0} units off, the nearest other {:.0}",
+                    now.since(s.thrown),
+                    s.at.x,
+                    s.at.y,
+                    s.at.z,
+                    s.at.distance(me.origin),
+                    other
+                );
             }
             here
         });

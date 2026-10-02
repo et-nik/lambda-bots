@@ -2,11 +2,15 @@
 //! it (ten times a second, from what the bot believes), and dodging what it sees about to blow up.
 //!
 //! - **Throws:** three times a second at the nearest enemy in sight, or lost up to 3 s ago with its position still
-//!   tight: a grenade 300–1000 units away when a throw lands there and the blast spares the bot, a satchel at 150–400
-//!   with a clear line to the spot, a snark at 150–800 likewise. A grenade that fits is thrown almost always, a
-//!   satchel or a snark more rarely (the chance per look is the kind's base times the skill's `throw_rate`); a grenade
-//!   rests the arm about a second, a satchel 3–6 s. With no gun but the crowbar, throws are the weapon (yapb's grenade
-//!   war).
+//!   tight: a grenade 300–1000 units away when a throw lands there and the blast spares the bot, a satchel at one in
+//!   sight 350–550 away (800 with the long jump module) with a clear line to it, a snark at 150–800 likewise. A
+//!   grenade that fits is thrown almost always, a satchel or a snark more rarely (the chance per look is the kind's
+//!   base times the skill's `throw_rate`); a grenade rests the arm about a second, a satchel 3–6 s. With no gun but
+//!   the crowbar, throws are the weapon (yapb's grenade war).
+//! - **A satchel at an enemy** goes as players throw it: on the run at the enemy (from a jump for skills with tricks,
+//!   as often as the style likes; from a long jump at one 550–800 away with the module), the bot backing off after
+//!   it, and set off as it comes by the enemy. Thrown from where the bot stands it would fly some 200 units and lie
+//!   in the bot's own blast.
 //! - **Grenades with no enemy known:** now and then one where an enemy is expected: where a lost one would come into
 //!   view, a sound heard lately, the busiest way into the bot's sight. Skills with `throw_series` throw one after
 //!   another until none is left, the grenade kept in hand between them; an enemy in sight within 250 units ends the
@@ -57,7 +61,6 @@ use crate::trail::TrailPlan;
 
 /// Throw windows (horizontal distance).
 const GRENADE_BAND: [f32; 2] = [300.0, 1000.0];
-const SATCHEL_BAND: [f32; 2] = [150.0, 400.0];
 const SNARK_BAND: [f32; 2] = [200.0, 1000.0];
 const LOB_BAND: [f32; 2] = [300.0, 700.0];
 /// A throw's blast must land at least this far from the thrower.
@@ -79,7 +82,6 @@ const THROW_TRACK_SIGMA: f32 = 400.0;
 const THROW_CHECK: f64 = 0.3;
 /// Chance per check to take a throw (times the skill's `throw_rate`): at an enemy out of sight and in sight.
 const UNSEEN_GRENADE: f32 = 0.9;
-const UNSEEN_SATCHEL: f32 = 0.35;
 const UNSEEN_SNARK: f32 = 0.6;
 const SEEN_GRENADE: f32 = 0.9;
 const SEEN_SATCHEL: f32 = 0.15;
@@ -118,14 +120,12 @@ const RADIO_PRESS: f32 = 0.1;
 /// this long at most.
 const SATCHEL_COMING: f32 = 1.5;
 const SATCHEL_WAIT: f64 = 2.5;
-/// After a pile is thrown at an enemy, the radio stays up for it this long.
-const SATCHEL_EXPECT: f64 = 4.0;
 /// An enemy in sight away from the charges this close needs a gun rather than the radio.
 const SATCHEL_THREAT: f32 = 700.0;
 /// A sound heard this recently this close to a charge: someone by it.
 const SATCHEL_HEARD: f64 = 1.0;
 const SATCHEL_HEARD_NEAR: f32 = 200.0;
-/// Hurt this badly just now, the bot sets its satchels off at an enemy by them anyway: they go with it when it dies.
+/// Hurt this badly just now, the bot sets its satchels off at an enemy by them at once: they go with it when it dies.
 const SATCHEL_DYING: f32 = 30.0;
 const SATCHEL_DYING_HURT: f64 = 0.5;
 /// Satchels go off once an enemy has been out of sight this long after it was seen by them (for so long it may still
@@ -135,10 +135,12 @@ const SATCHEL_LOST_NEAR: f64 = 6.0;
 const SATCHEL_LIE: [f32; 2] = [8.0, 15.0];
 /// A pile is this many satchels (as many as the bot carries).
 pub(crate) const SATCHEL_PILE: [u32; 2] = [2, 4];
-/// At an enemy in sight this far away, a satchel is thrown from a jump and set off as it comes by.
+/// At an enemy in sight this far away, a satchel is thrown on the run and set off as it comes by; it flies about
+/// this fast then. With the long jump module it goes from a long jump this far away: the leap carries it far, and
+/// the bot stays out of its blast.
 const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
-/// The balanced style's liking for satchels thrown from a jump, which the base chance is for.
-const BALANCED_SATCHEL_JUMP: f32 = 0.4;
+const SATCHEL_RUN: f32 = 500.0;
+const LEAP_BAND: [f32; 2] = [550.0, 800.0];
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
 const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
@@ -149,10 +151,6 @@ const BARRAGE_RUN: f64 = 2.0;
 const BARRAGE_HEALTH: f32 = 50.0;
 /// A satchel flying at the enemy is watched while seen this recently; the enemy while lost this recently.
 const AIRBURST_SEEN: f64 = 0.25;
-/// A satchel in flight by the enemy is set off with the bot taking this share of its damage at most, with this much
-/// health at least.
-const AIRBURST_SELF: f32 = 0.25;
-const AIRBURST_HEALTH: f32 = 70.0;
 /// Backing off a pile takes this long at most; the bot does not close in on the enemy for this long after a throw.
 const PILE_BACK_OFF: f32 = 1.5;
 /// Seconds of stepping along the wall after laying a mine (it arms in 2.5 s).
@@ -350,11 +348,11 @@ pub struct Arms {
     detonate_why: &'static str,
     /// The radio up for the satchels waits for an enemy in their blast until then; pressed at once when `None`.
     detonate_wait: Option<SimTime>,
-    /// An enemy is expected by the satchels until then (a pile thrown at it, a trap watched): the radio is up for it.
+    /// An enemy is expected by the satchels until then (a trap watched): the radio is up for it.
     pub(crate) radio_until: SimTime,
-    /// The throw under way: at whom, and whether its satchel is to go off in flight; how many of its satchels are
+    /// The satchel under way is thrown at this enemy, to go off as it comes by; how many of the throw's satchels are
     /// noted as thrown.
-    throw_aim: Option<(Option<PlayerKey>, bool)>,
+    throw_aim: Option<PlayerKey>,
     /// The throw under way lays a trap: its satchels lie long.
     trap_throw: bool,
     landed: usize,
@@ -581,9 +579,7 @@ fn near_beam(p: Vec3, a: Vec3, b: Vec3) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Way {
     Grenade,
-    /// A few satchels at one spot, to be set off from out of their blast.
-    Pile,
-    /// A satchel from a jump, set off as it comes by the enemy.
+    /// A satchel on the run, set off as it comes by the enemy.
     Airburst,
     Snark,
 }
@@ -860,13 +856,12 @@ impl BotBrain {
         Some(at + Vec3::Z * 16.0)
     }
 
-    /// The self-damage from its own satchels a bot takes to set them off at an enemy: a little when healthy.
-    fn satchel_spare(body: &Body) -> f32 {
-        if body.health >= AIRBURST_HEALTH {
-            AIRBURST_SELF * body.damages.satchel
-        } else {
-            0.0
-        }
+    /// The bot is out of the blast of its satchels at `charges`, with a margin: a blast reaches a little further than
+    /// its radius (it bursts above the floor and is measured to the near side of a body), and a satchel in flight is
+    /// known a moment late.
+    fn spared(body: &Body, charges: &[Vec3]) -> bool {
+        let clear = blast_radius(body.damages.satchel) + SATCHEL_SPARED;
+        charges.iter().all(|c| c.distance(body.origin) >= clear)
     }
 
     /// Sets the bot's satchels off, or draws the radio for them, once it is out of their blast (it backs off first):
@@ -874,7 +869,7 @@ impl BotBrain {
     ///   enemy is in the blast), or coming into it;
     /// - the bot dying with an enemy by them, someone heard by them, or an enemy seen by them a moment ago that may
     ///   still be there (pressed at once);
-    /// - the radio up while an enemy is expected by them (a pile thrown at it, a trap watched);
+    /// - the radio up while an enemy is expected by them (a trap watched);
     /// - after they have lain a while with nobody in sight.
     fn detonation(&mut self, body: &Body, rng: &mut BotRng) -> bool {
         let now = body.now;
@@ -967,9 +962,8 @@ impl BotBrain {
         } else {
             return false;
         };
-        // Pressed at once: from out of the blast (a dying bot only short of killing itself).
-        let spare = if dying { body.health - 1.0 } else { 0.0 };
-        if wait.is_none() && hurts(body.origin) > spare {
+        // Pressed at once: from out of their blast.
+        if wait.is_none() && !Self::spared(body, &charges) {
             self.back_off_charges(&charges, body);
             return true;
         }
@@ -993,17 +987,23 @@ impl BotBrain {
     }
 
     /// Whether the radio up for the bot's satchels presses now: at once for a reason that holds on its own, else
-    /// while an enemy is in their blast and the bot is spared by them (it backs off when it is not). The wait ends
-    /// when it runs out, and when an enemy in sight away from the charges comes close: that one needs a gun.
+    /// while an enemy is in their blast; never with the bot in it, which it may have come into since the radio went
+    /// up (it backs off, or gives up a press meant at once). The wait ends when it runs out, and when an enemy in
+    /// sight away from the charges comes close: that one needs a gun.
     fn detonate_go(&mut self, body: &Body) -> Result<bool, &'static str> {
-        let Some(until) = self.mind.arms.detonate_wait else {
-            return Ok(true);
-        };
         let now = body.now;
         let charges = self.charges_at(body);
         if charges.is_empty() {
             return Err("no charges known");
         }
+        let spared = Self::spared(body, &charges);
+        let Some(until) = self.mind.arms.detonate_wait else {
+            return if spared {
+                Ok(true)
+            } else {
+                Err("the bot in their blast")
+            };
+        };
         let damage = body.damages.satchel;
         let hurts = |p: Vec3| satchel_damage(&charges, p, damage);
         let victim = self
@@ -1011,7 +1011,7 @@ impl BotBrain {
             .enemies()
             .any(|t| fresh(t, now) && hurts(ahead(t, now, RADIO_PRESS)) >= SATCHEL_WORTH);
         if victim {
-            if hurts(body.origin) <= Self::satchel_spare(body) {
+            if spared {
                 return Ok(true);
             }
             self.back_off_charges(&charges, body);
@@ -1159,15 +1159,14 @@ impl BotBrain {
         }
         let d = (t.pos - body.origin).truncate().length();
         let count = |w: WeaponId| carried(body, w);
-        let coming = t.velocity_known(now) && t.vel.truncate().dot((body.origin - t.pos).truncate()) > 0.0;
         let grenade_band = if war {
             [WAR_GRENADE_MIN, GRENADE_BAND[1]]
         } else {
             GRENADE_BAND
         };
         let in_band = |band: [f32; 2]| (band[0]..=band[1]).contains(&d);
-        // The throws that fit, with their chance per look: a grenade; a pile of satchels at an enemy out of sight or
-        // coming this way; a satchel from a jump, set off as it comes by, at one in sight further off; a snark.
+        // The throws that fit, with their chance per look: a grenade; a satchel on the run at an enemy in sight, set
+        // off as it comes by; a snark.
         let satchels = count(WeaponId::Satchel);
         let free = self.explosives.charges.is_empty();
         let mut ways: smallvec::SmallVec<[(Way, f32); 4]> = smallvec::SmallVec::new();
@@ -1175,17 +1174,13 @@ impl BotBrain {
         if grenade {
             ways.push((Way::Grenade, if seen { SEEN_GRENADE } else { UNSEEN_GRENADE }));
         }
-        if satchels > 0 && free && in_band(SATCHEL_BAND) && (!seen || coming || war) {
-            ways.push((Way::Pile, if seen { SEEN_SATCHEL } else { UNSEEN_SATCHEL }));
-        }
-        // From a jump: a trick, for skills that do tricks, as often as the style likes (the balanced style's the base);
-        // not where a suicide costs a GunGame kill.
-        let jump_throw = ch.skill.tricks && body.tricks.satchel_jump && !body.gungame.is_some_and(|g| g.descore());
-        if satchels > 0 && free && seen && body.on_ground && in_band(AIRBURST_BAND) && jump_throw {
-            ways.push((
-                Way::Airburst,
-                SEEN_SATCHEL * ch.tricks.satchel_jump / BALANCED_SATCHEL_JUMP,
-            ));
+        // From a jump: a trick, for skills that do tricks; not where a suicide costs a GunGame kill. With the long jump
+        // module from a long jump, at an enemy further off.
+        let jumps = ch.skill.tricks && body.tricks.satchel_jump && !body.gungame.is_some_and(|g| g.descore());
+        let leaps = jumps && body.has_longjump && body.tricks.longjump;
+        let satchel_band = [AIRBURST_BAND[0], if leaps { LEAP_BAND[1] } else { AIRBURST_BAND[1] }];
+        if satchels > 0 && free && seen && body.on_ground && in_band(satchel_band) {
+            ways.push((Way::Airburst, SEEN_SATCHEL));
         }
         if count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND) {
             ways.push((Way::Snark, if seen { SEEN_SNARK } else { UNSEEN_SNARK }));
@@ -1244,7 +1239,7 @@ impl BotBrain {
                     }
                 }
             }
-            Way::Pile | Way::Airburst | Way::Snark => {
+            Way::Airburst | Way::Snark => {
                 if !clear_line(nav, body.eye, floor + Vec3::Z * 8.0) {
                     return false;
                 }
@@ -1257,22 +1252,20 @@ impl BotBrain {
         };
         let target = if kind == Kind::Snark { t.pos } else { floor };
         let mut thrower = Thrower::new(kind, target, throw, now);
-        match way {
-            Way::Pile => {
-                let pile = rng
-                    .combat
-                    .range_f32(SATCHEL_PILE[0] as f32, SATCHEL_PILE[1] as f32 + 0.99) as u32;
-                thrower = thrower.pile(pile.min(satchels as u32));
-            }
-            Way::Airburst => thrower = thrower.from_jump(),
-            Way::Grenade | Way::Snark => {}
+        if way == Way::Airburst {
+            // As often as the style likes jumps.
+            let jump = jumps && rng.combat.next_f32() < ch.tricks.satchel_jump;
+            thrower = match (jump, leaps && d >= LEAP_BAND[0]) {
+                (true, true) => thrower.from_leap(),
+                (true, false) => thrower.from_jump(),
+                (false, _) => thrower.on_the_run(),
+            };
         }
         // At an enemy in sight a grenade goes at once: it will not wait for a cooked one.
         if seen {
             thrower = thrower.quick();
         }
-        self.mind.arms.throw_aim =
-            matches!(way, Way::Pile | Way::Airburst).then_some((Some(t.who), way == Way::Airburst));
+        self.mind.arms.throw_aim = (way == Way::Airburst).then_some(t.who);
         self.mind.arms.landed = 0;
         self.mind.arms.active = Some(Active::Throw(thrower));
         let rest = match kind {
@@ -1367,7 +1360,7 @@ impl BotBrain {
         let throw = ballistics::satchel(nav, body.origin, body.velocity, at, body.gravity);
         let pile = rng.combat.range_f32(pile[0] as f32, pile[1] as f32 + 0.99) as u32;
         let thrower = Thrower::new(Kind::Satchel, at, throw, now).pile(pile.min(carried as u32));
-        self.mind.arms.throw_aim = Some((None, false));
+        self.mind.arms.throw_aim = None;
         self.mind.arms.trap_throw = true;
         self.mind.arms.landed = 0;
         self.mind.arms.active = Some(Active::Throw(thrower));
@@ -1505,6 +1498,21 @@ impl BotBrain {
                 .any(|t| t.pos.distance(body.origin) < near);
             let status = match &mut active {
                 Active::Throw(t) => {
+                    // A satchel at an enemy in sight goes where the enemy is going, led by the satchel's flight.
+                    if let Some(e) = self
+                        .mind
+                        .arms
+                        .throw_aim
+                        .and_then(|k| self.beliefs.track(k))
+                        .filter(|e| e.state == TrackState::Visible)
+                    {
+                        let lead = if e.velocity_known(now) {
+                            e.vel.truncate().extend(0.0) * ((e.pos - body.origin).truncate().length() / SATCHEL_RUN)
+                        } else {
+                            Vec3::ZERO
+                        };
+                        t.target = e.pos + lead - Vec3::Z * 32.0;
+                    }
                     let status = t.update(&hands, nav);
                     // Each satchel of a pile is noted as it leaves the hand.
                     for landing in t.landings.iter().skip(self.mind.arms.landed) {
@@ -1670,6 +1678,10 @@ impl BotBrain {
             self.intents
                 .weapon(Prio::Protocol, WeaponIntent::hold(WeaponId::HandGrenade));
         }
+        // A satchel thrown from a long jump: the keys of one once it is found to land safely, none till then (the
+        // throw is given up when it never does).
+        let leaps = matches!(&self.mind.arms.active, Some(Active::Throw(t)) if t.leaps());
+        let leap = leaps && requests.iter().any(|r| r.jump) && nav.leap_lands(self.motor.view).is_some();
         for r in requests {
             if let Some(w) = r.weapon {
                 self.intents.weapon(Prio::Protocol, w);
@@ -1680,13 +1692,13 @@ impl BotBrain {
             if let Some(m) = r.movement {
                 self.intents.movement(Prio::Protocol, m);
             }
-            if r.jump {
+            if r.jump && leap == leaps {
                 self.intents.stance(
                     Prio::Protocol,
                     StanceIntent {
-                        jump: true,
+                        jump: !leap,
                         duck: false,
-                        longjump: false,
+                        longjump: leap,
                     },
                 );
             }
@@ -1709,10 +1721,7 @@ impl BotBrain {
             .track(target)
             .filter(|t| t.state == TrackState::Visible || now.since(t.last_seen) <= AIRBURST_SEEN)
             .map(|t| t.pos);
-        // Rather than let the satchel pass the enemy, a bot in good health takes a little of its own blast (of all its
-        // charges together).
-        let spared =
-            satchel_damage(&self.charges_at(body), body.origin, body.damages.satchel) <= Self::satchel_spare(body);
+        let spared = Self::spared(body, &self.charges_at(body));
         Burst { satchel, enemy, spared }
     }
 
@@ -1879,7 +1888,6 @@ impl BotBrain {
                 }
                 Kind::Satchel => {
                     stats.satchels += t.landings.len() as u32;
-                    let (target, airburst) = aim.unwrap_or((None, false));
                     let mut plan = SatchelPlan::roll(now, rng);
                     if std::mem::take(&mut self.mind.arms.trap_throw) {
                         plan.lie_until = now + f64::from(rng.combat.range_f32(TRAP_LIE[0], TRAP_LIE[1]));
@@ -1887,14 +1895,9 @@ impl BotBrain {
                     self.mind.arms.satchels = Some(plan);
                     // Closing in would take the bot into its own blast.
                     self.mind.arms.hold_until = self.mind.arms.hold_until.max(now + SATCHEL_HOLD);
-                    if airburst && let Some(target) = target {
-                        self.mind.arms.active = Some(Active::Airburst(Airburst::new(target, now)));
-                    } else {
-                        self.back_off_satchels(&t.landings, body);
-                        // The enemy the pile was thrown at is expected by it: the radio stays up.
-                        if target.is_some() {
-                            self.mind.arms.radio_until = self.mind.arms.radio_until.max(now + SATCHEL_EXPECT);
-                        }
+                    match aim {
+                        Some(target) => self.mind.arms.active = Some(Active::Airburst(Airburst::new(target, now))),
+                        None => self.back_off_satchels(&t.landings, body),
                     }
                 }
                 Kind::Snark => {
@@ -2774,6 +2777,120 @@ pub(crate) mod tests {
         brain.weapon_options(&b, &character(), &mut Open, &mut rng);
         assert!(brain.mind.arms.active.is_some());
         assert_eq!(brain.mind.arms.detonate_why, "dying by them");
+    }
+
+    #[test]
+    fn a_bot_in_the_blast_of_its_satchels_backs_off_before_setting_them_off() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain
+            .explosives
+            .thrown_satchel(Vec3::new(260.0, 0.0, -36.0), SimTime(0.0));
+        brain.beliefs.on_sighting(&seen(2.0, Vec3::new(300.0, 100.0, 0.0)));
+        brain.update(SimTime(2.0), &params(), None, None);
+        let mut b = body(2.0);
+        b.arsenal.retain(|a| a.id != WeaponId::HandGrenade);
+        radio(&mut b, 0);
+        b.weapon = Some(WeaponId::Satchel);
+        let mut rng = BotRng::new(7, 7);
+        brain.weapon_options(&b, &character(), &mut Open, &mut rng);
+        assert_eq!(brain.mind.arms.detonate_why, "an enemy in their blast");
+        // An enemy by them, but the bot 260 units off them: the radio waits while it backs off.
+        assert_eq!(brain.detonate_go(&b), Ok(false));
+        assert!(
+            brain.mind.arms.dodge.is_some_and(|(_, away)| away.x < -0.9),
+            "away from them"
+        );
+        b.origin = Vec3::new(-80.0, 0.0, 0.0);
+        assert_eq!(brain.detonate_go(&b), Ok(true), "out of their blast");
+    }
+
+    /// Open floor where a long jump lands safely anywhere.
+    struct Leaps;
+
+    impl Tracer for Leaps {
+        fn trace(&mut self, q: &TraceQuery) -> Trace {
+            Open.trace(q)
+        }
+
+        fn point_contents(&mut self, p: Vec3) -> i32 {
+            Open.point_contents(p)
+        }
+    }
+
+    impl NavService for Leaps {
+        fn go_to(&mut self, dest: Vec3) -> (NavStatus, Option<NavStep>) {
+            Open.go_to(dest)
+        }
+        fn roam(&mut self, rng: &mut Pcg32) -> Option<NavStep> {
+            Open.roam(rng)
+        }
+        fn away_from(&mut self, threat: Vec3) -> Option<Vec3> {
+            Open.away_from(threat)
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn leap_lands(&mut self, view: Vec3) -> Option<Vec3> {
+            let (forward, _, _) = view_angle_vectors(Vec3::new(0.0, view.y, 0.0));
+            Some(forward * 420.0)
+        }
+    }
+
+    #[test]
+    fn with_the_module_a_satchel_at_an_enemy_further_off_goes_from_a_long_jump() {
+        // The jump the satchel throw asks for, with the enemy `d` units off and long jumps landing safely or not.
+        let jump_keys = |d: f32, safe: bool| {
+            let enemy = Vec3::new(d, 0.0, 0.0);
+            let mut ch = character();
+            ch.tricks.satchel_jump = 1.0;
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&ch.skill));
+            // The satchel in hand, drawn.
+            let _ = brain.motor.weapon.update(
+                SimTime(0.0),
+                Some(WeaponId::Satchel),
+                None,
+                &mut smallvec::SmallVec::new(),
+            );
+            let mut rng = BotRng::new(7, 7);
+            for i in 0..200 {
+                let t = f64::from(i) * 0.05;
+                brain.beliefs.on_sighting(&seen(t, enemy));
+                brain.update(SimTime(t), &params(), None, None);
+                let mut b = body(t);
+                b.arsenal.clear();
+                b.arsenal.push(Armed::new(WeaponId::Satchel, None, Some(3)));
+                b.weapon = Some(WeaponId::Satchel);
+                b.has_longjump = true;
+                if brain.mind.arms.active.is_none() {
+                    brain.weapon_options(&b, &ch, &mut Open, &mut rng);
+                    continue;
+                }
+                // Running at the enemy; the view comes onto what the throw asks for.
+                b.velocity = Vec3::new(270.0, 0.0, 0.0);
+                brain.intents = Default::default();
+                if safe {
+                    brain.run_protocols(&b, &ch, &mut Leaps, &mut rng);
+                } else {
+                    brain.run_protocols(&b, &ch, &mut Open, &mut rng);
+                }
+                if let Some((Prio::Protocol, s)) = brain.intents.stance {
+                    return Some(s);
+                }
+                if let Some((_, LookIntent::Angles(a))) = brain.intents.look {
+                    brain.motor.view = a;
+                }
+            }
+            None
+        };
+        let leap = jump_keys(650.0, true).expect("a jump");
+        assert!(leap.longjump && !leap.jump, "{leap:?}");
+        assert_eq!(
+            jump_keys(650.0, false),
+            None,
+            "no long jump where it would not land safely, nor a plain one that would not get the satchel there"
+        );
+        let near = jump_keys(450.0, true).expect("a jump");
+        assert!(near.jump && !near.longjump, "a plain jump closer: {near:?}");
     }
 
     #[test]

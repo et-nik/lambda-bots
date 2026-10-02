@@ -1252,6 +1252,13 @@ impl Runtime {
                 })
                 .collect();
             watch::mines(self, &laid);
+            let satchels: Vec<_> = self
+                .projectile_entities
+                .iter()
+                .filter(|p| p.kind == ProjectileKind::Satchel)
+                .map(|p| (p.index, p.owner, p.origin, p.velocity))
+                .collect();
+            watch::satchels(self, &satchels);
         }
     }
 
