@@ -6,10 +6,12 @@
 //!   Once the pin is out the grenade is always thrown, at the latest shortly before the fuse runs out.
 //! - **Satchel:** draw it (a second), turn to the throw, press the DLL's throw button once the game takes it;
 //!   confirmed when the game reports a charge out and one satchel fewer. A pile is thrown one after another as the
-//!   game allows (a second apart), each at the same spot. Thrown from a jump, the bot runs at the target, jumps, and
-//!   presses the button a moment after its feet leave the ground: the jump's lift and the run go into the throw. A
-//!   press that did nothing is followed by the other button; what the presses showed of the server's satchel buttons
-//!   (a throw with charges out, a button that did nothing, or one that set the charges off) is reported.
+//!   game allows (a second apart), each at the same spot. Thrown on the run (as players throw at an enemy), the bot
+//!   runs at the target once the satchel is in hand and throws when it moves at it: the run goes into the throw, and
+//!   the satchel flies twice as fast and far. From a jump, it then jumps and presses the button a moment after its
+//!   feet leave the ground: the jump's lift goes in as well. A press that did nothing is followed by the other
+//!   button; what the presses showed of the server's satchel buttons (a throw with charges out, a button that did
+//!   nothing, or one that set the charges off) is reported.
 //! - **Snark:** draw, turn to the target (14 units above its origin, as yapb), press once when there is room in front
 //!   (the game's own check); confirmed by one snark fewer.
 //! - **Snark barrage** ([`Barrage`]): at an enemy close by, all the snarks: held down, the game lets one go every 0.3 s
@@ -77,10 +79,13 @@ const SNARK_AIM_UP: f32 = 14.0;
 /// A satchel from a jump leaves this long after the feet leave the ground; the jump waits this long for them to.
 const JUMP_THROW: f64 = 0.12;
 const JUMP_GIVE_UP: f64 = 0.4;
-/// Before a jump throw the bot runs at the target until this fast toward it, for this long at most.
+/// Thrown on the run, the satchel leaves once the bot runs at the target this fast and the throw lands within this
+/// of it; not so by then, or with the target this close, it stays in hand (it would go off by the thrower).
 const RUN_UP_SPEED: f32 = 320.0;
 const RUN_UP_MIN: f32 = 200.0;
-const RUN_UP_FOR: f64 = 0.8;
+const REACHES: f32 = 32.0;
+const RUN_UP_FOR: f64 = 1.2;
+const RUN_CLOSE: f32 = 250.0;
 /// A snark barrage lasts this long at most, and ends when the enemy is out of sight this long.
 const BARRAGE_FOR: f64 = 6.0;
 const BARRAGE_LOST: f64 = 0.4;
@@ -113,8 +118,12 @@ pub struct Thrower {
     quick: bool,
     /// Satchels still to throw at the target, this one included.
     pile: u32,
-    /// Satchels are thrown from a jump.
+    /// Satchels are thrown on the run at the target; since when it runs (the satchel in hand).
+    run: bool,
+    run_from: Option<SimTime>,
+    /// Satchels are thrown from a jump; a long jump (its keys are the caller's to press): the leap carries them far.
     jump: bool,
+    leap: bool,
     /// Where the satchels thrown so far should land.
     pub landings: Vec<Vec3>,
     /// The satchel button that throws here, once one did or the one the DLL profile names did nothing.
@@ -142,7 +151,10 @@ impl Thrower {
             steady_since: None,
             quick: false,
             pile: 1,
+            run: false,
+            run_from: None,
             jump: false,
+            leap: false,
             landings: Vec::new(),
             button: None,
             pressed_out: false,
@@ -164,10 +176,28 @@ impl Thrower {
         self
     }
 
-    /// Satchels thrown from a jump.
+    /// Satchels thrown on the run at the target.
+    pub fn on_the_run(mut self) -> Thrower {
+        self.run = true;
+        self
+    }
+
+    /// Satchels thrown on the run, from a jump.
     pub fn from_jump(mut self) -> Thrower {
+        self.run = true;
         self.jump = true;
         self
+    }
+
+    /// Satchels thrown on the run, from a long jump.
+    pub fn from_leap(mut self) -> Thrower {
+        self.leap = true;
+        self.from_jump()
+    }
+
+    /// The jump asked for is a long jump.
+    pub fn leaps(&self) -> bool {
+        self.leap
     }
 
     /// Where the thrown grenade or satchel should come down.
@@ -295,9 +325,12 @@ impl Thrower {
         let button = self.button.unwrap_or(h.dll.satchel_throw());
         // Just after satchels went off the game takes no throw until it has seen both buttons up (its idle frame).
         let button_ready = state != 2 && takes(game, button);
-        // From a jump the bot runs at the target first: the run carries the satchel on.
+        // On the run the bot runs at the target once the satchel is in hand: the run carries the satchel on.
         let toward = (self.target - h.origin).truncate().normalize_or_zero();
-        let run_up = self.jump.then_some(MoveIntent {
+        if self.run && h.ready(w) {
+            self.run_from.get_or_insert(now);
+        }
+        let run_up = self.run_from.is_some().then_some(MoveIntent {
             dir: toward,
             speed: RUN_UP_SPEED,
         });
@@ -320,20 +353,36 @@ impl Thrower {
             self.resolved_at = now;
             self.throw = ballistics::satchel(&mut Unchecked, h.origin, h.velocity, self.target, h.gravity);
         }
-        let angles = self.angles();
+        let reaches = self.landing(h.gravity).truncate().distance(self.target.truncate()) <= REACHES;
+        // Before a long jump the view is on the target: the leap goes along it, and makes another throw.
+        let angles = if self.leap && self.phase == Phase::Draw {
+            dir_to_view_angles(self.target - h.eye)
+        } else {
+            self.angles()
+        };
         match self.phase {
             Phase::Draw => {
                 if now.since(self.started) > DRAW_TIMEOUT + 1.0 || count <= 0 {
                     return finished(&self.landings, "no satchel to throw");
                 }
+                if let Some(from) = self.run_from {
+                    // From the ground, running at the target fast enough for the satchel to get there (from a long
+                    // jump it will); never one that would come down short, by the bot.
+                    if (self.target - h.origin).truncate().length() < RUN_CLOSE {
+                        return finished(&self.landings, "the target came close");
+                    }
+                    let run = h.velocity.truncate().dot(toward);
+                    if !(h.on_ground && run >= RUN_UP_MIN && (reaches || self.leap)) {
+                        if now.since(from) > RUN_UP_FOR {
+                            return finished(&self.landings, "the throw would not reach on the run");
+                        }
+                        return running(hold(w), angles, false);
+                    }
+                }
                 if !(h.ready(w) && button_ready && settled(h.view, angles, 3.0)) {
                     return running(hold(w), angles, false);
                 }
                 if self.jump && h.on_ground {
-                    let run = h.velocity.truncate().dot(toward);
-                    if run < RUN_UP_MIN && now.since(self.started) < RUN_UP_FOR {
-                        return running(hold(w), angles, false);
-                    }
                     self.phase = Phase::Jump { at: now };
                     return running(hold(w), angles, true);
                 }
@@ -346,9 +395,15 @@ impl Thrower {
                 running(press(w, button, Trigger::Hold, 0.0), angles, false)
             }
             Phase::Jump { at } => {
-                // Rising a moment after the feet left the ground: the lift goes into the throw.
-                if (h.on_ground || now.since(at) < JUMP_THROW) && now.since(at) < JUMP_GIVE_UP {
+                // Rising a moment after the feet left the ground, the view on the throw the lift makes: the lift goes
+                // into the throw. One that would not get there (a long jump not taken) stays in hand.
+                if (h.on_ground || now.since(at) < JUMP_THROW || !settled(h.view, angles, 3.0) || !reaches)
+                    && now.since(at) < JUMP_GIVE_UP
+                {
                     return running(hold(w), angles, h.on_ground);
+                }
+                if !reaches {
+                    return finished(&self.landings, "the throw would not reach from the jump");
                 }
                 self.phase = Phase::Pressed {
                     at: now,
@@ -817,8 +872,19 @@ mod tests {
             panic!()
         };
         assert_eq!(r.weapon.unwrap().fire, Fire::None);
+        // The lift makes another throw: it waits for the view to come onto it.
         airborne.now = SimTime(0.5);
         airborne.velocity = Vec3::new(250.0, 0.0, 150.0);
+        let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
+            panic!()
+        };
+        assert_eq!(
+            r.weapon.unwrap().fire,
+            Fire::None,
+            "the view is not on the lifted throw yet"
+        );
+        airborne.now = SimTime(0.52);
+        airborne.view = th.angles();
         let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
             panic!()
         };
@@ -829,6 +895,129 @@ mod tests {
             "the run carries it on: {:?}",
             th.throw.velocity
         );
+    }
+
+    #[test]
+    fn a_satchel_on_the_run_leaves_running_at_the_target_from_the_ground_and_never_short() {
+        let target = Vec3::new(420.0, 0.0, -36.0);
+        let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
+        let mut scene = Scene {
+            view: Vec3::ZERO,
+            arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(1))],
+            prediction: Prediction {
+                current: Some(WeaponId::Satchel),
+                primary_ammo: 1,
+                ..Prediction::default()
+            },
+            dll: DllProfile::resolve("auto", true),
+        };
+        scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon::default());
+        let fire = |th: &mut Thrower, h: &Hands<'_>| match th.update(h, &mut Unchecked) {
+            Status::Running(r) => r.weapon.unwrap().fire,
+            other => panic!("{other:?}"),
+        };
+        let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
+        // Standing, a satchel would come down some 200 units off, by the bot: it runs at the target instead.
+        let mut h = scene.hands(0.0, WeaponId::Satchel);
+        h.view = th.angles();
+        assert_eq!(fire(&mut th, &h), Fire::None);
+        // Running at it in the air (a hop): not yet.
+        h.now = SimTime(0.3);
+        h.velocity = Vec3::new(260.0, 0.0, -150.0);
+        h.on_ground = false;
+        let _ = fire(&mut th, &h);
+        h.view = th.angles();
+        assert_eq!(fire(&mut th, &h), Fire::None, "from the ground only");
+        // On the ground at a run: thrown, the run in the throw.
+        h.now = SimTime(0.45);
+        h.velocity = Vec3::new(260.0, 0.0, 0.0);
+        h.on_ground = true;
+        let _ = fire(&mut th, &h);
+        h.view = th.angles();
+        assert_eq!(fire(&mut th, &h), Fire::Primary);
+        assert!(th.throw.velocity.x > 450.0, "{:?}", th.throw);
+        // Never getting to run at it: given up, the satchel kept.
+        let mut stuck = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
+        let mut h = scene.hands(0.0, WeaponId::Satchel);
+        h.view = stuck.angles();
+        for t in [0.0, 0.5, 1.0] {
+            h.now = SimTime(t);
+            assert_eq!(fire(&mut stuck, &h), Fire::None);
+        }
+        h.now = SimTime(1.3);
+        assert_eq!(
+            stuck.update(&h, &mut Unchecked),
+            Status::Failed("the throw would not reach on the run")
+        );
+        // The target come close: kept.
+        let mut close = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
+        close.target = Vec3::new(200.0, 0.0, -36.0);
+        assert_eq!(
+            close.update(&scene.hands(0.0, WeaponId::Satchel), &mut Unchecked),
+            Status::Failed("the target came close")
+        );
+    }
+
+    #[test]
+    fn a_satchel_from_a_long_jump_goes_far_and_never_from_a_plain_jump_that_would_not_get_there() {
+        // Further than a satchel from a plain jump at a run gets (some 870 units).
+        let target = Vec3::new(900.0, 0.0, -36.0);
+        let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
+        let mut scene = Scene {
+            view: Vec3::ZERO,
+            arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(1))],
+            prediction: Prediction {
+                current: Some(WeaponId::Satchel),
+                primary_ammo: 1,
+                ..Prediction::default()
+            },
+            dll: DllProfile::resolve("auto", true),
+        };
+        scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon::default());
+        let request = |th: &mut Thrower, h: &Hands<'_>| match th.update(h, &mut Unchecked) {
+            Status::Running(r) => r,
+            other => panic!("{other:?}"),
+        };
+        for leap in [true, false] {
+            let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0));
+            th = if leap { th.from_leap() } else { th.from_jump() };
+            assert_eq!(th.leaps(), leap);
+            // Running at it: far out of a throw's reach from the ground, but a long jump will carry the satchel.
+            let mut h = scene.hands(0.0, WeaponId::Satchel);
+            h.velocity = Vec3::new(260.0, 0.0, 0.0);
+            h.view = dir_to_view_angles(target - h.eye);
+            let r = request(&mut th, &h);
+            assert_eq!(r.jump, leap, "the leap goes at once, along the view on the target");
+            if !leap {
+                continue;
+            }
+            // In the leap (560 along, 299 up at the takeoff): thrown once the view is on the throw it makes.
+            h.now = SimTime(0.15);
+            h.on_ground = false;
+            h.velocity = Vec3::new(560.0, 0.0, 180.0);
+            let _ = request(&mut th, &h);
+            h.view = th.angles();
+            assert_eq!(request(&mut th, &h).weapon.unwrap().fire, Fire::Primary);
+            // A plain jump instead: the throw would not get there, the satchel stays in hand.
+            let mut plain = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).from_leap();
+            let mut h = scene.hands(0.0, WeaponId::Satchel);
+            h.velocity = Vec3::new(260.0, 0.0, 0.0);
+            h.view = dir_to_view_angles(target - h.eye);
+            assert!(request(&mut plain, &h).jump);
+            h.on_ground = false;
+            h.velocity = Vec3::new(260.0, 0.0, 170.0);
+            for t in [0.15, 0.3] {
+                h.now = SimTime(t);
+                let _ = request(&mut plain, &h);
+                h.view = plain.angles();
+                assert_eq!(request(&mut plain, &h).weapon.unwrap().fire, Fire::None);
+            }
+            h.now = SimTime(0.45);
+            assert_eq!(
+                plain.update(&h, &mut Unchecked),
+                Status::Failed("the throw would not reach from the jump")
+            );
+        }
     }
 
     #[test]

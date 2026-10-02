@@ -60,8 +60,9 @@ const HELP: &[(&str, &str)] = &[
         "write what a player does to the log: moves, view and weapon 20 times a second, shots, mines, the room around",
     ),
     (
-        "gg mines <name|#userid|all> [off] | mines off",
-        "bots play GunGame's tripmine level on a server with no GunGame: mines handed back as they go (needs sv_cheats 1)",
+        "gg mines|satchels <name|#userid|all> [off] | mines off",
+        "bots play GunGame's tripmine or satchel level on a server with no GunGame: mines handed back as they go; \
+         satchels from `lb weapons satchel give` (needs sv_cheats 1)",
     ),
     (
         "weapons [all|melee|<weapon>...] [give]",
@@ -141,7 +142,10 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "profile" => profile(rt, rest),
         "status" => status(rt),
         "gg" => match rest {
-            ["mines", args @ ..] => gungame_mines(rt, host, args),
+            ["mines", args @ ..] => gungame_drill(rt, host, lb_game::gungame::Kit::Mines, args),
+            ["satchels", args @ ..] => {
+                gungame_drill(rt, host, lb_game::gungame::Kit::Throwable(WeaponId::Satchel), args)
+            }
             _ => gungame(rt),
         },
         "weapons" => weapons(rt, rest),
@@ -324,7 +328,7 @@ fn gungame(rt: &Runtime) -> Vec<String> {
             rt.game.mode
         )];
         if !drilled.is_empty() {
-            out.push(format!("  on the tripmine level (emulated): {}", drilled.join(", ")));
+            out.push(format!("  on an emulated level: {}", drilled.join(", ")));
         }
         return out;
     };
@@ -365,10 +369,11 @@ fn gungame(rt: &Runtime) -> Vec<String> {
 }
 
 /// `lb gg mines`: bots play GunGame's tripmine level on a server with no GunGame (the stand): tripmines and a glock
-/// only, the mines handed back as they go off, the way the plugin does.
-fn gungame_mines(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
+/// only, the mines handed back as they go off, the way the plugin does. `lb gg satchels`: the satchel level, the
+/// satchels being what `lb weapons satchel give` hands out.
+fn gungame_drill(rt: &mut Runtime, host: &mut dyn Host, kit: lb_game::gungame::Kit, args: &[&str]) -> Vec<String> {
     let (who, on) = match args {
-        [] => return vec!["usage: lb gg mines <name|#userid|all> [off] | lb gg mines off".into()],
+        [] => return vec!["usage: lb gg mines|satchels <name|#userid|all> [off] | lb gg mines off".into()],
         ["off"] => ("all".to_string(), false),
         [name @ .., "off"] => (name.join(" "), false),
         name => (name.join(" "), true),
@@ -386,16 +391,18 @@ fn gungame_mines(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<St
         }
     }
     for &i in &bots {
-        rt.bots[i].drill = on.then_some(lb_game::gungame::Kit::Mines);
+        rt.bots[i].drill = on.then_some(kit);
     }
     let names: Vec<&str> = bots.iter().map(|&i| rt.bots[i].persona.name.as_str()).collect();
     vec![format!(
         "{}: {}",
         names.join(", "),
-        if on {
+        if !on {
+            "back to the game's own weapons"
+        } else if kit == lb_game::gungame::Kit::Mines {
             "the tripmine level: mines and a glock, the mines handed back as they go off"
         } else {
-            "back to the game's own weapons"
+            "the satchel level: satchels only (handed out with `lb weapons satchel give`)"
         }
     )]
 }

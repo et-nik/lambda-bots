@@ -1,10 +1,10 @@
 //! Setting off explosives the bot knows of when an enemy walks up to them.
 //!
 //! - **Satchels** (yapb's `DetonateSatchel`): draw the satchel (its radio while charges are out) and press the DLL's
-//!   detonate button once the game takes it. Confirmed when the game reports the charges gone off; the button that
-//!   did it is reported, and holds for every bot on the server. If the press threw another satchel instead, or did
-//!   nothing at all (the throw button with the pocket empty), the buttons are the other way round on this server,
-//!   and the other button is pressed.
+//!   detonate button once the game takes it, while still told to. Confirmed when the game reports the charges gone
+//!   off; the button that did it is reported, and holds for every bot on the server. If the press threw another
+//!   satchel instead, or did nothing at all (the throw button with the pocket empty), the buttons are the other way
+//!   round on this server, and the other button is pressed.
 //! - **A satchel set off in flight** ([`Airburst`]): thrown at an enemy in sight, the radio stays in hand and the
 //!   charge goes off as it comes by the enemy, like a grenade that goes off when told.
 //! - **Tripmines** (yapb's `DetonateTripmine`): shooting a mine sets it off and credits the shooter, whoever placed
@@ -61,7 +61,8 @@ impl SatchelTrigger {
         }
     }
 
-    /// `go`: press once the radio is in hand; until then it is held up, waiting.
+    /// `go`: press once the radio is in hand and the game takes the button; until then, or when no longer told to
+    /// before the press, it is held up, waiting.
     pub fn update(&mut self, h: &Hands<'_>, go: bool) -> Status {
         let now = h.now;
         let w = WeaponId::Satchel;
@@ -113,6 +114,10 @@ impl SatchelTrigger {
                 last,
             } => {
                 let Some(at) = at else {
+                    // Still told to: the bot may have come into the blast while the game held the button back.
+                    if !go {
+                        return waiting;
+                    }
                     if !takes(game, button) {
                         return if now.since(since) > BUTTON_TIMEOUT {
                             Status::Failed("the satchel radio took no press")
@@ -167,8 +172,12 @@ pub struct Burst {
     pub spared: bool,
 }
 
-/// The satchel goes off with the enemy this close to it (60 damage of the multiplayer satchel's 120).
+/// The satchel goes off with the enemy this close to it (60 damage of the multiplayer satchel's 120), or once it is
+/// going away from the enemy (this much further off than it came) after coming within the pass (some 30 damage):
+/// it comes no closer.
 pub const AIRBURST_REACH: f32 = 150.0;
+const AIRBURST_PASS: f32 = 220.0;
+const PASSED: f32 = 24.0;
 /// The radio sets satchels off this long after a throw (`CSatchel::Throw`).
 const RADIO_READY: f64 = 0.5;
 /// A satchel that has not come by the enemy by then is left lying.
@@ -208,7 +217,7 @@ impl Airburst {
     pub fn update(&mut self, h: &Hands<'_>, b: Burst) -> Status {
         let now = h.now;
         if let Some(t) = &mut self.trigger {
-            let status = t.update(h, true);
+            let status = t.update(h, b.spared);
             self.button = t.button;
             return status;
         }
@@ -225,7 +234,9 @@ impl Airburst {
         if let Some(g) = gap {
             self.closest = Some(self.closest.map_or(g, |c| c.min(g)));
         }
-        let near = gap.is_some_and(|g| g <= AIRBURST_REACH);
+        let near = gap.is_some_and(|g| {
+            g <= AIRBURST_REACH || self.closest.is_some_and(|c| c <= AIRBURST_PASS && g >= c + PASSED)
+        });
         if near && b.spared && now.since(self.thrown) >= RADIO_READY {
             self.trigger = Some(SatchelTrigger::new(now));
             return self.update(h, b);
@@ -369,6 +380,29 @@ mod tests {
     }
 
     #[test]
+    fn a_press_held_back_by_the_game_waits_while_no_longer_told_to() {
+        let dll = DllProfile::default();
+        let arsenal = [Armed::new(WeaponId::Satchel, None, Some(1))];
+        let mut trigger = SatchelTrigger::new(SimTime(0.0));
+        // Told to while the game still holds the button back after a throw.
+        let fresh = held_back(1, 1, 0.4, 0.3);
+        assert_eq!(
+            fire(trigger.update(&hands(0.0, &arsenal, &fresh, dll), true)),
+            Fire::None
+        );
+        // The button is free, but the bot came into the blast meanwhile: no press.
+        let out = predicted(1, 1);
+        assert_eq!(
+            fire(trigger.update(&hands(0.4, &arsenal, &out, dll), false)),
+            Fire::None
+        );
+        assert_eq!(
+            fire(trigger.update(&hands(0.6, &arsenal, &out, dll), true)),
+            Fire::Primary
+        );
+    }
+
+    #[test]
     fn the_radio_waits_up_until_told() {
         let dll = DllProfile::default();
         let arsenal = [Armed::new(WeaponId::Satchel, None, Some(1))];
@@ -489,6 +523,21 @@ mod tests {
             Status::Done
         );
         assert!(a.burst());
+        // Past the enemy within 200 units without coming closer: set off as it goes away.
+        let mut past = Airburst::new(PlayerKey { slot: 3, userid: 3 }, SimTime(0.0));
+        let by = |x: f32| Burst {
+            satchel: Some(Vec3::new(x, 190.0, 40.0)),
+            enemy: Some(enemy),
+            spared: true,
+        };
+        for (t, x) in [(0.4, 400.0), (0.5, 480.0), (0.6, 500.0)] {
+            assert_eq!(fire(past.update(&hands(t, &arsenal, &out, dll), by(x))), Fire::None);
+        }
+        assert_eq!(
+            fire(past.update(&hands(0.7, &arsenal, &out, dll), by(620.0))),
+            Fire::Primary,
+            "going away from the enemy"
+        );
         // Never near the enemy: left lying.
         let mut miss = Airburst::new(PlayerKey { slot: 3, userid: 3 }, SimTime(0.0));
         assert_eq!(

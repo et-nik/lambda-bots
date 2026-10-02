@@ -1161,7 +1161,7 @@ impl Runtime {
         let now = self.now;
         if self.bots.iter().any(|b| b.drill.is_some()) && self.gungame_board().is_some() {
             tracing::info!(
-                "a GunGame match is on: the tripmine level of `lb gg mines` ends, its levels are the plugin's"
+                "a GunGame match is on: the level of `lb gg mines|satchels` ends, its levels are the plugin's"
             );
             for bot in &mut self.bots {
                 bot.drill = None;
@@ -1252,6 +1252,21 @@ impl Runtime {
                 })
                 .collect();
             watch::mines(self, &laid);
+            let row = arms_stats::Row::plain(WeaponId::Satchel);
+            let satchels: Vec<_> = self
+                .projectile_entities
+                .iter()
+                .filter(|p| p.kind == ProjectileKind::Satchel)
+                .map(|p| {
+                    let owner = self
+                        .launched
+                        .get(&p.index)
+                        .filter(|l| l.row == row)
+                        .map_or(p.owner, |l| l.owner);
+                    (p.index, owner, p.origin, p.velocity)
+                })
+                .collect();
+            watch::satchels(self, &satchels);
         }
     }
 
