@@ -208,10 +208,8 @@ is left alone for 8 s: the bot fights on with the one in hand. Grenades, satchel
 see *Explosives*.
 
 **Secondary attack** where it pays:
-- the glock's rapid fire (held down, five shots a second in a cone ten times wider) where it lands more bullets a
-  second than the clicked aimed shots, given the bot's own aim error and pause between clicks: up to some 100–200
-  units (clicks go as fast as the glock fires within 272 units), about 300 for a beginner, who pauses longer between
-  clicks further off;
+- the glock's rapid fire (five shots a second in a cone ten times wider) where it lands more bullets a second than
+  the aimed shots (three a second; both are held down), given the bot's own aim error: up to some 100–200 units;
 - the hornet gun's darts under 250 units with at least four hornets;
 - both shotgun barrels at 32–300 units, half of the shots (as yapb).
 
@@ -256,8 +254,8 @@ the shot.
   may be fired (200–300 units, as above), a bolt with one under 160, the egon's beam end under 128, and a rocket or a
   bolt with someone else standing near the first 350 units of it. An MP5 grenade's arc is looked along again from where the bot is when it fires, and the
   shot is called off if a wall, a player or the target itself (closer than 300 units) came in the way.
-- Automatic weapons are held down. Others are clicked as fast as they fire within 272 units, and further off with a
-  pause from `semi_auto_delay` (yapb).
+- Automatic weapons and the glock are held down: the game fires them as fast as they cycle. Others are clicked as fast
+  as they fire within 272 units, and further off with a pause from `semi_auto_delay` (yapb).
 - After a weapon switch it waits for the game to confirm it and 0.5 s more for the deploy.
 - **Rockets are guided:** the RPG's rocket follows the laser spot, which is where the bot looks, so after a shot the
   view stays on the target until the rocket should get there, and 0.4 s more (6 s at most; the rocket crawls at 250
