@@ -262,7 +262,7 @@ pub(crate) fn thrown(rt: &mut Runtime, out: &[(&'static str, u16, u16, Vec3, Vec
         for &(what, index, _, origin, velocity) in out.iter().filter(|s| s.2 == slot) {
             let Some(s) = w.thrown.get_mut(&index) else {
                 let v = view(me);
-                let (d, other) = nearest_other(me.origin);
+                let (d, other) = nearest_other(origin);
                 tracing::info!(
                     "watch #{userid} {what} #{index} thrown: at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0}; the player at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0} view {:.1} {:.1}{}; the nearest other #{other} {d:.0} off",
                     origin.x,
