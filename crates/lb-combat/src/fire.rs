@@ -1,7 +1,7 @@
 //! Fire control: pull the trigger when the view is on the target closely enough (yapb `focusEnemy`), the target is
 //! within the weapon's reach, and no blast would reach the shooter; semi-automatic weapons are clicked at a human
 //! cadence. The secondary attack is used where it pays: the glock's rapid fire when it lands more bullets a second
-//! than aimed single shots (up close), the hornet gun's darts up close, both shotgun barrels up close (and half the
+//! than the aimed shots (up close), the hornet gun's darts up close, both shotgun barrels up close (and half the
 //! time a little farther); the crossbow's scope is snapped on for single far shots (`arms::scope`).
 
 use lb_core::Vec3;
@@ -97,10 +97,9 @@ const DOUBLE_ALWAYS: f32 = 300.0;
 const DOUBLE_UNDER: f32 = 500.0;
 
 /// How to fire `a` at `distance`; `double` allows both shotgun barrels a little farther than they are always fired
-/// (`DOUBLE_ALWAYS`). `aim_sigma` is the bot's aim error there (units) and `click` its pause between single shots:
-/// the glock's rapid fire, held down at five shots a second in a cone ten times wider, is taken where it lands more
-/// bullets a second than the clicked aimed shots.
-pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32, click: f32) -> Mode {
+/// (`DOUBLE_ALWAYS`). `aim_sigma` is the bot's aim error there (units): the glock's rapid fire, five shots a second
+/// in a cone ten times wider, is taken where it lands more bullets a second than the aimed shots, both held down.
+pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32) -> Mode {
     let s = spec(a.id);
     let primary = Mode {
         attack: Attack::Primary,
@@ -110,7 +109,7 @@ pub fn mode(a: &Armed, distance: f32, double: bool, aim_sigma: f32, click: f32) 
     match s.alt {
         AltFire::Rapid { cycle, spread } => {
             let hits = |cone: f32, every: f32| s.hit_chance_with([cone, cone], distance, BODY, aim_sigma) / every;
-            if hits(spread, cycle) > hits(s.spread[0], click.max(s.cycle)) {
+            if hits(spread, cycle) > hits(s.spread[0], s.cycle) {
                 Mode {
                     attack: Attack::Secondary,
                     trigger: Trigger::Hold,
@@ -202,32 +201,40 @@ mod tests {
     #[test]
     fn secondary_modes_where_they_pay() {
         let glock = Armed::new(WeaponId::Glock, Some(17), Some(50));
-        // A normal bot: aim error about 10 units up close, clicks every 0.55 s.
-        assert_eq!(mode(&glock, 100.0, false, 11.0, 0.55).attack, Attack::Secondary);
-        assert_eq!(mode(&glock, 200.0, false, 12.0, 0.55).attack, Attack::Secondary);
-        assert_eq!(mode(&glock, 450.0, false, 14.0, 0.55).attack, Attack::Primary);
-        // An expert clicks at the weapon's own rate: the rapid fire pays only closer.
-        assert_eq!(mode(&glock, 120.0, false, 1.6, 0.3).attack, Attack::Secondary);
-        assert_eq!(mode(&glock, 300.0, false, 1.8, 0.3).attack, Attack::Primary);
-        let hornets = |n| Armed::new(WeaponId::Hornetgun, None, Some(n));
-        assert_eq!(mode(&hornets(8), 200.0, false, 10.0, 0.3).attack, Attack::Secondary);
-        assert_eq!(mode(&hornets(2), 200.0, false, 10.0, 0.3).attack, Attack::Primary);
-        let shotgun = |clip| Armed::new(WeaponId::Shotgun, Some(clip), Some(20));
-        assert_eq!(mode(&shotgun(8), 150.0, true, 10.0, 0.75).attack, Attack::Secondary);
+        // Both glock fires are held down; the rapid one is taken up close, where it lands more bullets a second. Aim
+        // error up close: about 10 units for a normal bot, under 2 for an expert.
+        assert_eq!(mode(&glock, 100.0, false, 11.0).attack, Attack::Secondary);
+        assert_eq!(mode(&glock, 200.0, false, 12.0).attack, Attack::Primary);
         assert_eq!(
-            mode(&shotgun(1), 150.0, true, 10.0, 0.75).attack,
+            mode(&glock, 450.0, false, 14.0),
+            Mode {
+                attack: Attack::Primary,
+                trigger: Trigger::Hold,
+                cycle: 0.3,
+            },
+            "held down, not clicked"
+        );
+        assert_eq!(mode(&glock, 120.0, false, 1.6).attack, Attack::Secondary);
+        assert_eq!(mode(&glock, 300.0, false, 1.8).attack, Attack::Primary);
+        let hornets = |n| Armed::new(WeaponId::Hornetgun, None, Some(n));
+        assert_eq!(mode(&hornets(8), 200.0, false, 10.0).attack, Attack::Secondary);
+        assert_eq!(mode(&hornets(2), 200.0, false, 10.0).attack, Attack::Primary);
+        let shotgun = |clip| Armed::new(WeaponId::Shotgun, Some(clip), Some(20));
+        assert_eq!(mode(&shotgun(8), 150.0, true, 10.0).attack, Attack::Secondary);
+        assert_eq!(
+            mode(&shotgun(1), 150.0, true, 10.0).attack,
             Attack::Primary,
             "one shell left"
         );
         assert_eq!(
-            mode(&shotgun(8), 150.0, false, 10.0, 0.75).attack,
+            mode(&shotgun(8), 150.0, false, 10.0).attack,
             Attack::Secondary,
             "always up close"
         );
-        assert_eq!(mode(&shotgun(8), 20.0, false, 10.0, 0.75).attack, Attack::Secondary);
-        assert_eq!(mode(&shotgun(8), 400.0, true, 10.0, 0.75).attack, Attack::Secondary);
-        assert_eq!(mode(&shotgun(8), 400.0, false, 10.0, 0.75).attack, Attack::Primary);
-        assert_eq!(mode(&shotgun(8), 700.0, true, 10.0, 0.75).attack, Attack::Primary);
+        assert_eq!(mode(&shotgun(8), 20.0, false, 10.0).attack, Attack::Secondary);
+        assert_eq!(mode(&shotgun(8), 400.0, true, 10.0).attack, Attack::Secondary);
+        assert_eq!(mode(&shotgun(8), 400.0, false, 10.0).attack, Attack::Primary);
+        assert_eq!(mode(&shotgun(8), 700.0, true, 10.0).attack, Attack::Primary);
         assert!(
             !zoom_wanted(WeaponId::Crossbow, Some(900.0), false),
             "the scope protocol puts it on"

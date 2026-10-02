@@ -158,7 +158,7 @@ const DOUBLE_SPREAD: [f32; 2] = [0.173_65, 0.043_62];
 pub const SPECS: [WeaponSpec; 14] = [
     //       weapon                  class           clip trigger cycle damage pel spread (h, v)          water  band               reach   reload rank alt fire
     spec_row(WeaponId::Crowbar,     Melee,          -1,  Hold,   0.4,  25.0,  1, [0.0, 0.0],             true,  [0.0, 64.0],       64.0,   0.0,   0,  AltFire::None),
-    spec_row(WeaponId::Glock,       Pistol,         17,  Tap,    0.3,  12.0,  1, [0.01, 0.01],           true,  [0.0, 1500.0],     8192.0, 1.5,   1,  Rapid { cycle: 0.2, spread: 0.1 }),
+    spec_row(WeaponId::Glock,       Pistol,         17,  Hold,   0.3,  12.0,  1, [0.01, 0.01],           true,  [0.0, 1500.0],     8192.0, 1.5,   1,  Rapid { cycle: 0.2, spread: 0.1 }),
     spec_row(WeaponId::Hornetgun,   Pistol,         -1,  Hold,   0.25, 10.0,  1, [0.0, 0.0],             true,  [150.0, 900.0],    2048.0, 0.0,   2,  Darts { cycle: 0.1 }),
     spec_row(WeaponId::Python,      Pistol,         6,   Tap,    0.75, 50.0,  1, [0.008_73, 0.008_73],   false, [0.0, 4000.0],     8192.0, 2.0,   3,  Zoom { fov: 40.0, toggle: 0.5 }),
     spec_row(WeaponId::Snark,       Throwable,      -1,  Tap,    0.3,  10.0,  1, [0.0, 0.0],             false, [150.0, 800.0],    800.0,  0.0,   4,  AltFire::None),

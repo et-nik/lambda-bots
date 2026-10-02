@@ -1000,13 +1000,7 @@ impl BotBrain {
                 let distance = t.pos.distance(body.eye);
                 let w = choice.weapon();
                 let armed = body.armed(w).copied().unwrap_or_else(|| Armed::new(w, None, None));
-                let mode = fire::mode(
-                    &armed,
-                    distance,
-                    m.arms.double,
-                    ch.aim_sigma(distance),
-                    click(m, distance),
-                );
+                let mode = fire::mode(&armed, distance, m.arms.double, ch.aim_sigma(distance));
                 let shot = shot_of(w, mode.attack, body.zoomed());
                 let Some(aim) = m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat) else {
                     m.hold_fire = Some("no aim point yet");
