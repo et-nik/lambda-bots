@@ -172,8 +172,12 @@ pub struct Burst {
     pub spared: bool,
 }
 
-/// The satchel goes off with the enemy this close to it (60 damage of the multiplayer satchel's 120).
+/// The satchel goes off with the enemy this close to it (60 damage of the multiplayer satchel's 120), or once it is
+/// going away from the enemy (this much further off than it came) after coming within the pass (some 30 damage):
+/// it comes no closer.
 pub const AIRBURST_REACH: f32 = 150.0;
+const AIRBURST_PASS: f32 = 220.0;
+const PASSED: f32 = 24.0;
 /// The radio sets satchels off this long after a throw (`CSatchel::Throw`).
 const RADIO_READY: f64 = 0.5;
 /// A satchel that has not come by the enemy by then is left lying.
@@ -230,7 +234,9 @@ impl Airburst {
         if let Some(g) = gap {
             self.closest = Some(self.closest.map_or(g, |c| c.min(g)));
         }
-        let near = gap.is_some_and(|g| g <= AIRBURST_REACH);
+        let near = gap.is_some_and(|g| {
+            g <= AIRBURST_REACH || self.closest.is_some_and(|c| c <= AIRBURST_PASS && g >= c + PASSED)
+        });
         if near && b.spared && now.since(self.thrown) >= RADIO_READY {
             self.trigger = Some(SatchelTrigger::new(now));
             return self.update(h, b);
@@ -517,6 +523,21 @@ mod tests {
             Status::Done
         );
         assert!(a.burst());
+        // Past the enemy within 200 units without coming closer: set off as it goes away.
+        let mut past = Airburst::new(PlayerKey { slot: 3, userid: 3 }, SimTime(0.0));
+        let by = |x: f32| Burst {
+            satchel: Some(Vec3::new(x, 190.0, 40.0)),
+            enemy: Some(enemy),
+            spared: true,
+        };
+        for (t, x) in [(0.4, 400.0), (0.5, 480.0), (0.6, 500.0)] {
+            assert_eq!(fire(past.update(&hands(t, &arsenal, &out, dll), by(x))), Fire::None);
+        }
+        assert_eq!(
+            fire(past.update(&hands(0.7, &arsenal, &out, dll), by(620.0))),
+            Fire::Primary,
+            "going away from the enemy"
+        );
         // Never near the enemy: left lying.
         let mut miss = Airburst::new(PlayerKey { slot: 3, userid: 3 }, SimTime(0.0));
         assert_eq!(

@@ -98,9 +98,12 @@ const WARMUP_FEAR: f32 = -0.3;
 const LAST_LEVEL_KEEP: f32 = 300.0;
 /// Out of the bot's own blast by this much more.
 const KEEP_MARGIN: f32 = 40.0;
-/// A grenade thrown at an enemy closer than this comes down on the thrower too; a snark or a satchel turns on it.
+/// A grenade thrown at an enemy closer than this comes down on the thrower too; a snark turns on it; a satchel is
+/// thrown on the run from no closer than its band.
 const GRENADE_KEEP: f32 = 280.0;
 const SNARK_KEEP: f32 = 200.0;
+/// With a throwable in hand the view is on the ground this far toward the enemy (some 15° down on level ground).
+const THROWABLE_LOOK: f32 = 250.0;
 /// Distances a GunGame duel is weighed at, and how much more damage a second a distance must give the bot (its own
 /// less the enemy's) than where it is, to be gone for.
 const DUEL_DISTANCES: [f32; 8] = [100.0, 200.0, 300.0, 450.0, 600.0, 800.0, 1000.0, 1300.0];
@@ -984,9 +987,9 @@ impl BotBrain {
         let weapon_choice = m.choice.map(Choice::weapon);
         m.firing = false;
         m.hold_fire = None;
-        // With a throwable in hand the view stays on the enemy while the gun comes out; a throw turns to its own arc
-        // and the satchel radio watches its charges over it (their protocols' looks come first). On the tripmine level
-        // nothing is fired at anyone: the view and the weapon are the goal's and the mines'.
+        // With a throwable in hand the view faces the enemy, not aimed; a throw turns to its own arc and the satchel
+        // radio watches its charges over it (their protocols' looks come first). On the tripmine level nothing is
+        // fired at anyone: the view and the weapon are the goal's and the mines'.
         let mines = m.choice == Some(Choice::Use(WeaponId::Tripmine));
         match (track, m.choice) {
             (Some(t), Some(_)) if mines && t.state == TrackState::Visible => {
@@ -1007,8 +1010,20 @@ impl BotBrain {
                     return;
                 };
                 m.last_aim = Some(aim);
-                self.intents
-                    .look(Prio::Threat, LookIntent::Point { at: aim, engaged: true });
+                // A throwable is not aimed, as players hold one: the view faces the enemy, down at the ground some way
+                // toward it; a throw turns to its own arc.
+                let look = if matches!(choice, Choice::Use(w) if spec(w).class == WeaponClass::Throwable) {
+                    let floor = body.origin - Vec3::Z * 36.0;
+                    let to = t.pos - Vec3::Z * 36.0 - floor;
+                    let share = (THROWABLE_LOOK / to.truncate().length().max(1.0)).min(1.0);
+                    LookIntent::Point {
+                        at: floor + to * share,
+                        engaged: false,
+                    }
+                } else {
+                    LookIntent::Point { at: aim, engaged: true }
+                };
+                self.intents.look(Prio::Threat, look);
                 let intent = match choice {
                     // Throws and mines are the protocols': in hand, never fired at the target.
                     Choice::Use(w) if spec(w).class == WeaponClass::Throwable => {
@@ -1258,7 +1273,8 @@ fn keep_away(m: &Mind, t: &EnemyTrack, body: &Body) -> f32 {
         Some(WeaponId::Crossbow) if !body.zoomed() => BOLT_CLEAR + KEEP_MARGIN,
         Some(WeaponId::Egon) => EGON_CLEAR + KEEP_MARGIN,
         Some(WeaponId::HandGrenade) => GRENADE_KEEP,
-        Some(WeaponId::Snark | WeaponId::Satchel) => SNARK_KEEP,
+        Some(WeaponId::Snark) => SNARK_KEEP,
+        Some(WeaponId::Satchel) => crate::arms::AIRBURST_BAND[0],
         _ => 0.0,
     };
     let last = body

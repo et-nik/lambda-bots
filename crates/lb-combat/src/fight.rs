@@ -4,7 +4,8 @@
 //!   stands with the skill's `stay_mid` / `stay_far` chance. A low will to approach (health × aggression below
 //!   30), or a pistol or shotgun against an enemy facing the bot, makes it strafe.
 //! - **Strafe side:** away from the side the enemy aims at, swapped 30% of the time, re-decided every 0.3–0.8 s, down
-//!   to every 0.2–0.45 s for the best.
+//!   to every 0.2–0.45 s for the best. With a throwable in hand there is no strafe: the bot goes straight at the enemy
+//!   or away from it (as players with satchels do), dodge jumps still.
 //!   Walls within 134 units on a side turn it around; with walls that close on both sides it strafes toward the one
 //!   farther off while there is room, and only in a corridor too narrow for that does it go back and forth instead.
 //! - **Distance:** further off than the weapon in hand does well at ([`close_in`]), a bot with the will to (health ×
@@ -92,6 +93,8 @@ pub struct FightInput {
 pub fn close_in(weapon: Option<WeaponId>) -> f32 {
     match weapon {
         Some(WeaponId::Shotgun) => 350.0,
+        // Thrown on the run from 350–550 units.
+        Some(WeaponId::Satchel) => 500.0,
         Some(WeaponId::Hornetgun | WeaponId::Egon) => 600.0,
         Some(WeaponId::Glock | WeaponId::Mp5) => 700.0,
         Some(WeaponId::Gauss) => 1200.0,
@@ -156,6 +159,8 @@ impl Fight {
         let forward = to.normalize_or(Vec2::X);
         let right = Vec2::new(forward.y, -forward.x);
         let melee = i.weapon == WeaponClass::Melee;
+        // A throwable is not dodged with like a gun: straight at the enemy or away from it, as players go.
+        let throws = i.weapon == WeaponClass::Throwable;
         let skilled = s.skill >= 50;
         let push = i.wants_closer(distance);
         if let Some(out) = self.unstick(i, tracer, rng) {
@@ -173,7 +178,7 @@ impl Fight {
             if i.approach < 30.0 || (close_gun && i.enemy_faces_me) {
                 self.style = Style::Strafe;
             }
-            if self.style == Style::Strafe && !melee && i.on_ground && rng.next_f32() < s.crouch_tap {
+            if self.style == Style::Strafe && !melee && !throws && i.on_ground && rng.next_f32() < s.crouch_tap {
                 self.duck_until = i.now + f64::from(rng.range_f32(0.25, 0.5));
             }
             self.style_until = i.now + f64::from(rng.range_f32(1.0, 3.0));
@@ -221,7 +226,7 @@ impl Fight {
                     self.side = -self.side;
                 }
             }
-            sideways = self.side * i.maxspeed;
+            sideways = if throws { 0.0 } else { self.side * i.maxspeed };
             if !melee {
                 if push {
                     ahead = i.maxspeed;
@@ -524,6 +529,25 @@ mod tests {
         assert!(m.velocity.y > 250.0, "{m:?}");
         // A crossbow does as well far off.
         assert_eq!(close_in(Some(WeaponId::Crossbow)), f32::INFINITY);
+    }
+
+    #[test]
+    fn with_satchels_it_goes_straight_into_their_throw_and_out_of_their_blast() {
+        let mut open = Floor { wall_y: None };
+        let satchel = |distance: f32| FightInput {
+            weapon: WeaponClass::Throwable,
+            close_in: close_in(Some(WeaponId::Satchel)),
+            keep_away: 350.0,
+            ..input(0.0, distance)
+        };
+        for (distance, ahead) in [(800.0, 1.0), (450.0, 0.0), (250.0, -1.0)] {
+            let mut f = Fight::default();
+            let m = f.update(&satchel(distance), &SKILL, &mut open, &mut Pcg32::new(4, 4));
+            assert!(
+                m.velocity.y.abs() < 1.0 && (m.velocity.x - 300.0 * ahead).abs() < 1.0,
+                "no strafe, {distance} units off: {m:?}"
+            );
+        }
     }
 
     #[test]

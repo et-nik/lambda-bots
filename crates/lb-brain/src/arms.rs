@@ -138,7 +138,7 @@ pub(crate) const SATCHEL_PILE: [u32; 2] = [2, 4];
 /// At an enemy in sight this far away, a satchel is thrown on the run and set off as it comes by; it flies about
 /// this fast then. With the long jump module it goes from a long jump this far away: the leap carries it far, and
 /// the bot stays out of its blast.
-const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
+pub(crate) const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
 const SATCHEL_RUN: f32 = 500.0;
 const LEAP_BAND: [f32; 2] = [550.0, 800.0];
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
@@ -2963,6 +2963,39 @@ pub(crate) mod tests {
         };
         assert!(aimed(WeaponId::Glock));
         assert!(aimed(WeaponId::Snark), "the snarks in hand, the glock coming out");
+    }
+
+    #[test]
+    fn on_the_satchel_level_the_satchel_is_not_aimed_the_view_on_the_ground_toward_the_enemy() {
+        use lb_game::gungame::GunGame;
+        let enemy = Vec3::new(450.0, 100.0, 0.0);
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.mind.arms.next_throw = SimTime(100.0);
+        let mut rng = BotRng::new(7, 7);
+        for i in 0..10 {
+            let t = f64::from(i) * 0.1;
+            let mut sight = seen(t, enemy);
+            sight.first = i == 0;
+            brain.beliefs.on_sighting(&sight);
+            brain.update(SimTime(t), &params(), None, None);
+            let mut b = body(t);
+            b.arsenal.clear();
+            b.arsenal.push(Armed::new(WeaponId::Satchel, None, Some(5)));
+            b.weapon = Some(WeaponId::Satchel);
+            b.gungame = Some(GunGame::drill(1, Kit::Throwable(WeaponId::Satchel)));
+            b.allowed = Kit::Throwable(WeaponId::Satchel).weapons();
+            brain.act(&b, &character(), &mut Open, None, &mut rng);
+        }
+        assert_eq!(brain.mind.hold_fire, Some("nothing to fire but throws"));
+        let Some((Prio::Threat, LookIntent::Point { at, engaged: false })) = brain.intents.look else {
+            panic!("{:?}", brain.intents.look);
+        };
+        let view = lb_core::math::dir_to_view_angles(at - Vec3::new(0.0, 0.0, 28.0));
+        let toward = lb_core::math::dir_to_view_angles(enemy);
+        assert!(
+            (view.y - toward.y).abs() < 1.0 && (10.0..20.0).contains(&view.x),
+            "toward the enemy, some 15° down at the ground: {view}"
+        );
     }
 
     #[test]

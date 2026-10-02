@@ -1161,7 +1161,7 @@ impl Runtime {
         let now = self.now;
         if self.bots.iter().any(|b| b.drill.is_some()) && self.gungame_board().is_some() {
             tracing::info!(
-                "a GunGame match is on: the tripmine level of `lb gg mines` ends, its levels are the plugin's"
+                "a GunGame match is on: the level of `lb gg mines|satchels` ends, its levels are the plugin's"
             );
             for bot in &mut self.bots {
                 bot.drill = None;
