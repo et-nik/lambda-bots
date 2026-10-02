@@ -1165,6 +1165,7 @@ impl Runtime {
             );
             for bot in &mut self.bots {
                 bot.drill = None;
+                bot.mines_level = None;
             }
             return;
         }
@@ -3306,7 +3307,7 @@ fn behave(
     let body = body_of(bot, ctx);
     bot.mines_level = body
         .gungame
-        .filter(|g| g.kit == lb_game::gungame::Kit::Mines)
+        .filter(|g| ctx.gungame.is_some() && g.kit == lb_game::gungame::Kit::Mines)
         .map(|g| g.level);
     let input = nav_input(bot, ctx, &body);
     bot.brain.motor.view = bot.view;
