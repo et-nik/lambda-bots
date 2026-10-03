@@ -1284,6 +1284,7 @@ fn keep_away(m: &Mind, t: &EnemyTrack, body: &Body) -> f32 {
         Some(WeaponId::Egon) => EGON_CLEAR + KEEP_MARGIN,
         Some(WeaponId::HandGrenade) => GRENADE_KEEP,
         Some(WeaponId::Snark) => SNARK_KEEP,
+        Some(WeaponId::Satchel) if crate::arms::refilled(body, WeaponId::Satchel) => crate::arms::REFILLED_AIRBURST[0],
         Some(WeaponId::Satchel) => crate::arms::AIRBURST_BAND[0],
         _ => 0.0,
     };

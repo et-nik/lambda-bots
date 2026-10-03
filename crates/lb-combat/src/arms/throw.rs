@@ -122,7 +122,8 @@ const RUN_EXPECTED: f32 = 270.0;
 /// A planned grenade leaves within this of the pin time asked: later, the blast would come a tick late.
 const RELEASE_WINDOW: f32 = 0.05;
 /// Thrown on the run, the satchel leaves once the bot runs at the target this fast and the throw lands within this
-/// of it; not so by then, or with the target this close, it stays in hand (it would go off by the thrower).
+/// of it; not so by then, or with the target this close (unless told otherwise), it stays in hand (it would go off by
+/// the thrower).
 const RUN_UP_SPEED: f32 = 320.0;
 const RUN_UP_MIN: f32 = 200.0;
 const REACHES: f32 = 32.0;
@@ -175,9 +176,10 @@ pub struct Thrower {
     /// Satchels still to throw at the target, this one included.
     pile: u32,
     /// Satchels and grenades are thrown on the run at the target; since when it runs (the satchel in hand, the
-    /// grenade's run-up).
+    /// grenade's run-up); a satchel on the run is given up at a target closer than `run_close`.
     run: bool,
     run_from: Option<SimTime>,
+    run_close: f32,
     /// Satchels and grenades are thrown from a jump; a long jump (its keys are the caller's to press): the leap
     /// carries them far.
     jump: bool,
@@ -220,6 +222,7 @@ impl Thrower {
             pile: 1,
             run: false,
             run_from: None,
+            run_close: RUN_CLOSE,
             jump: false,
             leap: false,
             jumped: None,
@@ -283,6 +286,12 @@ impl Thrower {
         self
     }
 
+    /// A satchel on the run thrown at a target as close as `d`.
+    pub fn closer(mut self, d: f32) -> Thrower {
+        self.run_close = d;
+        self
+    }
+
     /// Satchels or a grenade thrown on the run, from a jump.
     pub fn from_jump(mut self) -> Thrower {
         self.run = true;
@@ -299,6 +308,11 @@ impl Thrower {
     /// The jump asked for is a long jump.
     pub fn leaps(&self) -> bool {
         self.leap
+    }
+
+    /// Runs at the target for the throw (a satchel in hand, a grenade's run-up).
+    pub fn runs_up(&self) -> bool {
+        self.run_from.is_some()
     }
 
     /// Let go only because the fuse was running out (`Some("forced by the fuse")`), or on a fallback with no throw
@@ -724,13 +738,13 @@ impl Thrower {
                     return finished(&self.landings, "no satchel to throw");
                 }
                 if let Some(from) = self.run_from {
-                    // From the ground, running at the target fast enough for the satchel to get there (from a long
-                    // jump it will); never one that would come down short, by the bot.
-                    if (self.target - h.origin).truncate().length() < RUN_CLOSE {
+                    // Running at the target fast enough for the satchel to get there (from a long jump it will),
+                    // from the ground for a jump, from a hop as well; never one that would come down short, by the bot.
+                    if (self.target - h.origin).truncate().length() < self.run_close {
                         return finished(&self.landings, "the target came close");
                     }
                     let run = h.velocity.truncate().dot(toward);
-                    if !(h.on_ground && run >= RUN_UP_MIN && (reaches || self.leap)) {
+                    if !((h.on_ground || !self.jump) && run >= RUN_UP_MIN && (reaches || self.leap)) {
                         if now.since(from) > RUN_UP_FOR {
                             return finished(&self.landings, "the throw would not reach on the run");
                         }
@@ -1553,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn a_satchel_on_the_run_leaves_running_at_the_target_from_the_ground_and_never_short() {
+    fn a_satchel_on_the_run_leaves_running_at_the_target_and_never_short() {
         let target = Vec3::new(420.0, 0.0, -36.0);
         let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
         let mut scene = Scene {
@@ -1576,21 +1590,25 @@ mod tests {
         let mut h = scene.hands(0.0, WeaponId::Satchel);
         h.view = th.angles();
         assert_eq!(fire(&mut th, &h), Fire::None);
-        // Running at it in the air (a hop): not yet.
+        // Running at it in the air, falling from a hop: it would come down short.
         h.now = SimTime(0.3);
         h.velocity = Vec3::new(260.0, 0.0, -150.0);
         h.on_ground = false;
         let _ = fire(&mut th, &h);
         h.view = th.angles();
-        assert_eq!(fire(&mut th, &h), Fire::None, "from the ground only");
+        assert_eq!(fire(&mut th, &h), Fire::None, "never short");
         // On the ground at a run: thrown, the run in the throw.
+        let mut ground = th.clone();
         h.now = SimTime(0.45);
         h.velocity = Vec3::new(260.0, 0.0, 0.0);
         h.on_ground = true;
-        let _ = fire(&mut th, &h);
-        h.view = th.angles();
-        assert_eq!(fire(&mut th, &h), Fire::Primary);
-        assert!(th.throw.velocity.x > 450.0, "{:?}", th.throw);
+        let _ = fire(&mut ground, &h);
+        h.view = ground.angles();
+        assert_eq!(fire(&mut ground, &h), Fire::Primary);
+        assert!(ground.throw.velocity.x > 450.0, "{:?}", ground.throw);
+        // So it is at the top of the hop.
+        h.on_ground = false;
+        assert_eq!(fire(&mut th, &h), Fire::Primary, "from a hop");
         // Never getting to run at it: given up, the satchel kept.
         let mut stuck = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
         let mut h = scene.hands(0.0, WeaponId::Satchel);
@@ -1604,13 +1622,21 @@ mod tests {
             stuck.update(&h, &mut Unchecked),
             Status::Failed("the throw would not reach on the run")
         );
-        // The target come close: kept.
+        // The target come close: kept, unless told it may be that close.
         let mut close = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
         close.target = Vec3::new(200.0, 0.0, -36.0);
         assert_eq!(
             close.update(&scene.hands(0.0, WeaponId::Satchel), &mut Unchecked),
             Status::Failed("the target came close")
         );
+        let mut closer = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0))
+            .on_the_run()
+            .closer(150.0);
+        closer.target = Vec3::new(200.0, 0.0, -36.0);
+        assert!(matches!(
+            closer.update(&scene.hands(0.0, WeaponId::Satchel), &mut Unchecked),
+            Status::Running(_)
+        ));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! `lb watch`: what a player does, written to the log to study how people play. Twenty times a second where they
-//! are, how they move, where they look and what they hold; four times a second the room around them and where the
+//! are, how they move, where they look and what they hold (a bot: also its goal, the weapon protocol under way, its
+//! target, its satchels out and when it weighs a throw again); four times a second the room around them and where the
 //! others are; their shots with what the shot met, their tripmines as they are laid and go, and their satchels and
 //! hand grenades as they are thrown, fly (twenty times a second), come to rest and go off.
 
@@ -136,8 +137,13 @@ pub(crate) fn tick(rt: &mut Runtime, host: &mut dyn Host) {
                 .copied()
                 .flatten()
                 .map_or_else(|| rt.strings.string_lossy(c.weaponmodel), |w| w.classname().to_string());
+            let bot = rt
+                .bots
+                .iter()
+                .find(|b| b.userid == w.userid)
+                .map_or_else(String::new, |b| format!("; bot {}", b.brain.watch_note(now, c.origin)));
             tracing::info!(
-                "watch #{} at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0} speed {:.0} view {:.1} {:.1} {}{}{}water {} holds {weapon}{}",
+                "watch #{} at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0} speed {:.0} view {:.1} {:.1} {}{}{}water {} holds {weapon}{}{bot}",
                 w.userid,
                 c.origin.x,
                 c.origin.y,

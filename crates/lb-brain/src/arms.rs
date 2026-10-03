@@ -6,7 +6,8 @@
 //!   sight 350–550 away (800 with the long jump module) with a clear line to it, a snark at 150–800 likewise. A
 //!   grenade that fits is thrown almost always, a satchel or a snark more rarely (the chance per look is the kind's
 //!   base times the skill's `throw_rate`); a grenade rests the arm about a second, a satchel 3–6 s. With no gun but
-//!   the crowbar, throws are the weapon (yapb's grenade war).
+//!   the crowbar, throws are the weapon (yapb's grenade war); on GunGame's satchel level a satchel goes at an enemy in
+//!   sight 200–650 away at nearly every look, one after another.
 //! - **A grenade at an enemy** is planned to go off where the enemy will be ([`lb_combat::grenade`]): the flight and
 //!   the bounces the game gives it, cooked so it bursts on the tick it gets there. It goes as players throw it: on
 //!   the run at the enemy (or where one is expected) from 340 units, from a jump at one 500 or more away or above (skills
@@ -171,6 +172,19 @@ pub(crate) const SATCHEL_PILE: [u32; 2] = [2, 4];
 pub(crate) const AIRBURST_BAND: [f32; 2] = [350.0, 550.0];
 const SATCHEL_RUN: f32 = 500.0;
 const LEAP_BAND: [f32; 2] = [550.0, 800.0];
+/// On GunGame's satchel level, where the game hands each satchel back as it goes, satchels are the weapon: one goes at
+/// an enemy in sight this far off (the run at it brings one further off into reach) at nearly every look, from the air
+/// as well (bots there hop), with its own still out, and the next is weighed as soon as the last is done with; the bot
+/// holds back from closing in only while it flies. On the GunGame server (2026-10-03, bots only) the bots threw there
+/// one every 9 s with a satchel in hand, for 0.53 kills a throw, waiting meanwhile with an enemy in sight on the
+/// chance, the rest, the ground under a dodge hop and the narrower band; so, one every 3 s, 0.38 kills a throw, 3.4
+/// times the kills a minute, no suicides either way.
+pub(crate) const REFILLED_AIRBURST: [f32; 2] = [200.0, 650.0];
+const REFILLED_SATCHEL: f32 = 0.9;
+const REFILLED_REST: [f32; 2] = [0.0, 0.3];
+const REFILLED_HOLD: f64 = 1.0;
+/// On the run a satchel there is given up at an enemy closer than this.
+const REFILLED_RUN_CLOSE: f32 = 150.0;
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
 const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
@@ -730,10 +744,9 @@ fn backfire(tracer: &mut dyn Tracer, eye: Vec3, dir: Vec3, hit: &Trace) -> f32 {
     out.distance(hit.end).max(1.0)
 }
 
-/// On GunGame's grenade level the game hands every grenade back as it goes: many grenades, not a few good ones.
-fn grenades_refilled(body: &Body) -> bool {
-    body.gungame
-        .is_some_and(|g| g.kit == Kit::Throwable(WeaponId::HandGrenade))
+/// On GunGame's level of the throwable `w` the game hands every one back as it goes: many throws, not a few good ones.
+pub(crate) fn refilled(body: &Body, w: WeaponId) -> bool {
+    body.gungame.is_some_and(|g| g.kit == Kit::Throwable(w))
 }
 
 /// How many of the throwable `w` the bot carries and may use.
@@ -754,6 +767,34 @@ fn clear_line(tracer: &mut dyn Tracer, from: Vec3, to: Vec3) -> bool {
 }
 
 impl BotBrain {
+    /// For `lb watch` of a bot: its goal, the weapon protocol under way (a throw's phase), its target (how far off
+    /// `origin`, how sure), how many of its satchels are out and how long until a throw is weighed again.
+    pub fn watch_note(&self, now: SimTime, origin: Vec3) -> String {
+        let arms = match &self.mind.arms.active {
+            Some(Active::Throw(t)) => format!(
+                "{}/{}{}",
+                t.kind.as_str(),
+                t.phase(),
+                if t.runs_up() { "/run" } else { "" }
+            ),
+            Some(a) => a.name().replace(' ', "_"),
+            None => "-".to_string(),
+        };
+        let target = self
+            .mind
+            .target
+            .and_then(|k| self.beliefs.track(k))
+            .map_or("-".to_string(), |t| {
+                format!("#{} {:.0} {:?}", t.who.userid, t.pos.distance(origin), t.state)
+            });
+        format!(
+            "goal {} arms {arms} target {target} charges {} rest {:.1}",
+            self.mind.goal.map_or("none", |g| g.kind.as_str()),
+            self.explosives.charges.len(),
+            self.mind.arms.next_throw.since(now).max(0.0)
+        )
+    }
+
     pub(crate) fn hands<'a>(&self, body: &'a Body) -> Hands<'a> {
         let dll = body.dll;
         Hands {
@@ -1190,7 +1231,8 @@ impl BotBrain {
             let class = spec(a.id).class;
             body.allows(a.id) && a.loaded() && !matches!(class, WeaponClass::Melee | WeaponClass::Throwable)
         });
-        let refilled = grenades_refilled(body);
+        let grenades_back = refilled(body, WeaponId::HandGrenade);
+        let satchels_back = refilled(body, WeaponId::Satchel);
         let Some(t) = self
             .beliefs
             .enemies()
@@ -1220,7 +1262,7 @@ impl BotBrain {
         // The throws that fit, with their chance per look: a grenade; a satchel on the run at an enemy in sight, set
         // off as it comes by; a snark.
         let satchels = count(WeaponId::Satchel);
-        let free = self.explosives.charges.is_empty();
+        let free = satchels_back || self.explosives.charges.is_empty();
         let mut ways: smallvec::SmallVec<[(Way, f32); 4]> = smallvec::SmallVec::new();
         let grenade = count(WeaponId::HandGrenade) > 0 && in_band(grenade_band);
         if grenade {
@@ -1230,9 +1272,25 @@ impl BotBrain {
         // module from a long jump, at an enemy further off.
         let jumps = ch.skill.tricks && body.tricks.satchel_jump && !body.gungame.is_some_and(|g| g.descore());
         let leaps = jumps && body.has_longjump && body.tricks.longjump;
-        let satchel_band = [AIRBURST_BAND[0], if leaps { LEAP_BAND[1] } else { AIRBURST_BAND[1] }];
-        if satchels > 0 && free && seen && body.on_ground && in_band(satchel_band) {
-            ways.push((Way::Airburst, SEEN_SATCHEL));
+        let satchel_band = [
+            if satchels_back {
+                REFILLED_AIRBURST[0]
+            } else {
+                AIRBURST_BAND[0]
+            },
+            if leaps {
+                LEAP_BAND[1]
+            } else if satchels_back {
+                REFILLED_AIRBURST[1]
+            } else {
+                AIRBURST_BAND[1]
+            },
+        ];
+        if satchels > 0 && free && seen && (body.on_ground || satchels_back) && in_band(satchel_band) {
+            ways.push((
+                Way::Airburst,
+                if satchels_back { REFILLED_SATCHEL } else { SEEN_SATCHEL },
+            ));
         }
         if count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND) {
             ways.push((Way::Snark, if seen { SEEN_SNARK } else { UNSEEN_SNARK }));
@@ -1286,9 +1344,9 @@ impl BotBrain {
                 // sight. Cooked as long as it pays only at one out of sight, or close by on the grenade level; the bot
                 // backs off from it once it is out.
                 let aim = grenade_aim(t, now);
-                let quick = refilled && d >= QUICK_FROM;
+                let quick = grenades_back && d >= QUICK_FROM;
                 let run = body.waterlevel < 2
-                    && d >= if refilled && !quick {
+                    && d >= if grenades_back && !quick {
                         QUICK_FROM
                     } else {
                         GRENADE_RUN_MIN
@@ -1301,14 +1359,14 @@ impl BotBrain {
                 let delivery = grenade::Delivery {
                     latest: if quick {
                         QUICK_COOK
-                    } else if seen && !refilled {
+                    } else if seen && !grenades_back {
                         SEEN_COOK
                     } else {
                         grenade::LATEST
                     },
                     quick,
                     flat: run && seen,
-                    retreat: seen || refilled,
+                    retreat: seen || grenades_back,
                 };
                 let plan = grenade::plan(
                     nav,
@@ -1323,7 +1381,7 @@ impl BotBrain {
                     None,
                     delivery,
                 );
-                let worth = if refilled { REFILLED_WORTH } else { GRENADE_WORTH };
+                let worth = if grenades_back { REFILLED_WORTH } else { GRENADE_WORTH };
                 match plan {
                     Some(p) if p.damage >= worth => {
                         planned = Some((aim, p, run, delivery));
@@ -1373,6 +1431,9 @@ impl BotBrain {
                 (true, false) => thrower.from_jump(),
                 (false, _) => thrower.on_the_run(),
             };
+            if satchels_back {
+                thrower = thrower.closer(REFILLED_RUN_CLOSE);
+            }
         }
         // At an enemy in sight a grenade goes at once: it will not wait for a cooked one.
         if seen {
@@ -1386,6 +1447,7 @@ impl BotBrain {
                 self.mind.arms.series = ch.skill.throw_series && count(WeaponId::HandGrenade) > 1;
                 GRENADE_REST
             }
+            Kind::Satchel if satchels_back => REFILLED_REST,
             Kind::Satchel => THROW_REST,
             Kind::Snark => SNARK_REST,
         };
@@ -1439,7 +1501,7 @@ impl BotBrain {
             };
             // Cooked to burst as it gets there: whoever comes through has no time to get away from it. With grenades
             // handed back as they go, at once.
-            let (delivery, worth) = if grenades_refilled(body) {
+            let (delivery, worth) = if refilled(body, WeaponId::HandGrenade) {
                 let quick = grenade::Delivery {
                     latest: QUICK_COOK,
                     quick: true,
@@ -1674,6 +1736,33 @@ impl BotBrain {
                     // Each satchel of a pile is noted as it leaves the hand.
                     for landing in t.landings.iter().skip(self.mind.arms.landed) {
                         self.explosives.thrown_satchel(*landing, now);
+                        let enemy = self.mind.arms.throw_aim.and_then(|k| self.beliefs.track(k));
+                        let along = body
+                            .velocity
+                            .truncate()
+                            .dot((*landing - body.origin).truncate().normalize_or_zero());
+                        tracing::info!(
+                            "satchel thrown {}: view {:.1} {:.1}, running {along:.0} along it ({:.0} in all), to come \
+                             down {:.0} units off at {:.0} {:.0} {:.0}{}",
+                            t.way(),
+                            self.motor.view.x,
+                            self.motor.view.y,
+                            body.velocity.length(),
+                            landing.distance(body.origin),
+                            landing.x,
+                            landing.y,
+                            landing.z,
+                            enemy.map_or(String::new(), |e| format!(
+                                "; the enemy #{} {:.0} units away{}",
+                                e.who.userid,
+                                e.pos.distance(body.origin),
+                                if e.state == TrackState::Visible {
+                                    ", in sight"
+                                } else {
+                                    ""
+                                }
+                            ))
+                        );
                     }
                     self.mind.arms.landed = t.landings.len();
                     if let Some(detonate) = t.learned.take() {
@@ -2088,7 +2177,12 @@ impl BotBrain {
                     }
                     self.mind.arms.satchels = Some(plan);
                     // Closing in would take the bot into its own blast.
-                    self.mind.arms.hold_until = self.mind.arms.hold_until.max(now + SATCHEL_HOLD);
+                    let hold = if refilled(body, WeaponId::Satchel) {
+                        REFILLED_HOLD
+                    } else {
+                        SATCHEL_HOLD
+                    };
+                    self.mind.arms.hold_until = self.mind.arms.hold_until.max(now + hold);
                     match aim {
                         Some(target) => self.mind.arms.active = Some(Active::Airburst(Airburst::new(target, now))),
                         None => self.back_off_satchels(&t.landings, body),
@@ -2139,6 +2233,11 @@ impl BotBrain {
             }
             Active::Airburst(a) => {
                 if a.burst() {
+                    tracing::info!(
+                        "satchel set off in flight by the enemy {:.1} s after the throw: it came within {:?} of it",
+                        now.since(a.thrown()),
+                        a.closest
+                    );
                     stats.satchel_off("in flight by the enemy");
                     self.explosives.detonated();
                     self.mind.arms.satchels = None;
@@ -3157,6 +3256,42 @@ pub(crate) mod tests {
         };
         assert!(aimed(WeaponId::Glock));
         assert!(aimed(WeaponId::Snark), "the snarks in hand, the glock coming out");
+    }
+
+    #[test]
+    fn on_the_satchel_level_a_satchel_goes_at_an_enemy_close_by_with_one_out_already() {
+        use lb_game::gungame::GunGame;
+        // In sight 250 units off, closer than the band elsewhere, with one of the bot's satchels lying far off.
+        let enemy = Vec3::new(250.0, 0.0, 0.0);
+        let thrown = |level: bool| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            brain
+                .explosives
+                .thrown_satchel(Vec3::new(-900.0, 0.0, -36.0), SimTime(0.0));
+            let mut rng = BotRng::new(7, 7);
+            for i in 0..20 {
+                let t = 2.0 + f64::from(i) * 0.1;
+                let mut sight = seen(t, enemy);
+                sight.first = i == 0;
+                brain.beliefs.on_sighting(&sight);
+                brain.update(SimTime(t), &params(), None, None);
+                let mut b = body(t);
+                b.arsenal.clear();
+                radio(&mut b, 5);
+                b.weapon = Some(WeaponId::Satchel);
+                if level {
+                    b.gungame = Some(GunGame::drill(1, Kit::Throwable(WeaponId::Satchel)));
+                    b.allowed = Kit::Throwable(WeaponId::Satchel).weapons();
+                }
+                brain.weapon_options(&b, &character(), &mut Open, &mut rng);
+                if matches!(&brain.mind.arms.active, Some(Active::Throw(th)) if th.kind == Kind::Satchel) {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(thrown(true));
+        assert!(!thrown(false), "elsewhere too close, and its satchel out");
     }
 
     #[test]

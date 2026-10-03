@@ -342,11 +342,12 @@ one it holds.
 **Throws.** Three times a second a bot with grenades, satchels or snarks weighs a throw at the nearest enemy: one in
 sight, or one lost up to 3 s ago whose position is still known to within 400 units. Each kind that fits the distance
 has its chance per weighing: 0.9 for a grenade, 0.35 for satchels and 0.6 for snarks at an enemy out of sight, and
-0.9, 0.15 and 0.6 at one in sight. The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for
-experts) and the style's liking for throws, a little more for bold bots and a little less for careful ones, is the
-chance to throw at all (0.95 at most); which kind goes is drawn as likely as its own chance. So a grenade that fits is
-thrown almost always. After a grenade the next throw is weighed about a second later, after satchels 3–6 s later,
-after snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the crowbar, throws are the weapon:
+0.9, 0.15 and 0.6 at one in sight (a satchel 0.9 on GunGame's satchel level). The best of them, times the skill's
+`throw_rate` (0.5 for beginners up to 1.4 for experts) and the style's liking for throws, a little more for bold bots
+and a little less for careful ones, is the chance to throw at all (0.95 at most); which kind goes is drawn as likely as
+its own chance. So a grenade that fits is thrown almost always. After a grenade the next throw is weighed about a
+second later, after satchels 3–6 s later (at once on the satchel level), after snarks 1–2.5 s later: they cost nothing
+to let go. With no gun left but the crowbar, throws are the weapon:
 twice as likely, and grenades from 150 units (yapb's grenade war).
 - **Grenades with no enemy known.** Now and then (a chance of 0.03 per weighing, times `throw_rate` and the style's
   liking: about every 10 s for a normal bot) one goes where an enemy is expected, 350–1000 units away and up to 48
@@ -402,25 +403,38 @@ twice as likely, and grenades from 150 units (yapb's grenade war).
     second before that (the enemy round a corner, or close), it goes where the enemy most likely is round the corner
     (its place blurred 150 units more, no clear line asked), else where its blast is farthest from the bot. Every
     suicide by grenade on the GunGame server (2026-10-02) was a grenade held 2.35–2.6 s, forced out or dumped late.
-- **A pile of satchels**, 150–400 units away with a clear line to the spot, at an enemy out of sight or one in sight
-  coming this way: two to four of them (as many as the bot carries) thrown one after another at the spot, as fast as
-  the game allows (a second apart); then the bot backs off out of their blast.
-- **A satchel from a jump** (a trick: skills from normal up, as often as the style likes it; the balanced style's
-  0.4 is the base chance), at an enemy in sight 350–550 units away: the bot runs at the enemy, jumps and throws it a
-  moment after its feet leave the ground, so the run and the jump's lift carry it on. The satchel radio stays in
-  hand, and the satchel goes off as it comes within 150 units of the enemy (the game lets the radio work half a
-  second after a throw), like a grenade that goes off when told. Rather than let it pass, a bot with 70 health or
-  more takes up to a quarter of its blast itself; a hurt one waits until it is out of the blast. A satchel that does
-  not come by within 2.5 s is left lying. For a second after the throw the bot backs off from the enemy (the run-up
-  carried it after the satchel), and it does not close in while its satchels are fresh.
+- **A pile of satchels** for a trap (see *Goals*): two to four of them (as many as the bot carries) thrown one after
+  another at the spot, as fast as the game allows (a second apart); then the bot backs off out of their blast.
+- **A satchel at an enemy in sight**, 350–550 units away (800 from a long jump with the module) with a clear line to
+  its feet and none of the bot's satchels out, goes as players throw it: the bot runs at the enemy with the satchel in
+  hand and lets it go running at it (200 units a second or more) once the throw comes down on the enemy, where the
+  enemy is going in the time the satchel takes to get there, so the run goes into the throw and the satchel flies
+  twice as fast and far. From a jump (a trick: skills from normal up, as often as the style likes it; the balanced
+  style's 0.4 is the base chance; not where a suicide costs a GunGame kill) it jumps and lets go a moment after its
+  feet leave the ground, so the jump's lift carries it on too. A target that comes within 250 units on the way, or a
+  throw that does not come down on it within 1.2 s, keeps the satchel in hand. The radio stays in hand, and the
+  satchel goes off as it comes within 150 units of the enemy, or as it goes away from the enemy after passing within
+  220, like a grenade that goes off when told, once the game takes the radio's press (a second after the throw in the
+  classic SDK) and only with the bot out of the blast of all its satchels; one that does not come by within 2.5 s is
+  left lying. For a second after the throw the bot backs off from the enemy (the run-up carried it after the satchel),
+  and it does not close in for 3 s.
+- **GunGame's satchel level**, where the game hands each satchel back as it goes: satchels are the bot's weapon (it
+  no longer retreats for want of a gun), and one goes at an enemy in sight 200–650 units off (the run at it brings one
+  further off into reach) at nearly every look (0.9 a weighing), from the top of a hop as well, with its own satchels
+  still out and a target as close as 150 units on the way; the next is weighed as soon as the last is done with, the
+  bot holds back from closing in only while one flies (a second), and it keeps enemies 200 units off rather than 350.
+  On the GunGame server (2026-10-03, eight bots with satchels only) the bots threw there 3.1 satchels a minute before,
+  waiting with an enemy in sight on the chance, the rest after a throw, the ground under a dodge hop and the narrow
+  band, and retreating 39% of the time: after, 15 a minute, a throw every 3 s instead of 9, 5.7 kills a minute
+  instead of 1.65 (0.38 kills a throw instead of 0.53), standing still 15% of the time instead of 39% (the user on
+  the stand: 12%), and no suicides either way.
 - **The satchels go off**, all of them wherever they lie (the radio reaches 4096 units), once the bot is out of their
   blast (300 units for the multiplayer satchel's 120 damage; it backs off first). What they would do to someone is
   their blasts together: a satchel does 120 damage, less the further off, so two lying close reach further than one.
   The bot sets them off:
   - with an enemy in their blast for 40 damage or more (one satchel 200 units away), where it will be by the time
     they go off: the radio takes a second to draw, and is pressed only while the enemy is still in the blast (for up
-    to 2.5 s); a bot with 70 health or more takes up to a quarter of a satchel's blast itself rather than let the
-    enemy go;
+    to 2.5 s);
   - with an enemy seen coming into their blast within 1.5 s: the radio comes up and waits for it;
   - when it is about to die (30 health or less, hurt just now) with an enemy by them: they go with it when it dies;
   - with a step, a jump, pain, a shot, a weapon or a pickup heard within 200 units of one of them in the last second
@@ -429,9 +443,8 @@ twice as likely, and grenades from 150 units (yapb's grenade war).
     6 s after;
   - after they have lain 8–15 s with nobody in sight, whatever else.
 
-  After a pile thrown at an enemy the radio stays up for 4 s, and a trap is watched with it in hand, so the charges
-  go off the moment the enemy is in their blast. An enemy in sight away from the satchels within 700 units puts the
-  radio away for a gun.
+  A trap is watched with the radio in hand, so the charges go off the moment an enemy is in their blast. An enemy in
+  sight away from the satchels within 700 units puts the radio away for a gun.
 - **Satchel buttons.** In the classic SDK (and as yapb played) the secondary attack throws, charges out or not, and the
   primary sets them off; in Valve's 2023 update and BugfixedHL-Rebased it is the other way round. The bots take
   BugfixedHL-Rebased's buttons when its cvars are there, and the classic ones on any other DLL, and check them as they
@@ -648,7 +661,9 @@ The bots know a GunGame match the way a player does: from the scoreboard and fro
   else: no crowbar on a gun's level. Where its gun does nothing at the distance (a rocket too close, a crossbow bolt
   or the egon beam's end bursting on the bot itself) it keeps the gun in hand and backs off. On their levels
   throwables are its weapon (yapb's grenade war: grenades from 150 units, thrown more readily; on the grenade level
-  let go at once, the game handing each one back); on the tripmine level the glock only sets mines off.
+  let go at once, the game handing each one back; on the satchel level a satchel at nearly every look, the satchel
+  counting as its gun there: it does not retreat for want of one); on the tripmine level the glock only sets mines
+  off.
 - **Pickups.** Weapons and ammo are left alone (the plugin blocks picking them up and hides the map's); health,
   armor, the long jump and chargers are not.
 - **Targets.** The leader counts as if half as far, a player on the last level (the crowbar in hand past the first
@@ -780,11 +795,13 @@ For weapon tests on a stand server started with `sv_cheats 1`:
 - `lb gg mines <name|#userid|all>` has bots play GunGame's tripmine level on a server with no GunGame: only the
   tripmines and the glock, everything else as on that level, the mines handed back as they go off the way the plugin
   does (ten out at most; five carried, the game's limit); `lb gg mines off` ends it, and so does a GunGame match. `lb gg` lists them.
-  `lb gg grenades <name|#userid|all>` does the same for the hand grenade level, the grenades handed back as they are
-  thrown (never the last one gone).
+  `lb gg grenades <name|#userid|all>` and `lb gg satchels <name|#userid|all>` do the same for the hand grenade and
+  the satchel levels, the grenades or satchels handed back as they are thrown (never the last one gone).
 - `lb watch <name|#userid>` writes what a player does to the log, to study how people play (the tripmine trail was
-  taken from a human so): twenty times a second where it is, how it moves, where it looks and what it holds; four
-  times a second the room around it (eight ways at waist height) and where everyone else is; each shot with what the
-  line along its view meets, and each of its tripmines as it is laid and goes. `lb watch off` stops it.
+  taken from a human so): twenty times a second where it is, how it moves, where it looks and what it holds (a bot
+  also its goal, the weapon protocol under way, its target, how many of its satchels are out and when it weighs a
+  throw again); four times a second the room around it (eight ways at waist height) and where everyone else is; each
+  shot with what the line along its view meets, each of its tripmines as it is laid and goes, and each of its
+  satchels and grenades as it is thrown, flies, comes to rest and goes off. `lb watch off` stops it.
   `scripts/stand/tricks-scenarios.sh` runs the tricks this way (the long jump module with the map's weapons, the
   gauss alone, both, and the map's weapons alone as the control), with hard bots.
