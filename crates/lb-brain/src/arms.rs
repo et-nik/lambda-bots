@@ -66,25 +66,38 @@ use crate::trail::TrailPlan;
 
 /// Throw windows (horizontal distance).
 const GRENADE_BAND: [f32; 2] = [300.0, 1000.0];
-/// A grenade at an enemy this far away goes on the run, from this far from a jump (or at an enemy this far above).
-const GRENADE_RUN_MIN: f32 = 340.0;
-const GRENADE_JUMP_MIN: f32 = 500.0;
+/// A grenade at an enemy this far away goes on the run, from this far from a jump (or at an enemy this far above),
+/// from this far from a long jump. Players dash at an enemy even closer, and back off at once; half their grenades
+/// go from a jump (the GunGame server, 2026-10-02).
+const GRENADE_RUN_MIN: f32 = 150.0;
+const GRENADE_JUMP_MIN: f32 = 250.0;
 const GRENADE_JUMP_ABOVE: f32 = 48.0;
+const GRENADE_LEAP_MIN: f32 = 500.0;
 /// How fast where an enemy may be spreads while the grenade is out (units a second): in sight, and lost a while.
 const GRENADE_SPREAD: f32 = 110.0;
 const GRENADE_SPREAD_LOST: f32 = 130.0;
-/// A grenade is thrown only when its plan should do this much damage (it costs little: a bot carries up to ten).
+/// A grenade is thrown only when its plan should do this much damage (it costs little: a bot carries up to ten);
+/// handed back as fast as they go, when it should do this much.
 const GRENADE_WORTH: f32 = 10.0;
-/// After a grenade on the run the bot backs off from where it went this long, as players do.
-const GRENADE_BACK_OFF: f64 = 0.6;
+const REFILLED_WORTH: f32 = 5.0;
+/// The pin out this long at most: at an enemy in sight (the bot holding a grenade is not shooting, and is shot at;
+/// players cook about a second), and with grenades handed back as fast as they go (GunGame's grenade level: players
+/// let go at once, one every 1.2 s, as many kills a throw as the bots' cooked ones and far more a minute) at an enemy
+/// this far off or more. Closer, a grenade cooked to burst as it gets there did best on the GunGame server (0.22 kills
+/// a throw against 0.08 let go at once, and fewer suicides), and goes so.
+const SEEN_COOK: f32 = 1.2;
+const QUICK_COOK: f32 = 0.75;
+const QUICK_FROM: f32 = 300.0;
+/// After a grenade the bot backs off from where it went this long, as players do.
+const GRENADE_BACK_OFF: f64 = 0.8;
 /// The bot runs at about this speed when it lets go on the run.
 const GRENADE_RUN_SPEED: f32 = 270.0;
 const SNARK_BAND: [f32; 2] = [200.0, 1000.0];
 const LOB_BAND: [f32; 2] = [300.0, 700.0];
 /// A throw's blast must land at least this far from the thrower.
 const SELF_CLEAR: f32 = 300.0;
-/// With nothing but throws, closer ones are worth it (the plan still keeps the blast off the bot).
-const WAR_GRENADE_MIN: f32 = 220.0;
+/// With nothing but throws, closer ones are worth it (the plan still keeps the blast off the bot as it backs off).
+const WAR_GRENADE_MIN: f32 = 150.0;
 /// Seconds before a quick throw leaves the hand (the game's least).
 const WAR_LEAD: f32 = 0.5;
 /// An MP5 grenade bursts on the first thing it touches and the bot moves on while it flies: it must land further off,
@@ -717,6 +730,12 @@ fn backfire(tracer: &mut dyn Tracer, eye: Vec3, dir: Vec3, hit: &Trace) -> f32 {
     out.distance(hit.end).max(1.0)
 }
 
+/// On GunGame's grenade level the game hands every grenade back as it goes: many grenades, not a few good ones.
+fn grenades_refilled(body: &Body) -> bool {
+    body.gungame
+        .is_some_and(|g| g.kit == Kit::Throwable(WeaponId::HandGrenade))
+}
+
 /// How many of the throwable `w` the bot carries and may use.
 pub(crate) fn carried(body: &Body, w: WeaponId) -> i32 {
     if body.allows(w) {
@@ -1171,6 +1190,7 @@ impl BotBrain {
             let class = spec(a.id).class;
             body.allows(a.id) && a.loaded() && !matches!(class, WeaponClass::Melee | WeaponClass::Throwable)
         });
+        let refilled = grenades_refilled(body);
         let Some(t) = self
             .beliefs
             .enemies()
@@ -1262,13 +1282,33 @@ impl BotBrain {
         let mut planned = None;
         let (kind, throw) = match way {
             Way::Grenade => {
-                // Planned to burst where the enemy will be; on the run, with the run in the throw.
+                // Planned to burst where the enemy will be; on the run, with the run in the throw, flat at an enemy in
+                // sight. Cooked as long as it pays only at one out of sight, or close by on the grenade level; the bot
+                // backs off from it once it is out.
                 let aim = grenade_aim(t, now);
-                let run = body.on_ground && body.waterlevel < 2 && d >= GRENADE_RUN_MIN;
+                let quick = refilled && d >= QUICK_FROM;
+                let run = body.waterlevel < 2
+                    && d >= if refilled && !quick {
+                        QUICK_FROM
+                    } else {
+                        GRENADE_RUN_MIN
+                    };
                 let velocity = if run {
                     (t.pos - body.origin).truncate().normalize_or_zero().extend(0.0) * GRENADE_RUN_SPEED
                 } else {
                     body.velocity
+                };
+                let delivery = grenade::Delivery {
+                    latest: if quick {
+                        QUICK_COOK
+                    } else if seen && !refilled {
+                        SEEN_COOK
+                    } else {
+                        grenade::LATEST
+                    },
+                    quick,
+                    flat: run && seen,
+                    retreat: seen || refilled,
                 };
                 let plan = grenade::plan(
                     nav,
@@ -1281,10 +1321,12 @@ impl BotBrain {
                     0.0,
                     0.0,
                     None,
+                    delivery,
                 );
+                let worth = if refilled { REFILLED_WORTH } else { GRENADE_WORTH };
                 match plan {
-                    Some(p) if p.damage >= GRENADE_WORTH => {
-                        planned = Some((aim, p, run));
+                    Some(p) if p.damage >= worth => {
+                        planned = Some((aim, p, run, delivery));
                         (Kind::Grenade, p.throw)
                     }
                     _ => {
@@ -1306,15 +1348,16 @@ impl BotBrain {
         };
         let target = if kind == Kind::Snark { t.pos } else { floor };
         let mut thrower = Thrower::new(kind, target, throw, now);
-        if let Some((aim, plan, run)) = planned {
-            thrower = thrower.planned(aim, plan);
+        if let Some((aim, plan, run, delivery)) = planned {
+            thrower = thrower.planned(aim, plan, delivery);
             if run {
-                // From a jump at an enemy far off or above, as often as the style likes; with the module a long jump.
+                // From a jump at an enemy a little off or above, as often as the style likes; with the module a long
+                // jump at one far off.
                 let jump = ch.skill.tricks
                     && body.tricks.grenade_jump
                     && (d >= GRENADE_JUMP_MIN || above >= GRENADE_JUMP_ABOVE)
                     && rng.combat.next_f32() < ch.tricks.grenade_jump;
-                let leap = jump && body.has_longjump && body.tricks.longjump && d >= GRENADE_JUMP_MIN;
+                let leap = jump && body.has_longjump && body.tricks.longjump && d >= GRENADE_LEAP_MIN;
                 thrower = match (jump, leap) {
                     (true, true) => thrower.from_leap(),
                     (true, false) => thrower.from_jump(),
@@ -1394,6 +1437,19 @@ impl BotBrain {
             } else {
                 body.velocity
             };
+            // Cooked to burst as it gets there: whoever comes through has no time to get away from it. With grenades
+            // handed back as they go, at once.
+            let (delivery, worth) = if grenades_refilled(body) {
+                let quick = grenade::Delivery {
+                    latest: QUICK_COOK,
+                    quick: true,
+                    flat: false,
+                    retreat: true,
+                };
+                (quick, REFILLED_WORTH)
+            } else {
+                (grenade::Delivery::COOKED, GRENADE_WORTH)
+            };
             let Some(plan) = grenade::plan(
                 nav,
                 body.eye,
@@ -1405,14 +1461,14 @@ impl BotBrain {
                 0.0,
                 0.0,
                 None,
+                delivery,
             )
-            .filter(|p| p.damage >= GRENADE_WORTH) else {
+            .filter(|p| p.damage >= worth) else {
                 continue;
             };
             self.mind.arms.throw_aim = None;
             self.mind.arms.landed = 0;
-            // Cooked to burst as it gets there: whoever comes through has no time to get away from it.
-            let mut thrower = Thrower::new(Kind::Grenade, plan.target, plan.throw, now).planned(aim, plan);
+            let mut thrower = Thrower::new(Kind::Grenade, plan.target, plan.throw, now).planned(aim, plan, delivery);
             if run {
                 thrower = thrower.on_the_run();
             }
@@ -2005,8 +2061,8 @@ impl BotBrain {
                             if seen { ", in sight" } else { "" }
                         );
                     }
-                    // Players back off at once after a grenade thrown on the run.
-                    if t.ran_at() {
+                    // Players back off at once after a grenade.
+                    if t.backs_off() {
                         let away = (body.origin - t.target).truncate().normalize_or_zero();
                         if away != Vec2::ZERO {
                             self.mind.arms.dodge = Some((now + GRENADE_BACK_OFF, away));

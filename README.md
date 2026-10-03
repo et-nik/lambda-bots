@@ -114,6 +114,7 @@ run them from their own console.
 | `lb map [spots\|mines\|lanes\|danger]` | the map as bots know it and where they got hurt                 |
 | `lb gg`                                | GunGame: every player's level, the leader, each bot's kit       |
 | `lb gg mines <name\|all> [off]`        | play GunGame's tripmine level on a stand (needs `sv_cheats 1`)  |
+| `lb gg grenades <name\|all> [off]`     | play GunGame's hand grenade level on a stand (`sv_cheats 1`)    |
 | `lb watch [name\|#userid] [off]`       | log what a player does: moves, view, weapon, shots, mines       |
 | `lb perf [reset\|bots]`                | core time per frame, bot command timing                         |
 | `lb compat`                            | server compatibility profile                                    |

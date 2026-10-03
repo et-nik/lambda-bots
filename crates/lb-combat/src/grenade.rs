@@ -18,15 +18,19 @@
 //! the world tick by tick, and weighs every tick it could burst at by the damage it would do there: the enemy where
 //! its motion takes it, blurred by how far it may have turned since the throw (the longer the grenade is out, the
 //! more), and the less the longer the throw waits with the pin out (the enemy may get away meanwhile). Cooked so it
-//! bursts as it gets there, a grenade leaves no time to run from it. With no throw at the enemy to be had as the fuse
-//! runs low, it goes where the enemy most likely is round a corner ([`plan_behind_cover`]), else where its blast is
-//! farthest from the bot ([`dump`]).
+//! bursts as it gets there, a grenade leaves no time to run from it. How long it may be cooked is the throw's
+//! [`Delivery`]: at an enemy round a corner as long as it pays; at one in sight about a second, as players throw (the
+//! bot holding a grenade is not shooting, and is shot at); with grenades handed back as fast as they go (GunGame's
+//! grenade level) at once, many grenades rather than a few good ones. On the run a flat throw comes before a lob, the
+//! run in the grenade; and with the bot backing off once it is out, the blast is kept off where the bot will be by then.
+//! With no throw at the enemy to be had as the fuse runs low, it goes where the enemy most likely is round a corner
+//! ([`plan_behind_cover`]), else where its blast is farthest from the bot ([`dump`]).
 
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3, dmath};
 use lb_game::dll::DllProfile;
 use lb_game::mechanics::{GRENADE_FUSE, GRENADE_MIN_COOK, PROJECTILE_GRAVITY};
-use lb_worldq::{TraceQuery, Tracer};
+use lb_worldq::{Trace, TraceQuery, Tracer};
 
 use crate::ballistics::{Throw, grenade_launch};
 
@@ -61,10 +65,20 @@ const BODY_HALF: f32 = 16.0;
 const LEAD: f32 = 0.5;
 const PREDICT_FOR: f32 = 0.6;
 /// Waiting with the pin out, the enemy may get away (out of the line of every blast, round a corner): a throw that
-/// waits `w` seconds more is worth `e^(−w / WAIT_KEEP)` of its damage.
+/// waits `w` seconds more is worth `e^(−w / WAIT_KEEP)` of its damage; a quick one `e^(−w / QUICK_WAIT_KEEP)`.
 const WAIT_KEEP: f32 = 2.5;
+const QUICK_WAIT_KEEP: f32 = 0.3;
 /// The bot keeps this far from its own blast.
 pub const SELF_SAFE: f32 = RADIUS + 50.0;
+/// A bot backing off once the grenade is out runs this fast from this long after the throw, as far as the room behind
+/// lets it and this far at most: its blast is kept off that way back too.
+const RETREAT_SPEED: f32 = 250.0;
+const RETREAT_AFTER: f32 = 0.3;
+const RETREAT_MOST: f32 = 300.0;
+/// View pitches counted flat (down positive), and what a lob is worth beside them when a flat throw is asked for (a
+/// throw down at the floor is not tried then: on the run it lies by the bot when the run does not come).
+const FLAT: [f32; 2] = [-10.0, 12.0];
+const LOB_WORTH: f32 = 0.6;
 /// View pitches tried (down positive): every few degrees, then finer around the best.
 const PITCHES: [f32; 2] = [-56.0, 44.0];
 const PITCH_STEP: f32 = 4.0;
@@ -73,6 +87,9 @@ const FINE_STEP: f32 = 0.75;
 const VERIFY: usize = 4;
 /// An enemy gone out of the line of every blast (round a corner) is reckoned this much further off where it was.
 const BEHIND_COVER: f32 = 150.0;
+/// A player's box about its origin, met by a grenade thrown at it about this long after the throw is ready.
+const BODY_BOX: Vec3 = Vec3::new(16.0, 16.0, 36.0);
+const BODY_MEETS: f32 = 0.25;
 
 /// What the grenade is thrown at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +107,28 @@ impl Aim {
     pub fn at(&self, t: f32) -> Vec3 {
         self.pos + self.vel.truncate().extend(0.0) * (LEAD * t.clamp(0.0, PREDICT_FOR))
     }
+}
+
+/// How a grenade goes. `latest`: the pin is out this long at most when it leaves the hand (up to [`LATEST`]).
+/// `quick`: let go as soon as the bot is ready, the earliest tick taken (the thrower does not keep to it). `flat`: a
+/// flat throw is taken before a lob unless the lob is much the better. `retreat`: the bot backs off from the enemy once
+/// the grenade is out, so its blast is kept clear of the way back too.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Delivery {
+    pub latest: f32,
+    pub quick: bool,
+    pub flat: bool,
+    pub retreat: bool,
+}
+
+impl Delivery {
+    /// Cooked as long as it pays, the bot staying where it is.
+    pub const COOKED: Delivery = Delivery {
+        latest: LATEST,
+        quick: false,
+        flat: false,
+        retreat: false,
+    };
 }
 
 /// A planned grenade.
@@ -266,14 +305,79 @@ fn expected_damage(burst: Vec3, origin: Vec3, sigma: f32) -> f32 {
 }
 
 /// How long the pin should have been out at the throw for the grenade to burst on tick `m` after it, let go with
-/// the pin out `ready` at the soonest; `None` when that tick cannot be had any more.
-pub fn release_for(m: u32, ready: f32) -> Option<f32> {
+/// the pin out `ready` at the soonest and `latest` at the latest; `None` when that tick cannot be had.
+pub fn release_for(m: u32, ready: f32, latest: f32) -> Option<f32> {
     // Fuse left at the throw in ((m − 2)·0.1, (m − 1)·0.1]: the blast on tick m.
     let lo = GRENADE_FUSE - (m as f32 - 1.0) * THINK + TICK_MARGIN;
     let hi = GRENADE_FUSE - (m as f32 - 2.0) * THINK - TICK_MARGIN - LET_GO;
     let soonest = ready.max(GRENADE_MIN_COOK);
     let at = lo.max(soonest);
-    (at <= hi && at <= LATEST).then_some(at)
+    (at <= hi && at <= latest.min(LATEST)).then_some(at)
+}
+
+/// The world with a player's box in it: a grenade meeting it comes off it as off a wall (the player's hull is solid
+/// to it, `SV_Physics_Bounce`), so one thrown at an enemy close by falls short, by the thrower.
+struct WithBody<'a> {
+    world: &'a mut dyn Tracer,
+    mins: Vec3,
+    maxs: Vec3,
+}
+
+impl Tracer for WithBody<'_> {
+    fn trace(&mut self, q: &TraceQuery) -> Trace {
+        let mut t = self.world.trace(q);
+        if let Some((f, normal)) = box_hit(q.start, q.end, self.mins, self.maxs)
+            && f < t.fraction
+        {
+            t.fraction = f;
+            t.end = q.start + (q.end - q.start) * f;
+            t.normal = normal;
+            t.hit = None;
+        }
+        t
+    }
+
+    fn point_contents(&mut self, p: Vec3) -> i32 {
+        self.world.point_contents(p)
+    }
+}
+
+/// Where the segment from `a` to `b` enters the box `mins..maxs`: the share of the way and the normal of the face
+/// met; `None` when it misses the box or starts in it.
+fn box_hit(a: Vec3, b: Vec3, mins: Vec3, maxs: Vec3) -> Option<(f32, Vec3)> {
+    let d = b - a;
+    let (mut enter, mut exit) = (0.0f32, 1.0f32);
+    let mut normal = Vec3::ZERO;
+    for axis in 0..3 {
+        if d[axis].abs() < 1e-6 {
+            if a[axis] < mins[axis] || a[axis] > maxs[axis] {
+                return None;
+            }
+            continue;
+        }
+        let (t0, t1) = ((mins[axis] - a[axis]) / d[axis], (maxs[axis] - a[axis]) / d[axis]);
+        let (near, far) = (t0.min(t1), t0.max(t1));
+        if near > enter {
+            enter = near;
+            normal = Vec3::ZERO;
+            normal[axis] = -d[axis].signum();
+        }
+        exit = exit.min(far);
+        if enter > exit {
+            return None;
+        }
+    }
+    (enter > 0.0).then_some((enter, normal))
+}
+
+/// A blast at `point`, `flight` after the throw, spares the bot letting go at `me`: never within [`SELF_SAFE`] of
+/// it, nor (`retreat`) of where the bot backing off along `away`, as far as `room`, will be by then.
+fn spares(me: Vec3, away: Vec3, room: f32, retreat: bool, point: Vec3, flight: f32) -> bool {
+    if point.distance(me) < SELF_SAFE {
+        return false;
+    }
+    let back = (RETREAT_SPEED * (flight - RETREAT_AFTER)).clamp(0.0, room.max(0.0));
+    !retreat || point.distance(me + away * back) >= SELF_SAFE
 }
 
 struct Candidate {
@@ -289,9 +393,10 @@ struct Candidate {
     score: f32,
 }
 
-/// The best grenade from `eye`, the thrower at `me` moving at `velocity`, at `aim`; the pin out `held` seconds now
-/// (0 before it is pulled), the throw ready no sooner than `ready` seconds of it. Pitches around `near` only when
-/// given (a plan made again a moment later). `None` when no throw would hurt the enemy and spare the thrower.
+/// The best grenade from `eye`, the thrower at `me` moving at `velocity`, at `aim`, thrown as `delivery`; the pin out
+/// `held` seconds now (0 before it is pulled), the throw ready no sooner than `ready` seconds of it. Pitches around
+/// `near` only when given (a plan made again a moment later). `None` when no throw would hurt the enemy and spare the
+/// thrower.
 #[allow(clippy::too_many_arguments)]
 pub fn plan(
     tracer: &mut dyn Tracer,
@@ -304,12 +409,16 @@ pub fn plan(
     held: f32,
     ready: f32,
     near: Option<f32>,
+    delivery: Delivery,
 ) -> Option<Plan> {
-    plan_with(tracer, eye, me, velocity, aim, sv_gravity, dll, held, ready, near, true)
+    plan_with(
+        tracer, eye, me, velocity, aim, sv_gravity, dll, held, ready, near, true, delivery,
+    )
 }
 
 /// A grenade that must go soon at an enemy no blast has a clear line to (gone round a corner): as [`plan`], with
-/// where it may be blurred further and no line asked for, so it goes where the enemy most likely is.
+/// where it may be blurred further and no line asked for, so it goes where the enemy most likely is; let go with the
+/// pin out `latest` at the latest.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_behind_cover(
     tracer: &mut dyn Tracer,
@@ -320,13 +429,28 @@ pub fn plan_behind_cover(
     sv_gravity: f32,
     dll: DllProfile,
     held: f32,
+    latest: f32,
 ) -> Option<Plan> {
     let blurred = Aim {
         sigma: aim.sigma + BEHIND_COVER,
         ..*aim
     };
     plan_with(
-        tracer, eye, me, velocity, &blurred, sv_gravity, dll, held, held, None, false,
+        tracer,
+        eye,
+        me,
+        velocity,
+        &blurred,
+        sv_gravity,
+        dll,
+        held,
+        held,
+        None,
+        false,
+        Delivery {
+            latest,
+            ..Delivery::COOKED
+        },
     )
 }
 
@@ -343,20 +467,46 @@ fn plan_with(
     ready: f32,
     near: Option<f32>,
     line: bool,
+    delivery: Delivery,
 ) -> Option<Plan> {
     let soonest = ready.max(held);
     let last_tick = ((GRENADE_FUSE - soonest) / THINK).floor() as u32 + 2;
     // The yaw heads for where the enemy will be about when the grenade gets there; once more for the best found.
     let guess = (soonest - held) + (aim.pos - eye).truncate().length() / 800.0;
     let mut lead = aim.at(guess);
+    // Backing off from the enemy once the grenade is out, the bot goes back as far as the room behind lets it.
+    let away = (me - aim.pos).truncate().normalize_or_zero().extend(0.0);
+    let room = if delivery.retreat && away != Vec3::ZERO {
+        tracer.trace(&TraceQuery::line(me, me + away * RETREAT_MOST)).fraction * RETREAT_MOST - BODY_HALF
+    } else {
+        0.0
+    };
+    let spared = |point: Vec3, flight: f32| spares(me, away, room, delivery.retreat, point, flight);
+    // The enemy in sight stands in the way of a throw at it: a grenade meeting its body comes off it short.
+    let body = line.then(|| {
+        let at = aim.at(soonest - held + BODY_MEETS);
+        (at - BODY_BOX, at + BODY_BOX)
+    });
+    let keep = if delivery.quick { QUICK_WAIT_KEEP } else { WAIT_KEEP };
+    let worth = |pitch: f32| {
+        if delivery.flat && !(FLAT[0]..=FLAT[1]).contains(&pitch) {
+            LOB_WORTH
+        } else {
+            1.0
+        }
+    };
     let mut best: Option<Candidate> = None;
     // The best of the coarse pass, kept should the fine pass around it find none.
     let mut coarse: Option<Candidate> = None;
+    let tried = |p: &f32| !delivery.flat || *p <= FLAT[1];
     let mut pitches: Vec<f32> = match near {
-        Some(p) => (-3..=3).map(|i| p + i as f32 * FINE_STEP * 2.0).collect(),
+        Some(p) => (-3..=3).map(|i| p + i as f32 * FINE_STEP * 2.0).filter(tried).collect(),
         None => {
             let n = ((PITCHES[1] - PITCHES[0]) / PITCH_STEP) as i32;
-            (0..=n).map(|i| PITCHES[0] + i as f32 * PITCH_STEP).collect()
+            (0..=n)
+                .map(|i| PITCHES[0] + i as f32 * PITCH_STEP)
+                .filter(tried)
+                .collect()
         }
     };
     for pass in 0..2 {
@@ -369,24 +519,38 @@ fn plan_with(
             if tracer.trace(&TraceQuery::line(eye, start)).fraction < 1.0 {
                 continue;
             }
-            let Some(ticks) = fly(tracer, start, v, sv_gravity, last_tick as usize) else {
+            let flown = match body {
+                Some((mins, maxs)) => fly(
+                    &mut WithBody {
+                        world: &mut *tracer,
+                        mins,
+                        maxs,
+                    },
+                    start,
+                    v,
+                    sv_gravity,
+                    last_tick as usize,
+                ),
+                None => fly(tracer, start, v, sv_gravity, last_tick as usize),
+            };
+            let Some(ticks) = flown else {
                 continue;
             };
             let mut top: Option<Candidate> = None;
             for (i, tick) in ticks.iter().enumerate() {
                 let m = i as u32 + 1;
-                let Some(at) = release_for(m, soonest) else {
+                let Some(at) = release_for(m, soonest, delivery.latest) else {
                     continue;
                 };
                 let wait = at - held;
                 let flight = m as f32 * THINK;
                 let point = Vec3::new(tick.at.x, tick.at.y, tick.floor.map_or(tick.at.z, |f| f + LIFT));
-                if point.distance(me) < SELF_SAFE {
+                if !spared(point, flight) {
                     continue;
                 }
                 let target = aim.at(wait + flight);
                 let damage = expected_damage(point, target, aim.sigma + aim.spread * flight);
-                let score = damage * dmath::exp(-wait / WAIT_KEEP);
+                let score = damage * dmath::exp(-wait / keep) * worth(pitch);
                 if damage > 0.0 && top.as_ref().is_none_or(|c| score > c.score) {
                     top = Some(Candidate {
                         pitch,
@@ -408,7 +572,8 @@ fn plan_with(
         // The best few: the blast where the floor really is, and a clear line from it to the enemy.
         for mut c in found.into_iter().take(VERIFY) {
             let burst = burst_point(tracer, c.point);
-            if burst.distance(me) < SELF_SAFE {
+            let flight = c.tick as f32 * THINK;
+            if !spared(burst, flight) {
                 continue;
             }
             let body = c.target + Vec3::Z * BODY_UP;
@@ -418,9 +583,8 @@ fn plan_with(
                     continue;
                 }
             }
-            let flight = c.tick as f32 * THINK;
             c.damage = expected_damage(burst, c.target, aim.sigma + aim.spread * flight);
-            c.score = c.damage * dmath::exp(-(c.held - held) / WAIT_KEEP);
+            c.score = c.damage * dmath::exp(-(c.held - held) / keep) * worth(c.pitch);
             c.point.at = burst;
             if c.damage > 0.0 && best.as_ref().is_none_or(|b| c.score > b.score) {
                 best = Some(c);
@@ -430,7 +594,7 @@ fn plan_with(
             let b = best.take()?;
             lead = aim.at(b.held - held + b.tick as f32 * THINK);
             let p = b.pitch;
-            pitches = (-3..=3).map(|i| p + i as f32 * FINE_STEP).collect();
+            pitches = (-3..=3).map(|i| p + i as f32 * FINE_STEP).filter(tried).collect();
             coarse = Some(b);
         }
     }
@@ -548,15 +712,15 @@ mod tests {
     #[test]
     fn the_tick_of_the_blast_is_picked_by_how_long_the_pin_was_out() {
         // Thrown with 1.0 s of fuse left (held 2.0): the think at 1.0 finds it run out, the blast on 1.1.
-        let at = release_for(11, 0.6).unwrap();
+        let at = release_for(11, 0.6, LATEST).unwrap();
         let fuse = GRENADE_FUSE - at;
         assert!(fuse > 0.9 && fuse <= 1.0, "{fuse}");
         // A tick already gone is not had; nor one that needs the pin out past the latest.
-        assert_eq!(release_for(11, 2.5), None);
-        assert_eq!(release_for(3, 0.6), None);
+        assert_eq!(release_for(11, 2.5, LATEST), None);
+        assert_eq!(release_for(3, 0.6, LATEST), None);
         // Not sooner than the game throws: 2.5 s of fuse left at the soonest, the blast on tick 26.
-        assert_eq!(release_for(27, 0.0), None);
-        assert!(release_for(26, 0.0).unwrap() >= GRENADE_MIN_COOK);
+        assert_eq!(release_for(27, 0.0, LATEST), None);
+        assert!(release_for(26, 0.0, LATEST).unwrap() >= GRENADE_MIN_COOK);
     }
 
     #[test]
@@ -605,6 +769,7 @@ mod tests {
             0.0,
             0.0,
             None,
+            Delivery::COOKED,
         )
         .expect("a plan");
         assert!(blast_damage(p.burst, aim.pos) > 70.0, "{p:?}");
@@ -633,6 +798,7 @@ mod tests {
             0.6,
             0.6,
             None,
+            Delivery::COOKED,
         )
         .expect("a plan");
         assert!(p.burst.y > 40.0, "led: {p:?}");
@@ -659,6 +825,7 @@ mod tests {
             0.6,
             0.6,
             None,
+            Delivery::COOKED,
         )
         .expect("a plan");
         let running = plan(
@@ -672,6 +839,7 @@ mod tests {
             0.6,
             0.6,
             None,
+            Delivery::COOKED,
         )
         .expect("a plan");
         assert!(
@@ -720,6 +888,7 @@ mod tests {
             0.0,
             0.0,
             None,
+            Delivery::COOKED,
         ) {
             assert!(p.burst.distance(Vec3::ZERO) >= SELF_SAFE, "{p:?}");
         }
@@ -739,8 +908,122 @@ mod tests {
             0.0,
             0.0,
             None,
+            Delivery::COOKED,
         ) {
             panic!("thrown into a wall: {p:?}");
+        }
+    }
+
+    const QUICK: Delivery = Delivery {
+        latest: 0.75,
+        quick: true,
+        flat: true,
+        retreat: true,
+    };
+
+    #[test]
+    fn a_quick_grenade_goes_at_once_flat_on_the_run() {
+        let dll = DllProfile::resolve("auto", true);
+        let aim = Aim {
+            pos: Vec3::new(500.0, 0.0, 0.0),
+            vel: Vec3::ZERO,
+            sigma: 20.0,
+            spread: 110.0,
+        };
+        let run = Vec3::new(270.0, 0.0, 0.0);
+        let room = &mut Room { wall: None };
+        let p = plan(room, EYE, Vec3::ZERO, run, &aim, 800.0, dll, 0.0, 0.0, None, QUICK).expect("a plan");
+        assert!(p.release_held <= QUICK.latest, "{p:?}");
+        assert!(p.throw.flight >= 2.0, "the fuse it was given: {p:?}");
+        assert!((FLAT[0]..=FLAT[1]).contains(&p.throw.pitch), "{p:?}");
+        // Cooked as long as it pays, it waits for the blast to come as it gets there.
+        let cooked = plan(
+            room,
+            EYE,
+            Vec3::ZERO,
+            run,
+            &aim,
+            800.0,
+            dll,
+            0.0,
+            0.0,
+            None,
+            Delivery::COOKED,
+        )
+        .unwrap();
+        assert!(cooked.release_held > 1.5, "{cooked:?}");
+    }
+
+    #[test]
+    fn a_grenade_thrown_at_an_enemy_close_by_comes_off_its_body_short() {
+        let dll = DllProfile::resolve("auto", true);
+        let (start, v) = launch(EYE, Vec3::new(270.0, 0.0, 0.0), 5.0, 0.0, dll);
+        let at = Vec3::new(180.0, 0.0, 0.0);
+        let room = &mut Room { wall: None };
+        let past = fly(room, start, v, 800.0, 25).unwrap();
+        let mut with = WithBody {
+            world: room,
+            mins: at - BODY_BOX,
+            maxs: at + BODY_BOX,
+        };
+        let short = fly(&mut with, start, v, 800.0, 25).unwrap();
+        assert!(past.last().unwrap().at.x > 400.0, "{past:?}");
+        assert!(short.last().unwrap().at.x < at.x, "{short:?}");
+        assert_eq!(
+            box_hit(Vec3::ZERO, Vec3::new(400.0, 0.0, 0.0), at - BODY_BOX, at + BODY_BOX),
+            Some(((180.0 - 16.0) / 400.0, -Vec3::X))
+        );
+        assert_eq!(
+            box_hit(
+                Vec3::new(0.0, 50.0, 0.0),
+                Vec3::new(400.0, 50.0, 0.0),
+                at - BODY_BOX,
+                at + BODY_BOX
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn backing_off_keeps_the_blast_off_the_way_back() {
+        let me = Vec3::ZERO;
+        let away = -Vec3::X;
+        let behind = Vec3::new(-320.0, 0.0, 0.0);
+        let ahead = Vec3::new(320.0, 0.0, 0.0);
+        assert!(spares(me, away, 280.0, false, behind, 2.5));
+        assert!(!spares(me, away, 280.0, true, behind, 2.5), "it would back off into it");
+        assert!(spares(me, away, 280.0, true, ahead, 2.5));
+        // A wall just behind: no way back to keep clear.
+        assert!(spares(me, away, 0.0, true, behind, 2.5));
+        // Never by the hand, backing off or not.
+        assert!(!spares(me, away, 280.0, true, Vec3::new(250.0, 0.0, 0.0), 2.5));
+    }
+
+    #[test]
+    fn on_the_run_a_flat_throw_is_never_one_down_at_the_floor() {
+        let dll = DllProfile::resolve("auto", true);
+        let aim = Aim {
+            pos: Vec3::new(330.0, 0.0, 0.0),
+            vel: Vec3::ZERO,
+            sigma: 20.0,
+            spread: 110.0,
+        };
+        let open = &mut Room { wall: None };
+        if let Some(p) = plan(
+            open,
+            EYE,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            &aim,
+            800.0,
+            dll,
+            0.0,
+            0.0,
+            None,
+            QUICK,
+        ) {
+            assert!(p.throw.pitch <= FLAT[1], "{p:?}");
+            assert!(p.burst.distance(Vec3::ZERO) >= SELF_SAFE, "{p:?}");
         }
     }
 }

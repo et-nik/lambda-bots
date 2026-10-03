@@ -1160,11 +1160,13 @@ impl Runtime {
 
     /// `lb gg mines`: the bot's mines are handed back as the GunGame plugin does (ten out at most; five carried here,
     /// the game's limit): one at once for each laid, the rest once its count has kept still a moment (not to hide one
-    /// fewer from a bot that just pressed); and its glock kept loaded.
+    /// fewer from a bot that just pressed); and its glock kept loaded. `lb gg grenades`: grenades handed back as they
+    /// are thrown, never the last one gone (the game would take the weapon away).
     fn drill_upkeep(&mut self) {
         const OUT_MOST: i32 = 10;
         const GIVE_EVERY: f64 = 0.3;
         const STILL: f64 = 0.6;
+        const GRENADES_KEPT: i32 = 2;
         let now = self.now;
         if self.bots.iter().any(|b| b.drill.is_some()) && self.gungame_board().is_some() {
             tracing::info!(
@@ -1178,7 +1180,24 @@ impl Runtime {
         }
         let row = arms_stats::Row::plain(WeaponId::Tripmine);
         for bot in &mut self.bots {
-            if bot.drill != Some(lb_game::gungame::Kit::Mines) || bot.state != BotState::Alive {
+            if bot.state != BotState::Alive {
+                continue;
+            }
+            if bot.drill == Some(lb_game::gungame::Kit::Throwable(WeaponId::HandGrenade)) {
+                let carried = arsenal(&bot.self_state, &self.game.weapons);
+                let grenades = carried
+                    .iter()
+                    .find(|a| a.id == WeaponId::HandGrenade)
+                    .and_then(|a| a.reserve)
+                    .unwrap_or(0);
+                if grenades < GRENADES_KEPT && now.since(bot.drill_gave) >= GIVE_EVERY {
+                    bot.pending_client_cmds
+                        .push(vec!["give".into(), "weapon_handgrenade".into()]);
+                    bot.drill_gave = now;
+                }
+                continue;
+            }
+            if bot.drill != Some(lb_game::gungame::Kit::Mines) {
                 continue;
             }
             let slot = u16::from(bot.id.slot);
