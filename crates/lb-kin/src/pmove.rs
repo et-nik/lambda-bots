@@ -155,6 +155,8 @@ pub struct MoveEvents {
     pub touched: SmallVec<[u32; 4]>,
     /// Walking, the player ran into a wall (a step it went up does not count).
     pub walled: bool,
+    /// In the air, the player ran into a wall, a ceiling or a slope too steep to stand on.
+    pub bumped: bool,
 }
 
 impl MoveEvents {
@@ -163,6 +165,7 @@ impl MoveEvents {
         self.longjumped |= other.longjumped;
         self.landed = self.landed.or(other.landed);
         self.walled |= other.walled;
+        self.bumped |= other.bumped;
         for t in other.touched {
             if !self.touched.contains(&t) {
                 self.touched.push(t);
@@ -828,7 +831,9 @@ impl Pm<'_> {
         let (wishdir, wishspeed) = self.wish();
         self.air_accelerate(wishdir, wishspeed, self.phys.airaccelerate);
         self.p.velocity += self.p.basevelocity;
+        let walls = self.walls;
         self.fly_move();
+        self.events.bumped |= self.walls > walls;
     }
 
     fn water_move(&mut self) {

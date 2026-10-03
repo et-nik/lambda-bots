@@ -673,6 +673,13 @@ impl<W: SimWorld> Course<W> {
             push: p.field,
             gravity: self.phys.gravity,
             progressive_fall_damage: self.phys.progressive_fall_damage,
+            cmd_ms: f32::from(bot.driver.last_msec()),
+            airaccelerate: self.phys.airaccelerate,
+            hop_cap: if self.phys.bunnyhop_cap {
+                lb_kin::hop::CROP_FACTOR * self.phys.maxspeed
+            } else {
+                f32::INFINITY
+            },
             tricks: bot.tricks,
         }
     }
@@ -749,23 +756,7 @@ impl<W: SimWorld> Course<W> {
     ) -> NavStatus {
         let now = self.now;
         let p = bot.player;
-        let input = NavInput {
-            now,
-            origin: p.origin,
-            velocity: p.velocity,
-            view: bot.motor.view,
-            on_ground: p.on_ground(),
-            on_ladder: p.on_ladder,
-            ducked: p.ducked,
-            waterlevel: p.waterlevel,
-            ground_model: p.ground.map_or(0, |g| g as u16),
-            max_speed: self.phys.maxspeed,
-            health: bot.health,
-            push: p.field,
-            gravity: self.phys.gravity,
-            progressive_fall_damage: self.phys.progressive_fall_damage,
-            tricks: bot.tricks,
-        };
+        let input = self.input(bot);
         bot.player.longjump = bot.tricks.longjump;
         let mut ctx = NavCtx {
             graph: &self.graph,

@@ -14,6 +14,7 @@ pub struct CommandDriver {
     max_debt_ms: f64,
     latched: u16,
     last_sent_buttons: u16,
+    last_msec: u8,
     pub total_sent_ms: u64,
     pub total_frame_ms: f64,
     pub dropped_debt_ms: f64,
@@ -44,6 +45,7 @@ impl CommandDriver {
             max_debt_ms,
             latched: 0,
             last_sent_buttons: 0,
+            last_msec: 0,
             total_sent_ms: 0,
             total_frame_ms: 0.0,
             dropped_debt_ms: 0.0,
@@ -67,6 +69,11 @@ impl CommandDriver {
 
     pub fn last_sent_buttons(&self) -> u16 {
         self.last_sent_buttons
+    }
+
+    /// Milliseconds the last command covered; 0 before the first.
+    pub fn last_msec(&self) -> u8 {
+        self.last_msec
     }
 
     /// Time not yet sent: frame time minus sent msec minus dropped debt. Stays below one quantum when nothing leaks.
@@ -99,6 +106,7 @@ impl CommandDriver {
             previous_buttons: self.last_sent_buttons,
         };
         self.last_sent_buttons = buttons;
+        self.last_msec = msec as u8;
         self.latched = buttons_to_keep(buttons, held_buttons);
         self.total_sent_ms += msec as u64;
         self.commands_sent += 1;

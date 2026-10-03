@@ -13,6 +13,8 @@ pub struct PublicRules {
     /// BugfixedHL `mp_bunnyhop 1` (default) disables the speed cap.
     pub bunnyhop_uncapped: bool,
     pub maxspeed: f32,
+    /// `sv_airaccelerate`: how hard a press in the air speeds the player up.
+    pub airaccelerate: f32,
     pub gravity: f32,
     pub timelimit_min: f32,
     pub fraglimit: f32,
@@ -33,6 +35,7 @@ impl Default for PublicRules {
             falldamage_progressive: false,
             bunnyhop_uncapped: false,
             maxspeed: 320.0,
+            airaccelerate: 10.0,
             gravity: 800.0,
             timelimit_min: 0.0,
             fraglimit: 0.0,
@@ -52,6 +55,7 @@ pub const RULE_CVARS: &[&str] = &[
     "mp_falldamage",
     "mp_bunnyhop",
     "sv_maxspeed",
+    "sv_airaccelerate",
     "sv_gravity",
     "mp_timelimit",
     "mp_fraglimit",
@@ -64,7 +68,7 @@ pub fn rule_cvars() -> impl Iterator<Item = &'static str> {
 }
 
 impl PublicRules {
-    /// Applies a cvar value; `bhl` tells whether the BugfixedHL rules apply to `mp_bunnyhop`.
+    /// Applies a cvar value.
     pub fn apply_cvar(&mut self, name: &str, value: &str) {
         let f = value.trim().parse::<f32>().unwrap_or(0.0);
         match name {
@@ -83,6 +87,7 @@ impl PublicRules {
             "mp_falldamage" => self.falldamage_progressive = f > 0.0,
             "mp_bunnyhop" => self.bunnyhop_uncapped = f > 0.0,
             "sv_maxspeed" if f > 0.0 => self.maxspeed = f,
+            "sv_airaccelerate" => self.airaccelerate = f.max(0.0),
             "sv_gravity" if f > 0.0 => self.gravity = f,
             "mp_timelimit" => self.timelimit_min = f,
             "mp_fraglimit" => self.fraglimit = f,

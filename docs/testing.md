@@ -57,18 +57,18 @@ gauss with its uranium, its health.
 The game gives items only with `sv_cheats 1`, set before the map starts. The commands say so when it is off. On a
 GunGame server, GunGame takes weapons away as it hands out levels: test on a map without it.
 
-| Command                                                                  | Action                                                   |
-|--------------------------------------------------------------------------|----------------------------------------------------------|
-| `lb give <name\|#userid\|all> <item>...`                                 | items for bots now                                       |
-| `lb do <name\|#userid\|all> go <spot> [radius R] [timeout T] [tricks …]` | send bots to a spot; the outcome goes to the console     |
-| `lb do`                                                                  | what the bots on command are doing                       |
-| `lb do [<name\|all>] stop`                                               | call the commands off                                    |
-| `lb test [list]`                                                         | the map's tests                                          |
-| `lb test add <id> <spot> [options]`                                      | add a test to the map's file, or replace the one with the id |
-| `lb test remove <id>`                                                    | remove a test                                            |
-| `lb test run [<id>...\|all] [bot <name>] [repeat N]`                     | run tests with one bot                                   |
-| `lb test stop`                                                           | end the run (the report is written)                      |
-| `lb test results`                                                        | what the last run came to                                |
+| Command                                                                         | Action                                                       |
+|---------------------------------------------------------------------------------|--------------------------------------------------------------|
+| `lb give <name\|#userid\|all> <item>...`                                        | items for bots now                                           |
+| `lb do <name\|#userid\|all> go <spot> [radius R] [timeout T] [tricks …] [bhop]` | send bots to a spot; the outcome goes to the console         |
+| `lb do`                                                                         | what the bots on command are doing                           |
+| `lb do [<name\|all>] stop`                                                      | call the commands off                                        |
+| `lb test [list]`                                                                | the map's tests                                              |
+| `lb test add <id> <spot> [options]`                                             | add a test to the map's file, or replace the one with the id |
+| `lb test remove <id>`                                                           | remove a test                                                |
+| `lb test run [<id>...\|all] [bot <name>] [repeat N]`                            | run tests with one bot                                       |
+| `lb test stop`                                                                  | end the run (the report is written)                          |
+| `lb test results`                                                               | what the last run came to                                    |
 
 - **Items:**
   - `gauss` (with 100 uranium) and the other weapons by name (`crossbow`, `mp5`, `357`, …), with ammo;
@@ -83,6 +83,10 @@ GunGame server, GunGame takes weapons away as it hands out levels: test on a map
 
   `@me` and `@aim` need the game console. With `sv_cheats 1`, `noclip` takes you onto a ledge to mark it.
 - **Tricks:** `jump`, `longjump`, `gauss`, or `any` (the default), or `none` (the graph only).
+- **`bhop`:** the bot bunny hops along the way as its skill has it (hard and expert; see `docs/navigation.md`), for
+  timing a way hopped against walked. `lb test motor <name|#userid|all> bhop [seconds] [speed]` hops straight on
+  (keeping to `speed` times maxspeed, 1.7 by default, under the crop where the server crops) and logs the speed at
+  every takeoff and how many the server cropped.
 - **Options of `lb test add`:**
   - `from <spot>`;
   - `give <item>...`;

@@ -33,6 +33,8 @@ pub fn physics(input: &NavInput) -> Physics {
     Physics {
         gravity: input.gravity(),
         maxspeed: input.max_speed,
+        airaccelerate: input.airaccelerate(),
+        bunnyhop_cap: input.hop_cap().is_finite(),
         progressive_fall_damage: input.progressive_fall_damage,
         ..Physics::default()
     }

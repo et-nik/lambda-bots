@@ -664,10 +664,13 @@ Topology changes only after a structural failure is confirmed (v2 §9.5).
   - In flight: keep duck and forward, lenient 2-D reach.
   - Shortcut mode ports the yapb runway algorithm (`navigate.cpp 810–990`: runway ≥ 400, ≥ 3 points, corridor dot ≥ 0.92, legs ≥ 0.94, rise ≤ 40 / drop ≤ 64, speed2d ≥ 150).
   - The 250/+50 u headroom and 445/520 u deadly-drop traces are replaced by generator-precomputed launch windows, so there are no runtime traces.
-- **Bhop:**
-  - a locomotion mode on straight flat Walk chains of ≥ 400 u marked `bhop_ok`;
-  - release jump in the air, press on landing, small air-strafe;
-  - only enabled when the rules profile says uncapped, or when style requests it.
+- **Bhop** (as built, `lb_nav::hop`; see `docs/navigation.md`):
+  - a locomotion mode of the follower on Walk links up to the first special link, sharp turn (> 60°), slope (> 8°),
+    unfit node or the end of the way; no graph flag: every hop's flight is followed through live traces before the
+    jump;
+  - jump only when on the ground (fresh press, the first command back), optimal air-strafe in the air;
+  - on every server (the user's call): where the rules say the server crops (or a crop was seen), 0.97 × 1.7 ×
+    maxspeed at most; skill limits from the difficulty table (`bhop_speed`, `bhop_speed_uncapped`).
 - **GaussBoost** (port of `tasks.cpp 1443–1570` and `combat.cpp 1283–1339, 1369–1399`):
   - Prepare: select gauss, stand still, hold ATTACK2 ≥ 1.5 s (ammo ≥ 16 + reserve).
   - Aim: look at `eyes + back·96cosα − up·96sinα`; α and yaw come from the validated arc, with jitter ±2° only within robustness margin (yapb used random 25–38°).

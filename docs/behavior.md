@@ -313,7 +313,9 @@ away (550 for a bot under 40 health), with nobody near the first stretch of the 
   | 357, crossbow, RPG                   | never            |
 
   A hurt or timid bot (health × aggression under 30) keeps its distance, as yapb's did; nobody closes in while
-  reloading or while its own rocket, grenade or satchels are on the way to the target.
+  reloading or while its own rocket, grenade or satchels are on the way to the target. From hard up a bot bunny hops
+  along the path instead, where the way lets it (see *Tricks*): the movement keys and the jump are the hops', the view
+  stays on the enemy and the shots go on in the air.
 - **Style.** Every 1–3 s the bot decides between strafing and standing still. Closer than 768 units it strafes.
   Further away it stands with the skill's `stay_mid` / `stay_far` chance (not while closing in).
 - **Strafe side.** It strafes away from the side the enemy aims at, swaps sides now and then, and turns around at
@@ -551,6 +553,22 @@ times. From hard up the long jumps on the way are bold (`longjump_bold`) and the
 | hard   | 90%                         | yes            |
 | expert | 100%                        | yes            |
 
+From hard up the bots bunny hop along the way and closing in on an enemy, on every server, whatever its own setting
+for it (`bhop_speed`, `bhop_speed_uncapped` in `config/difficulty.yaml`; `tricks.bhop` turns them off). A server that
+crops a jump taken faster than 1.7 × maxspeed (to 0.65 of that: the SDK always, BugfixedHL with `mp_bunnyhop 0`) is
+hopped 3% under the crop, which still beats a run by two thirds. Speeds kept to, times maxspeed (with `sv_maxspeed 270`:
+hard 405 and 459, expert 445 and 540):
+
+| Skill  | Server crops                  | Server does not crop |
+|--------|-------------------------------|----------------------|
+| hard   | 1.5                           | 1.7                  |
+| expert | 1.7, held at 1.65 by the crop | 2.0                  |
+
+Between hard and expert the speeds are mixed (skill 87: 1.6 and 1.84); below hard there are none (the band
+`lb_difficulty hard` admits, 63..87, has bots below 75 that do not hop). Whether a server crops is read from
+BugfixedHL's `mp_bunnyhop`; without the cvar it is taken to crop, and a jump that comes out cropped on a server taken
+not to makes the bots keep under the crop until the map changes.
+
 - **What navigation may do** is told every frame (`NavService::set_tricks`):
   - long jump links, with the module (any skill);
   - long jumps along the way, as readily as the bot takes them: a roll every 8–12 s. Along straight, level
@@ -558,7 +576,10 @@ times. From hard up the long jumps on the way are bold (`longjump_bold`) and the
     than 60 health onto a landing that hurts, as long as 40 are left (see `docs/navigation.md`);
   - gauss boost links, for styles that gauss-jump, with 40 uranium, when a boost can be made now: the skill does
     tricks, the gauss is allowed and there are 16 uranium for a full charge, 60 health, no enemy seen for 2 s, out of
-    the water.
+    the water;
+  - bunny hops, at the skill's speeds, while no weapon protocol runs (a throw, a mine, the scope, a boost), no trail
+    of mines is being laid and no long jump of a fight (at an enemy, to dodge) has the keys (see
+    `docs/navigation.md`).
 - **A long jump at the enemy** fought, with the module, when the bot closes in: the weapon in hand does poorly this
   far off (see *Fighting*), or it is the crowbar (then also on the way there). At an enemy in sight 300–900 units away
   (bold: 250–1000), no more than 64 below or 40 above, the will to close in (health × aggression) of 20 at least, the
@@ -582,6 +603,10 @@ times. From hard up the long jumps on the way are bold (`longjump_bold`) and the
 - **In the air** on any long jump or boost the movement keys alone steer the flight, so the view is free: a bot that
   sees an enemy aims and shoots at it, one that does not looks along the way on from the landing, lined up for the
   next long jump.
+- **Bunny hops in a fight.** Closing in on an enemy along the path a bot takes the hops of the way as they are: the
+  keys and the jump, the view the aim's; a long jump at the enemy may still be taken from a hop's takeoff. A hop under
+  way when a fight starts is flown to its end (`NavService::flight`), the bot shooting from the air. In a duel the
+  bot strafes and dodge-jumps as before.
 - **A gauss jump on the way** somewhere more than 1400 units or 12 nodes off (any goal but a fight), with the gauss
   in hand and ready, 30 uranium and 60 health, no enemy about, on the ground: every 10–18 s the style's chance is
   rolled (4–6 s when the destination is near), and navigation looks for a boost that lands nearer the goal
@@ -598,9 +623,9 @@ times. From hard up the long jumps on the way are bold (`longjump_bold`) and the
   level way is clear of the beam's burst on the nearest wall and the sky or a high ceiling is farther than every
   wall around.
 
-`lb brain` shows each bot's tricks: whether it has the module, how readily it takes long jumps on the way and in a
-fight and whether they are bold and dodge, what navigation may do (and the fall damage a long jump on the way may
-take), its uranium, why the last look for a gauss jump came to nothing, how the tricks that left the ground went
+`lb brain` shows each bot's tricks: the speeds it bunny hops at now, whether it has the module, how readily it takes
+long jumps on the way and in a fight and whether they are bold and dodge, what navigation may do (and the fall damage
+a long jump on the way may take), its uranium, why the last look for a gauss jump came to nothing, how the tricks that left the ground went
 (landed where they should or not, by kind), the long jumps at enemies and to dodge, the gauss jumps found and the
 boosts started and fired. `lb stats` sums them over the bots since the last reset. A missed trick is logged with
 where it left the ground, how fast, and where it came down.

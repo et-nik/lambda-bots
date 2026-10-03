@@ -197,6 +197,15 @@ impl BotBrain {
         let bold = ch.skill.longjump_bold;
         // Dropping a trail's mines takes the ground: no long jumps along the way meanwhile.
         let laying = self.mind.arms.trail.as_ref().is_some_and(|p| p.laying(now));
+        // A weapon protocol (a throw, a mine, the scope) or a long jump of a fight has the keys: no hops meanwhile.
+        let t = &self.mind.tricks;
+        let hop_free =
+            body.tricks.bhop && self.mind.arms.active.is_none() && !laying && t.dodge.is_none() && now >= t.leap_until;
+        let bhop = ch
+            .skill
+            .bhop_speed
+            .filter(|_| hop_free)
+            .map(|capped| [capped, ch.skill.bhop_speed_uncapped.unwrap_or(capped)]);
         let told = Tricks {
             longjump,
             runway: longjump && self.mind.tricks.runway && !laying,
@@ -210,6 +219,7 @@ impl BotBrain {
             boost_now,
             gauss_damage: body.damages.gauss_charged,
             selfgauss: body.selfgauss == 1,
+            bhop,
         };
         self.mind.tricks.told = told;
         self.mind.tricks.uranium = uranium;
@@ -839,6 +849,35 @@ mod tests {
         assert!(
             nav.tricks.longjump && !nav.tricks.boost_now,
             "beginners long jump on the way, no more"
+        );
+    }
+
+    #[test]
+    fn bunny_hops_are_allowed_from_hard_on_while_nothing_else_has_the_keys() {
+        let balanced = lb_styles::StyleId::Balanced.trick_likes();
+        let told = |level: u8, dress: &mut dyn FnMut(&mut BotBrain, &mut Body)| {
+            let mut brain = new_brain();
+            let mut nav = Nav::new();
+            let ch = character(level, balanced);
+            let mut rng = BotRng::new(3, 3);
+            brain.update(SimTime(1.0), &PARAMS, None, None);
+            let mut b = body(1.0);
+            dress(&mut brain, &mut b);
+            brain.act(&b, &ch, &mut nav, None, &mut rng);
+            nav.tricks.bhop
+        };
+        assert_eq!(told(75, &mut |_, _| {}), Some([1.5, 1.7]));
+        assert_eq!(told(100, &mut |_, _| {}), Some([1.7, 2.0]));
+        assert_eq!(told(74, &mut |_, _| {}), None, "not below hard");
+        assert_eq!(
+            told(100, &mut |_, b| b.tricks.bhop = false),
+            None,
+            "the config switched them off"
+        );
+        assert_eq!(
+            told(100, &mut |brain, _| brain.mind.tricks.leap_until = SimTime(5.0)),
+            None,
+            "a long jump at an enemy has the keys"
         );
     }
 

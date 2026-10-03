@@ -253,8 +253,11 @@ skill_params! {
     longjump_dodge: bool,
     /// Charged gauss shots through thin walls at an enemy lost behind one a moment ago.
     gauss_walls: bool,
-    /// Bunny hop speed limit as a multiple of maxspeed; none = no bunny hopping.
+    /// Bunny hop speed limit as a multiple of maxspeed on a server that crops faster jumps (the SDK, BugfixedHL with
+    /// `mp_bunnyhop 0`), where hops keep just under the crop at 1.7 anyway; none = no bunny hopping.
     bhop_speed: Option<f32>,
+    /// The same on a server that does not crop (BugfixedHL's default `mp_bunnyhop 1`); none = as `bhop_speed`.
+    bhop_speed_uncapped: Option<f32>,
 }
 
 impl SkillParams {
@@ -400,6 +403,7 @@ impl Default for Presets {
             longjump_dodge: false,
             gauss_walls: false,
             bhop_speed,
+            bhop_speed_uncapped: None,
         };
         use AimModel::*;
         let mut presets = Presets {
@@ -455,7 +459,7 @@ impl Default for Presets {
                 8.0,
                 0.6,
                 true,
-                Some(1.25),
+                None,
             ),
             hard: p(
                 [0.14, 0.22],
@@ -533,6 +537,8 @@ impl Default for Presets {
             p.longjump_dodge = true;
             p.throw_series = true;
         }
+        presets.hard.bhop_speed_uncapped = Some(1.7);
+        presets.expert.bhop_speed_uncapped = Some(2.0);
         presets
     }
 }
@@ -601,6 +607,14 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
     if p.aim_error.iter().any(|v| *v < 0.0) {
         return Err(bad("aim_error", "must not be negative"));
     }
+    for (name, v) in [
+        ("bhop_speed", p.bhop_speed),
+        ("bhop_speed_uncapped", p.bhop_speed_uncapped),
+    ] {
+        if v.is_some_and(|v| !(1.0..=4.0).contains(&v)) {
+            return Err(bad(name, "must be in 1..=4 (a multiple of maxspeed) or ~"));
+        }
+    }
     Ok(())
 }
 
@@ -654,6 +668,12 @@ mod tests {
         assert!(p.at(50).tricks);
         assert!(p.at(62).longjump > p.normal.longjump && p.at(62).longjump < p.hard.longjump);
         assert!(!p.at(74).longjump_bold && p.at(75).longjump_bold && p.at(100).longjump_dodge);
+        let bhop = |skill: u8| (p.at(skill).bhop_speed, p.at(skill).bhop_speed_uncapped);
+        assert_eq!(bhop(74), (None, None), "bunny hops from hard on");
+        assert_eq!(bhop(75), (Some(1.5), Some(1.7)));
+        assert_eq!(bhop(100), (Some(1.7), Some(2.0)));
+        let (capped, uncapped) = bhop(87);
+        assert!(capped.is_some_and(|v| v > 1.5 && v < 1.7) && uncapped.is_some_and(|v| v > 1.7 && v < 2.0));
     }
 
     #[test]

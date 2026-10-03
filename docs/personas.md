@@ -62,10 +62,12 @@ these points: recognition time and its floor, aim latency and error, turn speed 
 tricks, how readily long jumps
 are taken (`longjump`: 0.15, 0.35, 0.6, 0.9, 1.0) and whether they are bold and dodge (`longjump_bold`,
 `longjump_dodge`, hard and expert), throwing grenades one after another until none is left (`throw_series`, hard and
-expert), shooting the gauss through walls (`gauss_walls`, hard and expert) and so on.
+expert), shooting the gauss through walls (`gauss_walls`, hard and expert), bunny hopping (`bhop_speed`, and
+`bhop_speed_uncapped` on a server that does not crop fast jumps: hard 1.5 and 1.7 times maxspeed, expert 1.7 and 2.0)
+and so on.
 Between two presets numbers are mixed linearly, so skill 62 is about halfway between normal and hard. Switches (aim
 model, tricks, bold long jumps, grenade series, dodge jumps, bunny hopping) keep the lower preset's value until the
-next point.
+next point: a bot bunny hops from skill 75 on.
 `overrides` in a personality then change single parameters, and `bots.reflex` in `config/lambdabots.yaml` (cvar
 `lb_reflex`, 0.5–2) makes every bot that many times as quick: recognition, aim latency and the scope's settling take
 that share of the time, turns are that much faster.
