@@ -14,7 +14,7 @@ schema: lambdabots/style@1
 #            satchels and snarks
 #   tricks   chances 0..1: longjump (long jumps along straight stretches of the way, with the module), lj_attack
 #            (long jumps at an enemy), gauss_jump (gauss jumps on the way somewhere far), satchel_jump (satchels
-#            thrown from a jump); skills below normal do only the first
+#            thrown from a jump), grenade_jump (grenades thrown from a jump); skills below normal do only the first
 #
 # Anything left out keeps its built-in value.
 
@@ -42,3 +42,4 @@ tricks:
   lj_attack: 0.6
   gauss_jump: 0.33
   satchel_jump: 0.7
+  grenade_jump: 0.6

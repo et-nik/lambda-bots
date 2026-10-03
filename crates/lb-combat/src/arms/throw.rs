@@ -1,9 +1,14 @@
 //! Throwing hand grenades, satchels and snarks.
 //!
 //! - **Grenade:** press the primary attack; the pin is out when the game reports the throw started (its own clock,
-//!   so the fuse is known to the frame). Hold it to cook the grenade so it goes off soon after landing, turn to the
-//!   throw solved for the target, stop for the last moment, and let go: the game throws on its next idle frame.
-//!   Once the pin is out the grenade is always thrown, at the latest shortly before the fuse runs out.
+//!   so the fuse is known to the frame). Hold it to cook the grenade so it goes off soon after landing (as long as
+//!   the plan's delivery lets it: at once on GunGame's grenade level), turn to the throw solved for the target, stop
+//!   for the last moment, and let go: the game throws on its next idle frame. Once the pin is out the grenade is
+//!   always thrown, at the latest a little after its moment, well before the fuse runs out. Thrown on the run (as
+//!   players throw), the bot does not stop: it backs off with the pin out, for the last moment of the cooking runs at
+//!   the target, and lets go running at it, the run in the throw (some 850 units a second, nearly flat). From a jump
+//!   it jumps at the target and lets go near the top of the jump; from a long jump the leap carries the grenade
+//!   further still.
 //! - **Satchel:** draw it (a second), turn to the throw, press the DLL's throw button once the game takes it;
 //!   confirmed when the game reports a charge out and one satchel fewer. A pile is thrown one after another as the
 //!   game allows (a second apart), each at the same spot. Thrown on the run (as players throw at an enemy), the bot
@@ -29,6 +34,7 @@ use lb_worldq::{TraceQuery, Tracer};
 
 use super::{Hands, Request, Status, hold, press, settled, stop, takes};
 use crate::ballistics::{self, Throw, Unchecked};
+use crate::grenade::{self, Aim, Delivery, Plan};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -79,6 +85,42 @@ const SNARK_AIM_UP: f32 = 14.0;
 /// A satchel from a jump leaves this long after the feet leave the ground; the jump waits this long for them to.
 const JUMP_THROW: f64 = 0.12;
 const JUMP_GIVE_UP: f64 = 0.4;
+/// A grenade on the run: the run at the target starts this long before the cooking is done; the grenade leaves
+/// running at it this fast, or once the run has gone on this long. With the target this close the bot runs no closer
+/// (players dash at an enemy closer still, and back off at once).
+const GRENADE_RUN_UP: f32 = 0.35;
+const GRENADE_RUN_FOR: f64 = 0.6;
+const GRENADE_RUN_CLOSE: f32 = 150.0;
+/// A grenade from a jump leaves this long after the feet leave the ground, near the top of the jump (players: 0.2–0.4
+/// s); the jump goes this long before the cooking is done.
+const GRENADE_JUMP_THROW: f64 = 0.28;
+/// A planned grenade is planned again this often (in the air, on the run-up), and over all pitches this often.
+const PLAN_AIR: f64 = 0.03;
+/// A planned grenade leaves only on a plan this fresh, made with the velocity the throw will carry; the plans come
+/// this often in the last moments before it.
+const PLAN_FRESH: f64 = 0.05;
+const PLAN_LAST: f32 = 0.15;
+/// This long before the fuse forces it out, with no plan to be had for `DUMP_STALE`, the grenade goes where its blast
+/// is farthest off: time to turn to that throw, while the fuse still carries the grenade far.
+const DUMP_BEFORE: f32 = 0.5;
+const DUMP_STALE: f64 = 0.15;
+/// A grenade to go at once is let go this long after its moment at the latest, whatever the view: held into the last
+/// half second of its fuse a grenade bursts by the thrower (every suicide by grenade on the GunGame server, 2026-10-02).
+const RUN_OUT: f32 = 0.9;
+/// A planned grenade that missed its moment goes as soon as it can: planned again to leave within this.
+const REPLAN_SLACK: f32 = 0.2;
+/// A quick grenade leaves with the view this close to the throw (degrees): many grenades, not exact ones.
+const QUICK_SETTLED: f32 = 3.0;
+/// Cooking a planned grenade before the run-up the bot keeps moving, as players do: back from the target this close
+/// (along a slant, out of a straight line of fire), across it further off.
+const COOK_BACK: f32 = 650.0;
+const COOK_SLANT: f32 = 0.5;
+const PLAN_RUN: f64 = 0.05;
+const PLAN_FULL: f64 = 0.3;
+/// The bot runs at this speed at the throw, as it is planned before the run-up.
+const RUN_EXPECTED: f32 = 270.0;
+/// A planned grenade leaves within this of the pin time asked: later, the blast would come a tick late.
+const RELEASE_WINDOW: f32 = 0.05;
 /// Thrown on the run, the satchel leaves once the bot runs at the target this fast and the throw lands within this
 /// of it; not so by then, or with the target this close, it stays in hand (it would go off by the thrower).
 const RUN_UP_SPEED: f32 = 320.0;
@@ -104,6 +146,20 @@ enum Phase {
     Jump { at: SimTime },
 }
 
+/// A grenade planned at `aim` as `plan` (made at `made`), thrown as `delivery`; planned again last at `at`, over all
+/// pitches at `full`. `fallback`: no throw at the enemy could be had as the fuse ran low; it goes where the enemy most
+/// likely is round a corner (`"behind cover"`), else where its blast is farthest off (`"dumped"`).
+#[derive(Clone, Debug)]
+struct Planned {
+    aim: Aim,
+    plan: Plan,
+    delivery: Delivery,
+    made: SimTime,
+    at: SimTime,
+    full: SimTime,
+    fallback: Option<&'static str>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Thrower {
     pub kind: Kind,
@@ -118,12 +174,23 @@ pub struct Thrower {
     quick: bool,
     /// Satchels still to throw at the target, this one included.
     pile: u32,
-    /// Satchels are thrown on the run at the target; since when it runs (the satchel in hand).
+    /// Satchels and grenades are thrown on the run at the target; since when it runs (the satchel in hand, the
+    /// grenade's run-up).
     run: bool,
     run_from: Option<SimTime>,
-    /// Satchels are thrown from a jump; a long jump (its keys are the caller's to press): the leap carries them far.
+    /// Satchels and grenades are thrown from a jump; a long jump (its keys are the caller's to press): the leap
+    /// carries them far.
     jump: bool,
     leap: bool,
+    /// When a grenade's jump was asked for.
+    jumped: Option<SimTime>,
+    /// A planned grenade; where and when it should burst once thrown.
+    planned: Option<Box<Planned>>,
+    burst: Option<(Vec3, SimTime)>,
+    /// Let go only because the fuse was running out.
+    forced: bool,
+    /// The view pitch and the bot's velocity as a grenade was let go.
+    launch: Option<(f32, Vec3)>,
     /// Where the satchels thrown so far should land.
     pub landings: Vec<Vec3>,
     /// The satchel button that throws here, once one did or the one the DLL profile names did nothing.
@@ -155,6 +222,11 @@ impl Thrower {
             run_from: None,
             jump: false,
             leap: false,
+            jumped: None,
+            planned: None,
+            burst: None,
+            forced: false,
+            launch: None,
             landings: Vec::new(),
             button: None,
             pressed_out: false,
@@ -162,6 +234,35 @@ impl Thrower {
             set_off: false,
             pin: None,
         }
+    }
+
+    /// A grenade planned at `aim` (see [`grenade::plan`]), first as `plan`, thrown as `delivery`: cooked to burst where
+    /// the enemy will be, as long as the delivery lets it.
+    pub fn planned(mut self, aim: Aim, plan: Plan, delivery: Delivery) -> Thrower {
+        self.planned = Some(Box::new(Planned {
+            aim,
+            plan,
+            delivery,
+            made: self.started,
+            at: self.started,
+            full: self.started,
+            fallback: None,
+        }));
+        self.throw = plan.throw;
+        self.target = plan.target;
+        self
+    }
+
+    /// The enemy a planned grenade is for, seen again: the plan follows it.
+    pub fn retarget(&mut self, aim: Aim) {
+        if let Some(p) = &mut self.planned {
+            p.aim = aim;
+        }
+    }
+
+    /// The grenade's plan as it stands.
+    pub fn plan(&self) -> Option<&Plan> {
+        self.planned.as_ref().map(|p| &p.plan)
     }
 
     /// Thrown as soon as the game allows, without cooking.
@@ -176,20 +277,20 @@ impl Thrower {
         self
     }
 
-    /// Satchels thrown on the run at the target.
+    /// Satchels or a grenade thrown on the run at the target.
     pub fn on_the_run(mut self) -> Thrower {
         self.run = true;
         self
     }
 
-    /// Satchels thrown on the run, from a jump.
+    /// Satchels or a grenade thrown on the run, from a jump.
     pub fn from_jump(mut self) -> Thrower {
         self.run = true;
         self.jump = true;
         self
     }
 
-    /// Satchels thrown on the run, from a long jump.
+    /// Satchels or a grenade thrown on the run, from a long jump.
     pub fn from_leap(mut self) -> Thrower {
         self.leap = true;
         self.from_jump()
@@ -200,8 +301,72 @@ impl Thrower {
         self.leap
     }
 
-    /// Where the thrown grenade or satchel should come down.
+    /// Let go only because the fuse was running out (`Some("forced by the fuse")`), or on a fallback with no throw
+    /// at the enemy to be had (`Some("behind cover")`, `Some("dumped")`).
+    pub fn forced(&self) -> Option<&'static str> {
+        self.planned
+            .as_ref()
+            .and_then(|p| p.fallback)
+            .or(self.forced.then_some("forced by the fuse"))
+    }
+
+    /// While a planned grenade cooks before its run-up: back from the target along a slant when it is close, across
+    /// it when it is far, the side picked by when the throw began; none toward a drop (the fight moves the bot then).
+    fn cook_move(&self, h: &Hands<'_>, tracer: &mut dyn Tracer, toward: lb_core::Vec2) -> Option<MoveIntent> {
+        if toward == lb_core::Vec2::ZERO || !h.on_ground {
+            return None;
+        }
+        let side = if (self.started.secs() * 10.0) as i64 % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let across = lb_core::Vec2::new(-toward.y, toward.x) * side;
+        let far = (self.target - h.origin).truncate().length() >= COOK_BACK;
+        let dir = if far {
+            across
+        } else {
+            (-toward + across * COOK_SLANT).normalize()
+        };
+        [dir, if far { -across } else { -toward }]
+            .into_iter()
+            .find(|d| !crate::fight::drops(tracer, h.origin, *d * RUN_UP_SPEED))
+            .map(|dir| MoveIntent {
+                dir,
+                speed: RUN_UP_SPEED,
+            })
+    }
+
+    /// The view pitch and the bot's velocity as the grenade was let go: the game throws it with them.
+    pub fn launch(&self) -> Option<(f32, Vec3)> {
+        self.launch
+    }
+
+    /// How it is thrown: from a stand, on the run, from a jump or a long jump.
+    pub fn way(&self) -> &'static str {
+        match (self.run, self.jumped.is_some(), self.leap) {
+            (false, _, _) => "standing",
+            (true, false, _) => "on the run",
+            (true, true, false) => "from a jump",
+            (true, true, true) => "from a long jump",
+        }
+    }
+
+    /// A grenade to back off from at once, as players do: one at the enemy, not from a long jump (the leap carries the
+    /// bot on) nor one dumped (its blast is anywhere but by the enemy).
+    pub fn backs_off(&self) -> bool {
+        !self.leap
+            && match &self.planned {
+                Some(p) => p.fallback != Some("dumped"),
+                None => self.run,
+            }
+    }
+
+    /// Where the thrown grenade or satchel should come down (a planned grenade: where it bursts).
     pub fn landing(&self, sv_gravity: f32) -> Vec3 {
+        if let Some(p) = &self.planned {
+            return p.plan.burst;
+        }
         let t = &self.throw;
         ballistics::position_at(
             t.start,
@@ -211,9 +376,11 @@ impl Thrower {
         )
     }
 
-    /// When the grenade goes off, once its pin is out.
+    /// When the grenade goes off, once its pin is out (a planned one: on its tick after the throw).
     pub fn goes_off(&self) -> Option<SimTime> {
-        self.pin.map(|pin| SimTime(pin + f64::from(GRENADE_FUSE)))
+        self.burst
+            .map(|b| b.1)
+            .or_else(|| self.pin.map(|pin| SimTime(pin + f64::from(GRENADE_FUSE))))
     }
 
     /// The pin is out: the grenade must be thrown whatever else comes up.
@@ -237,13 +404,13 @@ impl Thrower {
 
     pub fn update(&mut self, h: &Hands<'_>, tracer: &mut dyn Tracer) -> Status {
         match self.kind {
-            Kind::Grenade => self.grenade(h),
+            Kind::Grenade => self.grenade(h, tracer),
             Kind::Satchel => self.satchel(h),
             Kind::Snark => self.snark(h, tracer),
         }
     }
 
-    fn grenade(&mut self, h: &Hands<'_>) -> Status {
+    fn grenade(&mut self, h: &Hands<'_>, tracer: &mut dyn Tracer) -> Status {
         let now = h.now;
         let w = WeaponId::HandGrenade;
         let pin = h.predicted(w).map(|p| f64::from(p.start_throw)).filter(|t| *t > 0.0);
@@ -262,13 +429,92 @@ impl Thrower {
             }
             Phase::Cook { pin } => {
                 let held = (now.secs() - pin) as f32;
-                let cook = if self.quick {
-                    GRENADE_MIN_COOK
-                } else {
-                    (GRENADE_FUSE - self.throw.flight - LAND_BEFORE_FUSE).clamp(GRENADE_MIN_COOK, MAX_COOK)
-                };
-                let deadline = GRENADE_FUSE - FUSE_MARGIN;
-                if now.since(self.resolved_at) >= RESOLVE {
+                let deadline = self
+                    .planned
+                    .as_ref()
+                    .map_or(grenade::LATEST, |p| p.delivery.latest + RUN_OUT)
+                    .min(grenade::LATEST)
+                    .min(GRENADE_FUSE - FUSE_MARGIN);
+                let airborne = self.jumped.is_some() && !h.on_ground;
+                let toward = (self.target - h.origin).truncate().normalize_or_zero();
+                // Close to the target the bot runs no closer: the grenade goes as from a stand.
+                let run = self.run && (self.target - h.origin).truncate().length() >= GRENADE_RUN_CLOSE;
+                if let Some(pl) = &mut self.planned {
+                    // Planned again as the bot and the enemy move: in the air and on the run-up often (the velocity
+                    // the throw carries changes fast), and at once when the moment to let go has passed.
+                    let every = if airborne || held >= pl.plan.release_held - PLAN_LAST {
+                        PLAN_AIR
+                    } else if self.run_from.is_some() {
+                        PLAN_RUN
+                    } else {
+                        RESOLVE
+                    };
+                    let missed = held > pl.plan.release_held + RELEASE_WINDOW;
+                    if missed || now.since(pl.at) >= every {
+                        pl.at = now;
+                        // Before the run-up the throw is planned with the run it will carry.
+                        let velocity = if run && self.run_from.is_none() && self.jumped.is_none() {
+                            toward.extend(0.0) * RUN_EXPECTED
+                        } else {
+                            h.velocity
+                        };
+                        // A quick grenade keeps the pitch it was planned with: the view stays on the throw.
+                        let full = !pl.delivery.quick && now.since(pl.full) >= PLAN_FULL;
+                        if full {
+                            pl.full = now;
+                        }
+                        let near = (!full).then_some(pl.plan.throw.pitch);
+                        let aim = pl.aim;
+                        // Past its moment the grenade goes as soon as it can.
+                        let delivery = Delivery {
+                            latest: pl.delivery.latest.max(held + REPLAN_SLACK),
+                            ..pl.delivery
+                        };
+                        let made = grenade::plan(
+                            tracer, h.eye, h.origin, velocity, &aim, h.gravity, h.dll, held, held, near, delivery,
+                        );
+                        // Nothing over the few pitches near the last: over all of them.
+                        let made = match made {
+                            None if near.is_some() => {
+                                pl.full = now;
+                                grenade::plan(
+                                    tracer, h.eye, h.origin, velocity, &aim, h.gravity, h.dll, held, held, None,
+                                    delivery,
+                                )
+                            }
+                            made => made,
+                        };
+                        if let Some(p) = made
+                            && pl.fallback.is_none()
+                        {
+                            pl.plan = p;
+                            pl.made = now;
+                            self.throw = p.throw;
+                            self.target = p.target;
+                        }
+                    }
+                    // Nothing to throw at to be had while the fuse runs low (the bot boxed in, the enemy come
+                    // close): away from the bot, as far as it goes.
+                    if pl.fallback.is_none() && held >= deadline - DUMP_BEFORE && now.since(pl.made) > DUMP_STALE {
+                        // Where the enemy most likely is round the corner, else away from the bot.
+                        let aim = pl.aim;
+                        let to = grenade::plan_behind_cover(
+                            tracer, h.eye, h.origin, h.velocity, &aim, h.gravity, h.dll, held, deadline,
+                        )
+                        .map(|p| (p, "behind cover"))
+                        .or_else(|| {
+                            grenade::dump(tracer, h.eye, h.origin, h.velocity, h.gravity, h.dll, held)
+                                .map(|p| (p, "dumped"))
+                        });
+                        pl.fallback = Some(to.map_or("dumped", |t| t.1));
+                        if let Some((p, _)) = to {
+                            pl.plan = p;
+                            pl.made = now;
+                            self.throw = p.throw;
+                        }
+                    }
+                } else if now.since(self.resolved_at) >= RESOLVE || airborne {
+                    // In the air the velocity the throw carries changes fast: solved every frame.
                     self.resolved_at = now;
                     if let Some(t) =
                         ballistics::grenade(&mut Unchecked, h.eye, h.velocity, self.target, h.gravity, h.dll, 3.0)
@@ -276,38 +522,150 @@ impl Thrower {
                         self.throw = t;
                     }
                 }
-                let angles = self.angles();
-                if settled(h.view, angles, 1.5) {
+                // A quick grenade goes as soon as the bot is ready, on whatever tick that gives it.
+                let quick = self.planned.as_ref().is_some_and(|p| p.delivery.quick);
+                let (cook, late) = match &self.planned {
+                    Some(p) => (
+                        p.plan.release_held,
+                        !quick && p.fallback.is_none() && held > p.plan.release_held + RELEASE_WINDOW,
+                    ),
+                    _ if self.quick => (GRENADE_MIN_COOK, false),
+                    _ => (
+                        (GRENADE_FUSE - self.throw.flight - LAND_BEFORE_FUSE).clamp(GRENADE_MIN_COOK, MAX_COOK),
+                        false,
+                    ),
+                };
+                if !run || self.planned.as_ref().is_some_and(|p| p.fallback.is_some()) {
+                    self.run_from = None;
+                } else if held >= cook - GRENADE_RUN_UP || self.jumped.is_some() {
+                    self.run_from.get_or_insert(now);
+                }
+                // Before a long jump the view is on the target: the leap goes along it.
+                let angles = if self.leap && self.jumped.is_none() && self.run_from.is_some() {
+                    dir_to_view_angles(self.target - h.eye)
+                } else {
+                    self.angles()
+                };
+                if settled(h.view, angles, if quick { QUICK_SETTLED } else { 1.5 }) {
                     self.steady_since.get_or_insert(now);
                 } else {
                     self.steady_since = None;
                 }
                 let steady = self.steady_since.is_some_and(|t| now.since(t) >= STEADY);
-                let go = held >= deadline || (held >= cook && steady);
+                let running = h.on_ground && h.velocity.truncate().dot(toward) >= RUN_UP_MIN;
+                let mut jump = false;
+                if let Some(at) = self.jumped
+                    && h.on_ground
+                    && now.since(at) >= JUMP_GIVE_UP
+                {
+                    // The jump never came (no room, or no safe landing for a long jump): from the ground.
+                    self.jump = false;
+                    self.leap = false;
+                    self.jumped = None;
+                }
+                let dumped = self.planned.as_ref().is_some_and(|p| p.fallback.is_some());
+                let go = if held >= deadline {
+                    true
+                } else if dumped {
+                    // Once the view is on it, whatever the run.
+                    steady && held >= cook
+                } else if late {
+                    // Its tick is gone (the view was not on the throw in time): the plan takes the next one.
+                    false
+                } else if let Some(at) = self.jumped {
+                    jump = h.on_ground;
+                    !h.on_ground && now.since(at) >= GRENADE_JUMP_THROW && steady && held >= cook.min(deadline)
+                } else if self.run_from.is_some() {
+                    let ran_for = self.run_from.is_some_and(|t| now.since(t) >= GRENADE_RUN_FOR);
+                    if self.jump && running && held >= cook - GRENADE_JUMP_THROW as f32 && settled(h.view, angles, 5.0)
+                    {
+                        self.jumped = Some(now);
+                        jump = true;
+                        false
+                    } else if self.jump && ran_for {
+                        // Never got to run at the target for the jump: from the ground, the view onto the throw.
+                        self.jump = false;
+                        self.leap = false;
+                        false
+                    } else {
+                        held >= cook && steady && (running || ran_for)
+                    }
+                } else {
+                    held >= cook && steady
+                };
+                let run_up = MoveIntent {
+                    dir: toward,
+                    speed: RUN_UP_SPEED,
+                };
+                // Cooking before the run-up the bot moves as the fight has it; a planned grenade is not stopped for
+                // either: the plan carries whatever velocity the bot has.
+                let planned = self.planned.is_some();
+                let movement = if dumped {
+                    None
+                } else if self.run_from.is_some() {
+                    Some(run_up)
+                } else if planned {
+                    self.cook_move(h, tracer, toward)
+                } else if run {
+                    None
+                } else {
+                    (held >= cook - STOP_BEFORE).then(stop)
+                };
+                let fresh = self
+                    .planned
+                    .as_ref()
+                    .is_none_or(|p| p.fallback.is_some() || now.since(p.made) <= PLAN_FRESH);
+                self.forced = held >= deadline && !(go && fresh);
+                let go = held >= deadline || (go && fresh);
                 if go {
                     self.phase = Phase::Released { at: now };
+                    self.launch = Some((h.view.x, h.velocity));
+                    if let Some(p) = &self.planned {
+                        // Let go by the fuse on a plan gone stale, or quick off its tick: it bursts on the tick the
+                        // fuse left gives it.
+                        let flight = if (self.forced || quick) && p.fallback.is_none() {
+                            let fuse = (GRENADE_FUSE - held).max(0.0);
+                            ((fuse / grenade::THINK).ceil() + 1.0) * grenade::THINK
+                        } else {
+                            p.plan.throw.flight
+                        };
+                        self.burst = Some((p.plan.burst, now + f64::from(flight)));
+                    }
                     return Status::Running(Request {
                         weapon: Some(hold(w)),
-                        look: Some(LookIntent::Angles(angles)),
-                        movement: Some(stop()),
+                        look: Some(LookIntent::Angles(self.angles())),
+                        movement: if self.run_from.is_some() {
+                            Some(run_up)
+                        } else {
+                            (!planned).then(stop)
+                        },
                         jump: false,
                     });
                 }
                 Status::Running(Request {
                     weapon: Some(press(w, Attack::Primary, Trigger::Hold, 0.0)),
                     look: Some(LookIntent::Angles(angles)),
-                    movement: (held >= cook - STOP_BEFORE).then(stop),
-                    jump: false,
+                    movement,
+                    jump,
                 })
             }
             Phase::Released { at } => {
                 if pin.is_none() || now.since(at) >= CONFIRM {
                     return Status::Done;
                 }
+                // The game throws on its next idle frame, with the velocity the bot has then: the run goes on.
+                let toward = (self.target - h.origin).truncate().normalize_or_zero();
                 Status::Running(Request {
                     weapon: Some(hold(w)),
                     look: Some(LookIntent::Angles(self.angles())),
-                    movement: Some(stop()),
+                    movement: if self.run_from.is_some() {
+                        Some(MoveIntent {
+                            dir: toward,
+                            speed: RUN_UP_SPEED,
+                        })
+                    } else {
+                        self.planned.is_none().then(stop)
+                    },
                     jump: false,
                 })
             }
@@ -585,6 +943,7 @@ mod tests {
     use lb_game::dll::{DllKind, DllProfile};
     use lb_game::self_state::{PredictedWeapon, Prediction};
     use lb_motor::Fire;
+    use lb_worldq::TraceQuery;
 
     struct Scene {
         view: Vec3,
@@ -613,6 +972,302 @@ mod tests {
                 deploying: false,
             }
         }
+    }
+
+    /// A flat floor at z = -36.
+    struct Floor;
+
+    impl Tracer for Floor {
+        fn trace(&mut self, q: &TraceQuery) -> lb_worldq::Trace {
+            let mut t = lb_worldq::Trace::clear(q.end);
+            if q.end.z < -36.0 && q.start.z >= -36.0 {
+                t.fraction = (q.start.z + 36.0) / (q.start.z - q.end.z);
+                t.end = q.start + (q.end - q.start) * t.fraction;
+                t.normal = Vec3::Z;
+            }
+            t
+        }
+
+        fn point_contents(&mut self, _p: Vec3) -> i32 {
+            lb_worldq::contents::EMPTY
+        }
+    }
+
+    /// What a planned grenade did, thrown by a bot that moves as asked (full speed at once on the ground).
+    struct Thrown {
+        pin: f64,
+        released: f64,
+        velocity: Vec3,
+        origin: Vec3,
+        on_ground: bool,
+        backed_off: bool,
+        jumped: bool,
+        after: Option<MoveIntent>,
+    }
+
+    fn throw_planned(th: &mut Thrower, aim: &Aim) -> Thrown {
+        let mut scene = Scene {
+            view: Vec3::ZERO,
+            arsenal: vec![Armed::new(WeaponId::HandGrenade, None, Some(3))],
+            prediction: Prediction {
+                current: Some(WeaponId::HandGrenade),
+                primary_ammo: 3,
+                ..Prediction::default()
+            },
+            dll: DllProfile::resolve("auto", true),
+        };
+        let (mut origin, mut velocity) = (Vec3::ZERO, Vec3::ZERO);
+        let mut air: Option<f64> = None;
+        let mut out = Thrown {
+            pin: -1.0,
+            released: -1.0,
+            velocity: Vec3::ZERO,
+            origin: Vec3::ZERO,
+            on_ground: true,
+            backed_off: false,
+            jumped: false,
+            after: None,
+        };
+        // The game's clock: a pin pulled at 0 would read as none.
+        let mut t = 1.0;
+        while t < 5.0 {
+            let mut h = scene.hands(t, WeaponId::HandGrenade);
+            h.origin = origin;
+            h.eye = origin + Vec3::Z * 28.0;
+            h.velocity = velocity;
+            h.on_ground = air.is_none();
+            let Status::Running(r) = th.update(&h, &mut Floor) else {
+                break;
+            };
+            let fire = r.weapon.map_or(Fire::None, |w| w.fire);
+            if fire == Fire::Primary && out.pin < 0.0 {
+                out.pin = t;
+            }
+            if out.pin >= 0.0 && out.released < 0.0 {
+                if fire == Fire::None {
+                    out.released = t;
+                    out.velocity = velocity;
+                    out.origin = origin;
+                    out.on_ground = air.is_none();
+                } else if r.movement.is_some_and(|m| m.dir.x < 0.5) {
+                    out.backed_off = true;
+                }
+            } else if out.released >= 0.0 && out.after.is_none() {
+                out.after = r.movement;
+            }
+            if let Some(LookIntent::Angles(a)) = r.look {
+                let d = a - scene.view;
+                scene.view += d.clamp_length_max(5.0);
+            }
+            if r.jump && air.is_none() {
+                out.jumped = true;
+                air = Some(t);
+                velocity.z = 268.0;
+            }
+            if let Some(m) = r.movement
+                && air.is_none()
+            {
+                velocity = (m.dir * m.speed.min(300.0)).extend(0.0);
+            }
+            if let Some(at) = air {
+                velocity.z -= 800.0 * 0.01;
+                if t - at > 0.6 {
+                    air = None;
+                    velocity.z = 0.0;
+                }
+            }
+            origin += velocity * 0.01;
+            // The game throws on its idle frame a moment after the button is let go.
+            let thrown = out.released >= 0.0 && t > out.released + 0.015;
+            let pin = if thrown { 0.0 } else { out.pin.max(0.0) as f32 };
+            scene.prediction.weapons[WeaponId::HandGrenade as usize] = Some(PredictedWeapon {
+                start_throw: pin,
+                ..PredictedWeapon::default()
+            });
+            th.retarget(*aim);
+            t += 0.01;
+        }
+        out
+    }
+
+    #[test]
+    fn a_planned_grenade_goes_on_the_run_cooked_to_its_tick() {
+        let dll = DllProfile::resolve("auto", true);
+        let aim = Aim {
+            pos: Vec3::new(700.0, 0.0, 0.0),
+            vel: Vec3::ZERO,
+            sigma: 20.0,
+            spread: 110.0,
+        };
+        let eye = Vec3::new(0.0, 0.0, 28.0);
+        let run = Vec3::new(270.0, 0.0, 0.0);
+        let plan = grenade::plan(
+            &mut Floor,
+            eye,
+            Vec3::ZERO,
+            run,
+            &aim,
+            800.0,
+            dll,
+            0.0,
+            0.0,
+            None,
+            Delivery::COOKED,
+        )
+        .unwrap();
+        let mut th = Thrower::new(Kind::Grenade, plan.target, plan.throw, SimTime(1.0))
+            .planned(aim, plan, Delivery::COOKED)
+            .on_the_run();
+        let out = throw_planned(&mut th, &aim);
+        assert!(out.released > 0.0, "thrown");
+        let held = (out.released - out.pin) as f32;
+        let p = th.plan().unwrap();
+        assert!(
+            held >= p.release_held - 0.011 && held <= p.release_held + RELEASE_WINDOW,
+            "let go with the pin out {held} s, planned {}",
+            p.release_held
+        );
+        assert!(held <= grenade::LATEST);
+        assert!(
+            out.backed_off,
+            "it keeps moving off the line to the target while it cooks"
+        );
+        let toward = (aim.pos - out.origin).truncate().normalize();
+        assert!(
+            out.velocity.truncate().dot(toward) >= RUN_UP_MIN && out.on_ground,
+            "running at it: {:?}",
+            out.velocity
+        );
+        assert!(grenade::blast_damage(p.burst, aim.pos) > 60.0, "{p:?}");
+        assert!(
+            out.after.is_some_and(|m| m.dir.dot(toward) > 0.9),
+            "the run goes on until the game throws"
+        );
+        assert!(th.goes_off().is_some());
+    }
+
+    #[test]
+    fn a_planned_grenade_from_a_jump_leaves_in_the_air() {
+        let dll = DllProfile::resolve("auto", true);
+        let aim = Aim {
+            pos: Vec3::new(800.0, 0.0, 0.0),
+            vel: Vec3::ZERO,
+            sigma: 20.0,
+            spread: 110.0,
+        };
+        let eye = Vec3::new(0.0, 0.0, 28.0);
+        let run = Vec3::new(270.0, 0.0, 0.0);
+        let plan = grenade::plan(
+            &mut Floor,
+            eye,
+            Vec3::ZERO,
+            run,
+            &aim,
+            800.0,
+            dll,
+            0.0,
+            0.0,
+            None,
+            Delivery::COOKED,
+        )
+        .unwrap();
+        let mut th = Thrower::new(Kind::Grenade, plan.target, plan.throw, SimTime(1.0))
+            .planned(aim, plan, Delivery::COOKED)
+            .from_jump();
+        let out = throw_planned(&mut th, &aim);
+        assert!(out.jumped && out.released > 0.0);
+        assert!(!out.on_ground, "let go in the air");
+        assert!((out.released - out.pin) as f32 <= grenade::LATEST);
+    }
+
+    const QUICK: Delivery = Delivery {
+        latest: 0.75,
+        quick: true,
+        flat: true,
+        retreat: true,
+    };
+
+    #[test]
+    fn a_quick_grenade_goes_at_once_with_a_dash_at_the_enemy() {
+        let dll = DllProfile::resolve("auto", true);
+        let aim = Aim {
+            pos: Vec3::new(400.0, 0.0, 0.0),
+            vel: Vec3::ZERO,
+            sigma: 20.0,
+            spread: 110.0,
+        };
+        let eye = Vec3::new(0.0, 0.0, 28.0);
+        let run = Vec3::new(270.0, 0.0, 0.0);
+        let plan = grenade::plan(
+            &mut Floor,
+            eye,
+            Vec3::ZERO,
+            run,
+            &aim,
+            800.0,
+            dll,
+            0.0,
+            0.0,
+            None,
+            QUICK,
+        )
+        .unwrap();
+        let mut th = Thrower::new(Kind::Grenade, plan.target, plan.throw, SimTime(1.0))
+            .planned(aim, plan, QUICK)
+            .on_the_run();
+        let out = throw_planned(&mut th, &aim);
+        let held = (out.released - out.pin) as f32;
+        assert!(
+            held <= QUICK.latest + RELEASE_WINDOW + 0.02,
+            "let go with the pin out {held} s"
+        );
+        let toward = (aim.pos - out.origin).truncate().normalize();
+        assert!(
+            out.velocity.truncate().dot(toward) >= RUN_UP_MIN,
+            "dashing at it: {:?}",
+            out.velocity
+        );
+        assert!(th.backs_off(), "and backs off once it is out");
+    }
+
+    #[test]
+    fn a_quick_grenade_with_no_throw_to_be_had_is_not_held_into_the_fuse() {
+        let dll = DllProfile::resolve("auto", true);
+        let near = Aim {
+            pos: Vec3::new(400.0, 0.0, 0.0),
+            vel: Vec3::ZERO,
+            sigma: 20.0,
+            spread: 110.0,
+        };
+        let eye = Vec3::new(0.0, 0.0, 28.0);
+        let plan = grenade::plan(
+            &mut Floor,
+            eye,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            &near,
+            800.0,
+            dll,
+            0.0,
+            0.0,
+            None,
+            QUICK,
+        )
+        .unwrap();
+        let mut th = Thrower::new(Kind::Grenade, plan.target, plan.throw, SimTime(1.0)).planned(near, plan, QUICK);
+        // The enemy is gone far out of reach at once: no throw at it to be had.
+        let gone = Aim {
+            pos: Vec3::new(9000.0, 0.0, 0.0),
+            ..near
+        };
+        let out = throw_planned(&mut th, &gone);
+        let held = (out.released - out.pin) as f32;
+        assert!(out.released > 0.0, "thrown");
+        assert!(
+            held <= QUICK.latest + RUN_OUT + 0.02,
+            "let go with the pin out {held} s"
+        );
+        assert!(th.forced().is_some(), "{:?}", th.forced());
     }
 
     #[test]

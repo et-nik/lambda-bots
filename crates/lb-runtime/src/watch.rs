@@ -1,7 +1,7 @@
 //! `lb watch`: what a player does, written to the log to study how people play. Twenty times a second where they
 //! are, how they move, where they look and what they hold; four times a second the room around them and where the
-//! others are; their shots with what the shot met, their tripmines as they are laid and go, and their satchels as
-//! they are thrown, come to rest and go off.
+//! others are; their shots with what the shot met, their tripmines as they are laid and go, and their satchels and
+//! hand grenades as they are thrown, fly (twenty times a second), come to rest and go off.
 
 use lb_core::Vec3;
 use lb_core::time::SimTime;
@@ -27,12 +27,13 @@ pub(crate) struct Watched {
     next_room: SimTime,
     /// Its tripmines on the map by entity index: when each was first seen.
     mines: FxHashMap<u16, SimTime>,
-    /// Its satchels out by entity index.
-    satchels: FxHashMap<u16, Satchel>,
+    /// Its satchels and hand grenades out by entity index.
+    thrown: FxHashMap<u16, Thrown>,
     shots: Vec<Shot>,
 }
 
-struct Satchel {
+struct Thrown {
+    what: &'static str,
     thrown: SimTime,
     from: Vec3,
     at: Vec3,
@@ -53,7 +54,7 @@ impl Watched {
             next: SimTime::ZERO,
             next_room: SimTime::ZERO,
             mines: FxHashMap::default(),
-            satchels: FxHashMap::default(),
+            thrown: FxHashMap::default(),
             shots: Vec::new(),
         }
     }
@@ -239,9 +240,11 @@ pub(crate) fn mines(rt: &mut Runtime, laid: &[(u16, u16, Vec3, Vec3, bool)]) {
     }
 }
 
-/// After the projectiles are refreshed: the watched players' satchels (index, owner, origin, velocity) thrown, come to
-/// rest and gone, how far the player and the nearest other player were from each as it went.
-pub(crate) fn satchels(rt: &mut Runtime, out: &[(u16, u16, Vec3, Vec3)]) {
+/// After the projectiles are refreshed: the watched players' satchels and hand grenades (what, index, owner, origin,
+/// velocity) thrown, come to rest and gone, how far the player and the nearest other player were from each as it was
+/// thrown and as it went. One gone off is seen where it burst (`bursts`: index, origin; the entity stays a moment,
+/// hidden, there); else where it was last seen.
+pub(crate) fn thrown(rt: &mut Runtime, out: &[(&'static str, u16, u16, Vec3, Vec3)], bursts: &[(u16, Vec3)]) {
     let now = rt.now;
     let clients = &rt.clients_now;
     for w in &mut rt.watched {
@@ -249,11 +252,19 @@ pub(crate) fn satchels(rt: &mut Runtime, out: &[(u16, u16, Vec3, Vec3)]) {
             continue;
         };
         let (slot, userid) = (u16::from(w.slot), w.userid);
-        for &(index, _, origin, velocity) in out.iter().filter(|s| s.1 == slot) {
-            let Some(s) = w.satchels.get_mut(&index) else {
+        let nearest_other = |at: Vec3| {
+            clients
+                .iter()
+                .filter(|c| u16::from(c.slot) != slot && c.state == ClientState::Spawned && c.deadflag == 0)
+                .map(|c| (c.origin.distance(at), c.userid))
+                .fold((f32::INFINITY, 0), |a, b| if b.0 < a.0 { b } else { a })
+        };
+        for &(what, index, _, origin, velocity) in out.iter().filter(|s| s.2 == slot) {
+            let Some(s) = w.thrown.get_mut(&index) else {
                 let v = view(me);
+                let (d, other) = nearest_other(origin);
                 tracing::info!(
-                    "watch #{userid} satchel #{index} thrown: at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0}; the player at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0} view {:.1} {:.1}",
+                    "watch #{userid} {what} #{index} thrown: at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0}; the player at {:.0} {:.0} {:.0} vel {:.0} {:.0} {:.0} view {:.1} {:.1}{}; the nearest other #{other} {d:.0} off",
                     origin.x,
                     origin.y,
                     origin.z,
@@ -267,11 +278,13 @@ pub(crate) fn satchels(rt: &mut Runtime, out: &[(u16, u16, Vec3, Vec3)]) {
                     me.velocity.y,
                     me.velocity.z,
                     v.x,
-                    v.y
+                    v.y,
+                    if me.flags & FL_ONGROUND != 0 { " ground" } else { " air" }
                 );
-                w.satchels.insert(
+                w.thrown.insert(
                     index,
-                    Satchel {
+                    Thrown {
+                        what,
                         thrown: now,
                         from: origin,
                         at: origin,
@@ -281,10 +294,20 @@ pub(crate) fn satchels(rt: &mut Runtime, out: &[(u16, u16, Vec3, Vec3)]) {
                 continue;
             };
             s.at = origin;
+            tracing::info!(
+                "watch #{userid} {what} #{index} path {:.2} at {:.1} {:.1} {:.1} vel {:.0} {:.0} {:.0}",
+                now.since(s.thrown),
+                origin.x,
+                origin.y,
+                origin.z,
+                velocity.x,
+                velocity.y,
+                velocity.z
+            );
             if !s.lying && velocity.length() < 1.0 {
                 s.lying = true;
                 tracing::info!(
-                    "watch #{userid} satchel #{index} lies at {:.0} {:.0} {:.0} after {:.1} s, {:.0} units from where it was first seen, the player {:.0} off",
+                    "watch #{userid} {what} #{index} lies at {:.0} {:.0} {:.0} after {:.1} s, {:.0} units from where it was first seen, the player {:.0} off",
                     origin.x,
                     origin.y,
                     origin.z,
@@ -294,22 +317,22 @@ pub(crate) fn satchels(rt: &mut Runtime, out: &[(u16, u16, Vec3, Vec3)]) {
                 );
             }
         }
-        w.satchels.retain(|index, s| {
-            let here = out.iter().any(|o| o.0 == *index && o.1 == slot);
+        w.thrown.retain(|index, s| {
+            let here = out.iter().any(|o| o.1 == *index && o.2 == slot);
             if !here {
-                let other = clients
-                    .iter()
-                    .filter(|c| u16::from(c.slot) != slot && c.state == ClientState::Spawned && c.deadflag == 0)
-                    .map(|c| c.origin.distance(s.at))
-                    .fold(f32::INFINITY, f32::min);
+                let burst = bursts.iter().find(|b| b.0 == *index).map(|b| b.1);
+                let at = burst.unwrap_or(s.at);
+                let (d, other) = nearest_other(at);
                 tracing::info!(
-                    "watch #{userid} satchel #{index} gone after {:.1} s at {:.0} {:.0} {:.0}: the player {:.0} units off, the nearest other {:.0}",
+                    "watch #{userid} {} #{index} {} after {:.2} s at {:.0} {:.0} {:.0}, {:.0} units from where it was first seen: the player {:.0} units off, the nearest other #{other} {d:.0}",
+                    s.what,
+                    if burst.is_some() { "burst" } else { "gone" },
                     now.since(s.thrown),
-                    s.at.x,
-                    s.at.y,
-                    s.at.z,
-                    s.at.distance(me.origin),
-                    other
+                    at.x,
+                    at.y,
+                    at.z,
+                    at.distance(s.from),
+                    at.distance(me.origin)
                 );
             }
             here

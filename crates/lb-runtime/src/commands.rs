@@ -146,6 +146,9 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             ["satchels", args @ ..] => {
                 gungame_drill(rt, host, lb_game::gungame::Kit::Throwable(WeaponId::Satchel), args)
             }
+            ["grenades", args @ ..] => {
+                gungame_drill(rt, host, lb_game::gungame::Kit::Throwable(WeaponId::HandGrenade), args)
+            }
             _ => gungame(rt),
         },
         "weapons" => weapons(rt, rest),
@@ -175,6 +178,16 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "compat" => {
             let mut out: Vec<String> = rt.compat.to_yaml().lines().map(String::from).collect();
             out.push(format!("satchel_buttons: {}", rt.satchel_buttons()));
+            let (c, f) = rt.game.grenade_votes;
+            out.push(format!(
+                "grenade_speed: {} ({}; {c} of the bots' throws looked classic, {f} fast)",
+                rt.game.dll.grenade.as_str(),
+                if rt.game.grenade_checked.is_some() {
+                    "checked by the bots' throws"
+                } else {
+                    "not checked in the game yet"
+                }
+            ));
             out
         }
         "add" => add(rt, host, rest),
@@ -370,10 +383,11 @@ fn gungame(rt: &Runtime) -> Vec<String> {
 
 /// `lb gg mines`: bots play GunGame's tripmine level on a server with no GunGame (the stand): tripmines and a glock
 /// only, the mines handed back as they go off, the way the plugin does. `lb gg satchels`: the satchel level, the
-/// satchels being what `lb weapons satchel give` hands out.
+/// satchels being what `lb weapons satchel give` hands out. `lb gg grenades`: the hand grenade level, the grenades
+/// handed back as they are thrown.
 fn gungame_drill(rt: &mut Runtime, host: &mut dyn Host, kit: lb_game::gungame::Kit, args: &[&str]) -> Vec<String> {
     let (who, on) = match args {
-        [] => return vec!["usage: lb gg mines|satchels <name|#userid|all> [off] | lb gg mines off".into()],
+        [] => return vec!["usage: lb gg mines|satchels|grenades <name|#userid|all> [off] | lb gg mines off".into()],
         ["off"] => ("all".to_string(), false),
         [name @ .., "off"] => (name.join(" "), false),
         name => (name.join(" "), true),
@@ -401,6 +415,8 @@ fn gungame_drill(rt: &mut Runtime, host: &mut dyn Host, kit: lb_game::gungame::K
             "back to the game's own weapons"
         } else if kit == lb_game::gungame::Kit::Mines {
             "the tripmine level: mines and a glock, the mines handed back as they go off"
+        } else if kit == lb_game::gungame::Kit::Throwable(WeaponId::HandGrenade) {
+            "the hand grenade level: grenades only, handed back as they are thrown"
         } else {
             "the satchel level: satchels only (handed out with `lb weapons satchel give`)"
         }

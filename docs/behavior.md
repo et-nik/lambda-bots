@@ -345,22 +345,61 @@ experts) and the style's liking for throws, a little more for bold bots and a li
 chance to throw at all (0.95 at most); which kind goes is drawn as likely as its own chance. So a grenade that fits is
 thrown almost always. After a grenade the next throw is weighed about a second later, after satchels 3–6 s later,
 after snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the crowbar, throws are the weapon:
-twice as likely, and grenades from 220 units (yapb's grenade war).
+twice as likely, and grenades from 150 units (yapb's grenade war).
 - **Grenades with no enemy known.** Now and then (a chance of 0.03 per weighing, times `throw_rate` and the style's
   liking: about every 10 s for a normal bot) one goes where an enemy is expected, 350–1000 units away and up to 48
   units off the spot: where a lost enemy would come into view, else a sound heard in the last 4 s, else the busiest
-  place in sight at the edge of what the bot sees (a doorway, a corner: where players come into view from). Cooked,
-  so it goes off soon after landing.
+  place in sight at the edge of what the bot sees (a doorway, a corner: where players come into view from). Planned
+  like any grenade (below), so it bursts as it gets there (let go at once on GunGame's grenade level); on the run.
 - **A series** (skills with `throw_series`: hard and expert). Once a grenade goes, the rest follow one after another,
   0.3 s after each other as the game hands over the next grenade, at the enemy or where one is expected, until none
   is left; the grenade stays in hand between them. An enemy in sight within 250 units ends the series for the gun, as
   does a grenade that finds nowhere to go.
-- **Hand grenade**, 300–1000 units away: the throw is solved for the target with the game's own rule (the view's pitch
-  sets the throw's angle and speed, the bot's own velocity is added) and checked for walls along the arc; its blast
-  must land 300 units or more from the bot. The bot pulls the pin (holds the primary attack; the game's own clock
-  tells when the pin came out), cooks it so it goes off soon after landing, turns to the throw, stops for the last
-  moment and lets go. At an enemy in sight it throws as soon as the game allows, uncooked, where the enemy will be.
-  **Once the pin is out the grenade is always thrown**, at the latest shortly before the fuse runs out.
+- **Hand grenade**, 300–1000 units away, is planned to go off where the enemy will be, with the game's own rules
+  (`lb_combat::grenade`). The view's pitch sets the throw's angle and speed and the bot's own velocity is added
+  (`CHandGrenade::WeaponIdle`); the grenade falls at half gravity, a hit keeps the velocity along the surface and turns
+  back a fifth of the rest, and once it rolls each touch of the floor keeps 0.8 of its speed; it thinks every 0.1 s
+  from the throw and bursts on the think after the one that finds its fuse (three seconds from the pin) run out, so
+  how long the pin was out at the throw picks the 0.1 s tick it bursts on; the blast is lifted 45.6 units off a floor
+  close under it and does 100 damage less 0.4 a unit to the player's box, out to 250 units, with a clear line only.
+  The plan tries view pitches, each aimed so the grenade heads where the enemy will be (half its motion followed, for
+  0.6 s at most: players turn), flies each throw through the world tick by tick with traces (the enemy's body in the
+  way: thrown at one close by, a grenade comes off it short, by the thrower), and weighs each tick it could burst on
+  by the damage it would do there, the enemy's place blurred by how long the grenade is out (110 units a second for
+  one in sight, 130 for one lost) and the throw worth less the longer it waits (`e^(−wait/2.5 s)`); a blast within
+  300 units of the bot is never planned. A plan worth 10 damage or more is thrown. Cooked to burst as it
+  gets there, it leaves no time to run from it: the pin stays out some 2.3–2.6 s for a throw 400–700 units off.
+  The plan is made again as the bot and the enemy move (ten times a second, every 0.03 s in the air and in the last
+  moments before the throw), and the grenade leaves only on a plan made with the velocity the bot has then, within the
+  0.06 s that give its tick. Measured on the stand against the game's own blasts: the time to the tick, the point
+  within some 50 units.
+  - **How long it cooks.** Only at an enemy out of sight (round a corner, where one is expected) as long as it pays.
+    At an enemy in sight the pin is out 1.2 s at most, as players cook (the bot holding a grenade is not shooting,
+    and is shot at). On GunGame's grenade level, where the game hands each grenade back as it goes, at an enemy 300
+    units off or more it is let go at once (from 0.5 s, the game's least: as soon as the view is on the throw within
+    3° and the bot runs at the enemy, the earliest tick taken, the pitch kept), and a plan worth 5 is thrown: the user
+    threw there one every 1.2 s with as many kills a throw as the bots' cooked ones, and far more a minute
+    (2026-10-02). Closer it is cooked to burst as it gets there, from where the bot stands: on the GunGame server that
+    did 0.22 kills a throw against 0.08 for one let go at once, with fewer suicides (2026-10-03).
+  - **On the run, as players throw** (recorded from the user's play on 2026-10-02: mostly running at the enemy at
+    250–300 units a second or from a jump, the grenade flying 650–950 units a second nearly flat, a back-pedal right
+    after; on the GunGame server at enemies 130–550 units off, half from a jump). While it cooks the bot keeps moving:
+    back from the enemy along a slant within 650 units, across further off (never toward a drop). From 150 units off
+    it runs at the enemy for the last 0.35 s and lets go running at it, the run in the throw: at an enemy in sight a
+    flat throw (view 10° up to 12° down) is taken unless a lob is worth two thirds more, and none down at the floor
+    (on the run it would lie by the bot when the run does not come). From a jump (skills with tricks, `grenade_jump`
+    as often as the style likes, at an enemy 250 or more away or 48 above; a long jump with the module at one 500 or
+    more away) it lets go 0.28 s after the feet leave the ground, near the top. Right after a throw it backs off from
+    where it went for 0.8 s (not after a long jump's, nor after one dumped), and a throw at an enemy in sight is
+    planned with that in mind: its blast is kept 300 units off where it lets go and off the way back (250 units a
+    second from 0.3 s after the throw, as far as the room behind lets it, 300 at most). On the GunGame server the
+    bots' throws that carried the run in (200 units a second or more at the enemy) killed 2.4 times as often as the
+    others.
+  - **Once the pin is out the grenade is always thrown**, 0.9 s after its moment at the latest (2.6 s for one cooked
+    as long as it pays: it then bursts 0.5 s after the throw at the soonest). With no plan to be had for 0.15 s half a
+    second before that (the enemy round a corner, or close), it goes where the enemy most likely is round the corner
+    (its place blurred 150 units more, no clear line asked), else where its blast is farthest from the bot. Every
+    suicide by grenade on the GunGame server (2026-10-02) was a grenade held 2.35–2.6 s, forced out or dumped late.
 - **A pile of satchels**, 150–400 units away with a clear line to the spot, at an enemy out of sight or one in sight
   coming this way: two to four of them (as many as the bot carries) thrown one after another at the spot, as fast as
   the game allows (a second apart); then the bot backs off out of their blast.
@@ -474,6 +513,13 @@ In a game, the bots check the satchel buttons as they use them, and what one bot
 - a throw press that does nothing is followed by the other button;
 - a throw with charges out, and a throw press that sets them off instead, show which button is which.
 
+The grenade speed is checked the same way, by the bots' own throws: a grenade first seen a moment after it left the
+hand is as fast off the bot's own velocity, at the view pitch it was let go with, as one rule or the other throws it.
+Three throws that agree (three times as many as the other way) set it for every bot, for the session; a throw the two
+rules throw alike, or one that bounced at once, does not count. Builds of BugfixedHL-Rebased from before it took the
+2023 update in throw the classic way with its own satchel buttons (seen on a GunGame server on 2026-10-02: the grenades
+left at two thirds of the planned speed and burst some 175 units short).
+
 What was found is kept over map changes; `lb compat` shows the buttons, where they come from and who checked them.
 
 ## Tricks
@@ -576,8 +622,8 @@ The bots know a GunGame match the way a player does: from the scoreboard and fro
 - **Weapons.** Only the level's weapons hurt other players (the plugin blocks the rest), so a bot fights with nothing
   else: no crowbar on a gun's level. Where its gun does nothing at the distance (a rocket too close, a crossbow bolt
   or the egon beam's end bursting on the bot itself) it keeps the gun in hand and backs off. On their levels
-  throwables are its weapon (yapb's grenade war: grenades from 220 units, thrown more readily); on the tripmine level
-  the glock only sets mines off.
+  throwables are its weapon (yapb's grenade war: grenades from 150 units, thrown more readily; on the grenade level
+  let go at once, the game handing each one back); on the tripmine level the glock only sets mines off.
 - **Pickups.** Weapons and ammo are left alone (the plugin blocks picking them up and hides the map's); health,
   armor, the long jump and chargers are not.
 - **Targets.** The leader counts as if half as far, a player on the last level (the crowbar in hand past the first
@@ -709,6 +755,8 @@ For weapon tests on a stand server started with `sv_cheats 1`:
 - `lb gg mines <name|#userid|all>` has bots play GunGame's tripmine level on a server with no GunGame: only the
   tripmines and the glock, everything else as on that level, the mines handed back as they go off the way the plugin
   does (ten out at most; five carried, the game's limit); `lb gg mines off` ends it, and so does a GunGame match. `lb gg` lists them.
+  `lb gg grenades <name|#userid|all>` does the same for the hand grenade level, the grenades handed back as they are
+  thrown (never the last one gone).
 - `lb watch <name|#userid>` writes what a player does to the log, to study how people play (the tripmine trail was
   taken from a human so): twenty times a second where it is, how it moves, where it looks and what it holds; four
   times a second the room around it (eight ways at waist height) and where everyone else is; each shot with what the

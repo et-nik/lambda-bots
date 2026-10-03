@@ -111,6 +111,10 @@ pub struct GameState {
     pub rules_verdict: Option<DllProfile>,
     /// The button a bot was seen to set its satchels off with in the game, and which bot; kept over map changes.
     pub satchel_checked: Option<(lb_game::mechanics::Attack, String)>,
+    /// How hard grenades leave the hand here, as the bots' own throws showed it (kept over map changes), and the
+    /// throws so far that looked classic and fast.
+    pub grenade_checked: Option<lb_game::dll::GrenadeSpeed>,
+    pub grenade_votes: (u32, u32),
     /// Respawn times the bots timed on this server (items, weapons, ammo), kept in `data/learned/respawn.json`.
     pub respawns: [lb_knowledge::Learned; 3],
 }
@@ -882,6 +886,9 @@ impl Runtime {
         if let Some((detonate, _)) = &self.game.satchel_checked {
             dll.set_satchel_detonate(*detonate);
         }
+        if let Some(speed) = self.game.grenade_checked {
+            dll.grenade = speed;
+        }
         if self.game.dll.kind != dll.kind || self.game.dll.detected != dll.detected {
             tracing::info!(
                 "weapon rules: {} ({})",
@@ -1153,11 +1160,13 @@ impl Runtime {
 
     /// `lb gg mines`: the bot's mines are handed back as the GunGame plugin does (ten out at most; five carried here,
     /// the game's limit): one at once for each laid, the rest once its count has kept still a moment (not to hide one
-    /// fewer from a bot that just pressed); and its glock kept loaded.
+    /// fewer from a bot that just pressed); and its glock kept loaded. `lb gg grenades`: grenades handed back as they
+    /// are thrown, never the last one gone (the game would take the weapon away).
     fn drill_upkeep(&mut self) {
         const OUT_MOST: i32 = 10;
         const GIVE_EVERY: f64 = 0.3;
         const STILL: f64 = 0.6;
+        const GRENADES_KEPT: i32 = 2;
         let now = self.now;
         if self.bots.iter().any(|b| b.drill.is_some()) && self.gungame_board().is_some() {
             tracing::info!(
@@ -1171,7 +1180,24 @@ impl Runtime {
         }
         let row = arms_stats::Row::plain(WeaponId::Tripmine);
         for bot in &mut self.bots {
-            if bot.drill != Some(lb_game::gungame::Kit::Mines) || bot.state != BotState::Alive {
+            if bot.state != BotState::Alive {
+                continue;
+            }
+            if bot.drill == Some(lb_game::gungame::Kit::Throwable(WeaponId::HandGrenade)) {
+                let carried = arsenal(&bot.self_state, &self.game.weapons);
+                let grenades = carried
+                    .iter()
+                    .find(|a| a.id == WeaponId::HandGrenade)
+                    .and_then(|a| a.reserve)
+                    .unwrap_or(0);
+                if grenades < GRENADES_KEPT && now.since(bot.drill_gave) >= GIVE_EVERY {
+                    bot.pending_client_cmds
+                        .push(vec!["give".into(), "weapon_handgrenade".into()]);
+                    bot.drill_gave = now;
+                }
+                continue;
+            }
+            if bot.drill != Some(lb_game::gungame::Kit::Mines) {
                 continue;
             }
             let slot = u16::from(bot.id.slot);
@@ -1215,6 +1241,8 @@ impl Runtime {
         let mut snapshots = Vec::new();
         host.snapshot_entities(kind_mask(&[KIND_PROJECTILE, KIND_MINE]), &mut snapshots);
         self.projectile_entities.clear();
+        // Gone off this frame: the entity stays a moment, hidden, where it burst.
+        let mut bursts: Vec<(u16, Vec3)> = Vec::new();
         for e in &snapshots {
             let kind = *self
                 .projectile_kinds
@@ -1224,6 +1252,7 @@ impl Runtime {
             let v = |x: LbVec3| Vec3::new(x.x, x.y, x.z);
             self.launch_seen(e.ent.index, kind, e.model_id, e.owner.index, v(e.origin), v(e.velocity));
             if e.effects & EF_NODRAW != 0 {
+                bursts.push((e.ent.index, v(e.origin)));
                 continue;
             }
             self.projectile_entities.push(ProjectileEntity {
@@ -1252,21 +1281,26 @@ impl Runtime {
                 })
                 .collect();
             watch::mines(self, &laid);
-            let row = arms_stats::Row::plain(WeaponId::Satchel);
-            let satchels: Vec<_> = self
+            let (satchel, grenade) = (
+                arms_stats::Row::plain(WeaponId::Satchel),
+                arms_stats::Row::plain(WeaponId::HandGrenade),
+            );
+            let thrown: Vec<_> = self
                 .projectile_entities
                 .iter()
-                .filter(|p| p.kind == ProjectileKind::Satchel)
-                .map(|p| {
-                    let owner = self
-                        .launched
-                        .get(&p.index)
-                        .filter(|l| l.row == row)
-                        .map_or(p.owner, |l| l.owner);
-                    (p.index, owner, p.origin, p.velocity)
+                .filter_map(|p| {
+                    let launched = self.launched.get(&p.index);
+                    let what = match p.kind {
+                        ProjectileKind::Satchel => "satchel",
+                        ProjectileKind::Grenade if launched.is_some_and(|l| l.row == grenade) => "grenade",
+                        _ => return None,
+                    };
+                    let row = if what == "satchel" { satchel } else { grenade };
+                    let owner = launched.filter(|l| l.row == row).map_or(p.owner, |l| l.owner);
+                    Some((what, p.index, owner, p.origin, p.velocity))
                 })
                 .collect();
-            watch::satchels(self, &satchels);
+            watch::thrown(self, &thrown, &bursts);
         }
     }
 
@@ -1301,6 +1335,9 @@ impl Runtime {
             .get(&index)
             .filter(|l| l.row == row && now.since(l.seen) <= f64::from(LAUNCHED_MEMORY))
             .map(|l| (l.owner, l.first));
+        if known.is_none() && row == Row::plain(WeaponId::HandGrenade) {
+            self.learn_grenade_speed(owner, velocity);
+        }
         self.launched.insert(
             index,
             Launched {
@@ -1428,6 +1465,69 @@ impl Runtime {
                     );
                 }
             }
+        }
+    }
+
+    /// A bot's grenade first seen, a moment after it left the hand: its speed off the bot's own velocity, at the view
+    /// pitch the bot let it go with, tells the classic throw from the 2023 update's. A few throws that agree set the
+    /// server's grenade speed for every bot, for the rest of the session; a throw that bounced at once, or one the
+    /// two rules throw alike, says nothing.
+    fn learn_grenade_speed(&mut self, owner: u16, velocity: Vec3) {
+        use lb_game::dll::GrenadeSpeed;
+        const FRESH: f64 = 0.2;
+        const APART: f32 = 80.0;
+        const SURE: u32 = 3;
+        let now = self.now;
+        let Some(slot) = self.player_slot(owner) else {
+            return;
+        };
+        let Some(bot) = self.bots.iter_mut().find(|b| b.id.slot == slot) else {
+            return;
+        };
+        let Some((at, pitch, thrower)) = bot.brain.mind.arms.grenade_launch.take() else {
+            return;
+        };
+        if now.since(at) > FRESH {
+            return;
+        }
+        let throw_pitch = if pitch < 0.0 {
+            -10.0 + pitch * (80.0 / 90.0)
+        } else {
+            -10.0 + pitch * (100.0 / 90.0)
+        };
+        let along = lb_core::dmath::cos(throw_pitch.to_radians());
+        let speed = |k: f32, cap: f32| ((90.0 - throw_pitch) * k).min(cap) * along;
+        let (classic, fast) = (speed(4.0, 500.0), speed(6.5, 1000.0));
+        let own = (velocity - thrower).truncate().length();
+        if fast - classic < APART || own > fast + APART || own < classic - APART {
+            return;
+        }
+        let votes = &mut self.game.grenade_votes;
+        if (own - classic).abs() < (own - fast).abs() {
+            votes.0 += 1;
+        } else {
+            votes.1 += 1;
+        }
+        let (c, f) = *votes;
+        let seen = if c >= SURE && c >= 3 * f {
+            GrenadeSpeed::Classic
+        } else if f >= SURE && f >= 3 * c {
+            GrenadeSpeed::Fast
+        } else {
+            return;
+        };
+        if self.game.grenade_checked != Some(seen) {
+            self.game.grenade_checked = Some(seen);
+            if self.game.dll.grenade != seen {
+                tracing::warn!(
+                    "grenades leave the hand here at the {} speed, not {}: switched for this session ({c} throws looked classic, {f} fast)",
+                    seen.as_str(),
+                    self.game.dll.grenade.as_str()
+                );
+            } else {
+                tracing::info!("grenade speed checked by the bots' throws: {}", seen.as_str());
+            }
+            self.game.dll.grenade = seen;
         }
     }
 
