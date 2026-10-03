@@ -7,6 +7,7 @@ pub mod classify;
 pub mod exec;
 pub mod follow;
 pub mod graph;
+pub mod hop;
 pub mod import;
 pub mod known;
 pub mod navigator;

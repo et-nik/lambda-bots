@@ -399,6 +399,9 @@ pub struct TricksConfig {
     pub satchel_jump: bool,
     /// Hand grenades thrown from a jump (a long jump with the module) at an enemy far off or above.
     pub grenade_jump: bool,
+    /// Bunny hopping along straight stretches of the way and closing in on an enemy, on any server: one that crops
+    /// faster jumps is hopped just under the crop.
+    pub bhop: bool,
 }
 
 impl Default for TricksConfig {
@@ -409,6 +412,7 @@ impl Default for TricksConfig {
             gauss_boost: true,
             satchel_jump: true,
             grenade_jump: true,
+            bhop: true,
         }
     }
 }

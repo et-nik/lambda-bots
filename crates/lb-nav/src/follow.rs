@@ -15,6 +15,10 @@
 //! the path past them, down drops, onto nodes only 250 units off and one long jump after another, and takes a hard
 //! landing it can afford. The same way the follower takes a gauss boost onto a node further along when the bot asks
 //! for one: both are shortcuts off the graph's links, and a failed one is not the link's fault.
+//!
+//! A bot that may bunny hop (`crate::hop`) jumps again on the first command back on the ground along straight
+//! stretches of walking links, each hop's flight followed through the server's traces first, and strafes the flight
+//! along the path, passing the path's nodes as it flies by them.
 
 use lb_core::math::view_angle_vectors;
 use lb_core::{Vec2, Vec3};
@@ -25,6 +29,7 @@ use lb_worldq::{HullKind, TraceQuery, Tracer};
 use crate::classify::anchor;
 use crate::exec::{EYE_HEIGHT, Exec, ExecCtx, ExecStatus, HitKind, MechView, NavInput, travel_look};
 use crate::graph::{LinkFlags, LinkKind, NavGraph, NavNode, NodeFlags, NodeId};
+use crate::hop::{HopPhase, HopRun};
 use crate::known::FailReason;
 use crate::spec::{Action, Anchor, Cost, Needs, Stance, TraversalSpec};
 
@@ -68,6 +73,14 @@ const RUNWAY_TAKEOFF: f32 = 32.0;
 /// Room a long jump along the path has on each side of its flight: taking off a little off the line or the view a
 /// little off, it still gets through.
 const RUNWAY_MARGIN: [f32; 2] = [-8.0, 8.0];
+/// A hop not followed for this long (the bot was doing something else) is dropped.
+const HOP_STALE: f64 = 0.1;
+/// Faster than the hops keep to by this much, something else took the flight over (a long jump, a push).
+const HOP_TAKEN_OVER: f32 = 80.0;
+/// A hop that did not check out is not looked at again from within this of where it was, this soon, on the same
+/// link.
+const HOP_RETRY_MOVE: f32 = 48.0;
+const HOP_RETRY: f64 = 0.2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FollowStatus {
@@ -96,14 +109,17 @@ pub enum TrickKind {
     Boost,
     /// A gauss boost onto a node further along the way.
     GaussLeap,
+    /// A bunny hop along the way.
+    Hop,
 }
 
 impl TrickKind {
-    pub const ALL: [TrickKind; 4] = [
+    pub const ALL: [TrickKind; 5] = [
         TrickKind::LongJump,
         TrickKind::Runway,
         TrickKind::Boost,
         TrickKind::GaussLeap,
+        TrickKind::Hop,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -112,6 +128,7 @@ impl TrickKind {
             TrickKind::Runway => "long jumps on the way",
             TrickKind::Boost => "gauss boost links",
             TrickKind::GaussLeap => "gauss jumps on the way",
+            TrickKind::Hop => "bunny hops",
         }
     }
 }
@@ -119,8 +136,8 @@ impl TrickKind {
 /// How the tricks that left the ground went: landed where they should, or not, by kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrickCounts {
-    pub landed: [u32; 4],
-    pub missed: [u32; 4],
+    pub landed: [u32; TrickKind::ALL.len()],
+    pub missed: [u32; TrickKind::ALL.len()],
 }
 
 impl TrickCounts {
@@ -190,6 +207,10 @@ pub struct PathFollower {
     event: Option<(TrickKind, bool)>,
     /// The shortcut just ended: done, or why it failed.
     ended: Option<Result<(), FailReason>>,
+    /// A bunny hop under way.
+    hop: Option<HopRun>,
+    /// A hop that did not check out: the link walked to, where and when.
+    hop_miss: Option<(usize, Vec3, f64)>,
 }
 
 impl PathFollower {
@@ -223,6 +244,8 @@ impl PathFollower {
             leap_misses: smallvec::SmallVec::new(),
             event: None,
             ended: None,
+            hop: None,
+            hop_miss: None,
         }
     }
 
@@ -245,9 +268,14 @@ impl PathFollower {
         self.next
     }
 
-    /// On a special link or a shortcut: nothing else is to be started on the way now.
+    /// On a special link, a shortcut or a hop: nothing else is to be started on the way now.
     pub fn busy(&self) -> bool {
-        self.shortcut.is_some() || self.exec.is_some()
+        self.shortcut.is_some() || self.exec.is_some() || self.hop.is_some()
+    }
+
+    /// A bunny hop under way: the jump pressed or the flight in the air.
+    pub fn hopping(&self) -> bool {
+        self.hop.is_some()
     }
 
     /// In the air on a long jump or a boost: steered onto its landing until it comes down, whatever else happens.
@@ -281,6 +309,7 @@ impl PathFollower {
             spec,
         });
         self.ended = None;
+        self.hop = None;
     }
 
     /// Walks to the path's first node before the rest when the second one is not in a straight line from `origin`
@@ -330,6 +359,7 @@ impl PathFollower {
         }
         match &self.exec {
             Some((_, _, e)) => e.phase(),
+            None if self.hop.is_some() => "walk:hop",
             None => match self.recovery {
                 Recovery::None => "walk",
                 Recovery::Sidestep => "walk:sidestep",
@@ -498,6 +528,7 @@ impl PathFollower {
                     self.exec = Some((from, to, Exec::new(spec, s.now)));
                     self.exec_started = s.now;
                     self.airborne_from = None;
+                    self.hop = None;
                 }
                 if s.now - self.exec_started > f64::from(spec.deadline) {
                     return self.fail(s, from, to, FailReason::ControllerFailure);
@@ -554,6 +585,9 @@ impl PathFollower {
                 };
             }
             let kind = link.map_or(LinkKind::Walk, |l| l.kind);
+            if let Some(out) = self.hop_air(g, s, tracer) {
+                return out;
+            }
             if self.reached(g, s, kind, tracer) {
                 self.advance(s.now);
                 continue;
@@ -561,7 +595,8 @@ impl PathFollower {
             if kind == LinkKind::Walk && self.next > 0 && self.runway(g, s, tracer, flights) {
                 continue;
             }
-            return self.walk(g, s, mech, tracer, from, to, kind, link.map(|l| l.flags));
+            let out = self.walk(g, s, mech, tracer, from, to, kind, link.map(|l| l.flags));
+            return self.hop_takeoff(g, s, tracer, flights, kind, out);
         }
         FollowOutput {
             step: self.hold(s),
@@ -790,8 +825,132 @@ impl PathFollower {
         false
     }
 
+    /// A hop under way: the jump pressed until the bot leaves the ground, then the flight strafed along the way and
+    /// the path followed on as the bot flies past its nodes. `None` without one, and once it came down where it should
+    /// (the way on is walked from there, another hop taken when one fits); down off the way, the way is planned again.
+    fn hop_air(&mut self, g: &NavGraph, s: &NavInput, tracer: &mut dyn Tracer) -> Option<FollowOutput> {
+        let mut run = self.hop.take()?;
+        if s.now - run.last_tick > HOP_STALE {
+            return None;
+        }
+        run.last_tick = s.now;
+        let airborne = !s.on_ground && !s.on_ladder && s.waterlevel < 2;
+        if let HopPhase::Takeoff { at } = run.phase {
+            if !airborne {
+                // The jump has not gone out: another intent may have had the keys. Pressed a few commands at most,
+                // and not checked again at once.
+                if s.now - at > f64::from((3.0 * s.cmd_secs()).max(0.05)) {
+                    self.hop_miss = Some((self.next, s.origin, s.now));
+                    return None;
+                }
+                let step = self.hop_step(g, s, &run, true);
+                self.hop = Some(run);
+                return Some(FollowOutput {
+                    step,
+                    status: FollowStatus::Moving,
+                });
+            }
+            run.phase = HopPhase::Air;
+            self.airborne_from = None;
+        }
+        if !airborne {
+            let landed = run.landed_on_way(s, tracer);
+            self.event = Some((TrickKind::Hop, landed));
+            if landed {
+                return None;
+            }
+            tracing::debug!(
+                "bunny hop came down off the way at {:.0} {:.0} {:.0}",
+                s.origin.x,
+                s.origin.y,
+                s.origin.z
+            );
+            return Some(FollowOutput {
+                step: self.hold(s),
+                status: FollowStatus::Replan,
+            });
+        }
+        if s.ducked || s.velocity.truncate().length() > run.target + HOP_TAKEN_OVER {
+            return None;
+        }
+        while self.next > 0 && self.next < run.stop {
+            let at = g.node(self.path[self.next]).origin;
+            let seg = (at - g.node(self.path[self.next - 1]).origin).truncate();
+            if seg.length() < 1.0 || seg.dot((s.origin - at).truncate()) <= 0.0 {
+                break;
+            }
+            self.advance(s.now);
+        }
+        self.last_progress = s.now;
+        let step = self.hop_step(g, s, &run, false);
+        self.hop = Some(run);
+        Some(FollowOutput {
+            step,
+            status: FollowStatus::Moving,
+        })
+    }
+
+    /// A hop's step: the press that strafes the flight along the way (the jump too while the bot is to take off), the
+    /// look along the path as walking has it.
+    fn hop_step(&mut self, g: &NavGraph, s: &NavInput, run: &HopRun, jump: bool) -> NavStep {
+        let mut step = NavStep::hold(self.gaze(g, s));
+        if let Some((dir, speed)) = run.press(s) {
+            step.move_dir = dir;
+            step.speed = speed;
+        }
+        step.jump = jump;
+        step.hop = true;
+        step
+    }
+
+    /// A hop from where the bot runs along a walking link, when it may hop and the hop checks out: its step, the
+    /// jump pressed; otherwise the walking step as it is.
+    fn hop_takeoff(
+        &mut self,
+        g: &NavGraph,
+        s: &NavInput,
+        tracer: &mut dyn Tracer,
+        flights: &mut u32,
+        kind: LinkKind,
+        out: FollowOutput,
+    ) -> FollowOutput {
+        let recovering = self.recovery != Recovery::None || s.now < self.recovery_until;
+        if out.status != FollowStatus::Moving
+            || kind != LinkKind::Walk
+            || self.next == 0
+            || recovering
+            || s.tricks.bhop.is_none()
+        {
+            return out;
+        }
+        if self.hop_miss.is_some_and(|(next, at, when)| {
+            next == self.next && at.distance(s.origin) < HOP_RETRY_MOVE && s.now - when < HOP_RETRY
+        }) {
+            return out;
+        }
+        match crate::hop::check(g, &self.path, self.next, s, tracer, flights) {
+            Ok(run) => {
+                let step = self.hop_step(g, s, &run, true);
+                self.hop = Some(run);
+                self.hop_miss = None;
+                FollowOutput {
+                    step,
+                    status: FollowStatus::Moving,
+                }
+            }
+            Err(refusal) => {
+                if refusal.costly {
+                    tracing::trace!("no bunny hop: {}", refusal.why);
+                    self.hop_miss = Some((self.next, s.origin, s.now));
+                }
+                out
+            }
+        }
+    }
+
     fn fail(&mut self, s: &NavInput, from: NodeId, to: NodeId, reason: FailReason) -> FollowOutput {
         self.exec = None;
+        self.hop = None;
         FollowOutput {
             step: self.hold(s),
             status: FollowStatus::Failed { from, to, reason },

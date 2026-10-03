@@ -304,6 +304,9 @@ pub struct Runtime {
     pub arms_stats: arms_stats::ArmsStats,
     /// Each bot's tricks when the statistics were last reset.
     pub tricks_base: Vec<(BotId, commands::TrickTotals)>,
+    /// The server cropped a bot's jump on this map though its rules say it does not crop: bunny hops keep under the
+    /// crop until the map changes.
+    pub crop_seen: bool,
     /// Inputs from outside the engine (the navigation loader, the command channel), kept while recording and fed
     /// from the recording in a replay.
     pub outside: record::OutsideMode,
@@ -444,6 +447,7 @@ impl Runtime {
             items_give: Vec::new(),
             arms_stats: arms_stats::ArmsStats::default(),
             tricks_base: Vec::new(),
+            crop_seen: false,
             outside: record::OutsideMode::Live,
             record_request: None,
             record_status: "not recording".into(),
@@ -632,6 +636,7 @@ impl Runtime {
         }
         self.epoch = epoch;
         self.telemetry.set_epoch(epoch.0);
+        self.crop_seen = false;
         self.clients.reset(max_clients as usize);
         self.game.scoreboard = Scoreboard::default();
         self.game.scoreboard.resize(max_clients as usize);
@@ -981,6 +986,28 @@ impl Runtime {
                 .find(|b| b.id.slot == s.slot && b.id.generation == s.bot_gen)
             {
                 let body = &mut bot.self_state.body;
+                // A jump from the ground past the crop's speed that came out a third slower: the server crops bunny
+                // hops whatever its rules say.
+                if !self.crop_seen
+                    && body.flags & lb_game::self_state::FL_ONGROUND != 0
+                    && s.flags & lb_game::self_state::FL_ONGROUND == 0
+                    && bot.driver.last_sent_buttons() & lb_game::input::IN_JUMP != 0
+                {
+                    let sv_maxspeed = self.game.rules.maxspeed;
+                    let maxspeed = if body.maxspeed > 0.0 {
+                        body.maxspeed.min(sv_maxspeed)
+                    } else {
+                        sv_maxspeed
+                    };
+                    let (before, after) = (body.velocity.length(), s.velocity.truncate().length());
+                    if before > lb_kin::hop::CROP_FACTOR * maxspeed && after < 0.8 * before {
+                        tracing::info!(
+                            "the server crops jumps (one at {before:.0} came out at {after:.0}): bunny hops keep under \
+                             the crop until the map changes"
+                        );
+                        self.crop_seen = true;
+                    }
+                }
                 body.origin = s.origin;
                 body.velocity = s.velocity;
                 body.v_angle = s.v_angle;
@@ -2629,6 +2656,9 @@ impl Runtime {
                     gungame: gungame.as_ref(),
                     selfgauss: self.game.rules.selfgauss,
                     falldamage_progressive: self.game.rules.falldamage_progressive,
+                    sv_maxspeed: self.game.rules.maxspeed,
+                    airaccelerate: self.game.rules.airaccelerate,
+                    bunnyhop_uncapped: self.game.rules.bunnyhop_uncapped && !self.crop_seen,
                     tricks: self.config.tricks,
                     projectiles: &self.projectile_entities,
                 };
@@ -3182,6 +3212,13 @@ fn nav_input(bot: &Bot, ctx: &DriveCtx<'_>, body: &lb_brain::Body) -> lb_nav::ex
         },
         gravity: ctx.gravity,
         progressive_fall_damage: ctx.falldamage_progressive,
+        cmd_ms: f32::from(bot.driver.last_msec()),
+        airaccelerate: ctx.airaccelerate,
+        hop_cap: if ctx.bunnyhop_uncapped {
+            f32::INFINITY
+        } else {
+            lb_kin::hop::CROP_FACTOR * body.maxspeed.min(ctx.sv_maxspeed)
+        },
         // The long jump links open with the module; the brain says what else the bot may do (`set_tricks`).
         tricks: lb_nav_api::Tricks {
             longjump: body.has_longjump,
@@ -3259,6 +3296,12 @@ fn drive_order(
     let body = body_of(bot, ctx);
     let mut input = nav_input(bot, ctx, &body);
     commanded_tricks(&mut input, &body);
+    if bot.order.as_ref().is_some_and(|o| o.bhop) {
+        let skill = &bot.character.skill;
+        input.tricks.bhop = skill
+            .bhop_speed
+            .map(|capped| [capped, skill.bhop_speed_uncapped.unwrap_or(capped)]);
+    }
     let mut boost = bot.order.as_mut().and_then(|o| o.boost.take());
     let step = match (bot.order.as_mut().map(|o| &mut o.kind), ctx.graph, world) {
         (Some(orders::OrderKind::Go(reach)), Some(graph), Some(world)) => {
@@ -3489,6 +3532,12 @@ struct DriveCtx<'a> {
     gravity: f32,
     /// `mp_falldamage 1`: falls hurt by how fast they land.
     falldamage_progressive: bool,
+    /// `sv_maxspeed`.
+    sv_maxspeed: f32,
+    /// `sv_airaccelerate`.
+    airaccelerate: f32,
+    /// The server does not crop fast jumps (BugfixedHL's `mp_bunnyhop 1`, no crop seen on this map).
+    bunnyhop_uncapped: bool,
     damages: lb_game::mechanics::Damages,
     dll: DllProfile,
     /// Weapons bots may use (`lb weapons`).

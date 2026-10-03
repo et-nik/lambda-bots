@@ -1287,11 +1287,15 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         let told = &m.tricks.told;
         let yes = |v: bool| if v { "yes" } else { "no" };
         let ch = &b.character;
+        let bhop = match told.bhop {
+            Some([capped, uncapped]) => format!("up to {capped:.2}x maxspeed ({uncapped:.2}x where uncapped)"),
+            None => "no".into(),
+        };
         out.push(format!(
-            "  tricks: long jump module {}; long jumps taken {:.0}% on the way, {:.0}% in a fight (bold {}, to dodge \
-             {}); the way may take long jumps {} (along it {}, may land for {:.0} damage), gauss boosts {} (now {}), \
-             {} uranium; last look for a gauss jump: {}; landed/left the ground: {}; {} long jumps at enemies, {} to \
-             dodge, {} gauss jumps on the way found, {} gauss boosts started, {} fired{}",
+            "  tricks: bunny hops {bhop}; long jump module {}; long jumps taken {:.0}% on the way, {:.0}% in a fight \
+             (bold {}, to dodge {}); the way may take long jumps {} (along it {}, may land for {:.0} damage), gauss \
+             boosts {} (now {}), {} uranium; last look for a gauss jump: {}; landed/left the ground: {}; {} long jumps \
+             at enemies, {} to dodge, {} gauss jumps on the way found, {} gauss boosts started, {} fired{}",
             yes(b.self_state.body.has_longjump),
             lb_brain::tricks::leap_chance(ch, false) * 100.0,
             lb_brain::tricks::leap_chance(ch, true) * 100.0,
@@ -1399,7 +1403,7 @@ impl TrickTotals {
     /// What happened since `base`.
     fn since(&self, base: &TrickTotals) -> TrickTotals {
         let mut d = *self;
-        for i in 0..4 {
+        for i in 0..lb_nav::follow::TrickKind::ALL.len() {
             d.counts.landed[i] = d.counts.landed[i].saturating_sub(base.counts.landed[i]);
             d.counts.missed[i] = d.counts.missed[i].saturating_sub(base.counts.missed[i]);
         }
@@ -1480,7 +1484,7 @@ pub fn trick_totals(rt: &Runtime) -> TrickTotals {
             .find(|(id, _)| *id == b.id)
             .map_or_else(TrickTotals::default, |(_, base)| *base);
         let d = bot_tricks(b).since(&base);
-        for i in 0..4 {
+        for i in 0..lb_nav::follow::TrickKind::ALL.len() {
             t.counts.landed[i] += d.counts.landed[i];
             t.counts.missed[i] += d.counts.missed[i];
         }
@@ -1623,7 +1627,7 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
         ),
         format!(
             "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, long jumps {:.0}% \
-             (bold {}, to dodge {}), throws ×{:.2} (grenades in series {}), gauss through walls {}, bhop {}",
+             (bold {}, to dodge {}), throws ×{:.2} (grenades in series {}), gauss through walls {}, bunny hops {}",
             k.hearing_threshold,
             k.sound_bearing_sigma,
             k.track_forget,
@@ -1635,7 +1639,13 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             k.throw_rate,
             if k.throw_series { "yes" } else { "no" },
             if k.gauss_walls { "yes" } else { "no" },
-            opt(k.bhop_speed, "x"),
+            match k.bhop_speed {
+                Some(v) => format!(
+                    "up to {v:.2}x maxspeed ({:.2}x where uncapped)",
+                    k.bhop_speed_uncapped.unwrap_or(v)
+                ),
+                None => "never".into(),
+            },
         ),
         {
             let g = rt.styles.goals(p.style);
@@ -1821,11 +1831,29 @@ fn test(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
         if b.state == BotState::Alive {
             let origin = b.self_state.body.origin;
             let yaw = match script {
-                Script::Run { .. } => open_yaw(host, origin),
+                Script::Run { .. } | Script::Bhop { .. } => open_yaw(host, origin),
                 Script::Strafe { .. } => normalize_angle(open_yaw(host, origin) + 90.0),
                 _ => b.view.y,
             };
-            b.test = Some(MotorTest::new(script, now, origin, yaw));
+            let mut t = MotorTest::new(script, now, origin, yaw);
+            if let Script::Bhop { speed, .. } = script {
+                let rules = &rt.game.rules;
+                let body = &b.self_state.body;
+                let maxspeed = if body.maxspeed > 0.0 { body.maxspeed } else { 270.0 };
+                let cmd_rate = rt.config.engine.cmd_rate;
+                let air = lb_kin::hop::Air {
+                    airaccelerate: rules.airaccelerate,
+                    maxspeed,
+                    dt: if cmd_rate > 0.0 { 1.0 / cmd_rate } else { 0.001 },
+                };
+                let mut target = speed * maxspeed;
+                if !rules.bunnyhop_uncapped || rt.crop_seen {
+                    let crop = lb_kin::hop::CROP_FACTOR * maxspeed.min(rules.maxspeed);
+                    target = target.min(lb_nav::hop::CROP_MARGIN * crop);
+                }
+                t.hop = Some((air, target));
+            }
+            b.test = Some(t);
             started += 1;
         }
     }

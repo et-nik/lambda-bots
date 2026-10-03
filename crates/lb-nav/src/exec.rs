@@ -54,6 +54,13 @@ pub struct NavInput {
     pub gravity: f32,
     /// A fall hurts by how fast it lands (`mp_falldamage 1`); otherwise any fall past the safe speed takes 10.
     pub progressive_fall_damage: bool,
+    /// Milliseconds of the commands the bot sends; 0 when not known.
+    pub cmd_ms: f32,
+    /// `sv_airaccelerate`; 0 when not known.
+    pub airaccelerate: f32,
+    /// Speed above which the server crops a jump (1.7 × the bot's maxspeed), infinite on a server that does not
+    /// crop; 0 when not known, taken as cropping.
+    pub hop_cap: f32,
     /// What the bot may do on the way besides walking.
     pub tricks: Tricks,
 }
@@ -74,6 +81,29 @@ impl NavInput {
 
     pub fn eye(&self) -> Vec3 {
         self.origin + Vec3::Z * if self.ducked { 12.0 } else { EYE_HEIGHT }
+    }
+
+    /// Seconds of one command the bot sends, 10 ms when not known.
+    pub fn cmd_secs(&self) -> f32 {
+        if self.cmd_ms > 0.0 { self.cmd_ms / 1000.0 } else { 0.01 }
+    }
+
+    /// `sv_airaccelerate`, the default when not known.
+    pub fn airaccelerate(&self) -> f32 {
+        if self.airaccelerate > 0.0 {
+            self.airaccelerate
+        } else {
+            Physics::default().airaccelerate
+        }
+    }
+
+    /// Speed above which a jump is cropped; when not known, as a server that crops does it.
+    pub fn hop_cap(&self) -> f32 {
+        if self.hop_cap > 0.0 {
+            self.hop_cap
+        } else {
+            lb_kin::hop::CROP_FACTOR * self.max_speed
+        }
     }
 }
 

@@ -1,18 +1,36 @@
 //! `lb test motor`: scripted inputs that measure how the engine executes bot commands
-//! (run speed, jump apex, command time drift) at a given server fps and command rate.
+//! (run speed, jump apex, command time drift, bunny hops) at a given server fps and command rate.
 
-use lb_core::Vec3;
+use lb_core::math::world_vel_to_move;
 use lb_core::time::SimTime;
+use lb_core::{Vec2, Vec3, dmath};
+use lb_kin::hop::{Air, air_strafe};
 
 use lb_game::input::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Script {
-    Run { secs: f32 },
-    Strafe { secs: f32 },
-    Jump { count: u32 },
-    DuckJump { count: u32 },
-    Spin { secs: f32 },
+    Run {
+        secs: f32,
+    },
+    Strafe {
+        secs: f32,
+    },
+    Jump {
+        count: u32,
+    },
+    DuckJump {
+        count: u32,
+    },
+    Spin {
+        secs: f32,
+    },
+    /// Run for a moment, then bunny hop straight on for `secs`, keeping to `speed` times maxspeed (under the crop
+    /// where the server crops).
+    Bhop {
+        secs: f32,
+        speed: f32,
+    },
 }
 
 impl Script {
@@ -28,10 +46,17 @@ impl Script {
                 count: num(1, 3.0) as u32,
             },
             "spin" => Script::Spin { secs: num(1, 2.0) },
+            "bhop" => Script::Bhop {
+                secs: num(1, 6.0),
+                speed: num(2, 1.7),
+            },
             _ => return None,
         })
     }
 }
+
+/// A bunny hop script runs this long first, to get up to speed.
+const RUN_UP: f32 = 0.6;
 
 #[derive(Clone, Debug)]
 pub struct MotorTest {
@@ -53,6 +78,11 @@ pub struct MotorTest {
     pub frames: u64,
     pub yaw: f32,
     pub finished: bool,
+    /// The air and the speed kept to, for a bunny hop script.
+    pub hop: Option<(Air, f32)>,
+    /// Horizontal speed on the last frame on the ground and on the first in the air, at every takeoff.
+    pub takeoffs: Vec<(f32, f32)>,
+    ground_speed: Option<f32>,
 }
 
 pub struct MotorOutput {
@@ -84,6 +114,9 @@ impl MotorTest {
             frames: 0,
             yaw,
             finished: false,
+            hop: None,
+            takeoffs: Vec::new(),
+            ground_speed: None,
         }
     }
 
@@ -149,6 +182,33 @@ impl MotorTest {
                 out.yaw_delta = 360.0 / secs * dt;
                 out.done = elapsed >= secs;
             }
+            Script::Bhop { secs, .. } => {
+                let speed = if maxspeed > 0.0 { maxspeed } else { 320.0 };
+                let (sin, cos) = dmath::sin_cos(self.yaw.to_radians());
+                match self.hop {
+                    Some((air, target)) if elapsed >= RUN_UP => {
+                        if let Some((dir, wish)) = air_strafe(velocity.truncate(), Vec2::new(cos, sin), target, &air) {
+                            (out.forward, out.side) = world_vel_to_move(dir.extend(0.0) * wish, self.yaw);
+                        }
+                        if on_ground {
+                            out.buttons |= IN_JUMP;
+                        }
+                    }
+                    _ => out.forward = speed,
+                }
+                match (on_ground, self.ground_speed) {
+                    (true, _) => self.ground_speed = Some(speed2d),
+                    (false, Some(before)) => {
+                        if elapsed > RUN_UP {
+                            self.takeoffs.push((before, speed2d));
+                        }
+                        self.ground_speed = None;
+                    }
+                    (false, None) => {}
+                }
+                self.progress = (origin - self.start_origin).truncate().length();
+                out.done = elapsed >= RUN_UP + secs;
+            }
         }
         out
     }
@@ -166,6 +226,24 @@ impl MotorTest {
         let mut v = self.speed_samples.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         v[v.len() / 2]
+    }
+
+    /// Speeds at the takeoffs (before and after), and how many of them the server cropped.
+    fn hops(&self) -> String {
+        if self.takeoffs.is_empty() {
+            return String::new();
+        }
+        let speeds: Vec<String> = self
+            .takeoffs
+            .iter()
+            .map(|(before, after)| format!("{before:.0}>{after:.0}"))
+            .collect();
+        let cropped = self
+            .takeoffs
+            .iter()
+            .filter(|(before, after)| *after < before * 0.8)
+            .count();
+        format!(" takeoffs={} cropped={cropped}", speeds.join(","))
     }
 
     pub fn report(&self, bot: &str, now: SimTime, cmd_rate: f32) -> String {
@@ -192,7 +270,7 @@ impl MotorTest {
         format!(
             "motor test {:?} bot={bot} fps={fps:.0} cmd_rate={cmd_rate} elapsed={elapsed:.2}s max_speed2d={:.1} \
              steady_speed2d={:.1} progress={:.0} apex={apex} cmds={} avg_msec={avg_msec:.2} msec_sent={} \
-             frame_ms={:.1} drift_ms={:.2}",
+             frame_ms={:.1} drift_ms={:.2}{}",
             self.script,
             self.max_speed2d,
             self.steady_speed(),
@@ -200,7 +278,8 @@ impl MotorTest {
             self.commands,
             self.msec_sent,
             self.frame_ms_sum,
-            self.drift_ms()
+            self.drift_ms(),
+            self.hops()
         )
     }
 }

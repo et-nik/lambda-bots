@@ -76,8 +76,10 @@ Bots plan on a graph made from the map on a worker when it starts (1.5 s for cro
 `addons/lambdabots/nav/<map>/`; the map's yapb graph can be used instead (`lb_nav_source yapb`). Every link is
 checked with a port of the engine's player movement, and every special link (jump, drop, ladder, swim, door, lift,
 teleport, breakable, push) carries a contract that an executor carries out the way a player would, with fresh presses
-of use and jump. Failed links are avoided for a while, by reason; a bot stuck for good uses `kill`. Details and the
-obstacle courses: `docs/navigation.md`. Places and graph patches per map, and the in-game editor: `docs/overlays.md`.
+of use and jump. Bots from hard up bunny hop along straight stretches of the way and closing in on an enemy, on any
+server: each hop's flight is followed through the server's traces first, and where the server crops fast jumps they
+keep just under the crop. Failed links are avoided for a while, by reason; a bot stuck for good uses `kill`. Details
+and the obstacle courses: `docs/navigation.md`. Places and graph patches per map, and the in-game editor: `docs/overlays.md`.
 The map in 3D in the browser, next to any server: `docs/editor.md`. Testing how bots get to a spot, with items and
 tricks, live and offline, and the map's saved tests: `docs/testing.md`.
 

@@ -217,13 +217,16 @@ impl Navigator {
         let to = dest - input.origin;
         let flat = to.truncate().length();
         let standing = input.on_ground || input.on_ladder || input.waterlevel >= 2;
-        let flying = self.follower.as_ref().is_some_and(|f| f.flying());
+        let flying = self
+            .follower
+            .as_ref()
+            .is_some_and(|f| f.flying() || (f.hopping() && !standing));
         if flat < 32.0 && to.z.abs() < 48.0 && standing && !flying {
             self.follower = None;
             return (NavStatus::Arrived, None);
         }
         let on_special = self.follower.as_ref().is_some_and(|f| f.on_special_link(ctx.graph));
-        if flat < DIRECT_WALK && to.z.abs() < 32.0 && !on_special {
+        if flat < DIRECT_WALK && to.z.abs() < 32.0 && !on_special && !flying {
             let fresh = self
                 .direct
                 .filter(|(d, _, at)| d.distance(dest) < 16.0 && now - at < DIRECT_RECHECK);
@@ -364,8 +367,9 @@ impl Navigator {
         }
     }
 
-    /// Steers a long jump's or a boost's flight onto its landing when the bot is in one: the step, `None` when it is
-    /// not flying. Behavior that does not follow a path now (a fight) still lets the flight end where it should.
+    /// Steers a long jump's, a boost's or a bunny hop's flight onto its landing when the bot is in one: the step,
+    /// `None` when it is not flying. Behavior that does not follow a path now (a fight) still lets the flight end where
+    /// it should.
     pub fn fly_on(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput) -> Option<NavStep> {
         let now = input.now;
         if let Some((at, step)) = self.flight
@@ -373,7 +377,11 @@ impl Navigator {
         {
             return Some(step);
         }
-        let follower = self.follower.as_mut().filter(|f| f.flying())?;
+        let standing = input.on_ground || input.on_ladder || input.waterlevel >= 2;
+        let follower = self
+            .follower
+            .as_mut()
+            .filter(|f| f.flying() || (f.hopping() && !standing))?;
         let mut spare = u32::MAX;
         let flights = ctx.flights.as_deref_mut().unwrap_or(&mut spare);
         let out = follower.tick(ctx.graph, input, ctx.mech, &mut *ctx.tracer, flights);
@@ -479,6 +487,11 @@ impl Navigator {
     /// Roaming: walk to a goal, pause, pick the next one. Returns what to do this frame.
     pub fn roam(&mut self, ctx: &mut NavCtx<'_>, input: &NavInput, rng: &mut Pcg32) -> Option<NavStep> {
         let now = input.now;
+        if let Some((at, step)) = self.flight
+            && at == now
+        {
+            return Some(step);
+        }
         self.waiting = false;
         if self.follower.is_none() {
             let goal = match self.search.as_ref() {

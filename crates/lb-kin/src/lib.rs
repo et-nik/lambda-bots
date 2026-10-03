@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boxworld;
+pub mod hop;
 pub mod physics;
 pub mod pmove;
 pub mod tricks;

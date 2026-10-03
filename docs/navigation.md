@@ -215,6 +215,46 @@ validates is one a bot can make:
   alone steer, so the flight's look yields to any other (`NavStep::free_look`): a bot in the air shoots at an enemy
   in sight.
 
+### Bunny hops
+
+A bot that may bunny hop (from hard up, see `docs/behavior.md`) hops along straight stretches of walking links, on
+every server (`lb_nav::hop`):
+- **The jump** goes on the first command back on the ground: the game jumps before it brakes, so that command loses
+  nothing to friction. The bot presses it only then; a jump held in the air would not go off on landing (the game
+  wants a fresh press).
+- **In the air** every command presses nearly square to the flight, on the side of the way (`lb_kin::hop::air_strafe`):
+  the air adds speed along a press until the flight's own speed that way reaches 30, so pressed square every command
+  adds some, and the side swings over every command when the flight is on its way already. With `sv_airaccelerate 10`
+  and 10 ms commands (the air's gain grows with the command rate; the bots press for the commands they send) a run of
+  270 grows to some 365 over the first hop, 440 over the second. At the speed kept to the presses only turn the
+  flight; above it they brake (the air takes off up to 27 units/s a command). The movement is projected on the view,
+  so the bot looks where it likes meanwhile. A server that crops a jump faster than 1.7 × maxspeed is hopped 3% under
+  that.
+- **Where.** From the node walked to on, along walking links (not crouched, not depending on a mover) up to the first
+  of: a link walking does not do, a node crouched under, on a ladder, in water, mid-air or on a mover, a turn of the
+  path sharper than 60°, a climb or a descent steeper than about 8° (stairs and ramps: a hop down beside narrow
+  stairs would not get onto them again), the end of the way. There the bot runs on and hops again past it.
+- **The check.** A hop is taken from a run (90% of maxspeed at least) with 46 units clear overhead, once its flight,
+  steered the way the bot will steer it, is followed through the server's traces from the takeoff: it must come down
+  on a floor of the way (within 40 units of its line across, 24 up or down), not in lava or slime, without fall damage
+  and without bumping into a wall or a ceiling, where the way on to the next node is walked in a straight line, and
+  short of where the hops stop by the run friction takes to bring the speed down to what is wanted there (a quarter of
+  the speed to shed, plus 48 units: the entry speed of the link that starts there, a run at a corner or on stairs, 90
+  at the end of the way). The checks share the long jumps' budget of followed flights; one that did not check out is
+  not looked at again from within 48 units for 0.2 s on the same link.
+- **The flight** is steered at the point of the way a quarter of a second ahead; the bot passes the path's nodes as
+  it flies by them, never past where the hops stop, and nothing replans the way or ends it until the bot lands
+  (`NavService::flight`, as for long jumps). A hop that comes down off the way (64 units across, 40 up or down, or
+  where the way on is not walked) has the way planned again from there.
+
+Followed through the movement code (`lb-testkit/tests/bhop.rs`): an expert on a server that crops crosses a straight
+3072-unit corridor in 7.4 s where a run takes 11.3 (hard 7.9 s, an expert where the server does not crop 6.8 s), every
+takeoff on the first command back and none cropped; an L of two 1536-unit legs in 7.8 s against 11.3. On the stand's
+maps (an expert where the server crops, 40 routes each, 1000 frames a second) the routes took 84–93% of the time
+walked (dm_snow 84%, bounce 90%, datacore 91%, stalkyard 92%, crossfire 93%), none of some 980 hops down off the way,
+and links failing about as often as walked (69 against 66, nearly all jump links whose executor misses either way). On the live Xash stand the hops go off on the first command back and
+gain as followed offline (270, 351, 446 at the takeoffs).
+
 ## When a link fails
 
 A failed link is blocked for the bot that failed it, for a time that depends on why:

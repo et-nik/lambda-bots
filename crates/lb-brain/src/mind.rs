@@ -818,6 +818,16 @@ impl BotBrain {
                             apply_step(&mut self.intents, &step, body.eye, m);
                             return;
                         }
+                        // A bunny hop on the way there: its keys and its jump as they are, the view the aim's.
+                        if step.hop {
+                            apply_step(&mut self.intents, &step, body.eye, m);
+                            m.path_look = None;
+                            let (enemy, visible) = (t.pos, t.state == TrackState::Visible);
+                            if self.attack_leap(body, ch, enemy, visible, true, nav, rng) {
+                                self.leap_stance();
+                            }
+                            return;
+                        }
                         input.path = Some(step.move_dir);
                     }
                 }

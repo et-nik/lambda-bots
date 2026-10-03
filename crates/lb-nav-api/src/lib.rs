@@ -148,6 +148,9 @@ pub struct NavStep {
     /// In the air on a long jump or a boost: the movement keys alone steer the flight, so a mandatory step's look
     /// is only the way the bot flies and yields to any other (an enemy to shoot at).
     pub free_look: bool,
+    /// A bunny hop: the jump pressed on the first command back on the ground, the flight strafed along the way.
+    /// Closing in on an enemy it is taken as it is: the movement keys and the jump, not the look.
+    pub hop: bool,
 }
 
 /// A gauss boost a traversal needs now: the weapons are to turn the view to `view`, charge the gauss for `charge`
@@ -180,6 +183,9 @@ pub struct Tricks {
     pub gauss_damage: f32,
     /// A charged gauss beam that fails to punch through a wall comes back at its shooter (vanilla `selfgauss`).
     pub selfgauss: bool,
+    /// Bunny hopping along the way: the speed limits, multiples of maxspeed, on a server that crops faster jumps and
+    /// on one that does not.
+    pub bhop: Option<[f32; 2]>,
 }
 
 impl NavStep {
@@ -199,6 +205,7 @@ impl NavStep {
             longjump: false,
             boost: None,
             free_look: false,
+            hop: false,
         }
     }
 }

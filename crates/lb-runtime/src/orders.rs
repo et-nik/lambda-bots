@@ -46,12 +46,14 @@ impl Target {
     }
 }
 
-/// How an attempt goes: `radius R`, `timeout T` and `tricks <jump|longjump|gauss|any|none>...`.
+/// How an attempt goes: `radius R`, `timeout T`, `tricks <jump|longjump|gauss|any|none>...` and `bhop` (bunny hops
+/// along the way as the bot's skill has them).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GoOptions {
     pub radius: f32,
     pub timeout: f64,
     pub allowed: Allowed,
+    pub bhop: bool,
 }
 
 impl Default for GoOptions {
@@ -60,6 +62,7 @@ impl Default for GoOptions {
             radius: lb_nav::reach::RADIUS,
             timeout: TIMEOUT,
             allowed: Allowed::default(),
+            bhop: false,
         }
     }
 }
@@ -89,12 +92,16 @@ impl GoOptions {
                     let words: Vec<&str> = args[i + 1..]
                         .iter()
                         .copied()
-                        .take_while(|w| !matches!(*w, "radius" | "timeout"))
+                        .take_while(|w| !matches!(*w, "radius" | "timeout" | "bhop"))
                         .collect();
                     o.allowed = Allowed::parse(&words)?;
                     i += 1 + words.len();
                 }
-                other => return Err(format!("unknown option `{other}` (radius, timeout, tricks)")),
+                "bhop" => {
+                    o.bhop = true;
+                    i += 1;
+                }
+                other => return Err(format!("unknown option `{other}` (radius, timeout, tricks, bhop)")),
             }
         }
         Ok(o)
@@ -171,6 +178,8 @@ pub struct Order {
     pub test: bool,
     /// The player who gave the command, told the outcome too.
     pub reply_to: Option<u8>,
+    /// Bunny hops along the way, as the bot's skill has them.
+    pub bhop: bool,
 }
 
 impl Order {
@@ -181,6 +190,7 @@ impl Order {
             boost: None,
             test,
             reply_to: None,
+            bhop: false,
         }
     }
 
@@ -191,6 +201,7 @@ impl Order {
             boost: None,
             test: true,
             reply_to: None,
+            bhop: false,
         }
     }
 
@@ -390,7 +401,7 @@ pub(crate) fn give(rt: &mut crate::Runtime, host: &mut dyn lb_host::Host, args: 
 }
 
 const DO_USAGE: &str = "usage: lb do <name|#userid|all> go <x y z|node <n>|@me|@aim|place <name>> [radius R] [timeout T] \
-                        [tricks jump longjump gauss|any|none] | lb do [<name|all>] stop | lb do";
+                        [tricks jump longjump gauss|any|none] [bhop] | lb do [<name|all>] stop | lb do";
 
 /// `lb do`: bots on command.
 pub(crate) fn command(rt: &mut crate::Runtime, host: &mut dyn lb_host::Host, args: &[&str]) -> Vec<String> {
@@ -460,16 +471,18 @@ pub(crate) fn command(rt: &mut crate::Runtime, host: &mut dyn lb_host::Host, arg
                 reach.checks = lb_nav::reach::CHECKS_PER_FRAME;
                 let mut order = Order::go(reach, what.clone(), false);
                 order.reply_to = reply_to;
+                order.bhop = opts.bhop;
                 let b = &mut rt.bots[i];
                 b.nav.clear();
                 b.order = Some(order);
             }
             vec![format!(
-                "{} go to {what} (radius {:.0}, tricks {}, {:.0} s); the others stand still; the outcome goes to the \
+                "{} go to {what} (radius {:.0}, tricks {}{}, {:.0} s); the others stand still; the outcome goes to the \
                  console and the log",
                 names(rt, &bots),
                 opts.radius,
                 opts.allowed.names(),
+                if opts.bhop { ", bunny hops" } else { "" },
                 opts.timeout
             )]
         }
@@ -544,6 +557,9 @@ mod tests {
         let o = GoOptions::parse(&["tricks", "gauss", "jump", "timeout", "20"]).unwrap();
         assert!(o.allowed.gauss && o.allowed.jump && !o.allowed.longjump);
         assert_eq!((o.timeout, o.radius), (20.0, lb_nav::reach::RADIUS));
+        assert!(!o.bhop);
+        let o = GoOptions::parse(&["tricks", "jump", "bhop", "radius", "16"]).unwrap();
+        assert!(o.bhop && o.allowed.jump && !o.allowed.gauss && o.radius == 16.0);
         assert!(GoOptions::parse(&["radius"]).is_err());
         assert!(GoOptions::parse(&["fast"]).is_err());
     }

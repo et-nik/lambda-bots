@@ -38,7 +38,11 @@ schema: lambdabots/difficulty@1
 #   longjump_dodge        long jumps aside or away in a fight (for a dodge jump, away from a blast), the view back
 #                         on the enemy in the air
 #   gauss_walls           charged gauss shots through thin walls at an enemy lost behind one a moment ago
-#   bhop_speed            bunny hop speed limit, multiple of maxspeed; ~ = no bunny hopping
+#   bhop_speed            bunny hop speed limit, multiple of maxspeed, on a server that crops faster jumps (the SDK,
+#                         BugfixedHL with mp_bunnyhop 0): hops keep just under the crop at 1.7 anyway; ~ = no bunny
+#                         hopping
+#   bhop_speed_uncapped   bunny hop speed limit on a server that does not crop (BugfixedHL's default
+#                         mp_bunnyhop 1); ~ = as bhop_speed
 
 presets:
   noob:
@@ -72,6 +76,7 @@ presets:
     longjump_dodge: false
     gauss_walls: false
     bhop_speed: ~
+    bhop_speed_uncapped: ~
   easy:
     recognition_delay: [0.4, 0.6]
     recognition_floor: 0.22
@@ -103,6 +108,7 @@ presets:
     longjump_dodge: false
     gauss_walls: false
     bhop_speed: ~
+    bhop_speed_uncapped: ~
   normal:
     recognition_delay: [0.22, 0.35]
     recognition_floor: 0.16
@@ -133,7 +139,8 @@ presets:
     longjump_bold: false
     longjump_dodge: false
     gauss_walls: false
-    bhop_speed: 1.25
+    bhop_speed: ~
+    bhop_speed_uncapped: ~
   hard:
     recognition_delay: [0.14, 0.22]
     recognition_floor: 0.13
@@ -165,6 +172,7 @@ presets:
     longjump_dodge: true
     gauss_walls: true
     bhop_speed: 1.5
+    bhop_speed_uncapped: 1.7
   expert:
     recognition_delay: [0.08, 0.14]
     recognition_floor: 0.10
@@ -196,3 +204,4 @@ presets:
     longjump_dodge: true
     gauss_walls: true
     bhop_speed: 1.7
+    bhop_speed_uncapped: 2.0

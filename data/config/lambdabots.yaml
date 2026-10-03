@@ -85,13 +85,16 @@ game:
 # long jumps on the way alone). longjump: with the module, long jumps across gaps, along straight stretches of the
 # way and at enemies; gauss_jump: gauss jumps on the way somewhere far, the gauss in hand; gauss_boost: the gauss
 # boost links of the navigation graph, onto ledges and across; satchel_jump: satchels thrown from a jump and set off
-# in flight; grenade_jump: hand grenades thrown from a jump (a long jump with the module) at an enemy far off or above.
+# in flight; grenade_jump: hand grenades thrown from a jump (a long jump with the module) at an enemy far off or above;
+# bhop: bunny hopping (hard and expert) along straight stretches of the way and closing in on an enemy, on any server
+# (one that crops faster jumps, as mp_bunnyhop 0 does, is hopped just under the crop).
 tricks:
   longjump: true
   gauss_jump: true
   gauss_boost: true
   satchel_jump: true
   grenade_jump: true
+  bhop: true
 
 gungame:
   mode: auto              # auto | on | off
