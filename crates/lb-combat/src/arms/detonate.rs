@@ -214,6 +214,10 @@ impl Airburst {
         self.button.is_some()
     }
 
+    pub fn thrown(&self) -> SimTime {
+        self.thrown
+    }
+
     pub fn update(&mut self, h: &Hands<'_>, b: Burst) -> Status {
         let now = h.now;
         if let Some(t) = &mut self.trigger {

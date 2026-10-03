@@ -255,10 +255,12 @@ fn retreat_weight(s: &Situation<'_>) -> f32 {
     if recency <= 0.0 {
         return 0.0;
     }
-    let guns = s
-        .weapons
-        .iter()
-        .filter(|a| !matches!(spec(a.id).class, WeaponClass::Melee | WeaponClass::Throwable));
+    // On GunGame's satchel level (the game hands each one back as it goes) the satchel is the gun.
+    let satchels = s.kit() == Some(Kit::Throwable(WeaponId::Satchel));
+    let guns = s.weapons.iter().filter(|a| {
+        !matches!(spec(a.id).class, WeaponClass::Melee | WeaponClass::Throwable)
+            || (satchels && a.id == WeaponId::Satchel)
+    });
     let loaded = guns.clone().filter(|a| a.loaded()).count();
     let mut mult = 0.5;
     if loaded == 0 {

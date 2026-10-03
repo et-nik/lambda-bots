@@ -418,7 +418,7 @@ fn gungame_drill(rt: &mut Runtime, host: &mut dyn Host, kit: lb_game::gungame::K
         } else if kit == lb_game::gungame::Kit::Throwable(WeaponId::HandGrenade) {
             "the hand grenade level: grenades only, handed back as they are thrown"
         } else {
-            "the satchel level: satchels only (handed out with `lb weapons satchel give`)"
+            "the satchel level: satchels only, handed back as they are thrown"
         }
     )]
 }
