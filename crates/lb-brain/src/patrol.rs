@@ -6,8 +6,9 @@
 //!
 //! - **Where it has been:** four times a second the places within 250 units of the bot on its floor are marked; a
 //!   place not been to for 40 s is new again.
-//! - **Its level:** the places within 48 units of the height it first went on patrol at in this life (its ring of the
-//!   octagon, its floor), got to without leaving that height. A level with nothing 2 s of running off lets it off.
+//! - **Its level:** the places within 48 units of the height it first went on patrol at in this life, or since it was
+//!   last moved far at once (a teleport; on the octagon, to its next level's ring): its ring of the octagon, its floor,
+//!   got to without leaving that height. A level with nothing 2 s of running off lets it off.
 //! - **The next stop:** of the places within 10 s of running, the best for being far (6 s and more as good as any,
 //!   under 2 s none), for the way there going through places not been to lately, and onward: leaving along the way
 //!   the bot runs, not back.
@@ -43,6 +44,8 @@ const STALE: f64 = 1.0;
 pub(crate) const NO_WAY_FOR: f64 = 3.0;
 /// The patrol moved the bot this recently: it is going round.
 const GOING: f64 = 0.1;
+/// Moved this far between two marks, the bot was teleported.
+const TELEPORTED: f32 = 400.0;
 
 /// `b` is on the level of `a`.
 pub(crate) fn same_level(a: Vec3, b: Vec3) -> bool {
@@ -57,8 +60,9 @@ pub struct Patrol {
     /// Where it is going, and when it last went on there.
     stop: Option<(NodeId, Vec3)>,
     went: SimTime,
-    /// The height of the level it keeps to.
+    /// The height of the level it keeps to, and where it was at the last mark.
     level: Option<f32>,
+    at: Option<Vec3>,
     /// No way to the enemy it would close in on was found: not looked for again before this.
     pub(crate) no_way_until: SimTime,
 }
@@ -87,6 +91,10 @@ impl Patrol {
             return;
         }
         self.next_mark = now + MARK_PERIOD;
+        if self.at.is_some_and(|at| at.distance(origin) > TELEPORTED) {
+            self.on_spawn();
+        }
+        self.at = Some(origin);
         for (n, been) in self.been.iter_mut().enumerate() {
             let p = map.node_origin(n as NodeId);
             if (p - origin).truncate().length() <= MARK_NEAR && (p.z - origin.z).abs() <= FLOOR {
@@ -376,6 +384,20 @@ mod tests {
         let (n, stop) = p.next_stop(SimTime(7.0), at, at.z, None, &map, &mut rng).unwrap();
         assert!(n < UPPER && n > 24, "{n}");
         assert!(stop.distance(at) > 1000.0);
+    }
+
+    #[test]
+    fn a_teleport_to_another_ring_makes_that_ring_its_level() {
+        let map = Rings;
+        let mut p = Patrol::default();
+        p.mark(SimTime(0.0), map.node_origin(UPPER), &map);
+        p.level = Some(300.0);
+        // Walked on along the lower ring: still its level.
+        p.mark(SimTime(0.3), map.node_origin(UPPER + 1), &map);
+        assert_eq!(p.level, Some(300.0));
+        // Teleported up to the upper ring: its level is to be taken anew there.
+        p.mark(SimTime(0.6), map.node_origin(5), &map);
+        assert_eq!(p.level, None);
     }
 
     #[test]

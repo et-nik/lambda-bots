@@ -185,13 +185,11 @@ const REFILLED_REST: [f32; 2] = [0.0, 0.3];
 const REFILLED_HOLD: f64 = 1.0;
 /// On the run a satchel there is given up at an enemy closer than this.
 const REFILLED_RUN_CLOSE: f32 = 150.0;
-/// A throw on the run, from a jump or from a long jump is not taken with a ledge (higher than a safe drop) this close
-/// along the way to the enemy: it would carry the bot off its floor. A satchel then goes only at an enemy this close,
-/// which a short run up to the edge reaches (thrown down from it, it flies further).
+/// A grenade's run, a jump or a long jump at the enemy is not taken with a ledge (higher than a safe drop) this close
+/// along the way to it: it would carry the bot off its floor.
 const RUN_LEDGE: f32 = 150.0;
 const JUMP_LEDGE: f32 = 300.0;
 const LEAP_LEDGE: f32 = 600.0;
-const EDGE_SATCHEL: f32 = 350.0;
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
 const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
@@ -1296,17 +1294,12 @@ impl BotBrain {
             },
         ];
         // The run at the enemy, a jump or a long jump would carry the bot off its floor (the enemy on one below): not
-        // taken; a satchel then only at an enemy a short run reaches, braking at the edge.
+        // taken; a satchel goes on the run all the same, the run braking at the edge (thrown down from it, it flies
+        // further).
         let toward = (t.pos - body.origin).truncate().normalize_or_zero();
         let ledge = |nav: &mut dyn NavService, dist: f32| lb_combat::fight::drop_ahead(nav, body.origin, toward, dist);
         let edge = ledge(nav, RUN_LEDGE);
-        if satchels > 0
-            && free
-            && seen
-            && (body.on_ground || satchels_back)
-            && in_band(satchel_band)
-            && (!edge || d <= EDGE_SATCHEL)
-        {
+        if satchels > 0 && free && seen && (body.on_ground || satchels_back) && in_band(satchel_band) {
             ways.push((
                 Way::Airburst,
                 if satchels_back { REFILLED_SATCHEL } else { SEEN_SATCHEL },
