@@ -127,6 +127,16 @@ pub fn travel(map: &dyn MapView, from: NodeId, max: f32) -> Vec<f32> {
 /// As [`travel`], with the place each one is reached from on the quickest way (`NodeId::MAX` for `from` and the
 /// places out of reach).
 pub fn travel_tree(map: &dyn MapView, from: NodeId, max: f32) -> (Vec<f32>, Vec<NodeId>) {
+    travel_tree_within(map, from, max, &|_| true)
+}
+
+/// As [`travel_tree`], by way of the places `within` lets through only.
+pub fn travel_tree_within(
+    map: &dyn MapView,
+    from: NodeId,
+    max: f32,
+    within: &dyn Fn(NodeId) -> bool,
+) -> (Vec<f32>, Vec<NodeId>) {
     let mut cost = vec![f32::INFINITY; map.node_count()];
     let mut prev = vec![NodeId::MAX; map.node_count()];
     let Some(c0) = cost.get_mut(from as usize) else {
@@ -141,7 +151,7 @@ pub fn travel_tree(map: &dyn MapView, from: NodeId, max: f32) -> (Vec<f32>, Vec<
         }
         map.for_each_link(node, &mut |to, t| {
             let next = c + t;
-            if next <= max && next < cost[to as usize] {
+            if next <= max && next < cost[to as usize] && within(to) {
                 cost[to as usize] = next;
                 prev[to as usize] = node;
                 open.push(Open { cost: next, node: to });

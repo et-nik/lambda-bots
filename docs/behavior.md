@@ -307,15 +307,29 @@ away (550 for a bot under 40 health), with nobody near the first stretch of the 
   | Weapon in hand                       | Closes in beyond |
   |--------------------------------------|------------------|
   | shotgun                              | 350              |
+  | satchel                              | 500              |
   | hornetgun, egon                      | 600              |
   | glock, MP5                           | 700              |
+  | hand grenade, snark                  | 800              |
   | gauss                                | 1200             |
   | 357, crossbow, RPG                   | never            |
 
   A hurt or timid bot (health × aggression under 30) keeps its distance, as yapb's did; nobody closes in while
-  reloading or while its own rocket, grenade or satchels are on the way to the target. From hard up a bot bunny hops
-  along the path instead, where the way lets it (see *Tricks*): the movement keys and the jump are the hops', the view
-  stays on the enemy and the shots go on in the air.
+  reloading or while its own rocket, grenade or satchels are on the way to the target. With a throwable in hand the
+  bot does not close in on an enemy more than 128 units above or below it (another floor; on GunGame's octagon,
+  another ring): no drop down to it, no lift up. From hard up a bot bunny hops along the path instead, where the way
+  lets it (see *Tricks*): the movement keys and the jump are the hops', the view stays on the enemy and the shots go on
+  in the air.
+- **Going round with a throwable.** With grenades, satchels or snarks in hand the bot does not fight in place: not
+  closing in, with the enemy no closer than it keeps it off at (and not within 600 units while its own throw is on the
+  way there), and with no grenade drawn or cooked (that moves as its throw has it), it goes on round its own level,
+  throwing as it goes (see *Explosives*): the places within 48 units of
+  the height it first went round at in this life, got to without leaving it. The next stop is 2–10 s of running off,
+  the farther the better up to 6 s, by a way through places it has not been to in the last 40 s, leaving along the way
+  it runs rather than back; it is chosen again 300 units short of the stop, so the bot never stops. A level with
+  nothing 2 s off lets it off; a stop with no way to it counts as been to, and an enemy with no way to it is not
+  closed in on for 3 s. On GunGame's octagon, where each level's players have a ring of their own, that is round and
+  round its ring, as players go there.
 - **Style.** Every 1–3 s the bot decides between strafing and standing still. Closer than 768 units it strafes.
   Further away it stands with the skill's `stay_mid` / `stay_far` chance (not while closing in).
 - **Strafe side.** It strafes away from the side the enemy aims at, swaps sides now and then, and turns around at
@@ -403,6 +417,10 @@ twice as likely, and grenades from 150 units (yapb's grenade war).
     second before that (the enemy round a corner, or close), it goes where the enemy most likely is round the corner
     (its place blurred 150 units more, no clear line asked), else where its blast is farthest from the bot. Every
     suicide by grenade on the GunGame server (2026-10-02) was a grenade held 2.35–2.6 s, forced out or dumped late.
+- **Ledges.** A throw on the run, from a jump or from a long jump is not taken with a ledge (higher than a safe drop)
+  within 150, 300 or 600 units along the way to the enemy (one on a floor below; on GunGame's octagon, a lower ring):
+  it would carry the bot off its floor. A grenade then goes from where the bot is; a satchel only at an enemy within
+  350 units, and any run at the enemy brakes at the edge: the throw goes from there, or not at all.
 - **A pile of satchels** for a trap (see *Goals*): two to four of them (as many as the bot carries) thrown one after
   another at the spot, as fast as the game allows (a second apart); then the bot backs off out of their blast.
 - **A satchel at an enemy in sight**, 350–550 units away (800 from a long jump with the module) with a clear line to
@@ -674,6 +692,10 @@ The bots know a GunGame match the way a player does: from the scoreboard and fro
   with a gun that reaches further, in on a gun that does better far off.
 - **The levels.**
   - The crowbar alone: a lost enemy is hunted with at least 0.7 weight, as yapb's knife level.
+  - On gg_octagon (its own plugin puts each level's players on a ring of their own round the middle: the crowbar in
+    the middle, satchels, grenades and snarks on the rings above it, one over the other, the gauss on top) a bot with
+    a throwable goes round its ring, throwing down at the rings below and at whoever comes by on its own, and closes
+    in only on enemies on its own ring (see *Fighting*).
   - Tripmines: no enemy is engaged or hunted, nor aimed at (nothing hurts but the mines: the view is the trail's and
     the goal's, the tripmine in hand, or the glock once every mine is out), and sounds are gone to see about much less
     (40%). Trails are all the bot lays there, one after another, enemies about or not (a trail is the way away from

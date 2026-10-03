@@ -35,6 +35,8 @@ pub const PUSH_WILL: f32 = 30.0;
 /// Strafing while closing in, as a share of the run.
 const PUSH_STRAFE: f32 = 0.6;
 const SAFE_DROP: f32 = 160.0;
+/// A way ahead is looked at for a ledge this often along it.
+const LEDGE_STEP: f32 = 32.0;
 const CHECK_PERIOD: f64 = 0.1;
 /// With walls close on both sides, a strafe toward the farther one needs this much room, and stops this short of it.
 const ROOM_MIN: f32 = 64.0;
@@ -89,12 +91,15 @@ pub struct FightInput {
 }
 
 /// How far off `weapon` still does well: pellets and bullets spread, darts home in close, beams are hard to hold on
-/// a target far off. Guns that hit as well far off (the 357, the crossbow, the RPG) never close in.
+/// a target far off, throws reach so far. Guns that hit as well far off (the 357, the crossbow, the RPG) never close
+/// in.
 pub fn close_in(weapon: Option<WeaponId>) -> f32 {
     match weapon {
         Some(WeaponId::Shotgun) => 350.0,
         // Thrown on the run from 350–550 units.
         Some(WeaponId::Satchel) => 500.0,
+        // Thrown at enemies up to 1000 units off.
+        Some(WeaponId::HandGrenade | WeaponId::Snark) => 800.0,
         Some(WeaponId::Hornetgun | WeaponId::Egon) => 600.0,
         Some(WeaponId::Glock | WeaponId::Mp5) => 700.0,
         Some(WeaponId::Gauss) => 1200.0,
@@ -335,6 +340,28 @@ impl Fight {
 /// Moving along `velocity` for a fifth of a second would step off a ledge higher than a safe drop.
 pub fn drops(tracer: &mut dyn Tracer, origin: Vec3, velocity: Vec2) -> bool {
     let spot = origin + (velocity * 0.2).extend(0.0);
+    no_floor(tracer, spot)
+}
+
+/// Running from `origin` along `dir` (flat, of unit length) for `dist` units, short of a wall, would go off a ledge
+/// higher than a safe drop: looked at every 32 units.
+pub fn drop_ahead(tracer: &mut dyn Tracer, origin: Vec3, dir: Vec2, dist: f32) -> bool {
+    let clear = tracer
+        .trace(&TraceQuery::line(origin, origin + (dir * dist).extend(0.0)))
+        .fraction
+        * dist;
+    let mut d = LEDGE_STEP;
+    while d <= clear {
+        if no_floor(tracer, origin + (dir * d).extend(0.0)) {
+            return true;
+        }
+        d += LEDGE_STEP;
+    }
+    false
+}
+
+/// No floor within a safe drop under a player's origin at `spot`.
+fn no_floor(tracer: &mut dyn Tracer, spot: Vec3) -> bool {
     let tr = tracer.trace(&TraceQuery::line(spot, spot - Vec3::Z * (SAFE_DROP + 36.0)));
     !tr.start_solid && tr.fraction >= 1.0
 }
@@ -570,6 +597,34 @@ mod tests {
         let mut rng = Pcg32::new(3, 3);
         let m = f.update(&input(0.0, 80.0), &SKILL, &mut Cliff, &mut rng);
         assert!(m.velocity.x > 0.0, "reversed at the edge: {m:?}");
+    }
+
+    #[test]
+    fn a_ledge_ahead_is_found_along_the_way_and_not_beyond_a_wall() {
+        /// Floor only where x > -100; a wall across the way at y = 50.
+        struct Ledge;
+        impl Tracer for Ledge {
+            fn trace(&mut self, q: &TraceQuery) -> Trace {
+                let mut t = Trace::clear(q.end);
+                if (q.start.y - 50.0) * (q.end.y - 50.0) < 0.0 {
+                    t.fraction = (50.0 - q.start.y) / (q.end.y - q.start.y);
+                }
+                if q.end.z < -36.0 && q.start.x > -100.0 {
+                    t.fraction = t.fraction.min(0.1);
+                }
+                t
+            }
+            fn point_contents(&mut self, _p: Vec3) -> i32 {
+                contents::EMPTY
+            }
+        }
+        assert!(drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(-1.0, 0.0), 150.0));
+        assert!(!drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(-1.0, 0.0), 90.0));
+        assert!(!drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(1.0, 0.0), 600.0));
+        // Past the wall it would be off the ledge: the wall stops the run first.
+        let corner = Vec3::new(-50.0, 0.0, 0.0);
+        let slant = Vec2::new(-1.0, 1.0).normalize();
+        assert!(!drop_ahead(&mut Ledge, corner, slant, 300.0));
     }
 
     #[test]

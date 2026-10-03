@@ -2,12 +2,14 @@
 //!
 //! - **Combat tick (10 Hz):** picks the enemy to fight and the weapon for its distance.
 //! - **Decision (5 Hz, or at once on a new enemy or damage):** picks the goal.
-//! - **Goal:** moves the bot. Engage fights in place (strafing, standing, backing off); the others walk a path.
+//! - **Goal:** moves the bot. Engage fights in place (strafing, standing, backing off), with a throwable in hand goes
+//!   round the bot's level (see [`crate::patrol`]); the others walk a path.
 //! - **Aim and fire (priority 70):** owns the look and the weapon whenever an enemy is in sight, whatever the
 //!   goal, so a retreating or hunting bot still shoots back.
 //! - **Vigilance (priority 20):** looks along the path and glances at sounds.
 
 use lb_combat::aim::{Aim, AimSkill, Shot};
+use lb_combat::arms::throw::Kind;
 use lb_combat::fight::{Fight, FightInput, FightMove, FightSkill};
 use lb_combat::policy::{self, Armed, Choice, Target, XBOW_ZOOM_FROM};
 use lb_combat::{fire, target};
@@ -104,6 +106,8 @@ const GRENADE_KEEP: f32 = 280.0;
 const SNARK_KEEP: f32 = 200.0;
 /// With a throwable in hand the view is on the ground this far toward the enemy (some 15° down on level ground).
 const THROWABLE_LOOK: f32 = 250.0;
+/// A throw on its way to an enemy this far off leaves the bot free to go about: its blast and its snarks are there.
+const THROWN_CLEAR: f32 = 600.0;
 /// Distances a GunGame duel is weighed at, and how much more damage a second a distance must give the bot (its own
 /// less the enemy's) than where it is, to be gone for.
 const DUEL_DISTANCES: [f32; 8] = [100.0, 200.0, 300.0, 450.0, 600.0, 800.0, 1000.0, 1300.0];
@@ -809,10 +813,15 @@ impl BotBrain {
                     return;
                 }
                 let mut input = fight_input(m, t, body, ch);
+                let thrown = class == WeaponClass::Throwable;
                 // Closing in: the way there by the graph, round walls and drops; a jump or a ladder on it is taken
                 // whole.
-                if input.wants_closer(distance) {
-                    let (_, step) = nav.go_to(t.pos);
+                let push = input.wants_closer(distance) && !(thrown && now < self.patrol.no_way_until);
+                if push {
+                    let (status, step) = nav.go_to(t.pos);
+                    if thrown && status == NavStatus::NoPath {
+                        self.patrol.no_way_until = now + crate::patrol::NO_WAY_FOR;
+                    }
                     if let Some(step) = step {
                         if step.mandatory {
                             apply_step(&mut self.intents, &step, body.eye, m);
@@ -831,9 +840,21 @@ impl BotBrain {
                         input.path = Some(step.move_dir);
                     }
                 }
+                let (enemy, visible) = (t.pos, t.state == TrackState::Visible);
+                // A throwable is not fought with in place: not closing in, with the enemy no closer than it is kept
+                // off at and not close by its own throw on the way, the bot goes on round its level, throwing as it
+                // goes. A grenade drawn or cooked moves as its throw has it: its plan goes by the bot's run.
+                let cooking = matches!(&m.arms.active, Some(crate::arms::Active::Throw(t)) if t.kind == Kind::Grenade);
+                let free = !input.back_off
+                    && !cooking
+                    && distance >= input.keep_away
+                    && (!input.hold_ground || distance >= THROWN_CLEAR);
+                if thrown && !push && free && self.patrol(body, map, nav, rng) {
+                    return;
+                }
+                let m = &mut self.mind;
                 let mv = m.fight.update(&input, &fight_skill(ch), nav, &mut rng.combat);
                 m.path_look = None;
-                let (enemy, visible) = (t.pos, t.state == TrackState::Visible);
                 let closing = input.wants_closer(distance);
                 self.fight_step(mv, enemy, body, ch, nav, rng);
                 if self.attack_leap(body, ch, enemy, visible, closing, nav, rng) {
@@ -1304,6 +1325,14 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         .duel
         .filter(|(k, ..)| *k == t.who)
         .map_or(f32::INFINITY, |(.., close)| close);
+    // A throw is not closed in with on an enemy off the bot's level (on GunGame's octagon, on another ring): no drop
+    // down to it, no lift up.
+    let thrown = body.weapon.is_some_and(|w| spec(w).class == WeaponClass::Throwable);
+    let close_in = if thrown && !crate::patrol::same_level(body.origin, t.pos) {
+        f32::INFINITY
+    } else {
+        lb_combat::fight::close_in(body.weapon).min(close).max(keep * 1.25)
+    };
     FightInput {
         now,
         origin: body.origin,
@@ -1320,7 +1349,7 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         on_ground: body.on_ground,
         velocity: body.velocity.truncate(),
         maxspeed: body.maxspeed,
-        close_in: lb_combat::fight::close_in(body.weapon).min(close).max(keep * 1.25),
+        close_in,
         keep_away: keep,
         path: None,
     }

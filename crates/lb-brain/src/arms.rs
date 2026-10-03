@@ -185,6 +185,13 @@ const REFILLED_REST: [f32; 2] = [0.0, 0.3];
 const REFILLED_HOLD: f64 = 1.0;
 /// On the run a satchel there is given up at an enemy closer than this.
 const REFILLED_RUN_CLOSE: f32 = 150.0;
+/// A throw on the run, from a jump or from a long jump is not taken with a ledge (higher than a safe drop) this close
+/// along the way to the enemy: it would carry the bot off its floor. A satchel then goes only at an enemy this close,
+/// which a short run up to the edge reaches (thrown down from it, it flies further).
+const RUN_LEDGE: f32 = 150.0;
+const JUMP_LEDGE: f32 = 300.0;
+const LEAP_LEDGE: f32 = 600.0;
+const EDGE_SATCHEL: f32 = 350.0;
 /// All the snarks at an enemy in sight this close: the chance per look (times the skill's `throw_rate`), and the
 /// fewest worth it.
 const BARRAGE_BAND: [f32; 2] = [60.0, 200.0];
@@ -767,8 +774,9 @@ fn clear_line(tracer: &mut dyn Tracer, from: Vec3, to: Vec3) -> bool {
 }
 
 impl BotBrain {
-    /// For `lb watch` of a bot: its goal, the weapon protocol under way (a throw's phase), its target (how far off
-    /// `origin`, how sure), how many of its satchels are out and how long until a throw is weighed again.
+    /// For `lb watch` of a bot: its goal (`/patrol` while it goes round its level for it), the weapon protocol under
+    /// way (a throw's phase), its target (how far off `origin`, how sure), how many of its satchels are out and how
+    /// long until a throw is weighed again.
     pub fn watch_note(&self, now: SimTime, origin: Vec3) -> String {
         let arms = match &self.mind.arms.active {
             Some(Active::Throw(t)) => format!(
@@ -788,8 +796,9 @@ impl BotBrain {
                 format!("#{} {:.0} {:?}", t.who.userid, t.pos.distance(origin), t.state)
             });
         format!(
-            "goal {} arms {arms} target {target} charges {} rest {:.1}",
+            "goal {}{} arms {arms} target {target} charges {} rest {:.1}",
             self.mind.goal.map_or("none", |g| g.kind.as_str()),
+            if self.patrol.going(now) { "/patrol" } else { "" },
             self.explosives.charges.len(),
             self.mind.arms.next_throw.since(now).max(0.0)
         )
@@ -1286,7 +1295,18 @@ impl BotBrain {
                 AIRBURST_BAND[1]
             },
         ];
-        if satchels > 0 && free && seen && (body.on_ground || satchels_back) && in_band(satchel_band) {
+        // The run at the enemy, a jump or a long jump would carry the bot off its floor (the enemy on one below): not
+        // taken; a satchel then only at an enemy a short run reaches, braking at the edge.
+        let toward = (t.pos - body.origin).truncate().normalize_or_zero();
+        let ledge = |nav: &mut dyn NavService, dist: f32| lb_combat::fight::drop_ahead(nav, body.origin, toward, dist);
+        let edge = ledge(nav, RUN_LEDGE);
+        if satchels > 0
+            && free
+            && seen
+            && (body.on_ground || satchels_back)
+            && in_band(satchel_band)
+            && (!edge || d <= EDGE_SATCHEL)
+        {
             ways.push((
                 Way::Airburst,
                 if satchels_back { REFILLED_SATCHEL } else { SEEN_SATCHEL },
@@ -1346,6 +1366,7 @@ impl BotBrain {
                 let aim = grenade_aim(t, now);
                 let quick = grenades_back && d >= QUICK_FROM;
                 let run = body.waterlevel < 2
+                    && !edge
                     && d >= if grenades_back && !quick {
                         QUICK_FROM
                     } else {
@@ -1414,8 +1435,13 @@ impl BotBrain {
                 let jump = ch.skill.tricks
                     && body.tricks.grenade_jump
                     && (d >= GRENADE_JUMP_MIN || above >= GRENADE_JUMP_ABOVE)
-                    && rng.combat.next_f32() < ch.tricks.grenade_jump;
-                let leap = jump && body.has_longjump && body.tricks.longjump && d >= GRENADE_LEAP_MIN;
+                    && rng.combat.next_f32() < ch.tricks.grenade_jump
+                    && !ledge(nav, JUMP_LEDGE);
+                let leap = jump
+                    && body.has_longjump
+                    && body.tricks.longjump
+                    && d >= GRENADE_LEAP_MIN
+                    && !ledge(nav, LEAP_LEDGE);
                 thrower = match (jump, leap) {
                     (true, true) => thrower.from_leap(),
                     (true, false) => thrower.from_jump(),
@@ -1425,8 +1451,8 @@ impl BotBrain {
         }
         if way == Way::Airburst {
             // As often as the style likes jumps.
-            let jump = jumps && rng.combat.next_f32() < ch.tricks.satchel_jump;
-            thrower = match (jump, leaps && d >= LEAP_BAND[0]) {
+            let jump = jumps && rng.combat.next_f32() < ch.tricks.satchel_jump && !ledge(nav, JUMP_LEDGE);
+            thrower = match (jump, leaps && d >= LEAP_BAND[0] && !ledge(nav, LEAP_LEDGE)) {
                 (true, true) => thrower.from_leap(),
                 (true, false) => thrower.from_jump(),
                 (false, _) => thrower.on_the_run(),
