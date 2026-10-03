@@ -6,6 +6,7 @@ pub mod arms;
 pub mod attention;
 pub mod goals;
 pub mod mind;
+pub mod patrol;
 pub mod trail;
 pub mod tricks;
 
@@ -75,6 +76,8 @@ pub struct BotBrain {
     pub last_attention: Option<Attention>,
     /// When the bot last had each place of the map in sight.
     pub watch: Watch,
+    /// Where the bot has been, and where it goes on to with nothing to do where it stands.
+    pub patrol: patrol::Patrol,
     /// Where a lost enemy would come into view, worked out twice a second.
     pub expect: Option<(PlayerKey, Vec3)>,
     /// Where an enemy would come into view when none is known: the busiest way into the bot's sight a few hundred
@@ -116,6 +119,7 @@ impl BotBrain {
             intents: Intents::default(),
             last_attention: None,
             watch: Watch::default(),
+            patrol: patrol::Patrol::default(),
             expect: None,
             approach: None,
             danger: None,
@@ -139,6 +143,7 @@ impl BotBrain {
         self.glance = attention::Glance::default();
         self.mind.reset();
         self.motor.reset();
+        self.patrol.on_spawn();
     }
 
     pub fn on_death(&mut self) {
@@ -161,10 +166,12 @@ impl BotBrain {
         self.charger_cursor = 0;
     }
 
-    /// The navigation graph was replaced: where lost enemies may be and the places watched were over its nodes.
+    /// The navigation graph was replaced: where lost enemies may be, the places watched and the places been to were
+    /// over its nodes.
     pub fn on_new_graph(&mut self) {
         self.beliefs.on_new_graph();
         self.watch = Watch::default();
+        self.patrol.reset();
     }
 
     pub fn on_public(&mut self, e: &PublicEvent) {
@@ -334,6 +341,7 @@ impl BotBrain {
         let Some(map) = map else { return };
         if let Some(e) = eyes {
             self.watch.update(now, e.origin, e.eye, e.view, e.half_fov, map);
+            self.patrol.mark(now, e.origin, map);
         }
         let watch = eyes.map(|_| &self.watch);
         self.beliefs
