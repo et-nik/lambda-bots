@@ -419,7 +419,7 @@ impl Thrower {
     pub fn update(&mut self, h: &Hands<'_>, tracer: &mut dyn Tracer) -> Status {
         match self.kind {
             Kind::Grenade => self.grenade(h, tracer),
-            Kind::Satchel => self.satchel(h),
+            Kind::Satchel => self.satchel(h, tracer),
             Kind::Snark => self.snark(h, tracer),
         }
     }
@@ -607,10 +607,7 @@ impl Thrower {
                 } else {
                     held >= cook && steady
                 };
-                let run_up = MoveIntent {
-                    dir: toward,
-                    speed: RUN_UP_SPEED,
-                };
+                let run_up = run_at(h, tracer, toward);
                 // Cooking before the run-up the bot moves as the fight has it; a planned grenade is not stopped for
                 // either: the plan carries whatever velocity the bot has.
                 let planned = self.planned.is_some();
@@ -673,10 +670,7 @@ impl Thrower {
                     weapon: Some(hold(w)),
                     look: Some(LookIntent::Angles(self.angles())),
                     movement: if self.run_from.is_some() {
-                        Some(MoveIntent {
-                            dir: toward,
-                            speed: RUN_UP_SPEED,
-                        })
+                        Some(run_at(h, tracer, toward))
                     } else {
                         self.planned.is_none().then(stop)
                     },
@@ -687,7 +681,7 @@ impl Thrower {
         }
     }
 
-    fn satchel(&mut self, h: &Hands<'_>) -> Status {
+    fn satchel(&mut self, h: &Hands<'_>, tracer: &mut dyn Tracer) -> Status {
         let now = h.now;
         let w = WeaponId::Satchel;
         let game = h.predicted(w);
@@ -702,10 +696,7 @@ impl Thrower {
         if self.run && h.ready(w) {
             self.run_from.get_or_insert(now);
         }
-        let run_up = self.run_from.is_some().then_some(MoveIntent {
-            dir: toward,
-            speed: RUN_UP_SPEED,
-        });
+        let run_up = self.run_from.is_some().then(|| run_at(h, tracer, toward));
         let running = |weapon: WeaponIntent, angles: Vec3, jump: bool| {
             Status::Running(Request {
                 weapon: Some(weapon),
@@ -941,6 +932,16 @@ impl Barrage {
 }
 
 /// The game releases a snark only with free space 20–64 units in front of the thrower (`CSqueak::PrimaryAttack`).
+/// The run at the target for a throw; up to a ledge only (the target on a floor below), braking there: the throw goes
+/// from the edge, or not at all.
+fn run_at(h: &Hands<'_>, tracer: &mut dyn Tracer, toward: lb_core::Vec2) -> MoveIntent {
+    let edge = crate::fight::drops(tracer, h.origin, toward * RUN_UP_SPEED);
+    MoveIntent {
+        dir: if edge { -toward } else { toward },
+        speed: RUN_UP_SPEED,
+    }
+}
+
 fn room_ahead(h: &Hands<'_>, tracer: &mut dyn Tracer) -> bool {
     let (forward, _, _) = view_angle_vectors(h.view);
     let tr = tracer.trace(&TraceQuery::line(
@@ -1518,7 +1519,7 @@ mod tests {
             dll: DllProfile::resolve("auto", true),
         };
         scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon::default());
-        let Status::Running(r) = th.update(&scene.hands(0.0, WeaponId::Satchel), &mut Unchecked) else {
+        let Status::Running(r) = th.update(&scene.hands(0.0, WeaponId::Satchel), &mut Floor) else {
             panic!()
         };
         let run = r.movement.expect("a run-up");
@@ -1529,7 +1530,7 @@ mod tests {
         scene.view = Vec3::new(solved.pitch, solved.yaw, 0.0);
         let mut running = scene.hands(0.3, WeaponId::Satchel);
         running.velocity = run;
-        let Status::Running(r) = th.update(&running, &mut Unchecked) else {
+        let Status::Running(r) = th.update(&running, &mut Floor) else {
             panic!()
         };
         assert!(r.jump && r.weapon.unwrap().fire == Fire::None, "then jumps");
@@ -1537,14 +1538,14 @@ mod tests {
         let mut airborne = scene.hands(0.35, WeaponId::Satchel);
         airborne.on_ground = false;
         airborne.velocity = Vec3::new(250.0, 0.0, 250.0);
-        let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
+        let Status::Running(r) = th.update(&airborne, &mut Floor) else {
             panic!()
         };
         assert_eq!(r.weapon.unwrap().fire, Fire::None);
         // The lift makes another throw: it waits for the view to come onto it.
         airborne.now = SimTime(0.5);
         airborne.velocity = Vec3::new(250.0, 0.0, 150.0);
-        let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
+        let Status::Running(r) = th.update(&airborne, &mut Floor) else {
             panic!()
         };
         assert_eq!(
@@ -1554,7 +1555,7 @@ mod tests {
         );
         airborne.now = SimTime(0.52);
         airborne.view = th.angles();
-        let Status::Running(r) = th.update(&airborne, &mut Unchecked) else {
+        let Status::Running(r) = th.update(&airborne, &mut Floor) else {
             panic!()
         };
         assert_eq!(r.weapon.unwrap().fire, Fire::Primary, "thrown while rising");
@@ -1637,6 +1638,51 @@ mod tests {
             closer.update(&scene.hands(0.0, WeaponId::Satchel), &mut Unchecked),
             Status::Running(_)
         ));
+    }
+
+    #[test]
+    fn a_run_at_a_target_on_a_floor_below_stops_at_the_edge() {
+        /// A floor at z = -36 for x under 100, nothing under it beyond (a ring's edge, the target a floor below).
+        struct Edge;
+        impl Tracer for Edge {
+            fn trace(&mut self, q: &TraceQuery) -> lb_worldq::Trace {
+                let mut t = Floor.trace(q);
+                if q.start.x >= 100.0 {
+                    t = lb_worldq::Trace::clear(q.end);
+                }
+                t
+            }
+            fn point_contents(&mut self, _p: Vec3) -> i32 {
+                lb_worldq::contents::EMPTY
+            }
+        }
+        let target = Vec3::new(420.0, 0.0, -228.0);
+        let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
+        let mut scene = Scene {
+            view: Vec3::new(throw.pitch, throw.yaw, 0.0),
+            arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(1))],
+            prediction: Prediction {
+                current: Some(WeaponId::Satchel),
+                primary_ammo: 1,
+                ..Prediction::default()
+            },
+            dll: DllProfile::resolve("auto", true),
+        };
+        scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon::default());
+        let run = |th: &mut Thrower, h: &Hands<'_>| match th.update(h, &mut Edge) {
+            Status::Running(r) => r.movement.expect("a run-up").dir,
+            other => panic!("{other:?}"),
+        };
+        let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
+        // Well short of the edge: at the target.
+        let mut h = scene.hands(0.0, WeaponId::Satchel);
+        h.velocity = Vec3::new(100.0, 0.0, 0.0);
+        assert!(run(&mut th, &h).x > 0.99);
+        // Running at it a fifth of a second short of the edge: braking, not off it.
+        h.now = SimTime(0.3);
+        h.origin = Vec3::new(60.0, 0.0, 0.0);
+        h.velocity = Vec3::new(300.0, 0.0, 0.0);
+        assert!(run(&mut th, &h).x < -0.99);
     }
 
     #[test]

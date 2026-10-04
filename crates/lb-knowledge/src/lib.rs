@@ -14,4 +14,4 @@ pub use chargers::{ChargerSpot, Chargers};
 pub use explosives::{BeamPass, Blast, Explosives, ProjectileSighting};
 pub use items::{ItemBelief, ItemSpot, ItemState, Items, Learned};
 pub use obs::*;
-pub use places::{Spread, Watch, travel, travel_tree};
+pub use places::{Spread, Watch, travel, travel_tree, travel_tree_within};
