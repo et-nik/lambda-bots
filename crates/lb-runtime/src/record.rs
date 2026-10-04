@@ -36,7 +36,7 @@ use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
 pub const MAGIC: &[u8; 8] = b"LBREC\0\r\n";
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 /// Uncompressed bytes gathered before a block goes to the writer thread.
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
@@ -55,6 +55,8 @@ pub enum Outside {
     NavPoll(Option<String>),
     /// Commands accepted from the telemetry command channel.
     Channel(Vec<String>),
+    /// The chat worker's replies.
+    Chat(Vec<lb_chat::Reply>),
 }
 
 #[derive(Debug, Default)]
@@ -103,6 +105,16 @@ impl Script {
         Vec::new()
     }
 
+    /// The chat replies that came in at this point, if any.
+    fn chat(&mut self) -> Vec<lb_chat::Reply> {
+        if let Some(Outside::Chat(_)) = self.events.front()
+            && let Some(Outside::Chat(replies)) = self.events.pop_front()
+        {
+            return replies;
+        }
+        Vec::new()
+    }
+
     fn fail(&mut self, why: String) {
         self.broken.get_or_insert(why);
     }
@@ -132,6 +144,7 @@ pub struct Carried {
     pub dev: bool,
     pub freeze: bool,
     pub game_mode_forced: i32,
+    pub chat: lb_chat::Carry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,12 +211,14 @@ pub enum Record {
 }
 
 impl Runtime {
-    /// What the runtime carries, the telemetry secret replaced by [`REDACTED`]: a replay opens no sockets.
+    /// What the runtime carries, the telemetry secret and the chat key replaced by [`REDACTED`]: a replay opens no
+    /// sockets.
     pub fn carried(&self) -> Carried {
         let mut config = self.config.clone();
         if !config.telemetry.secret.is_empty() {
             config.telemetry.secret = REDACTED.into();
         }
+        config.chat.redact();
         let mut cvars = self.cvars.clone();
         cvars.redact(Cv::TelemetrySecret, REDACTED);
         Carried {
@@ -219,6 +234,7 @@ impl Runtime {
             dev: self.dev,
             freeze: self.freeze,
             game_mode_forced: self.game_mode_forced,
+            chat: self.chat.carry(),
         }
     }
 
@@ -236,6 +252,7 @@ impl Runtime {
         self.dev = c.dev;
         self.freeze = c.freeze;
         self.game_mode_forced = c.game_mode_forced;
+        self.chat.restore(c.chat);
     }
 
     /// A hash of what the runtime made of its files (personalities, skill table, styles, names).
@@ -278,6 +295,21 @@ impl Runtime {
                 }
             },
         }
+    }
+
+    /// The chat worker's replies, taken once at the start of every `frame_post`; a replay takes them from the
+    /// recording.
+    pub(crate) fn chat_replies(&mut self) -> Vec<lb_chat::Reply> {
+        if let OutsideMode::Replay(script) = &mut self.outside {
+            return script.chat();
+        }
+        let replies = self.chat.backend.poll();
+        if let OutsideMode::Record(log) = &mut self.outside
+            && !replies.is_empty()
+        {
+            log.push(Outside::Chat(replies.clone()));
+        }
+        replies
     }
 
     /// Commands from the telemetry command channel.
@@ -701,13 +733,14 @@ fn gather_files(init: &InitData, map: &str) -> Vec<(Root, String, Vec<u8>)> {
     files
 }
 
-/// The main config with the telemetry secret replaced by [`REDACTED`]; `None` when it does not parse, as the
-/// runtime then does not read it either.
+/// The main config with the telemetry secret and the chat key replaced by [`REDACTED`]; `None` when it does not
+/// parse, as the runtime then does not read it either.
 fn scrub_config(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut config = MainConfig::parse(std::str::from_utf8(bytes).ok()?, "").ok()?;
     if !config.telemetry.secret.is_empty() {
         config.telemetry.secret = REDACTED.into();
     }
+    config.chat.redact();
     lb_config::yaml::to_string(&config).ok().map(String::into_bytes)
 }
 
@@ -1046,6 +1079,16 @@ mod tests {
         cvars: Vec<String>,
         joined: Vec<(u8, i32, String)>,
         announced: usize,
+        /// The bots stand on the ground.
+        ground: bool,
+        /// The human in slot 7 is out of everyone's sight.
+        hide_human: bool,
+        /// The human joins the server (events) at this frame.
+        human_joins: Option<u64>,
+        /// The human's chat lines, by frame.
+        says: Vec<(u64, String)>,
+        /// Client commands the bots sent.
+        sent: Vec<Vec<String>>,
     }
 
     impl Host for SimServer {
@@ -1120,7 +1163,8 @@ mod tests {
         fn kick_bot(&mut self, _slot: u8, _bot_gen: u32, _reason: &str) -> bool {
             true
         }
-        fn bot_client_command(&mut self, _slot: u8, _bot_gen: u32, _argv: &[&str]) -> bool {
+        fn bot_client_command(&mut self, _slot: u8, _bot_gen: u32, argv: &[&str]) -> bool {
+            self.sent.push(argv.iter().map(|a| a.to_string()).collect());
             true
         }
         fn run_player_moves(&mut self, cmds: &[LbBotCommand], feedback: &mut Vec<LbMoveFeedback>) -> bool {
@@ -1169,9 +1213,17 @@ mod tests {
             header.flags = LB_FRAME_PRE;
             let mut arena = ArenaWriter::default();
             for (slot, userid, name) in &self.joined[self.announced..] {
-                arena.client(LB_CLIENT_EV_PUT_IN_SERVER, *slot, *userid, true, name.as_bytes());
+                arena.client_gen(LB_CLIENT_EV_CONNECT, *slot, *userid, true, 1, name.as_bytes());
+                arena.client_gen(LB_CLIENT_EV_PUT_IN_SERVER, *slot, *userid, true, 1, name.as_bytes());
             }
             self.announced = self.joined.len();
+            if self.human_joins == Some(n) {
+                arena.client(LB_CLIENT_EV_CONNECT, 7, 3, false, b"Gordon");
+                arena.client(LB_CLIENT_EV_PUT_IN_SERVER, 7, 3, false, b"Gordon");
+            }
+            for (_, text) in self.says.iter().filter(|(at, _)| *at == n) {
+                arena.command(7, 3, &[b"say", text.as_bytes()], text.as_bytes());
+            }
             let mut clients = Vec::new();
             let mut selves = Vec::new();
             for (slot, userid, _) in &self.joined {
@@ -1182,6 +1234,9 @@ mod tests {
                 clients.push(c);
                 let mut s: LbSelfSnapshot = zeroed();
                 (s.slot, s.bot_gen, s.health, s.maxspeed) = (*slot, 1, 100.0, 270.0);
+                if self.ground {
+                    s.flags = lb_game::self_state::FL_ONGROUND;
+                }
                 s.origin = c.origin;
                 s.view_ofs.z = 28.0;
                 selves.push(s);
@@ -1193,7 +1248,9 @@ mod tests {
                 y: 150.0,
                 z: 36.0,
             };
-            clients.push(human);
+            if !self.hide_human {
+                clients.push(human);
+            }
             Entry::FramePre(FrameRec::from_parts(header, &clients, &selves, &arena.bytes))
         }
     }
@@ -1442,6 +1499,155 @@ mod tests {
         for (_, rel, bytes) in &files {
             assert!(!bytes.windows(8).any(|w| w == b"hunter2-"), "the secret is in {rel}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chat_lines_replay_to_the_same_commands() {
+        use lb_chat::{Outcome, Reply};
+
+        let root = dir("record-chat");
+        let init = InitData {
+            adapter_version: "test".into(),
+            plugin_path: root.join("plugin"),
+            game_dir: root.join("game"),
+            install_dir: root.join("install"),
+            platform: 0,
+            late_load: false,
+            sandbox: true,
+        };
+        std::fs::create_dir_all(root.join("install/config")).unwrap();
+        std::fs::write(
+            root.join("install/config/lambdabots.yaml"),
+            "schema: lambdabots/main@1\nquota:\n  count: 1\n  mode: normal\nengine:\n  master_seed: 7\nchat:\n  enabled: \
+             true\n  provider:\n    api_key: sk-hunter2-chat\n",
+        )
+        .unwrap();
+        let mut server = SimServer {
+            ground: true,
+            hide_human: true,
+            human_joins: Some(20),
+            says: vec![(850, "привет всем".into())],
+            ..SimServer::default()
+        };
+        let mut init_calls = Vec::new();
+        let mut rt = Runtime::new(&mut RecordingHost::new(&mut server, Some(&mut init_calls)), init);
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line("ну привет".into())]);
+        let sent = fake.sent.clone();
+        rt.chat.backend = Box::new(fake);
+        let mut rec = Recorder::new(init_calls);
+        let step = |rt: &mut Runtime, rec: &mut Recorder, server: &mut SimServer, entry: Entry| {
+            let mut host = RecordingHost::new(server, rec.begin(|| entry.clone()));
+            run_step(rt, &mut host, &entry);
+            rec.end(rt);
+        };
+        step(
+            &mut rt,
+            &mut rec,
+            &mut server,
+            Entry::Command(vec!["lb".into(), "record".into(), "start".into()]),
+        );
+        rec.map_starting(&mut rt, "flatland");
+        let map = Entry::MapStart {
+            map: "flatland".into(),
+            max_clients: 8,
+            epoch: 1,
+            late_load: false,
+        };
+        step(&mut rt, &mut rec, &mut server, map);
+        let mut stood = 0;
+        for n in 0..1800 {
+            if n == 900 {
+                let name = rt.bots[0].persona.name.clone();
+                step(
+                    &mut rt,
+                    &mut rec,
+                    &mut server,
+                    Entry::Command(vec!["lb".into(), "chat".into(), "test".into(), name, "привет".into()]),
+                );
+            }
+            let frame = server.frame(n);
+            step(&mut rt, &mut rec, &mut server, frame);
+            step(
+                &mut rt,
+                &mut rec,
+                &mut server,
+                Entry::FramePost {
+                    mono_ns: n * 10_000_000,
+                },
+            );
+            stood += usize::from(rt.bots.first().is_some_and(|b| b.chat.typing_in_the_open()));
+        }
+        assert_eq!(rt.clients.humans(false), 1, "Gordon is on the server");
+        let said: Vec<&Vec<String>> = server.sent.iter().filter(|a| a[0] == "say").collect();
+        assert!(said.iter().any(|a| a[1] == "ну привет"), "{:?}", server.sent);
+        assert!(stood > 100, "the bot stood still while typing ({stood} frames)");
+        assert!(sent.lock().unwrap().asked.iter().any(|r| r.trigger.is_answer()));
+        assert!(
+            rt.chat
+                .journal
+                .entries()
+                .any(|e| matches!(&e.event, lb_chat::Event::Chat { from, .. } if from.bot)),
+            "the bot's line is in the journal"
+        );
+        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+        assert_eq!(
+            sent.lock().unwrap().summaries.len(),
+            1,
+            "the map's summary went to the memory"
+        );
+        assert_eq!(sent.lock().unwrap().summaries[0].players[0].key, "name:gordon");
+        rec.finish(&mut rt, "test over");
+        let file = std::fs::read_dir(root.join("install/records"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut replies = 0;
+        let mut reader = Reader::open(&file).unwrap();
+        while let Some(record) = reader.next_record().unwrap() {
+            let bytes = postcard::to_allocvec(&record).unwrap();
+            assert!(
+                !bytes.windows(8).any(|w| w == b"hunter2-"),
+                "the chat key is in the recording"
+            );
+            if let Record::Step(step) = &record {
+                replies += step.outside.iter().filter(|o| matches!(o, Outside::Chat(_))).count();
+            }
+        }
+        assert!(replies >= 1);
+
+        let opts = ReplayOptions {
+            dir: Some(root.join("replay")),
+            max_diffs: 5,
+            ..ReplayOptions::default()
+        };
+        let report = replay(&file, &opts, &mut |_| {}).unwrap();
+        assert!(report.matches(), "{}", report.lines().join("\n"));
+
+        // Another line in the recording: the bot says it, and the replay tells.
+        let tampered = root.join("tampered-chat.lbrec");
+        let mut reader = Reader::open(&file).unwrap();
+        let mut writer = Writer::create(&tampered).unwrap();
+        while let Some(mut record) = reader.next_record().unwrap() {
+            if let Record::Step(step) = &mut record {
+                for o in &mut step.outside {
+                    if let Outside::Chat(replies) = o {
+                        for r in replies.iter_mut() {
+                            *r = Reply {
+                                id: r.id,
+                                outcome: Outcome::Line("ну и ладно".into()),
+                            };
+                        }
+                    }
+                }
+            }
+            writer.write(&record).unwrap();
+        }
+        writer.close().unwrap();
+        let report = replay(&tampered, &opts, &mut |_| {}).unwrap();
+        assert!(!report.matches(), "{}", report.lines().join("\n"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

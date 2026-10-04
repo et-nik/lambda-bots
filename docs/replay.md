@@ -80,20 +80,21 @@ holds:
   - trace and contents results;
   - cvar values, entity snapshots and weapon data;
   - the outcome of creating a bot, and the feedback of the moves;
-- what the runtime took from outside the engine: the frame at which the navigation loader had finished, and commands
-  from the telemetry command channel.
+- what the runtime took from outside the engine: the frame at which the navigation loader had finished, commands
+  from the telemetry command channel, and the chat worker's replies (the lines the bots then type, `docs/chat.md`).
 
 Calls without an answer are not kept: prints, server commands, debug drawing. The core makes some of them from log
 lines, which other threads write at their own pace.
 
 **End**: why the recording stopped, with its step and frame counts.
 
-The telemetry secret is not kept: in the carried config, in `config/lambdabots.yaml` and in the values of
-`lb_telemetry_secret` it is stored as `<redacted>`. A replay opens no sockets, so it does not need it. The recorded
+The telemetry secret and the chat key are not kept: in the carried config, in `config/lambdabots.yaml` and in the
+values of `lb_telemetry_secret` they are stored as `<redacted>` (`chat.provider.api_key`, and the values of
+`chat.provider.headers`, which may hold a gateway's key). A replay opens no sockets, so it needs neither. The recorded
 `lambdabots.yaml` is written back from what it parses to, without its comments; one that does not parse is left out,
 as the runtime does not use it either. Everything else stays as the server had it, `access.password` and the
 `setinfo` values the core read from clients included: share a recording only with people you would give the
-server's config to.
+server's config to. The players' chat and the bots' lines are in it too.
 
 The file starts with `LBREC\0\r\n` and a format version. Then come blocks: a compressed length and an lz4 block of
 postcard-encoded records. ABI structures are stored as their bytes, so a recording is tied to the ABI version,
@@ -106,7 +107,7 @@ which the replay checks.
   mismatch, and the replay stops.
 - **The decisions.** Compared bit for bit:
   - bot commands: buttons, view angles, movement, msec, random seed;
-  - client commands (weapon switches, `kill`);
+  - client commands (weapon switches, `kill`, the bots' `say`);
   - bots added and kicked.
 
   Differences are listed; the replay goes on with the recorded engine answers.
@@ -123,7 +124,10 @@ A replay can only match if the core's decisions depend on nothing but the record
   into `sincos` where another does not. The first replays differed in the last bit of 2% of move commands until this
   rule came in.
 - **Other threads reach the core only through recorded outside inputs.** The navigation loader works on its own
-  thread. Its result is applied at the frame the recording names, and a replay waits for its own loader there.
+  thread. Its result is applied at the frame the recording names, and a replay waits for its own loader there. The
+  chat worker's replies are taken once at the start of every `frame_post`; a replay takes the recorded ones there
+  and asks no model. Whatever the worker reads (the key, the memory of players, the clock) stays on its side: the
+  core decides nothing by it.
 - **A replay opens no sockets** (`InitData::sandbox`), so no telemetry goes out and no commands come in. Recorded
   channel commands are fed in at their frames.
 

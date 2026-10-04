@@ -91,6 +91,8 @@ pub struct Bot {
     pub drill: Option<lb_game::gungame::Kit>,
     pub drill_gave: SimTime,
     pub drill_count: (i32, SimTime),
+    /// The bot's line on its way into the chat.
+    pub chat: lb_chat::BotChat,
 }
 
 impl Bot {
@@ -144,6 +146,7 @@ impl Bot {
             drill: None,
             drill_gave: SimTime::ZERO,
             drill_count: (0, SimTime::ZERO),
+            chat: lb_chat::BotChat::default(),
         }
     }
 
@@ -211,13 +214,18 @@ impl Bot {
                     self.nav.reset();
                     self.brain.on_spawn();
                     self.stall.reset();
+                    self.chat.on_spawn();
                     self.set_state(BotState::Alive, now);
                 } else if force_respawn && body.deadflag == DEAD_RESPAWNABLE {
                     if self.respawn_at.is_none() {
                         let delay = self.rng.motor.range_f32(respawn_delay[0], respawn_delay[1]) as f64;
                         self.respawn_at = Some(now + delay);
                     }
-                    if self.state == BotState::Dead && self.respawn_at.is_some_and(|t| now >= t) {
+                    // A player typing in the chat respawns once the line is out (or the game respawns them).
+                    if self.state == BotState::Dead
+                        && self.respawn_at.is_some_and(|t| now >= t)
+                        && !self.chat.holds_respawn(now, crate::chat::RESPAWN_HOLD)
+                    {
                         self.set_state(BotState::Respawning, now);
                     }
                 }
@@ -314,6 +322,56 @@ pub fn pick_bot_to_kick(bots: &[Bot]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bot() -> Bot {
+        let styles = lb_styles::StyleTable::default();
+        let spec = lb_config::profiles::PersonaSpec {
+            name: "Kleiner".into(),
+            ..Default::default()
+        };
+        let p = lb_styles::Persona::resolve(&spec, lb_styles::PersonaSource::Unsaved, &["gordon".into()], &styles);
+        let skill = p.skill_params(&lb_config::skill::Presets::default());
+        let style = (styles.goals(p.style), styles.weapons(p.style), styles.tricks(p.style));
+        let id = BotId { slot: 1, generation: 1 };
+        Bot::new(id, 11, Arc::new(p), skill, style, SimTime::ZERO, 1, 100.0, 200.0)
+    }
+
+    fn die(b: &mut Bot) {
+        b.self_state.body.health = 0.0;
+        b.self_state.body.deadflag = lb_game::self_state::DEAD_RESPAWNABLE;
+    }
+
+    #[test]
+    fn typing_holds_the_respawn_for_a_while() {
+        let mut typing = bot();
+        let mut quiet = bot();
+        for b in [&mut typing, &mut quiet] {
+            b.self_state.body.health = 100.0;
+            b.seen_reset_hud = true;
+            b.update_lifecycle(SimTime(0.5), true, [0.3, 1.2]);
+            assert_eq!(b.state, BotState::Alive);
+            die(b);
+            b.update_lifecycle(SimTime(1.0), true, [0.3, 1.2]);
+            b.update_lifecycle(SimTime(1.0), true, [0.3, 1.2]);
+            assert_eq!(b.state, BotState::Dead);
+        }
+        typing.chat.set_line("ну и ладно".into(), SimTime(1.0), 25.0);
+        typing.chat.tick(SimTime(1.0), lb_chat::Can::Free, |_| 10.0);
+        assert!(typing.chat.typing());
+        for b in [&mut typing, &mut quiet] {
+            b.update_lifecycle(SimTime(3.0), true, [0.3, 1.2]);
+        }
+        assert_eq!(
+            quiet.state,
+            BotState::Respawning,
+            "nothing to type: it respawns when due"
+        );
+        assert_eq!(typing.state, BotState::Dead, "typing holds the respawn");
+        typing.update_lifecycle(SimTime(3.0 + crate::chat::RESPAWN_HOLD - 0.1), true, [0.3, 1.2]);
+        assert_eq!(typing.state, BotState::Dead);
+        typing.update_lifecycle(SimTime(3.0 + crate::chat::RESPAWN_HOLD + 0.1), true, [0.3, 1.2]);
+        assert_eq!(typing.state, BotState::Respawning, "but not for ever");
+    }
 
     fn quota(mode: QuotaMode, count: u32) -> QuotaConfig {
         QuotaConfig {

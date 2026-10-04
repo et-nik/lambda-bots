@@ -57,7 +57,35 @@ pub struct PersonaSpec {
     pub created: Option<String>,
     #[serde(default, skip_serializing_if = "SkillOverrides::is_empty")]
     pub overrides: SkillOverrides,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatSpec>,
 }
+
+/// How the personality talks in the chat; whatever is left out comes from its seed and style.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChatSpec {
+    /// 0..1: how readily it speaks when nobody asked (0 only answers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chattiness: Option<f32>,
+    /// It may swear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profanity: Option<bool>,
+    /// Characters a minute it types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing_cpm: Option<f32>,
+    /// How it writes, in a few words for the model ("short, lower case, ends with ))").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    /// Who it is, for the model ("plays here every evening, loves the crossbow").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+}
+
+/// Longest `chat.style` / `chat.about` in characters.
+pub const CHAT_TEXT_MAX: usize = 300;
+/// Typing speeds a personality may have, characters a minute.
+pub const TYPING_CPM_RANGE: [f32; 2] = [30.0, 1500.0];
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -135,6 +163,25 @@ impl PersonaSpec {
             .is_some_and(|m| m.is_empty() || m.contains(['"', '\\', ';']))
         {
             return Err(bad("model", "must be a plain model name".into()));
+        }
+        if let Some(chat) = &self.chat {
+            if chat.chattiness.is_some_and(|c| !(0.0..=1.0).contains(&c)) {
+                return Err(bad("chat.chattiness", "must be in 0..=1".into()));
+            }
+            if chat
+                .typing_cpm
+                .is_some_and(|c| !(TYPING_CPM_RANGE[0]..=TYPING_CPM_RANGE[1]).contains(&c))
+            {
+                return Err(bad("chat.typing_cpm", "must be in 30..=1500".into()));
+            }
+            for (field, text) in [("style", &chat.style), ("about", &chat.about)] {
+                if text.as_deref().is_some_and(|t| t.chars().count() > CHAT_TEXT_MAX) {
+                    return Err(bad(
+                        &format!("chat.{field}"),
+                        format!("must be at most {CHAT_TEXT_MAX} characters"),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -242,6 +289,23 @@ bots:
             "duplicate names, case-insensitive"
         );
         assert!(bad("  - name: \"a\"\n    speed: 3\n"), "unknown fields");
+        assert!(bad("  - name: \"a\"\n    chat: { chattiness: 2 }\n"));
+        assert!(bad("  - name: \"a\"\n    chat: { typing_cpm: 5 }\n"));
+        assert!(
+            bad("  - name: \"a\"\n    chat: { mood: angry }\n"),
+            "unknown chat fields"
+        );
+    }
+
+    #[test]
+    fn chat_block() {
+        let text = "schema: lambdabots/profiles@1\nbots:\n  - name: \"DUT9 ATLASA\"\n    chat:\n      chattiness: 0.7\n      profanity: true\n      style: \"коротко, строчными, ставит ))\"\n      about: \"довольно хороший игрок, иногда его зовут читером\"\n";
+        let f = ProfilesFile::parse(text, "roster.yaml").unwrap();
+        let chat = f.entries()[0].chat.as_ref().unwrap();
+        assert_eq!(chat.chattiness, Some(0.7));
+        assert_eq!(chat.profanity, Some(true));
+        assert_eq!(chat.typing_cpm, None);
+        assert_eq!(chat.style.as_deref(), Some("коротко, строчными, ставит ))"));
     }
 
     #[test]

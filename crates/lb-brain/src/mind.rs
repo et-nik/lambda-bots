@@ -1326,8 +1326,10 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         .filter(|(k, ..)| *k == t.who)
         .map_or(f32::INFINITY, |(.., close)| close);
     // A throw is not closed in with on an enemy off the bot's level (on GunGame's octagon, on another ring): no drop
-    // down to it, no lift up.
-    let thrown = body.weapon.is_some_and(|w| spec(w).class == WeaponClass::Throwable);
+    // down to it, no lift up. Not with one being drawn either, nor with one in hand while another weapon is chosen (a
+    // throw holds its own).
+    let throwable = |w: Option<WeaponId>| w.is_some_and(|w| spec(w).class == WeaponClass::Throwable);
+    let thrown = throwable(m.choice.map(Choice::weapon)) || throwable(body.weapon);
     let close_in = if thrown && !crate::patrol::same_level(body.origin, t.pos) {
         f32::INFINITY
     } else {

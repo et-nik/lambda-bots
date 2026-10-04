@@ -17,7 +17,12 @@ option(LB_WITH_REHLDS "Build the ReHLDS API bridge" ${LB_WITH_REHLDS_DEFAULT})
 
 include(cmake/Corrosion.cmake)
 corrosion_import_crate(MANIFEST_PATH Cargo.toml CRATES lb-plugin CRATE_TYPES staticlib)
-corrosion_set_env_vars(lb_plugin LB_BUILD_VERSION=${LB_VERSION})
+if(APPLE)
+    # The crates' C parts (ring) are built for the macOS the Rust target names, not the build machine's.
+    corrosion_set_env_vars(lb_plugin LB_BUILD_VERSION=${LB_VERSION} MACOSX_DEPLOYMENT_TARGET=11.0)
+else()
+    corrosion_set_env_vars(lb_plugin LB_BUILD_VERSION=${LB_VERSION})
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # The Rust unwinder asks for libgcc_s; -static-libgcc supplies the same symbols from libgcc_eh.a, so the module
     # depends on glibc only.
@@ -51,6 +56,12 @@ if(LB_WITH_REHLDS)
     target_compile_definitions(lambdabots_mm PRIVATE LB_WITH_REHLDS=1)
 endif()
 target_link_libraries(lambdabots_mm PRIVATE lb_plugin)
+# The chat's HTTPS trusts the system's root certificates: the keychain on macOS, the certificate store on Windows.
+if(APPLE)
+    target_link_libraries(lambdabots_mm PRIVATE "-framework Security" "-framework CoreFoundation")
+elseif(WIN32)
+    target_link_libraries(lambdabots_mm PRIVATE crypt32)
+endif()
 
 include(cmake/LbPlatform.cmake)
 lb_configure_plugin_target(lambdabots_mm)

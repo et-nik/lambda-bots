@@ -8,7 +8,8 @@
 //!   place not been to for 40 s is new again.
 //! - **Its level:** the places within 48 units of the height it first went on patrol at in this life, or since it was
 //!   last moved far at once (a teleport; on the octagon, to its next level's ring): its ring of the octagon, its floor,
-//!   got to without leaving that height. A level with nothing 2 s of running off lets it off.
+//!   got to without leaving that height. A level with nothing 2 s of running off lets it off, onto the level of the
+//!   stop it goes to; one the bot was knocked off stays its own.
 //! - **The next stop:** of the places within 10 s of running, the best for being far (6 s and more as good as any,
 //!   under 2 s none), for the way there going through places not been to lately, and onward: leaving along the way
 //!   the bot runs, not back.
@@ -156,6 +157,25 @@ impl Patrol {
             .map(|n| (n, map.node_origin(n)))
     }
 
+    /// Chooses where to go on to from `origin`, running along `heading`; the stop it was going to stays when there is
+    /// nowhere.
+    fn choose_stop(&mut self, now: SimTime, origin: Vec3, heading: Option<Vec2>, map: &dyn MapView, rng: &mut BotRng) {
+        let here = map
+            .nearest_node(origin, 256.0)
+            .map_or(origin.z, |n| map.node_origin(n).z);
+        let level = *self.level.get_or_insert(here);
+        let next = self.next_stop(now, origin, level, heading, map, rng);
+        // Let off a level with nowhere to go on it, the bot keeps to the one it goes on to. Knocked off its level, it
+        // keeps that one, to go round again once back on it.
+        if let Some((_, at)) = next
+            && (here - level).abs() <= FLOOR
+            && (at.z - level).abs() > FLOOR
+        {
+            self.level = Some(at.z);
+        }
+        self.stop = next.or(self.stop);
+    }
+
     /// The patrol moved the bot on its last frame (a frame or so before `now`).
     pub fn going(&self, now: SimTime) -> bool {
         now.since(self.went) <= GOING
@@ -192,11 +212,7 @@ impl BotBrain {
         if p.stop.is_none() || close {
             let speed = body.velocity.truncate().length();
             let heading = (speed >= HEADING_SPEED).then(|| body.velocity.truncate() / speed);
-            let level = *p.level.get_or_insert_with(|| {
-                map.nearest_node(body.origin, 256.0)
-                    .map_or(body.origin.z, |n| map.node_origin(n).z)
-            });
-            p.stop = p.next_stop(now, body.origin, level, heading, map, rng).or(p.stop);
+            p.choose_stop(now, body.origin, heading, map, rng);
         }
         let Some((_, stop)) = p.stop else { return false };
         let (status, step) = nav.go_to(stop);
@@ -401,13 +417,29 @@ mod tests {
     }
 
     #[test]
-    fn a_level_with_nowhere_to_go_lets_the_bot_off_it() {
+    fn a_level_with_nowhere_to_go_lets_the_bot_off_it_onto_the_level_it_goes_to() {
         let map = Rings;
         let mut p = Patrol::default();
         let mut rng = BotRng::new(3, 3);
         let at = map.node_origin(UPPER + LOWER);
         p.mark(SimTime(0.0), at, &map);
-        let (n, _) = p.next_stop(SimTime(0.0), at, at.z, None, &map, &mut rng).unwrap();
+        p.choose_stop(SimTime(0.0), at, None, &map, &mut rng);
+        let (n, stop) = p.stop.expect("a stop");
         assert!(n < UPPER + LOWER, "{n}");
+        assert_eq!(p.level, Some(stop.z));
+    }
+
+    #[test]
+    fn a_bot_knocked_off_its_level_keeps_it() {
+        let map = Rings;
+        let mut p = Patrol::default();
+        let mut rng = BotRng::new(4, 4);
+        // Down on the lower ring, the lift up out of reach: round the lower ring for now, the upper one still its level.
+        let at = map.node_origin(UPPER + LOWER / 2);
+        p.mark(SimTime(0.0), at, &map);
+        p.level = Some(500.0);
+        p.choose_stop(SimTime(0.0), at, None, &map, &mut rng);
+        assert!(p.stop.is_some_and(|(_, stop)| stop.z == 300.0), "{:?}", p.stop);
+        assert_eq!(p.level, Some(500.0));
     }
 }

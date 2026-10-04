@@ -4,6 +4,7 @@
 
 pub mod arms_stats;
 pub mod capture;
+pub mod chat;
 pub mod clients;
 pub mod commands;
 pub mod cvars;
@@ -75,6 +76,8 @@ use lb_styles::{Persona, StyleId, StyleTable};
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Engine message of temporary entities (explosions among them).
 const SVC_TEMPENTITY: i32 = 23;
+/// Engine message that ends a match and shows the scoreboard.
+const SVC_INTERMISSION: i32 = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InitData {
@@ -314,6 +317,8 @@ pub struct Runtime {
     pub record_request: Option<record::RecordRequest>,
     /// What the recorder is doing, for `lb record`.
     pub record_status: String,
+    /// Bots in the game chat.
+    pub chat: chat::ChatRuntime,
 }
 
 impl Runtime {
@@ -451,10 +456,12 @@ impl Runtime {
             outside: record::OutsideMode::Live,
             record_request: None,
             record_status: "not recording".into(),
+            chat: chat::ChatRuntime::new(),
         };
         rt.game.respawns = learned::load_respawns(&rt.init.install_dir);
         rt.register_cvars(host);
         rt.open_telemetry();
+        rt.chat_sync_backend();
         let summary = rt.startup_summary();
         tracing::info!("{summary}");
         host.server_print(&format!("[lambdabots] {summary}\n"));
@@ -544,10 +551,15 @@ impl Runtime {
             (Cv::Reflex, c.bots.reflex.to_string()),
             (Cv::ForceRespawn, (c.bots.force_respawn as u8).to_string()),
             (Cv::Editor, (c.access.editor_enabled as u8).to_string()),
+            (Cv::Chat, (c.chat.enabled as u8).to_string()),
         ];
         for (cv, value) in values {
             self.cvars.set(host, cv, &value);
         }
+        if !self.config.chat.enabled {
+            self.chat_switched_off();
+        }
+        self.chat_sync_backend();
         self.editor_allowed = self.config.access.editor_enabled;
         if !self.editor_allowed {
             self.editor = None;
@@ -586,6 +598,7 @@ impl Runtime {
             (Cv::LogLevel, c.logging.level.clone()),
             (Cv::NavSource, c.nav.source.name().to_string()),
             (Cv::Editor, (c.access.editor_enabled as u8).to_string()),
+            (Cv::Chat, (c.chat.enabled as u8).to_string()),
         ];
         self.editor_allowed = c.access.editor_enabled;
         self.cvars.register(host, &defaults);
@@ -711,6 +724,7 @@ impl Runtime {
         self.mechs.set_map(None, max_clients);
         self.link_health.clear();
         self.live_check = lb_nav::probe::LiveCheck::default();
+        self.chat_map_start(name, epoch.0, late_load);
         self.start_nav_load(name);
         tracing::info!(
             "map {name} (epoch {}, {} slots){}",
@@ -768,6 +782,7 @@ impl Runtime {
     pub fn map_end(&mut self, _host: &mut dyn Host) {
         self.save_experience();
         self.keep_respawns();
+        self.chat_map_end();
         if self.config.bots.save_names {
             let saved: Vec<String> = self
                 .bots
@@ -834,7 +849,6 @@ impl Runtime {
                 self.game.resolved_msgs.push((name.to_string(), id));
             }
         }
-        const SVC_INTERMISSION: i32 = 30;
         for id in [SVC_TEMPENTITY, SVC_INTERMISSION] {
             mask[id as usize / 8] |= 1 << (id % 8);
         }
@@ -1736,7 +1750,9 @@ impl Runtime {
     }
 
     pub fn frame_post(&mut self, host: &mut dyn Host, mono_ns: u64) {
+        let replies = self.chat_replies();
         if self.safe_mode.is_none() {
+            self.chat_tick(replies);
             self.drive_bots(host);
             self.tend_orders(host);
         }
@@ -1775,7 +1791,9 @@ impl Runtime {
                     e.bot_gen,
                     String::from_utf8_lossy(&e.name)
                 );
+                let before = self.clients.slots.get(e.slot as usize).cloned();
                 self.clients.apply(&e);
+                self.chat_on_client(&e, before);
                 match e.kind {
                     ClientEventKind::Disconnect => {
                         let ours = |b: &Bot| b.id.slot == e.slot && (!e.is_ours || b.id.generation == e.bot_gen);
@@ -1803,6 +1821,7 @@ impl Runtime {
                 );
             }
             RawEvent::UserMsg(m) if m.msg_id == SVC_TEMPENTITY => self.on_temp_entity(&m),
+            RawEvent::UserMsg(m) if m.msg_id == SVC_INTERMISSION => self.chat_on_intermission(),
             RawEvent::UserMsg(m) => {
                 let Some(name) = self.strings.msg_name(m.msg_id).map(|n| n.to_vec()) else {
                     return;
@@ -1932,16 +1951,17 @@ impl Runtime {
                                     "kind": "kill", "killer": killer, "victim": victim, "weapon": weapon,
                                 }),
                             );
+                            self.chat_on_death(*killer, *victim, weapon);
                         }
                         _ => {}
                     }
                 }
             }
-            RawEvent::ClientCommand(c) => {
-                if c.argv.first().map(|a| a.as_slice()) == Some(b"lb") {
-                    self.client_command(host, c.slot, &c.argv[1..]);
-                }
-            }
+            RawEvent::ClientCommand(c) => match c.argv.first().map(|a| a.as_slice()) {
+                Some(b"lb") => self.client_command(host, c.slot, &c.argv[1..]),
+                Some(b"say" | b"say_team") => self.chat_on_say(&c),
+                _ => {}
+            },
             RawEvent::ServerCommand(c) => {
                 let args: Vec<String> = c.argv.iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
                 let refs: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
@@ -2158,6 +2178,18 @@ impl Runtime {
                     _ => tracing::warn!("lb_reflex `{value}`: expected a number in 0.5..2"),
                 },
                 Cv::ForceRespawn => self.config.bots.force_respawn = value.trim() != "0",
+                Cv::Chat => {
+                    let on = value.trim() != "0";
+                    if on != self.config.chat.enabled {
+                        self.config.chat.enabled = on;
+                        if on {
+                            self.chat_sync_backend();
+                        } else {
+                            self.chat_switched_off();
+                        }
+                        tracing::info!("chat {}", if on { "on" } else { "off" });
+                    }
+                }
                 Cv::Editor => {
                     self.editor_allowed = value.trim() != "0";
                     if !self.editor_allowed {
@@ -2928,6 +2960,7 @@ fn watch_stalls(
         || bot.test.is_some()
         || bot.selftest.is_some()
         || bot.order.is_some()
+        || bot.chat.typing()
     {
         return;
     }
@@ -2974,7 +3007,7 @@ fn drive_one(
     match bot.state {
         BotState::Respawning => {
             let phase = (now.secs() * 10.0) as u64 % 4;
-            if phase >= 2 {
+            if phase >= 2 && !bot.chat.holds_respawn(now, chat::RESPAWN_HOLD) {
                 buttons |= IN_JUMP;
             }
         }
@@ -3021,6 +3054,8 @@ fn drive_one(
                 forward = out.forward;
                 side = out.side;
                 buttons |= out.buttons;
+            } else if chat::typing_holds_still(bot, now) {
+                // Typing in the chat: the keyboard is in the chat input.
             } else {
                 let out = behave(bot, ctx, tracer, link_health, budgets);
                 forward = out.forward;

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lb_config::profiles::{PersonaSpec, TraitsSpec};
+use lb_config::profiles::{ChatSpec, PersonaSpec, TraitsSpec};
 use lb_config::skill::{Presets, SkillBand, SkillOverrides, SkillParams, SkillValue};
 use lb_core::rng::{Pcg32, fnv1a64, splitmix64};
 
@@ -11,7 +11,11 @@ use crate::style::{StyleId, StyleTable};
 
 /// Stream of the draws that fill a profile's gaps. Fixed: changing it would change every derived personality.
 const FILL_STREAM: u64 = 0x7065_7273;
+/// Stream of the chat traits' draws, apart from [`FILL_STREAM`] so they never move the others.
+const CHAT_STREAM: u64 = 0x6368_6174;
 pub const DEFAULT_SKILL: u8 = 50;
+/// Built-in manners of writing a personality without its own `chat.style` gets one of.
+pub const CHAT_MANNERS: u8 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PersonaSource {
@@ -55,7 +59,56 @@ pub struct Persona {
     pub tags: Vec<String>,
     pub seed: u64,
     pub overrides: SkillOverrides,
+    pub chat: ChatTraits,
     pub source: PersonaSource,
+}
+
+/// How a personality talks in the chat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatTraits {
+    /// 0..1: how readily it speaks when nobody asked.
+    pub chattiness: f32,
+    pub profanity: bool,
+    /// The profile's typing speed, characters a minute.
+    pub typing_cpm: Option<f32>,
+    /// Where in the server's typing range a personality without its own speed falls, 0..1.
+    pub typing_rank: f32,
+    /// The profile's own words on how it writes; without them, `manner` picks a built-in one.
+    pub style: Option<String>,
+    pub manner: u8,
+    pub about: Option<String>,
+}
+
+impl ChatTraits {
+    /// Characters a minute, inside `range` unless the profile sets its own.
+    pub fn typing_cpm(&self, range: [f32; 2]) -> f32 {
+        self.typing_cpm
+            .unwrap_or(range[0] + (range[1] - range[0]).max(0.0) * self.typing_rank)
+    }
+
+    fn resolve(spec: Option<&ChatSpec>, style: StyleId, seed: u64) -> ChatTraits {
+        let mut rng = Pcg32::new(seed, CHAT_STREAM);
+        let [lo, hi] = match style {
+            StyleId::Rusher => [0.45, 0.8],
+            StyleId::Sniper => [0.15, 0.4],
+            StyleId::Trapper => [0.25, 0.55],
+            StyleId::Balanced | StyleId::Controller => [0.3, 0.6],
+        };
+        let chattiness = rng.range_f32(lo, hi);
+        let typing_rank = rng.next_f32();
+        let manner = rng.range_i32(0, i32::from(CHAT_MANNERS) - 1) as u8;
+        let spec = spec.cloned().unwrap_or_default();
+        let text = |t: Option<String>| t.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        ChatTraits {
+            chattiness: spec.chattiness.unwrap_or(chattiness),
+            profanity: spec.profanity.unwrap_or(false),
+            typing_cpm: spec.typing_cpm,
+            typing_rank,
+            style: text(spec.style),
+            manner,
+            about: text(spec.about),
+        }
+    }
 }
 
 /// Default seed of a nickname (case-insensitive).
@@ -104,6 +157,7 @@ impl Persona {
             tags: spec.tags.clone(),
             seed,
             overrides: spec.overrides.clone(),
+            chat: ChatTraits::resolve(spec.chat.as_ref(), style, seed),
             source,
         }
     }
@@ -132,6 +186,7 @@ impl Persona {
             seed: Some(self.seed),
             created,
             overrides: self.overrides.clone(),
+            chat: None,
         }
     }
 }
@@ -283,6 +338,43 @@ mod tests {
             "triangular draw keeps most skills near the middle: {middle}"
         );
         assert!(skills.iter().all(|s| *s <= 100));
+    }
+
+    #[test]
+    fn chat_traits_come_from_their_own_stream() {
+        let base = PersonaSpec {
+            name: "Gina".into(),
+            style: Some("rusher".into()),
+            ..Default::default()
+        };
+        let a = Persona::resolve(&base, PersonaSource::Unsaved, &models(), &StyleTable::default());
+        assert!((0.45..=0.8).contains(&a.chat.chattiness));
+        assert!(!a.chat.profanity);
+        assert!(a.chat.manner < CHAT_MANNERS);
+        let cpm = a.chat.typing_cpm([150.0, 330.0]);
+        assert!((150.0..=330.0).contains(&cpm));
+        let talking = PersonaSpec {
+            chat: Some(ChatSpec {
+                chattiness: Some(0.9),
+                profanity: Some(true),
+                typing_cpm: Some(400.0),
+                style: Some("  ".into()),
+                about: Some("loves the crossbow".into()),
+            }),
+            ..base
+        };
+        let b = Persona::resolve(&talking, PersonaSource::Unsaved, &models(), &StyleTable::default());
+        assert_eq!(
+            (a.aggression, a.fear, &a.model, a.colors),
+            (b.aggression, b.fear, &b.model, b.colors)
+        );
+        assert_eq!((b.chat.chattiness, b.chat.profanity), (0.9, true));
+        assert_eq!(b.chat.typing_cpm([150.0, 330.0]), 400.0);
+        assert_eq!(
+            (b.chat.style.as_deref(), b.chat.about.as_deref()),
+            (None, Some("loves the crossbow"))
+        );
+        assert_eq!((a.chat.manner, a.chat.typing_rank), (b.chat.manner, b.chat.typing_rank));
     }
 
     #[test]

@@ -69,6 +69,8 @@ const ENGINE_FREE: &[&str] = &[
     "lb-modes",
     "lb-brain",
     "lb-ext",
+    "lb-chat",
+    "lb-llm",
 ];
 
 fn layering(root: &Path) -> Result<()> {
@@ -228,6 +230,7 @@ const PACKAGE_DOCS: &[&str] = &[
     "docs/navigation.md",
     "docs/overlays.md",
     "docs/replay.md",
+    "docs/chat.md",
     "docs/images/replay.svg",
 ];
 /// Data directories copied into `addons/lambdabots/`.

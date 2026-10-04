@@ -70,6 +70,15 @@ In GunGame they read everyone's level from the scoreboard, fight only with what 
 the leader.
 Details and the `lb brain` decision trace: `docs/behavior.md`.
 
+## Chat
+
+Bots talk in the game chat through a chat model (the Anthropic Messages API or any OpenAI-compatible endpoint, a
+gateway of your own included): they answer players who speak to them, greet, say gg, grumble about a nemesis, in the
+server's language or the player's. A line takes as long to type as a player's would: an alive bot types standing
+still in a calm moment, a dead one holds its respawn until the line is out. They remember the players they met
+between maps and restarts (`data/chat/memory.json`, with your own notes in `config/chat/players.yaml`). Off until
+`chat.enabled`; nothing is sent while no human plays. Details: `docs/chat.md`.
+
 ## Navigation
 
 Bots plan on a graph made from the map on a worker when it starts (1.5 s for crossfire) and kept in
@@ -93,39 +102,42 @@ checks that every bot command comes out the same. Details: `docs/replay.md`.
 All commands are `lb <subcommand>` in the server console or via rcon. Players listed in `access.admins` can
 run them from their own console.
 
-| Command                                | Action                                                          |
-|----------------------------------------|-----------------------------------------------------------------|
-| `lb add [n\|name]`                     | add bots or one personality (raises the quota)                  |
-| `lb kick [#userid\|name\|all]`         | kick bots (lowers the quota)                                    |
-| `lb kill [#userid\|all]`               | kill bots with the `kill` command                               |
-| `lb quota <n> [normal\|fill\|match]`   | set the quota                                                   |
-| `lb list`, `lb status`                 | bot list, core state                                            |
-| `lb roster [all]`, `lb profile <name>` | personalities and their skill parameters                        |
-| `lb nav`                               | navigation graph and where bots are walking                     |
-| `lb nav regen`                         | make the map's graph again (drops the kept ones)                |
-| `lb overlay [reload]`                  | the map's overlays; reload reads and applies them again         |
-| `lb edit …`                            | in-game editor of the map's overlay (`lb_editor 1`)             |
-| `lb nav test <kind\|all> [n]`          | a bot runs special links (obstacle course)                      |
-| `lb nav test link <from> <to> …`       | a bot runs exactly these links                                  |
-| `lb give <name\|all> <item>…`          | items for bots now (needs `sv_cheats 1`)                        |
-| `lb do <name\|all> go <spot> …`        | send bots to a spot, with tricks where the graph has no way     |
-| `lb test [add\|run\|stop …]`           | the map's tests from a start to a goal, reports in logs/tests   |
-| `lb record [start [s]\|stop]`          | record the next map for `lb-cli replay`                         |
-| `lb vision [name]`                     | what bots see, hear and remember                                |
-| `lb brain [name]`                      | goals, candidates, target, weapon, reactions, weapon prediction |
-| `lb map [spots\|mines\|lanes\|danger]` | the map as bots know it and where they got hurt                 |
-| `lb gg`                                | GunGame: every player's level, the leader, each bot's kit       |
-| `lb gg mines <name\|all> [off]`        | play GunGame's tripmine level on a stand (needs `sv_cheats 1`)  |
-| `lb gg grenades <name\|all> [off]`     | play GunGame's hand grenade level on a stand (`sv_cheats 1`)    |
-| `lb gg satchels <name\|all> [off]`     | play GunGame's satchel level on a stand (`sv_cheats 1`)         |
-| `lb watch [name\|#userid] [off]`       | log a player's moves, view, weapon, shots, mines and throws     |
-| `lb perf [reset\|bots]`                | core time per frame, bot command timing                         |
-| `lb compat`                            | server compatibility profile                                    |
-| `lb config show\|reload`               | show the config, or reload config and profiles                  |
-| `lb test motor …`                      | motor measurements (requires `lb_dev 1`)                        |
-| `lb weapons [all\|<weapon>…] [give]`   | weapons bots may use; `give` hands them out on spawn (cheats)   |
-| `lb stats [reset]`                     | weapon statistics: rounds, hit rate by distance, kills          |
-| `lb selftest [name]`                   | check the game DLL's weapon rules live (needs `sv_cheats 1`)    |
+| Command                                  | Action                                                          |
+|------------------------------------------|-----------------------------------------------------------------|
+| `lb add [n\|name]`                       | add bots or one personality (raises the quota)                  |
+| `lb kick [#userid\|name\|all]`           | kick bots (lowers the quota)                                    |
+| `lb kill [#userid\|all]`                 | kill bots with the `kill` command                               |
+| `lb quota <n> [normal\|fill\|match]`     | set the quota                                                   |
+| `lb list`, `lb status`                   | bot list, core state                                            |
+| `lb roster [all]`, `lb profile <name>`   | personalities and their skill parameters                        |
+| `lb nav`                                 | navigation graph and where bots are walking                     |
+| `lb nav regen`                           | make the map's graph again (drops the kept ones)                |
+| `lb overlay [reload]`                    | the map's overlays; reload reads and applies them again         |
+| `lb edit …`                              | in-game editor of the map's overlay (`lb_editor 1`)             |
+| `lb nav test <kind\|all> [n]`            | a bot runs special links (obstacle course)                      |
+| `lb nav test link <from> <to> …`         | a bot runs exactly these links                                  |
+| `lb give <name\|all> <item>…`            | items for bots now (needs `sv_cheats 1`)                        |
+| `lb do <name\|all> go <spot> …`          | send bots to a spot, with tricks where the graph has no way     |
+| `lb test [add\|run\|stop …]`             | the map's tests from a start to a goal, reports in logs/tests   |
+| `lb record [start [s]\|stop]`            | record the next map for `lb-cli replay`                         |
+| `lb vision [name]`                       | what bots see, hear and remember                                |
+| `lb brain [name]`                        | goals, candidates, target, weapon, reactions, weapon prediction |
+| `lb map [spots\|mines\|lanes\|danger]`   | the map as bots know it and where they got hurt                 |
+| `lb gg`                                  | GunGame: every player's level, the leader, each bot's kit       |
+| `lb gg mines <name\|all> [off]`          | play GunGame's tripmine level on a stand (needs `sv_cheats 1`)  |
+| `lb gg grenades <name\|all> [off]`       | play GunGame's hand grenade level on a stand (`sv_cheats 1`)    |
+| `lb gg satchels <name\|all> [off]`       | play GunGame's satchel level on a stand (`sv_cheats 1`)         |
+| `lb watch [name\|#userid] [off]`         | log a player's moves, view, weapon, shots, mines and throws     |
+| `lb perf [reset\|bots]`                  | core time per frame, bot command timing                         |
+| `lb compat`                              | server compatibility profile                                    |
+| `lb config show\|reload`                 | show the config, or reload config and profiles                  |
+| `lb test motor …`                        | motor measurements (requires `lb_dev 1`)                        |
+| `lb weapons [all\|<weapon>…] [give]`     | weapons bots may use; `give` hands them out on spawn (cheats)   |
+| `lb stats [reset]`                       | weapon statistics: rounds, hit rate by distance, kills          |
+| `lb selftest [name]`                     | check the game DLL's weapon rules live (needs `sv_cheats 1`)    |
+| `lb chat [status\|log [n]\|on\|off]`     | bots in the chat: what they type, the last lines and decisions  |
+| `lb chat say\|test\|prompt <bot> <text>` | a line by hand; a player's line answered by the model; a prompt |
+| `lb chat memory <player> [forget]`       | what the bots remember of a player                              |
 
 | cvar            | Default   | Purpose                                             |
 |-----------------|-----------|-----------------------------------------------------|
@@ -140,6 +152,7 @@ run them from their own console.
 | `lb_editor`     | 0         | 1 lets admins use `lb edit`                         |
 | `lb_gungame`    | auto      | GunGame detection: auto, on, off                    |
 | `lb_log_level`  | info      | level of the `logs/lambdabots.<date>.log` file      |
+| `lb_chat`       | 0         | bots in the chat (`chat.enabled`)                   |
 | `lb_dev`        | 0         | debug commands                                      |
 
 ## Building
@@ -198,7 +211,9 @@ scripts/stand/lbcmd.sh --stop
 | `crates/lb-perception` | vision, hearing, damage compass                                                 |
 | `crates/lb-knowledge`  | beliefs: tracks of players, hypotheses from sounds and damage                   |
 | `crates/lb-brain`      | per-bot senses, beliefs and attention                                           |
-| `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging, recorder                 |
+| `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging, recorder, chat worker    |
+| `crates/lb-chat`       | chat: journal of the map, who speaks, typing, prompts, memory of players        |
+| `crates/lb-llm`        | chat models over HTTPS: Anthropic Messages, OpenAI-compatible completions       |
 | `crates/lb-plugin`     | exported `lb_core_*`, panic isolation                                           |
 | `crates/lb-cli`        | config check, replay, `nav gen/coverage/path/try/validate-overlay/tracecheck`   |
 | `crates/lb-testkit`    | simulated server for the obstacle courses                                       |

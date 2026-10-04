@@ -481,13 +481,18 @@ pub mod encode {
         }
 
         pub fn client(&mut self, what: u8, slot: u8, userid: i32, is_ours: bool, name: &[u8]) {
+            self.client_gen(what, slot, userid, is_ours, 0, name);
+        }
+
+        /// A client event of one of our bots of generation `bot_gen` (or anyone's, with `is_ours` false).
+        pub fn client_gen(&mut self, what: u8, slot: u8, userid: i32, is_ours: bool, bot_gen: u32, name: &[u8]) {
             let c = LbEvClient {
                 what,
                 slot,
                 is_ours: is_ours as u8,
                 is_fake: is_ours as u8,
                 userid,
-                bot_gen: 0,
+                bot_gen,
                 topcolor: 0,
                 bottomcolor: 0,
                 name_len: name.len() as u8,
@@ -499,6 +504,22 @@ pub mod encode {
             };
             self.record(LB_EV_CLIENT, LB_CTX_FRAME, 0.0, &[pod_bytes(&c), name]);
         }
+
+        /// A client's command as the adapter's `ClientCommand` hook passes it: the words and the arguments' line.
+        pub fn command(&mut self, slot: u8, userid: i32, argv: &[&[u8]], line: &[u8]) {
+            let c = LbEvCommand {
+                slot,
+                argc: argv.len() as u8,
+                line_len: line.len() as u16,
+                userid,
+            };
+            let mut words = Vec::new();
+            for a in argv {
+                words.extend_from_slice(&(a.len() as u16).to_ne_bytes());
+                words.extend_from_slice(a);
+            }
+            self.record(LB_EV_CLIENT_CMD, LB_CTX_FRAME, 0.0, &[pod_bytes(&c), &words, line]);
+        }
     }
 }
 
@@ -506,6 +527,20 @@ pub mod encode {
 mod tests {
     use super::encode::ArenaWriter;
     use super::*;
+
+    #[test]
+    fn roundtrip_client_commands() {
+        let mut w = ArenaWriter::default();
+        w.command(7, 3, &[b"say", "привет всем".as_bytes()], "\"привет всем\"".as_bytes());
+        let (events, malformed) = decode_events(&w.bytes, MapEpoch(1), &mut StringTable::default());
+        assert_eq!(malformed, 0);
+        let RawEvent::ClientCommand(c) = &events[0].event else {
+            panic!("{events:?}");
+        };
+        assert_eq!((c.slot, c.userid), (7, 3));
+        assert_eq!(c.argv, vec![b"say".to_vec(), "привет всем".as_bytes().to_vec()]);
+        assert_eq!(c.line, "\"привет всем\"".as_bytes());
+    }
 
     #[test]
     fn roundtrip_user_message_and_names() {

@@ -208,7 +208,10 @@ A heard stimulus **never** creates a target. It primes vision (m_cue) and raises
 - TeamInfo and GameMode messages.
 - Server cvars via RulesModel: sk_*, mp_dmg_*, mp_weaponstay, mp_falldamage, mp_bunnyhop, mp_footsteps, mp_friendlyfire, mp_teamplay, mp_selfgauss, sv_gravity, sv_maxspeed, sv_aim, gg_*.
 - Static map knowledge, including learned experience.
-- Chat: none in v1. `lb-brain::events` has a reserved `NarrativeEvent` bus: bounded, one-way, no feedback into decisions.
+- Chat (`docs/chat.md`): players' `say` and `say_team` (the team's only), with the kill feed and the scoreboard, feed
+  the chat's journal; the bots' lines come from a chat model and are recorded outside inputs. Chat feeds nothing back
+  into decisions; typing is a runtime override of the motor (an alive bot stands still while it types, a dead one
+  holds its respawn), not a brain goal.
 
 ### 2.5 Honest replacements for the yapb cheats
 | #  | yapb location                                                                                                         | Replacement                                                                                                                                            |

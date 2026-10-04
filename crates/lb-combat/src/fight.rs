@@ -344,12 +344,12 @@ pub fn drops(tracer: &mut dyn Tracer, origin: Vec3, velocity: Vec2) -> bool {
 }
 
 /// Running from `origin` along `dir` (flat, of unit length) for `dist` units, short of a wall, would go off a ledge
-/// higher than a safe drop: looked at every 32 units.
+/// higher than a safe drop: looked at every 32 units and where the run ends.
 pub fn drop_ahead(tracer: &mut dyn Tracer, origin: Vec3, dir: Vec2, dist: f32) -> bool {
-    let clear = tracer
+    let fraction = tracer
         .trace(&TraceQuery::line(origin, origin + (dir * dist).extend(0.0)))
-        .fraction
-        * dist;
+        .fraction;
+    let clear = fraction * dist;
     let mut d = LEDGE_STEP;
     while d <= clear {
         if no_floor(tracer, origin + (dir * d).extend(0.0)) {
@@ -357,7 +357,8 @@ pub fn drop_ahead(tracer: &mut dyn Tracer, origin: Vec3, dir: Vec2, dist: f32) -
         }
         d += LEDGE_STEP;
     }
-    false
+    // Short of a wall the bot's half-width keeps it off a ledge past the last look; with none, the run ends there.
+    fraction >= 1.0 && no_floor(tracer, origin + (dir * dist).extend(0.0))
 }
 
 /// No floor within a safe drop under a player's origin at `spot`.
@@ -620,6 +621,8 @@ mod tests {
         }
         assert!(drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(-1.0, 0.0), 150.0));
         assert!(!drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(-1.0, 0.0), 90.0));
+        // Off it between the last look (96 units on) and the run's end.
+        assert!(drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(-1.0, 0.0), 110.0));
         assert!(!drop_ahead(&mut Ledge, Vec3::ZERO, Vec2::new(1.0, 0.0), 600.0));
         // Past the wall it would be off the ledge: the wall stops the run first.
         let corner = Vec3::new(-50.0, 0.0, 0.0);
