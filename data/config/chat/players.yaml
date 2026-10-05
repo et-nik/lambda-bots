@@ -1,8 +1,9 @@
 schema: lambdabots/chat-players@1
 # What the bots know of regular players, in your words; they also keep notes of their own in data/chat/memory.json.
-# id: a SteamID, or the nickname of a player without one (bots too); name: the nickname the bots know the player by;
-# alias: what the bots call the player instead of a hard nickname, one name or a list (the main one first; a SteamID
-# keeps them when the nickname changes); note: anything worth knowing. alias and note are both optional.
+# id: a SteamID, or the nickname of a player without one (bots too); name: the nickname, for you to read (what is
+# written for a SteamID goes to that SteamID only); alias: what the bots call the player instead of a hard nickname,
+# one name or a list (the main one first; a SteamID keeps them when the nickname changes); note: anything worth
+# knowing. alias and note are both optional.
 players: []
 #  - id: STEAM_0:0:219579426
 #    name: ATLAS Gamer

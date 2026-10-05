@@ -76,24 +76,31 @@ impl Aliases {
         self.of(nick).unwrap_or(nick)
     }
 
-    /// `line` with every whole nickname that has aliases written as the main one.
+    /// `line` with every whole nickname that has aliases written as the main one: of overlapping nicknames the longest
+    /// wins, and an alias written is never taken for a nickname in turn.
     pub fn apply(&self, line: &str) -> String {
-        let mut out = line.to_string();
+        let mut found: Vec<(usize, usize, &str)> = Vec::new();
         for (nick, aliases) in &self.names {
-            let alias = &aliases[0];
             let mut from = 0;
-            while let Some((start, end)) = find_ci(&out, nick, from) {
-                let before = out[..start].chars().next_back();
-                let after = out[end..].chars().next();
+            while let Some((start, end)) = find_ci(line, nick, from) {
+                from = end;
+                let before = line[..start].chars().next_back();
+                let after = line[end..].chars().next();
                 let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
-                if word(before) || word(after) {
-                    from = end;
-                    continue;
+                if !word(before) && !word(after) && !found.iter().any(|&(s, e, _)| s < end && start < e) {
+                    found.push((start, end, aliases[0].as_str()));
                 }
-                out.replace_range(start..end, alias);
-                from = start + alias.len();
             }
         }
+        found.sort_unstable_by_key(|&(start, _, _)| start);
+        let mut out = String::with_capacity(line.len());
+        let mut at = 0;
+        for (start, end, alias) in found {
+            out.push_str(&line[at..start]);
+            out.push_str(alias);
+            at = end;
+        }
+        out.push_str(&line[at..]);
         out
     }
 }
@@ -144,5 +151,13 @@ mod tests {
         assert_eq!(a.apply("Bobcat"), "Bobcat", "inside a word stays");
         assert_eq!(a.apply("gg ET^NiK)))"), "gg Ник)))");
         assert_eq!(a.apply("без ников"), "без ников");
+        let mut b = aliases();
+        b.insert("Gamer", &["Геймер"]);
+        b.insert("Атлас", &["Атлашка"]);
+        assert_eq!(
+            b.apply("ATLAS Gamer и Gamer, Атлас"),
+            "Атлас и Геймер, Атлашка",
+            "the longer nickname wins, an alias written stays"
+        );
     }
 }

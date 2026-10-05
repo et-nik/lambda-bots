@@ -27,7 +27,7 @@ pub struct ChatPlayersFile {
 pub struct KnownPlayer {
     /// A SteamID (`STEAM_0:1:123`), or the nickname of a player without one.
     pub id: String,
-    /// The nickname the bots know the player by, when `id` is a SteamID.
+    /// The player's nickname when `id` is a SteamID, for the reader: the note and the aliases go to that SteamID only.
     #[serde(default)]
     pub name: String,
     /// What the bots call the player instead of the nickname: one name (`Атлас`) or several (`[Атлас, Атласыч]`),

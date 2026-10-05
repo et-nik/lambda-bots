@@ -97,9 +97,16 @@ impl Client {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(LlmError::Config(format!("base_url `{base}` is not an http(s) URL")));
         }
-        if settings.key.is_some() && base.starts_with("http://") && !loopback(&base) {
+        let secret = settings.key.as_ref().map(|_| "the API key".to_string()).or_else(|| {
+            let (name, _) = settings.headers.iter().find(|(name, _)| credential(name))?;
+            Some(format!("the {name} header"))
+        });
+        if let Some(secret) = secret
+            && base.starts_with("http://")
+            && !loopback(&base)
+        {
             return Err(LlmError::Config(format!(
-                "base_url `{base}` would send the API key unencrypted: use https:// or a loopback address"
+                "base_url `{base}` would send {secret} unencrypted: use https:// or a loopback address"
             )));
         }
         let url = match settings.kind {
@@ -159,6 +166,14 @@ fn loopback(url: &str) -> bool {
     let host = uri.host().unwrap_or_default();
     let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// A header that carries a credential, judged by its name: `authorization`, `x-api-key`, `x-gateway-token` and the like.
+fn credential(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["auth", "key", "token", "secret", "password", "credential", "cookie"]
+        .iter()
+        .any(|w| name.contains(w))
 }
 
 /// Merges `extra` into `body` object by object; a `null` removes the field.
@@ -329,6 +344,13 @@ mod tests {
 
     #[test]
     fn keys_go_over_plain_http_only_to_loopback() {
+        let keyless = |base: &str, header: Option<&str>| {
+            let mut s = settings(Kind::OpenAi, base);
+            s.key = None;
+            s.headers
+                .extend(header.map(|name| (name.to_string(), "g-456".to_string())));
+            Client::new(s)
+        };
         for base in [
             "http://127.0.0.1:8099/v1",
             "http://localhost:11434/v1",
@@ -336,6 +358,7 @@ mod tests {
             "https://gw.example.com/v1",
         ] {
             assert!(Client::new(settings(Kind::OpenAi, base)).is_ok(), "{base}");
+            assert!(keyless(base, Some("X-Gateway-Key")).is_ok(), "{base}");
         }
         for base in [
             "http://192.168.8.10:8080/v1",
@@ -346,9 +369,13 @@ mod tests {
                 matches!(Client::new(settings(Kind::OpenAi, base)), Err(LlmError::Config(_))),
                 "{base}"
             );
-            let mut keyless = settings(Kind::OpenAi, base);
-            keyless.key = None;
-            assert!(Client::new(keyless).is_ok(), "{base}");
+            for name in ["Authorization", "x-api-key", "X-Gateway-Key", "x-gateway-token"] {
+                assert!(
+                    matches!(keyless(base, Some(name)), Err(LlmError::Config(_))),
+                    "{base}: {name}"
+                );
+            }
+            assert!(keyless(base, None).is_ok(), "{base}: x-gateway carries no key");
         }
     }
 }

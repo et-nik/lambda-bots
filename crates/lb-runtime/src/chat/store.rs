@@ -105,7 +105,7 @@ struct Entry {
     aliases: Vec<String>,
 }
 
-/// The admin's notes and aliases: by SteamID, and by nickname in lower case.
+/// The admin's notes and aliases: by SteamID, and by nickname in lower case for players written down without one.
 #[derive(Clone, Debug, Default)]
 pub struct Notes {
     by_key: BTreeMap<String, Entry>,
@@ -127,10 +127,7 @@ impl Notes {
                     };
                     let id = p.id.trim();
                     if id.starts_with("STEAM_") || id.starts_with("VALVE_") {
-                        notes.by_key.insert(id.to_string(), entry.clone());
-                        if !p.name.trim().is_empty() {
-                            notes.by_name.insert(p.name.trim().to_lowercase(), entry);
-                        }
+                        notes.by_key.insert(id.to_string(), entry);
                     } else {
                         notes.by_name.insert(id.to_lowercase(), entry);
                     }
@@ -190,7 +187,13 @@ mod tests {
         .unwrap();
         let notes = Notes::load(&path);
         assert_eq!(notes.get("STEAM_0:0:1", "whoever"), Some("strong"));
-        assert_eq!(notes.get("name:atlas gamer", "ATLAS Gamer"), Some("strong"));
+        assert_eq!(
+            notes.get("STEAM_0:0:2", "ATLAS Gamer"),
+            None,
+            "a SteamID's note is not given by nickname"
+        );
+        assert!(notes.aliases("STEAM_0:0:2", "ATLAS Gamer").is_empty());
+        assert_eq!(notes.get("name:atlas gamer", "ATLAS Gamer"), None);
         assert_eq!(notes.get("name:112s", "112s"), Some("chatty"));
         assert_eq!(notes.get("STEAM_0:0:2", "x"), None);
         assert_eq!(
