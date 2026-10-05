@@ -61,10 +61,20 @@ Your own words on regulars go in `config/chat/players.yaml`; the bots read them 
 ```yaml
 schema: lambdabots/chat-players@1
 players:
-  - id: STEAM_0:0:219579426      # a SteamID, or the nickname of a player without one
+  - id: STEAM_0:0:219579426      # a SteamID, or the nickname of a player without one (a bot's too)
     name: ATLAS Gamer
+    alias: [Атлас, Атласыч]      # what the bots call the player: one name, or several
     note: Хороший игрок, один из лучших. Многие называют его читером.
+  - id: ET^NiK
+    alias: Ник
 ```
+
+An alias is what the bots call a player instead of a hard nickname, one name or several (the first is the main one).
+The prompt names the player by them everywhere: `Атлас или Атласыч (ник ATLAS Gamer)` in the list of players, where
+the bots may mix the names, and the main one, `Атлас`, in the kill feed and the chat. Should the model still write the
+whole nickname, the line says the main alias instead. With a SteamID as `id` the aliases stay when the player changes
+nickname. Players without an alias are called briefly too: the rules ask for nicknames without clan tags and symbols.
+`lb chat reload` reads the file again.
 
 ## Settings
 
@@ -102,7 +112,8 @@ players:
 
 The key never leaves the chat worker: recordings and `lb config show` show `<redacted>` (the header values too).
 Keep it out of `config/` when that is a link into a repository (`--link-config` on the stand): use `api_key_file`
-outside it or `api_key_env`.
+outside it or `api_key_env`. Plain `http://` carries a key only to this machine (`localhost`, `127.0.0.1`, `[::1]`):
+a gateway elsewhere needs `https://`.
 
 Notes on models:
 

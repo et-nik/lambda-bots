@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -96,6 +97,11 @@ impl Client {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(LlmError::Config(format!("base_url `{base}` is not an http(s) URL")));
         }
+        if settings.key.is_some() && base.starts_with("http://") && !loopback(&base) {
+            return Err(LlmError::Config(format!(
+                "base_url `{base}` would send the API key unencrypted: use https:// or a loopback address"
+            )));
+        }
         let url = match settings.kind {
             Kind::Anthropic => anthropic::url(&base),
             Kind::OpenAi => openai::url(&base),
@@ -143,6 +149,16 @@ impl Client {
             Kind::OpenAi => openai::parse(&response.body),
         }
     }
+}
+
+/// `localhost` or a loopback address, the host read as the agent reads it: plain HTTP to it stays on this machine.
+fn loopback(url: &str) -> bool {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    let host = uri.host().unwrap_or_default();
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Merges `extra` into `body` object by object; a `null` removes the field.
@@ -309,5 +325,30 @@ mod tests {
         ));
         let s = settings(Kind::Anthropic, "");
         assert!(!format!("{s:?}").contains("sk-test"));
+    }
+
+    #[test]
+    fn keys_go_over_plain_http_only_to_loopback() {
+        for base in [
+            "http://127.0.0.1:8099/v1",
+            "http://localhost:11434/v1",
+            "http://[::1]:8080/v1",
+            "https://gw.example.com/v1",
+        ] {
+            assert!(Client::new(settings(Kind::OpenAi, base)).is_ok(), "{base}");
+        }
+        for base in [
+            "http://192.168.8.10:8080/v1",
+            "http://gw.example.com/v1",
+            "http://127.0.0.1@gw.example.com/v1",
+        ] {
+            assert!(
+                matches!(Client::new(settings(Kind::OpenAi, base)), Err(LlmError::Config(_))),
+                "{base}"
+            );
+            let mut keyless = settings(Kind::OpenAi, base);
+            keyless.key = None;
+            assert!(Client::new(keyless).is_ok(), "{base}");
+        }
     }
 }

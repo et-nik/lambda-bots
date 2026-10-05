@@ -74,6 +74,22 @@ pub enum Event {
 }
 
 impl Event {
+    /// The players in the event.
+    pub fn people(&self) -> Vec<&Who> {
+        match self {
+            Event::Kill { killer, victim, .. } => vec![killer, victim],
+            Event::Suicide { victim: who, .. }
+            | Event::Died { victim: who, .. }
+            | Event::Chat { from: who, .. }
+            | Event::Join { who }
+            | Event::Leave { who }
+            | Event::Rename { who, .. }
+            | Event::Level { who, .. }
+            | Event::Leader { who } => vec![who],
+            Event::MatchEnd { winner } => winner.iter().collect(),
+        }
+    }
+
     /// Players the event is about.
     pub fn involves(&self, userid: i32) -> bool {
         match self {

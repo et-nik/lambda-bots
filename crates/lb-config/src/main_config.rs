@@ -540,7 +540,7 @@ pub struct ChatProvider {
     /// PEM certificates trusted on top of the system's (a gateway's own CA).
     pub ca_file: String,
     /// Extra HTTP headers for every request.
-    pub headers: BTreeMap<String, String>,
+    pub headers: BTreeMap<String, Secret>,
     /// Seconds a request may take.
     pub timeout: f32,
     pub max_tokens: u32,
@@ -766,8 +766,13 @@ impl ChatConfig {
         if let Some(name) = p.headers.keys().find(|k| !token(k)) {
             return err("provider.headers", &format!("`{name}` is not a header name"));
         }
-        if p.headers.values().any(|v| v.contains(['\r', '\n'])) {
-            return err("provider.headers", "values must be one line");
+        // An HTTP header carries printable ASCII only.
+        let header_text = |s: &str| s.bytes().all(|b| b == b' ' || b.is_ascii_graphic());
+        if p.headers.values().any(|v| !header_text(&v.0)) {
+            return err("provider.headers", "values must be printable ASCII on one line");
+        }
+        if !p.api_key.0.trim().bytes().all(|b| b.is_ascii_graphic()) {
+            return err("provider.api_key", "must be printable ASCII without spaces");
         }
         let l = &self.limits;
         if !(0.1..=60.0).contains(&l.lines_per_minute) {
@@ -801,7 +806,7 @@ impl ChatConfig {
             self.provider.api_key = Secret(REDACTED.into());
         }
         for value in self.provider.headers.values_mut() {
-            *value = REDACTED.into();
+            *value = Secret(REDACTED.into());
         }
     }
 }
@@ -853,12 +858,15 @@ mod tests {
         assert_eq!(cfg.chat.limits, ChatLimits::default());
         let shown = format!("{:?}{}", cfg.redacted(), yaml::to_string(&cfg.redacted()).unwrap());
         assert!(!shown.contains("sk-123") && !shown.contains("g-456"), "{shown}");
-        assert!(!format!("{cfg:?}").contains("sk-123"));
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("sk-123") && !debug.contains("g-456"), "{debug}");
         let bad = |body: &str| MainConfig::parse(&format!("schema: lambdabots/main@1\nchat:\n{body}"), "t").is_err();
         assert!(bad("  provider: { kind: openai }\n"), "openai without base_url");
         assert!(bad("  provider: { base_url: api.anthropic.com }\n"));
         assert!(bad("  provider: { extra_body: '[1]' }\n"));
         assert!(bad("  provider: { headers: { \"bad header\": x } }\n"));
+        assert!(bad("  provider: { headers: { x-key: ключ } }\n"));
+        assert!(bad("  provider: { api_key: \"sk-ваш-ключ\" }\n"));
         assert!(bad("  typing: { cpm: [300, 100] }\n"));
         assert!(bad("  language: русский\n"));
         assert!(bad("  limits: { lines_per_minute: 0 }\n"));

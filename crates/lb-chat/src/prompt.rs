@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::aliases::Aliases;
 use crate::journal::{Event, Notable, Who};
 use crate::lang::{self, Lang};
 use crate::memory::{MapRecap, NOTES_MAX, PlayerMemory};
@@ -44,6 +45,7 @@ const RULES_RU: &str = "\
 - одна короткая строка: обычно 2–6 слов, до 40 символов; длиннее — только когда тебя прямо о чём-то спросили;
 - без кавычек, без своего ника в начале, без эмодзи и хэштегов;
 - можно без заглавных и запятых, как пишут в игре на скорость;
+- игроков называй коротко: как они названы ниже (несколько имён можно чередовать), без клан-тегов и значков в нике;
 - отвечай на языке, на котором к тебе обратились; иначе — на языке сервера;
 - если лучше промолчать или сказать нечего — ответь одним знаком -.
 
@@ -63,6 +65,7 @@ How to write:
 - one short line: usually 2-6 words, up to 40 characters; longer only when someone asked you something directly;
 - no quotes, no own name in front, no emoji or hashtags;
 - lower case and no commas are fine, as people type in a hurry;
+- call players briefly: as they are named below (mix several names freely), without clan tags and nickname symbols;
 - answer in the language you were spoken to in; otherwise in the server's language;
 - when it is better to keep quiet or there is nothing to say, answer with a single -.
 
@@ -99,15 +102,29 @@ fn language_name(code: &str) -> String {
     }
 }
 
-/// Players by name, the bot itself as "you".
-struct Names {
+/// Players by the names the bots call them, the bot itself as "you".
+struct Names<'a> {
     lang: Lang,
     me: i32,
+    aliases: &'a Aliases,
 }
 
-impl Names {
+impl Names<'_> {
     fn is_me(&self, who: &Who) -> bool {
         who.userid == self.me
+    }
+
+    fn call(&self, who: &Who) -> String {
+        self.aliases.call(&who.name).to_string()
+    }
+
+    /// A player in a list: the aliases with the nickname beside them.
+    fn listed(&self, nick: &str) -> String {
+        match (self.aliases.all(nick), self.lang) {
+            ([], _) => nick.to_string(),
+            (all, Lang::Ru) => format!("{} (ник {nick})", one_of(all, "или")),
+            (all, Lang::En) => format!("{} (nickname {nick})", one_of(all, "or")),
+        }
     }
 
     /// Subject: `ты` / `you`, else the name.
@@ -118,7 +135,7 @@ impl Names {
                 Lang::En => "you".into(),
             }
         } else {
-            who.name.clone()
+            self.call(who)
         }
     }
 
@@ -130,7 +147,7 @@ impl Names {
                 Lang::En => "you".into(),
             }
         } else {
-            who.name.clone()
+            self.call(who)
         }
     }
 
@@ -165,12 +182,12 @@ impl Names {
                 };
                 format!("{team}{}: {text}", self.subj(from))
             }
-            (Lang::Ru, Event::Join { who }) => format!("{} зашёл на сервер", who.name),
-            (Lang::En, Event::Join { who }) => format!("{} joined", who.name),
-            (Lang::Ru, Event::Leave { who }) => format!("{} вышел с сервера", who.name),
-            (Lang::En, Event::Leave { who }) => format!("{} left", who.name),
-            (Lang::Ru, Event::Rename { who, old }) => format!("{old} сменил ник на {}", who.name),
-            (Lang::En, Event::Rename { who, old }) => format!("{old} is now {}", who.name),
+            (Lang::Ru, Event::Join { who }) => format!("{} зашёл на сервер", self.call(who)),
+            (Lang::En, Event::Join { who }) => format!("{} joined", self.call(who)),
+            (Lang::Ru, Event::Leave { who }) => format!("{} вышел с сервера", self.call(who)),
+            (Lang::En, Event::Leave { who }) => format!("{} left", self.call(who)),
+            (Lang::Ru, Event::Rename { who, old }) => format!("{old} сменил ник на {}", self.call(who)),
+            (Lang::En, Event::Rename { who, old }) => format!("{old} is now {}", self.call(who)),
             (Lang::Ru, Event::Level { who, level }) => format!("{} — уровень {level}", self.subj(who)),
             (Lang::En, Event::Level { who, level }) => format!("{} reached level {level}", self.subj(who)),
             (Lang::Ru, Event::Leader { who }) => format!("{} теперь лидер", self.subj(who)),
@@ -186,10 +203,10 @@ impl Names {
         let lang = self.lang;
         match (lang, n) {
             (Lang::Ru, Notable::Nemesis { killer, victim, times }) if self.is_me(victim) => {
-                format!("{} только что убил тебя {times}-й раз подряд.", killer.name)
+                format!("{} только что убил тебя {times}-й раз подряд.", self.call(killer))
             }
             (Lang::En, Notable::Nemesis { killer, victim, times }) if self.is_me(victim) => {
-                format!("{} just killed you for the {times}th time in a row.", killer.name)
+                format!("{} just killed you for the {times}th time in a row.", self.call(killer))
             }
             (Lang::Ru, Notable::Nemesis { killer, victim, times }) => {
                 format!(
@@ -251,57 +268,74 @@ impl Names {
                 format!("{}: {count} kills in a row without dying.", self.subj(killer))
             }
             (Lang::Ru, Notable::RageQuit { who, deaths }) => {
-                format!("{} вышел с сервера после {deaths} смертей подряд.", who.name)
+                format!("{} вышел с сервера после {deaths} смертей подряд.", self.call(who))
             }
             (Lang::En, Notable::RageQuit { who, deaths }) => {
-                format!("{} left the server after dying {deaths} times in a row.", who.name)
+                format!(
+                    "{} left the server after dying {deaths} times in a row.",
+                    self.call(who)
+                )
             }
         }
     }
 }
 
+/// `a`, `a или b`, `a, b или c`.
+fn one_of(names: &[String], or: &str) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} {or} {last}", rest.join(", ")),
+    }
+}
+
 /// A moment of the map in the third person, for the memory: `X убил Y ломом`.
 pub fn moment(lang: Lang, n: &Notable) -> String {
-    let names = Names { lang, me: i32::MIN };
+    let aliases = Aliases::default();
+    let names = Names {
+        lang,
+        me: i32::MIN,
+        aliases: &aliases,
+    };
     names.notable(n).trim_end_matches('.').to_string()
 }
 
-fn trigger_text(names: &Names, t: &Trigger) -> String {
+fn trigger_text(names: &Names<'_>, t: &Trigger) -> String {
     let lang = names.lang;
     match (lang, t) {
-        (Lang::Ru, Trigger::Addressed { from, text }) => format!("{} пишет тебе: «{text}»", from.name),
-        (Lang::En, Trigger::Addressed { from, text }) => format!("{} writes to you: \"{text}\"", from.name),
+        (Lang::Ru, Trigger::Addressed { from, text }) => format!("{} пишет тебе: «{text}»", names.call(from)),
+        (Lang::En, Trigger::Addressed { from, text }) => format!("{} writes to you: \"{text}\"", names.call(from)),
         (Lang::Ru, Trigger::Continued { from, text }) => {
-            format!("{} отвечает на твою реплику: «{text}»", from.name)
+            format!("{} отвечает на твою реплику: «{text}»", names.call(from))
         }
-        (Lang::En, Trigger::Continued { from, text }) => format!("{} answers your line: \"{text}\"", from.name),
+        (Lang::En, Trigger::Continued { from, text }) => format!("{} answers your line: \"{text}\"", names.call(from)),
         (Lang::Ru, Trigger::Overheard { from, text }) => {
             format!(
                 "{} пишет в чат всем: «{text}». Можно ответить, а можно промолчать.",
-                from.name
+                names.call(from)
             )
         }
         (Lang::En, Trigger::Overheard { from, text }) => {
             format!(
                 "{} writes to everybody: \"{text}\". You may answer or keep quiet.",
-                from.name
+                names.call(from)
             )
         }
-        (Lang::Ru, Trigger::Joined { who }) => format!("На сервер зашёл {}.", who.name),
-        (Lang::En, Trigger::Joined { who }) => format!("{} joined the server.", who.name),
+        (Lang::Ru, Trigger::Joined { who }) => format!("На сервер зашёл {}.", names.call(who)),
+        (Lang::En, Trigger::Joined { who }) => format!("{} joined the server.", names.call(who)),
         (Lang::Ru, Trigger::MatchEnd { won: true, .. }) => "Матч окончен — ты победил!".into(),
         (Lang::En, Trigger::MatchEnd { won: true, .. }) => "The match is over and you won!".into(),
-        (Lang::Ru, Trigger::MatchEnd { winner: Some(w), .. }) => format!("Матч окончен, победил {}.", w.name),
-        (Lang::En, Trigger::MatchEnd { winner: Some(w), .. }) => format!("The match is over, {} won.", w.name),
+        (Lang::Ru, Trigger::MatchEnd { winner: Some(w), .. }) => format!("Матч окончен, победил {}.", names.call(w)),
+        (Lang::En, Trigger::MatchEnd { winner: Some(w), .. }) => format!("The match is over, {} won.", names.call(w)),
         (Lang::Ru, Trigger::MatchEnd { winner: None, .. }) => "Карта закончилась.".into(),
         (Lang::En, Trigger::MatchEnd { winner: None, .. }) => "The map is over.".into(),
         (_, Trigger::Notable(n)) => names.notable(n),
         (Lang::Ru, Trigger::KilledWhileTyping { killer }) => match killer {
-            Some(k) => format!("{} убил тебя, пока ты печатал в чат.", k.name),
+            Some(k) => format!("{} убил тебя, пока ты печатал в чат.", names.call(k)),
             None => "Тебя убили, пока ты печатал в чат.".into(),
         },
         (Lang::En, Trigger::KilledWhileTyping { killer }) => match killer {
-            Some(k) => format!("{} killed you while you were typing.", k.name),
+            Some(k) => format!("{} killed you while you were typing.", names.call(k)),
             None => "You got killed while typing.".into(),
         },
         (Lang::Ru, Trigger::LastLevel) => "Ты вышел на последний уровень — дальше только лом.".into(),
@@ -309,7 +343,8 @@ fn trigger_text(names: &Names, t: &Trigger) -> String {
     }
 }
 
-fn known_line(lang: Lang, k: &Known<'_>, bot: &str, now: u64) -> Option<String> {
+fn known_line(names: &Names<'_>, k: &Known<'_>, bot: &str, now: u64) -> Option<String> {
+    let lang = names.lang;
     let mut parts: Vec<String> = Vec::new();
     let sentence = |t: &str| t.trim().trim_end_matches('.').to_string();
     if let Some(note) = k.note.filter(|n| !n.trim().is_empty()) {
@@ -367,15 +402,23 @@ fn known_line(lang: Lang, k: &Known<'_>, bot: &str, now: u64) -> Option<String> 
             });
         }
     }
-    (!parts.is_empty()).then(|| format!("- {}: {}", k.name, parts.join("; ")))
+    (!parts.is_empty()).then(|| format!("- {}: {}", names.listed(k.name), parts.join("; ")))
 }
 
 /// The request for one line.
-pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server: &str, now: u64) -> Rendered {
+pub fn render(
+    req: &ChatRequest,
+    known: &[Known<'_>],
+    aliases: &Aliases,
+    maps: &[MapRecap],
+    server: &str,
+    now: u64,
+) -> Rendered {
     let lang = lang::Lang::of(&req.language);
     let names = Names {
         lang,
         me: req.bot.userid,
+        aliases,
     };
     let b = &req.bot;
     let mut system = String::new();
@@ -476,9 +519,14 @@ pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server:
                 .as_ref()
                 .map(|(l, w)| format!(", уровень {l} ({})", lang::weapon_name(lang, w)))
                 .unwrap_or_default();
-            let _ = write!(user, "Ты {state}, счёт {}/{}{level}", b.frags, b.deaths);
+            let score = if s.gungame {
+                String::new()
+            } else {
+                format!(", счёт {}/{}", b.frags, b.deaths)
+            };
+            let _ = write!(user, "Ты {state}{score}{level}");
             if let Some(leader) = &s.leader {
-                let _ = write!(user, ", лидер — {leader}");
+                let _ = write!(user, ", лидер — {}", aliases.call(leader));
             }
             let _ = writeln!(user, ".");
         }
@@ -493,9 +541,14 @@ pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server:
                 .as_ref()
                 .map(|(l, w)| format!(", level {l} ({})", lang::weapon_name(lang, w)))
                 .unwrap_or_default();
-            let _ = write!(user, "You are {state}, score {}/{}{level}", b.frags, b.deaths);
+            let score = if s.gungame {
+                String::new()
+            } else {
+                format!(", score {}/{}", b.frags, b.deaths)
+            };
+            let _ = write!(user, "You are {state}{score}{level}");
             if let Some(leader) = &s.leader {
-                let _ = write!(user, ", the leader is {leader}");
+                let _ = write!(user, ", the leader is {}", aliases.call(leader));
             }
             let _ = writeln!(user, ".");
         }
@@ -511,13 +564,12 @@ pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server:
         }
     );
     for p in s.players.iter().filter(|p| !p.me) {
-        let mut line = format!("- {} — {}/{}", p.name, p.frags, p.deaths);
-        if let Some(level) = p.level {
-            let _ = match lang {
-                Lang::Ru => write!(line, ", уровень {level}"),
-                Lang::En => write!(line, ", level {level}"),
-            };
-        }
+        // GunGame writes levels into the frags: the level says it all.
+        let mut line = match (lang, p.level) {
+            (Lang::Ru, Some(level)) if s.gungame => format!("- {} — уровень {level}", names.listed(&p.name)),
+            (Lang::En, Some(level)) if s.gungame => format!("- {} — level {level}", names.listed(&p.name)),
+            _ => format!("- {} — {}/{}", names.listed(&p.name), p.frags, p.deaths),
+        };
         let (mine, theirs) = p.duel;
         if mine + theirs > 0 {
             let _ = write!(
@@ -534,7 +586,7 @@ pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server:
 
     let known: Vec<String> = known
         .iter()
-        .filter_map(|k| known_line(lang, k, &b.name, now))
+        .filter_map(|k| known_line(&names, k, &b.name, now))
         .take(KNOWN_SHOWN)
         .collect();
     if !known.is_empty() {
@@ -559,8 +611,8 @@ pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server:
         .map(|m| {
             let when = lang::days_ago(lang, now.saturating_sub(m.ended));
             match (lang, &m.winner) {
-                (Lang::Ru, Some(w)) => format!("{} ({when}), победил {w}", m.map),
-                (Lang::En, Some(w)) => format!("{} ({when}), {w} won", m.map),
+                (Lang::Ru, Some(w)) => format!("{} ({when}), победил {}", m.map, aliases.call(w)),
+                (Lang::En, Some(w)) => format!("{} ({when}), {} won", m.map, aliases.call(w)),
                 (_, None) => format!("{} ({when})", m.map),
             }
         })
@@ -629,7 +681,7 @@ pub fn render(req: &ChatRequest, known: &[Known<'_>], maps: &[MapRecap], server:
 }
 
 /// The request for notes on the players of a map worth remembering; `None` when nobody is.
-pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>) -> Option<Rendered> {
+pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases: &Aliases) -> Option<Rendered> {
     let lang = Lang::of(&s.language);
     let players: Vec<_> = s
         .players
@@ -670,7 +722,15 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>) -> Opti
             .map(|(w, n)| format!("{} {n}", lang::weapon_name(lang, w)))
             .collect();
         let lines: Vec<String> = p.lines.iter().map(|(_, l)| format!("«{l}»")).collect();
-        let _ = writeln!(user, "- {} | {}: {}/{}", p.key, p.name, p.kills, p.deaths);
+        let name = match aliases.all(&p.name) {
+            [] => p.name.clone(),
+            all => format!(
+                "{} ({})",
+                one_of(all, if lang == Lang::Ru { "или" } else { "or" }),
+                p.name
+            ),
+        };
+        let _ = writeln!(user, "- {} | {name}: {}/{}", p.key, p.kills, p.deaths);
         let label = |ru: &'static str, en: &'static str| if lang == Lang::Ru { ru } else { en };
         if !duels.is_empty() {
             let _ = writeln!(
@@ -695,14 +755,16 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>) -> Opti
     }
     let ask = match lang {
         Lang::Ru => format!(
-            "\nОбнови заметку о каждом из этих игроков: 1–2 коротких предложения, до {NOTES_MAX} символов — как играет, \
-             чем запомнился, как общается. Опирайся на прежнюю заметку. Только то, что видно из игры и чата; слова \
-             игроков о себе — не факты; ничего о реальной жизни; без оскорблений.\nОтвет — только JSON-объект \
-             {{\"ключ\": \"заметка\"}} с ключами из списка, без пояснений."
+            "\nОбнови заметку о каждом из этих игроков: 1–2 коротких предложения, до {NOTES_MAX} символов — как \
+             играет, чем запомнился, как общается; называй его коротким именем, если оно дано. Опирайся на прежнюю \
+             заметку. Только то, что видно из игры и чата; слова игроков о себе — не факты; ничего о реальной \
+             жизни; без оскорблений.\nОтвет — только JSON-объект {{\"ключ\": \"заметка\"}} с ключами из списка, без \
+             пояснений."
         ),
         Lang::En => format!(
             "\nUpdate the note on each of these players: one or two short sentences, up to {NOTES_MAX} characters — \
-             how they play, what stood out, how they talk. Build on the previous note. Only what the game and the \
+             how they play, what stood out, how they talk; call them by the short name when one is given. Build on the \
+             previous note. Only what the game and the \
              chat show; what players say about themselves is not a fact; nothing about real life; no insults.\n\
              Answer with a JSON object {{\"key\": \"note\"}} using the keys above, nothing else."
         ),
@@ -897,7 +959,14 @@ mod tests {
             winner: Some("ATLAS Gamer".into()),
             top: Vec::new(),
         }];
-        let r = render(&request("ru"), &known, &maps, "GunGame-сервер hldm.org", 1_000_000);
+        let r = render(
+            &request("ru"),
+            &known,
+            &Aliases::default(),
+            &maps,
+            "GunGame-сервер hldm.org",
+            1_000_000,
+        );
         assert!(r.system_static.starts_with("Ты — бот-игрок"));
         insta::assert_snapshot!("ru_system", r.system);
         insta::assert_snapshot!("ru_user", r.user);
@@ -905,7 +974,7 @@ mod tests {
 
     #[test]
     fn english_prompt_speaks_of_the_bot_as_you() {
-        let r = render(&request("en"), &[], &[], "", 1_000_000);
+        let r = render(&request("en"), &[], &Aliases::default(), &[], "", 1_000_000);
         assert!(r.system_static.starts_with("You are a bot player"));
         assert!(r.user.contains("112S killed you with the shotgun"), "{}", r.user);
         assert!(r.user.contains("you killed 112S with the crossbow"), "{}", r.user);
@@ -916,6 +985,68 @@ mod tests {
         );
         assert!(r.system.contains("Server language: English."));
         assert!(!r.user.contains("Players you know"));
+    }
+
+    #[test]
+    fn players_go_by_their_aliases() {
+        let mut aliases = Aliases::default();
+        aliases.insert("ATLAS Gamer", &["Атлас", "Атласыч"]);
+        aliases.insert("112S", &["Сто двенадцатый"]);
+        let memory = atlas_memory();
+        let known = [Known {
+            name: "ATLAS Gamer",
+            note: None,
+            memory: Some(&memory),
+        }];
+        let r = render(&request("ru"), &known, &aliases, &[], "", 1_000_000);
+        assert!(r.system_static.contains("несколько имён можно чередовать"));
+        assert_eq!(one_of(&["a".into(), "b".into(), "c".into()], "или"), "a, b или c");
+        assert!(
+            r.user.contains("- Атлас или Атласыч (ник ATLAS Gamer) — 20/3"),
+            "{}",
+            r.user
+        );
+        assert!(r.user.contains("лидер — Атлас."), "{}", r.user);
+        assert!(r.user.contains("] Атлас убил eLdaYs из дробовика"), "{}", r.user);
+        assert!(r.user.contains("] Сто двенадцатый: Читер"), "{}", r.user);
+        assert!(
+            r.user.contains("- Атлас или Атласыч (ник ATLAS Gamer): часто играет"),
+            "{}",
+            r.user
+        );
+        assert!(r.user.contains("Повод: Сто двенадцатый пишет тебе"), "{}", r.user);
+        let maps = [MapRecap {
+            map: "dm_snow".into(),
+            ended: 1_000_000,
+            minutes: 14,
+            winner: Some("ATLAS Gamer".into()),
+            top: Vec::new(),
+        }];
+        let r = render(&request("ru"), &known, &aliases, &maps, "", 1_000_000);
+        assert!(r.user.contains("dm_snow (сегодня), победил Атлас."), "{}", r.user);
+        assert!(!r.user.contains("победил ATLAS"), "{}", r.user);
+    }
+
+    #[test]
+    fn gungame_shows_levels_not_frags() {
+        let mut req = request("ru");
+        req.scene.gungame = true;
+        req.bot.frags = 1203;
+        req.bot.level = Some((12, "crossbow".into()));
+        req.scene.players[1].frags = 1704;
+        req.scene.players[1].level = Some(17);
+        let r = render(&req, &[], &Aliases::default(), &[], "", 1_000_000);
+        assert!(
+            r.user.contains("Ты убит, ждёшь респауна, уровень 12 (арбалет)"),
+            "{}",
+            r.user
+        );
+        assert!(
+            r.user.contains("- ATLAS Gamer — уровень 17; на этой карте"),
+            "{}",
+            r.user
+        );
+        assert!(!r.user.contains("1203") && !r.user.contains("1704"), "{}", r.user);
     }
 
     #[test]
@@ -948,7 +1079,7 @@ mod tests {
             chat: Vec::new(),
         };
         let previous = BTreeMap::from([("STEAM_0:0:219579426".to_string(), "любит дробовик".to_string())]);
-        let r = render_notes(&summary, &previous).unwrap();
+        let r = render_notes(&summary, &previous, &Aliases::default()).unwrap();
         assert!(r.user.contains("STEAM_0:0:219579426 | ATLAS Gamer: 25/4"), "{}", r.user);
         assert!(r.user.contains("прежняя заметка: «любит дробовик»"), "{}", r.user);
         assert!(!r.user.contains("quiet"), "nothing to remember of a player met once");
@@ -956,7 +1087,7 @@ mod tests {
             players: vec![summary.players[1].clone()],
             ..summary
         };
-        assert!(render_notes(&quiet, &previous).is_none());
+        assert!(render_notes(&quiet, &previous, &Aliases::default()).is_none());
 
         let answer =
             "```json\n{\"STEAM_0:0:219579426\": \"  сильный, играет с дробовиком \", \"x\": 3, \"y\": \"\"}\n```";

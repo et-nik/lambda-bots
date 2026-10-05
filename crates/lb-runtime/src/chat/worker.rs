@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lb_chat::memory::Memory;
 use lb_chat::prompt::{self, Known, Rendered};
-use lb_chat::{ChatRequest, Failure, MapSummary, Outcome, Reply, sanitize};
+use lb_chat::{Aliases, ChatRequest, Failure, MapSummary, Outcome, Reply, sanitize};
 use lb_config::main_config::{ChatConfig, ProviderKind};
 use lb_llm::{Client, ErrorClass, Stop};
 
@@ -239,8 +239,16 @@ impl Worker {
         ));
     }
 
-    /// The key: the config's own, else the file's, else the environment variable's.
+    /// The key: the config's own, else the file's, else the environment variable's; it must fit an HTTP header.
     fn key(&self) -> Result<Option<String>, String> {
+        let key = self.key_text()?;
+        if key.as_deref().is_some_and(|k| !k.bytes().all(|b| b.is_ascii_graphic())) {
+            return Err("the API key has characters an HTTP header cannot carry".into());
+        }
+        Ok(key)
+    }
+
+    fn key_text(&self) -> Result<Option<String>, String> {
         let p = &self.config.provider;
         if !p.api_key.is_empty() {
             return Ok(Some(p.api_key.0.trim().to_string()));
@@ -283,7 +291,7 @@ impl Worker {
                 base_url: p.base_url.trim().to_string(),
                 model: p.model.trim().to_string(),
                 key,
-                headers: p.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                headers: p.headers.iter().map(|(k, v)| (k.clone(), v.0.clone())).collect(),
                 max_tokens: p.max_tokens,
                 temperature: p.temperature,
                 extra_body,
@@ -390,7 +398,15 @@ impl Worker {
             }
             Job::Preview(req) => {
                 let known = self.known(&req);
-                let r = prompt::render(&req, &known, &self.memory.maps, &self.config.server, unix_now());
+                let aliases = self.aliases(&req);
+                let r = prompt::render(
+                    &req,
+                    &known,
+                    &aliases,
+                    &self.memory.maps,
+                    &self.config.server,
+                    unix_now(),
+                );
                 for (title, text) in [("system", &r.system_static), ("bot", &r.system), ("request", &r.user)] {
                     logging::console_line(format!("[lambdabots] chat prompt, {title}:"));
                     for line in text.lines() {
@@ -441,14 +457,42 @@ impl Worker {
             .collect()
     }
 
+    /// The aliases of the players a request shows or speaks of.
+    fn aliases(&self, req: &ChatRequest) -> Aliases {
+        let mut aliases = Aliases::default();
+        for p in &req.scene.players {
+            aliases.insert(
+                &p.name,
+                self.notes.aliases(p.key.as_deref().unwrap_or_default(), &p.name),
+            );
+        }
+        let people = req
+            .events
+            .iter()
+            .flat_map(|r| r.event.people())
+            .chain(req.trigger.about());
+        for who in people {
+            aliases.insert(&who.name, self.notes.aliases("", &who.name));
+        }
+        aliases
+    }
+
     fn ask(&mut self, req: &ChatRequest) -> Outcome {
         if let Some(why) = self.blocked() {
             return Outcome::Failed(why);
         }
         let started = Instant::now();
+        let aliases = self.aliases(req);
         let rendered = {
             let known = self.known(req);
-            prompt::render(req, &known, &self.memory.maps, &self.config.server, unix_now())
+            prompt::render(
+                req,
+                &known,
+                &aliases,
+                &self.memory.maps,
+                &self.config.server,
+                unix_now(),
+            )
         };
         tracing::debug!(
             "chat prompt for {}:\n{}\n{}",
@@ -460,7 +504,8 @@ impl Worker {
             Ok(done) => {
                 let line = (done.stop != Stop::Refusal)
                     .then(|| sanitize::clean_reply(&done.text, &req.bot.name))
-                    .flatten();
+                    .flatten()
+                    .map(|line| aliases.apply(&line));
                 tracing::info!(
                     "chat {}: {:?} -> {} ({} ms, {} + {} tokens{})",
                     req.bot.name,
@@ -499,7 +544,7 @@ impl Worker {
         if notes
             && self.config.memory.ai_notes
             && self.blocked().is_none()
-            && let Some(rendered) = prompt::render_notes(s, &previous)
+            && let Some(rendered) = prompt::render_notes(s, &previous, &self.summary_aliases(s))
             && let Ok(done) = self.complete(rendered)
         {
             let mut notes = prompt::parse_notes(&done.text);
@@ -514,6 +559,14 @@ impl Worker {
             self.memory.apply_notes(&notes);
         }
         self.save();
+    }
+
+    fn summary_aliases(&self, s: &MapSummary) -> Aliases {
+        let mut aliases = Aliases::default();
+        for p in &s.players {
+            aliases.insert(&p.name, self.notes.aliases(&p.key, &p.name));
+        }
+        aliases
     }
 
     fn memory_command(&mut self, query: &str, forget: bool) {
@@ -533,7 +586,7 @@ impl Worker {
                     let lines: Vec<&str> = m.lines.iter().map(|(_, l)| l.as_str()).collect();
                     format!(
                         "chat: {key} ({}): {} maps, {}/{} kills/deaths, {} wins, weapons {:?}; vs bots: {}; notes: {}; \
-                         lines: {:?}; admin note: {}",
+                         lines: {:?}; admin note: {}; alias: {}",
                         m.names.join(", "),
                         m.maps,
                         m.kills,
@@ -545,7 +598,11 @@ impl Worker {
                         lines,
                         self.notes
                             .get(key, m.names.first().map_or("", String::as_str))
-                            .unwrap_or("-")
+                            .unwrap_or("-"),
+                        match self.notes.aliases(key, m.names.first().map_or("", String::as_str)) {
+                            [] => "-".to_string(),
+                            all => all.join(", "),
+                        }
                     )
                 }
                 None => format!("chat: nobody called `{query}` is remembered"),
@@ -738,6 +795,31 @@ mod tests {
         assert_eq!(memory.players["STEAM_0:1:42"].vs_bots["Kleiner"], [3, 1]);
         let usage = store::load_usage(&root.join("data/chat/usage.json"));
         assert_eq!(usage.tokens, 315, "two answers and the notes request");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn players_are_called_by_their_aliases() {
+        let server = MockServer::start(vec![answer("Gordon, hi! where is gordon?")]);
+        let root = dir("aliases");
+        std::fs::create_dir_all(root.join("config/chat")).unwrap();
+        std::fs::write(
+            root.join("config/chat/players.yaml"),
+            "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:1:42\n    name: Gordon Freeman\n    alias: [Гордон, Фримен]\n",
+        )
+        .unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        w.send(Job::Ask(Box::new(request(1))));
+        let got = replies(&mut w, 1);
+        assert_eq!(got[0].outcome, Outcome::Line("Гордон, hi! where is Гордон?".into()));
+        let asked = &server.requests()[0];
+        assert!(
+            asked.body.contains("Гордон or Фримен (nickname Gordon)"),
+            "{}",
+            asked.body
+        );
+        assert!(asked.body.contains("Гордон writes to you"), "{}", asked.body);
+        w.shutdown(Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&root);
     }
 

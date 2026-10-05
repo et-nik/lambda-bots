@@ -98,11 +98,18 @@ pub fn load_usage(path: &Path) -> Usage {
         .unwrap_or_default()
 }
 
-/// The admin's notes: by SteamID, and by nickname in lower case.
+/// What the admin wrote of a player.
+#[derive(Clone, Debug, Default)]
+struct Entry {
+    note: String,
+    aliases: Vec<String>,
+}
+
+/// The admin's notes and aliases: by SteamID, and by nickname in lower case.
 #[derive(Clone, Debug, Default)]
 pub struct Notes {
-    by_key: BTreeMap<String, String>,
-    by_name: BTreeMap<String, String>,
+    by_key: BTreeMap<String, Entry>,
+    by_name: BTreeMap<String, Entry>,
 }
 
 impl Notes {
@@ -114,15 +121,18 @@ impl Notes {
             Ok(f) => {
                 let mut notes = Notes::default();
                 for p in f.players {
-                    let note = p.note.trim().to_string();
+                    let entry = Entry {
+                        note: p.note.trim().to_string(),
+                        aliases: p.alias.iter().map(|a| a.trim().to_string()).collect(),
+                    };
                     let id = p.id.trim();
                     if id.starts_with("STEAM_") || id.starts_with("VALVE_") {
-                        notes.by_key.insert(id.to_string(), note.clone());
+                        notes.by_key.insert(id.to_string(), entry.clone());
                         if !p.name.trim().is_empty() {
-                            notes.by_name.insert(p.name.trim().to_lowercase(), note);
+                            notes.by_name.insert(p.name.trim().to_lowercase(), entry);
                         }
                     } else {
-                        notes.by_name.insert(id.to_lowercase(), note);
+                        notes.by_name.insert(id.to_lowercase(), entry);
                     }
                 }
                 notes
@@ -138,12 +148,20 @@ impl Notes {
         self.by_key.len() + self.by_name.len()
     }
 
-    /// The note on a player by memory key, else by name.
-    pub fn get(&self, key: &str, name: &str) -> Option<&str> {
+    fn entry(&self, key: &str, name: &str) -> Option<&Entry> {
         self.by_key
             .get(key)
             .or_else(|| self.by_name.get(&name.trim().to_lowercase()))
-            .map(String::as_str)
+    }
+
+    /// The note on a player by memory key, else by name.
+    pub fn get(&self, key: &str, name: &str) -> Option<&str> {
+        self.entry(key, name).map(|e| e.note.as_str()).filter(|n| !n.is_empty())
+    }
+
+    /// What the bots call a player, the main name first, by memory key, else by name.
+    pub fn aliases(&self, key: &str, name: &str) -> &[String] {
+        self.entry(key, name).map_or(&[], |e| e.aliases.as_slice())
     }
 }
 
@@ -167,7 +185,7 @@ mod tests {
         let path = dir.join("players.yaml");
         write_atomic(
             &path,
-            "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:0:1\n    name: ATLAS Gamer\n    note: strong\n  - id: 112S\n    note: chatty\n",
+            "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:0:1\n    name: ATLAS Gamer\n    alias: [Атлас, Атласыч]\n    note: strong\n  - id: 112S\n    note: chatty\n  - id: ET^NiK\n    alias: Ник\n",
         )
         .unwrap();
         let notes = Notes::load(&path);
@@ -175,6 +193,14 @@ mod tests {
         assert_eq!(notes.get("name:atlas gamer", "ATLAS Gamer"), Some("strong"));
         assert_eq!(notes.get("name:112s", "112s"), Some("chatty"));
         assert_eq!(notes.get("STEAM_0:0:2", "x"), None);
+        assert_eq!(
+            notes.aliases("STEAM_0:0:1", "ATLAS Gamer 2"),
+            ["Атлас", "Атласыч"],
+            "the SteamID keeps the aliases"
+        );
+        assert_eq!(notes.aliases("name:et^nik", "et^nik"), ["Ник"]);
+        assert_eq!(notes.get("name:et^nik", "ET^NiK"), None, "an alias without a note");
+        assert!(notes.aliases("name:112s", "112S").is_empty());
         let memory = dir.join("memory.json");
         std::fs::write(&memory, "{broken").unwrap();
         assert_eq!(load_memory(&memory), Memory::default());

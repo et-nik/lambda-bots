@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod addressing;
+pub mod aliases;
 pub mod botchat;
 pub mod director;
 pub mod journal;
@@ -14,6 +15,7 @@ pub mod prompt;
 pub mod request;
 pub mod sanitize;
 
+pub use aliases::Aliases;
 pub use botchat::{BotChat, Can, Priority};
 pub use director::{Cause, Director, Limits, Speak, Speaker};
 pub use journal::{Event, Journal, Notable, Who};

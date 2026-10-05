@@ -20,7 +20,7 @@ said_since() {
     start=$(date +%s)
     while (( $(date +%s) - start < TIMEOUT )); do
         if line=$(tail -c +$((from + 1)) "$LOG" | grep -a -m1 -F "$BOT: "); then
-            echo "  said: ${line#*$BOT: }"
+            echo "  said: ${line#*"$BOT": }"
             return 0
         fi
         sleep 0.5
