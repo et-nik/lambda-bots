@@ -487,6 +487,8 @@ pub struct ChatConfig {
     /// Chat commands of server plugins: a bot never says a line starting with one, and a player's line starting
     /// with one is not chat.
     pub blocked: Vec<String>,
+    /// Every request to the model and its answer go to `logs/chat.<date>.log`, as they went over the wire.
+    pub transcript: bool,
 }
 
 impl Default for ChatConfig {
@@ -512,6 +514,7 @@ impl Default for ChatConfig {
             .into_iter()
             .map(String::from)
             .collect(),
+            transcript: false,
         }
     }
 }

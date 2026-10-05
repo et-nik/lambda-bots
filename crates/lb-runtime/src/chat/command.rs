@@ -59,6 +59,16 @@ fn tester(rt: &Runtime) -> Who {
     }
 }
 
+/// Whether requests are written down, and where today.
+fn transcript_line(rt: &Runtime) -> String {
+    let path = super::transcript::today(&rt.init.install_dir.join("logs"));
+    if rt.config.chat.transcript {
+        format!("transcript: on, {}", path.display())
+    } else {
+        "transcript: off (`lb chat transcript on`)".into()
+    }
+}
+
 fn status(rt: &Runtime) -> Vec<String> {
     let c = &rt.config.chat;
     let n = rt.chat.counts;
@@ -75,6 +85,7 @@ fn status(rt: &Runtime) -> Vec<String> {
             rt.clients.humans(false)
         ),
         format!("worker: {}", rt.chat.backend.status()),
+        transcript_line(rt),
         format!(
             "this session: {} asked, {} said, {} kept quiet, {} failed",
             n.asked, n.said, n.silent, n.failed
@@ -104,7 +115,7 @@ pub(crate) fn command(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> V
     let usage = || {
         vec![
             "lb chat [status] | log [n] | say <bot> <text> | test <bot> <text> | prompt <bot> [text] | \
-             memory <player> [forget] | reload | on | off"
+             memory <player> [forget] | transcript [on|off] | reload | on | off"
                 .to_string(),
         ]
     };
@@ -118,6 +129,12 @@ pub(crate) fn command(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> V
                 out.push("chat: nothing yet".into());
             }
             out
+        }
+        ["transcript"] => vec![transcript_line(rt)],
+        ["transcript", "on" | "off"] => {
+            rt.config.chat.transcript = args[1] == "on";
+            rt.chat.backend.send(Job::Configure(Box::new(rt.config.chat.clone())));
+            vec![transcript_line(rt)]
         }
         ["on" | "off"] => {
             let on = args[0] == "on";

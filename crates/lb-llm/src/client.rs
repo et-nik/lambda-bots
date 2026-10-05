@@ -1,7 +1,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{LlmError, anthropic, http, openai};
 
@@ -81,6 +81,18 @@ pub struct Completion {
     pub output_tokens: u64,
 }
 
+/// What went over the wire, for a transcript: the request body as sent and the answer as received. The headers, which
+/// carry the key, are not kept, nor a user, a password or a query in the address.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Exchange {
+    pub url: String,
+    pub request: String,
+    /// `None` when no answer came.
+    pub status: Option<u16>,
+    pub response: Option<String>,
+    pub elapsed: Duration,
+}
+
 pub struct Client {
     settings: Settings,
     url: String,
@@ -136,6 +148,11 @@ impl Client {
     }
 
     pub fn complete(&self, prompt: &Prompt) -> Result<Completion, LlmError> {
+        self.exchange(prompt).0
+    }
+
+    /// [`Client::complete`], with what went over the wire.
+    pub fn exchange(&self, prompt: &Prompt) -> (Result<Completion, LlmError>, Exchange) {
         let s = &self.settings;
         let (mut body, mut headers) = match s.kind {
             Kind::Anthropic => (anthropic::body(s, prompt), anthropic::headers(s.key.as_deref())),
@@ -148,18 +165,33 @@ impl Client {
             body.as_object_mut().map(|o| o.remove("max_tokens"));
         }
         headers.extend(s.headers.iter().cloned());
-        let response = http::post_json(&self.agent, &self.url, &headers, &body.to_string())?;
-        if !(200..300).contains(&response.status) {
-            return Err(LlmError::status(
+        let mut wire = Exchange {
+            url: without_credentials(&self.url),
+            request: body.to_string(),
+            ..Exchange::default()
+        };
+        let started = Instant::now();
+        let response = http::post_json(&self.agent, &self.url, &headers, &wire.request);
+        wire.elapsed = started.elapsed();
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => return (Err(e), wire),
+        };
+        wire.status = Some(response.status);
+        wire.response = Some(response.body.clone());
+        let result = if !(200..300).contains(&response.status) {
+            Err(LlmError::status(
                 response.status,
                 &response.body,
                 response.retry_after.as_deref(),
-            ));
-        }
-        match s.kind {
-            Kind::Anthropic => anthropic::parse(&response.body),
-            Kind::OpenAi => openai::parse(&response.body),
-        }
+            ))
+        } else {
+            match s.kind {
+                Kind::Anthropic => anthropic::parse(&response.body),
+                Kind::OpenAi => openai::parse(&response.body),
+            }
+        };
+        (result, wire)
     }
 }
 
@@ -171,6 +203,17 @@ fn loopback(url: &str) -> bool {
     let host = uri.host().unwrap_or_default();
     let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `url` without a user, a password or a query, which may carry credentials.
+fn without_credentials(url: &str) -> String {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return "<address>".into();
+    };
+    let host = uri
+        .authority()
+        .map_or("", |a| a.as_str().rsplit('@').next().unwrap_or_default());
+    format!("{}://{host}{}", uri.scheme_str().unwrap_or("http"), uri.path())
 }
 
 /// `http://user:password@host`: the agent sends the user and the password as basic authorization.
@@ -325,6 +368,28 @@ mod tests {
         let e = client.complete(&prompt()).unwrap_err();
         assert_eq!(e.class(), crate::ErrorClass::Fatal);
         assert!(e.to_string().contains("bad key"));
+    }
+
+    #[test]
+    fn exchanges_keep_the_bodies_but_no_credentials() {
+        let server = MockServer::start(vec![Canned::json(
+            200,
+            r#"{"choices":[{"message":{"content":"gg"},"finish_reason":"stop"}]}"#,
+        )]);
+        let mut s = settings(Kind::OpenAi, &format!("{}/v1", server.url()));
+        s.headers = vec![("x-gateway-token".into(), "g-secret".into())];
+        let (done, wire) = Client::new(s).unwrap().exchange(&prompt());
+        assert_eq!(done.unwrap().text, "gg");
+        assert_eq!(wire.url, format!("{}/v1/chat/completions", server.url()));
+        assert!(wire.request.contains("\"say hi\""), "{}", wire.request);
+        assert_eq!(wire.status, Some(200));
+        assert!(wire.response.as_deref().unwrap().contains("\"gg\""));
+        let all = format!("{wire:?}");
+        assert!(!all.contains("sk-test") && !all.contains("g-secret"), "{all}");
+        assert_eq!(
+            without_credentials("https://user:pass@gw.example.com:8443/v1/messages?key=abc"),
+            "https://gw.example.com:8443/v1/messages"
+        );
     }
 
     #[test]

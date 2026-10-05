@@ -6,6 +6,7 @@
 mod backend;
 mod command;
 mod store;
+mod transcript;
 mod worker;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -725,7 +726,7 @@ impl Runtime {
         });
         self.chat.counts.asked += 1;
         self.chat
-            .log(now, format!("{name} asked ({:?}): {:?}", s.priority, s.trigger));
+            .log(now, format!("{name} asked ({:?}): {}", s.priority, s.trigger.summary()));
         self.chat.backend.send(Job::Ask(Box::new(request)));
     }
 

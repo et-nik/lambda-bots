@@ -145,3 +145,4 @@ chat:
     ai_notes: true          # one request after each map updates notes about the players met
     forget_after_days: 120
   blocked: [rtv, rockthevote, nominate, timeleft, nextmap, thetime, currentmap]   # plugin chat commands
+  transcript: false         # every request to the model and its answer in logs/chat.<date>.log (kept 7 days)

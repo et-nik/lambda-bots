@@ -11,5 +11,5 @@ mod openai;
 #[doc(hidden)]
 pub mod testing;
 
-pub use client::{Client, Completion, Kind, Prompt, Settings, Stop};
+pub use client::{Client, Completion, Exchange, Kind, Prompt, Settings, Stop};
 pub use error::{ErrorClass, LlmError};

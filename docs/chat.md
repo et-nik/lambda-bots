@@ -111,6 +111,7 @@ without clan tags and symbols.
 | `memory.ai_notes`            | `true`                            | one request after each map for notes on players                      |
 | `memory.forget_after_days`   | `120`                             | forget players unseen this long                                      |
 | `blocked`                    | `[rtv, rockthevote, nominate, …]` | plugin chat commands: never said, and not chat when players say them |
+| `transcript`                 | `false`                           | every request to the model and its answer in `logs/chat.<date>.log`  |
 
 The key never leaves the chat worker: recordings and `lb config show` show `<redacted>` (the header values too).
 Keep it out of `config/` when that is a link into a repository (`--link-config` on the stand): use `api_key_file`
@@ -131,6 +132,43 @@ Notes on models:
 When the provider refuses the settings (HTTP 401, 403, 404: a bad key, an unknown model), chat stops until
 `lb chat reload` or `lb config reload`. When it is busy or out of reach (429, 5xx, a timeout), requests wait 5 s,
 then 10, 20 … up to a minute, or as long as `retry-after` says.
+
+## What was sent and what came back
+
+With `chat.transcript: true` (or `lb chat transcript on`, until the next `lb config reload`) every request to the
+model and its answer go to `logs/chat.<date>.log`, one file a UTC day, a week of them kept. An entry holds the time,
+the bot and why it speaks, the address, the request body and the answer's status, time and body, and what came of it:
+the line the bot types, nothing, or why it failed. The JSON bodies are written as YAML, so the prompts read as text:
+
+```text
+===== 2026-10-05 21:14:03 UTC · DUT9 ATLASA · 112S to the bot: Не читаешь что?
+>>> POST https://api.moonshot.ai/v1/chat/completions
+max_completion_tokens: 4000
+messages:
+- content: |-
+    Ты — бот-игрок на сервере Half-Life Deathmatch (HLDM) …
+  role: system
+- content: |-
+    Сервер: GunGame-сервер hldm.org.
+    …
+  role: user
+model: kimi-k3
+reasoning_effort: low
+<<< 200 in 1840 ms
+choices:
+- finish_reason: stop
+  message:
+    content: читаю) это Атлас тут читер, не я
+    reasoning_content: …
+usage:
+  completion_tokens: 212
+  prompt_tokens: 1240
+=== line: читаю) это Атлас тут читер, не я
+```
+
+The headers are not written, so neither is the key, nor a user, a password or a query in the address. The players'
+chat and names are: keep the files as you keep the server's other logs. Requests that were not sent (chat off, the
+day's tokens spent, waiting after failures) leave no entry.
 
 ## Personalities
 
@@ -159,6 +197,7 @@ style (rushers talk more, snipers less):
 | `lb chat prompt <bot> [text]`      | the prompt such a line would get, printed to the server console           |
 | `lb chat memory <player> [forget]` | what the bots remember of a player; `forget` forgets them                 |
 | `lb chat reload`                   | read `config/chat/players.yaml` again and retry the provider              |
+| `lb chat transcript [on\|off]`     | write requests and answers to `logs/chat.<date>.log` (`chat.transcript`)  |
 
 `<bot>` is a personality or in-game name, its beginning, or `#userid`; a name with spaces goes in quotes. The worker's
 output goes to the server console and the log (`logs/lambdabots.<date>.log`: every line with its reason, time and

@@ -17,6 +17,7 @@ use lb_llm::{Client, ErrorClass, Stop};
 
 use super::backend::{ChatBackend, Job};
 use super::store::{self, Notes, Paths, Usage};
+use super::transcript::Transcript;
 use crate::logging;
 
 /// Requests waiting for the worker; more are answered at once as failed.
@@ -172,6 +173,8 @@ struct Worker {
     usage: Usage,
     usage_dirty: u64,
     status: Arc<Mutex<String>>,
+    /// `chat.transcript`: requests and answers written down.
+    transcript: Option<Transcript>,
 }
 
 impl Worker {
@@ -189,7 +192,9 @@ impl Worker {
             memory_dirty: false,
             usage_dirty: 0,
             status,
+            transcript: None,
         };
+        w.sync_transcript();
         tracing::info!(
             "chat worker: {} players remembered, {} notes from {}",
             w.memory.players.len(),
@@ -323,8 +328,22 @@ impl Worker {
         }
     }
 
-    /// Sends a prompt, counting tokens and handling failures; `None` after a failure, which says why.
-    fn complete(&mut self, rendered: Rendered) -> Result<lb_llm::Completion, Failure> {
+    fn sync_transcript(&mut self) {
+        if !self.config.transcript {
+            self.transcript = None;
+        } else if self.transcript.is_none() {
+            self.transcript = Some(Transcript::new(self.paths.install.join("logs")));
+        }
+    }
+
+    /// Sends a prompt, counting tokens and handling failures. `title` and `outcome` (what came of an answer) go to
+    /// the transcript with the exchange.
+    fn complete(
+        &mut self,
+        rendered: Rendered,
+        title: &str,
+        outcome: impl FnOnce(&lb_llm::Completion) -> String,
+    ) -> Result<lb_llm::Completion, Failure> {
         let client = match self.client() {
             Ok(c) => c,
             Err(why) => {
@@ -339,7 +358,15 @@ impl Worker {
             user: rendered.user,
             max_tokens: rendered.max_tokens,
         };
-        match client.complete(&prompt) {
+        let (result, wire) = client.exchange(&prompt);
+        if let Some(t) = self.transcript.as_mut() {
+            let what = match &result {
+                Ok(done) => outcome(done),
+                Err(e) => format!("failed: {e}"),
+            };
+            t.write(title, &wire, &what);
+        }
+        match result {
             Ok(done) => {
                 self.failures = 0;
                 self.backoff_until = None;
@@ -394,6 +421,7 @@ impl Worker {
                     self.backoff_until = None;
                 }
                 self.config = *config;
+                self.sync_transcript();
                 None
             }
             Job::Preview(req) => {
@@ -501,16 +529,25 @@ impl Worker {
             rendered.system,
             rendered.user
         );
-        match self.complete(rendered) {
+        let line_of = |done: &lb_llm::Completion| {
+            (done.stop != Stop::Refusal)
+                .then(|| sanitize::clean_reply(&done.text, &req.bot.name))
+                .flatten()
+                .map(|line| aliases.apply(&line))
+        };
+        let title = format!("{} · {}", req.bot.name, req.trigger.summary());
+        let outcome = |done: &lb_llm::Completion| match line_of(done) {
+            Some(line) => format!("line: {line}"),
+            None if done.stop == Stop::Refusal => "no line: the model refused".to_string(),
+            None => "no line: the model keeps quiet".to_string(),
+        };
+        match self.complete(rendered, &title, outcome) {
             Ok(done) => {
-                let line = (done.stop != Stop::Refusal)
-                    .then(|| sanitize::clean_reply(&done.text, &req.bot.name))
-                    .flatten()
-                    .map(|line| aliases.apply(&line));
+                let line = line_of(&done);
                 tracing::info!(
-                    "chat {}: {:?} -> {} ({} ms, {} + {} tokens{})",
+                    "chat {}: {} -> {} ({} ms, {} + {} tokens{})",
                     req.bot.name,
-                    req.trigger,
+                    req.trigger.summary(),
                     line.as_deref().unwrap_or("(nothing)"),
                     started.elapsed().as_millis(),
                     done.input_tokens,
@@ -546,7 +583,9 @@ impl Worker {
             && self.config.memory.ai_notes
             && self.blocked().is_none()
             && let Some(rendered) = prompt::render_notes(s, &previous, &self.summary_aliases(s))
-            && let Ok(done) = self.complete(rendered)
+            && let Ok(done) = self.complete(rendered, &format!("notes after {}", s.map), |done| {
+                format!("notes on {} players", prompt::parse_notes(&done.text).len())
+            })
         {
             let mut notes = prompt::parse_notes(&done.text);
             notes.retain(|key, _| s.players.iter().any(|p| &p.key == key));
@@ -842,6 +881,43 @@ mod tests {
         );
         req.scene.players[0].key = Some("name:gordon".into());
         assert_eq!(w.aliases(&req).of("Gordon"), Some("Гордон"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_transcript_holds_requests_and_answers() {
+        let server = MockServer::start(vec![
+            answer("hey"),
+            Canned::json(500, r#"{"error":{"message":"overloaded"}}"#),
+        ]);
+        let root = dir("transcript");
+        let mut c = config(&server.url());
+        c.provider.api_key = lb_config::main_config::Secret("sk-hunter2".into());
+        c.transcript = true;
+        let mut w = WorkerBackend::start(c, &root).unwrap();
+        w.send(Job::Ask(Box::new(request(1))));
+        w.send(Job::Ask(Box::new(request(2))));
+        assert_eq!(replies(&mut w, 2).len(), 2);
+        w.shutdown(Duration::from_secs(5));
+        let text = std::fs::read_to_string(super::super::transcript::today(&root.join("logs"))).unwrap();
+        assert!(
+            text.contains("UTC · Kleiner · Gordon to the bot: kleiner, hi"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(">>> POST {}/v1/chat/completions", server.url())),
+            "{text}"
+        );
+        assert!(
+            text.contains("- content: |-") && text.contains("role: system"),
+            "{text}"
+        );
+        assert!(text.contains("<<< 200 in") && text.contains("=== line: hey"), "{text}");
+        assert!(
+            text.contains("<<< 500 in") && text.contains("=== failed: HTTP 500: overloaded"),
+            "{text}"
+        );
+        assert!(!text.contains("hunter2"), "no key in the transcript");
         let _ = std::fs::remove_dir_all(&root);
     }
 

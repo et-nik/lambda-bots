@@ -73,6 +73,39 @@ impl Trigger {
     pub fn is_answer(&self) -> bool {
         matches!(self, Trigger::Addressed { .. } | Trigger::Continued { .. })
     }
+
+    /// What the line answers, in a few words, for logs.
+    pub fn summary(&self) -> String {
+        match self {
+            Trigger::Addressed { from, text } => format!("{} to the bot: {text}", from.name),
+            Trigger::Continued { from, text } => format!("{} answering the bot: {text}", from.name),
+            Trigger::Overheard { from, text } => format!("{} to everybody: {text}", from.name),
+            Trigger::Joined { who } => format!("{} joined", who.name),
+            Trigger::MatchEnd { won: true, .. } => "the bot won the match".into(),
+            Trigger::MatchEnd { winner, .. } => {
+                format!(
+                    "the match is over, {} won",
+                    winner.as_ref().map_or("nobody", |w| w.name.as_str())
+                )
+            }
+            Trigger::Notable(n) => match n {
+                Notable::Nemesis { killer, victim, times } => {
+                    format!("{} killed {} {times} times in a row", killer.name, victim.name)
+                }
+                Notable::Humiliation { killer, victim } => format!("{} crowbarred {}", killer.name, victim.name),
+                Notable::OwnBlast { victim, weapon } => format!("{} blew themselves up ({weapon})", victim.name),
+                Notable::Revenge { killer, victim } => format!("{} took revenge on {}", killer.name, victim.name),
+                Notable::Multikill { killer, count } => format!("{}: {count} kills at once", killer.name),
+                Notable::Streak { killer, count } => format!("{}: {count} kills in a row", killer.name),
+                Notable::RageQuit { who, deaths } => format!("{} left after {deaths} deaths in a row", who.name),
+            },
+            Trigger::KilledWhileTyping { killer } => match killer {
+                Some(k) => format!("{} killed the bot while it typed", k.name),
+                None => "killed while typing".into(),
+            },
+            Trigger::LastLevel => "the bot reached the last level".into(),
+        }
+    }
 }
 
 /// The bot as the model plays it.
@@ -217,6 +250,35 @@ pub struct MapSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summaries() {
+        let who = |name: &str| Who {
+            slot: 1,
+            userid: 1,
+            name: name.into(),
+            bot: false,
+        };
+        let t = Trigger::Addressed {
+            from: who("112S"),
+            text: "Читер".into(),
+        };
+        assert_eq!(t.summary(), "112S to the bot: Читер");
+        let t = Trigger::Notable(Notable::Nemesis {
+            killer: who("ATLAS Gamer"),
+            victim: who("DUT9 ATLASA"),
+            times: 3,
+        });
+        assert_eq!(t.summary(), "ATLAS Gamer killed DUT9 ATLASA 3 times in a row");
+        assert_eq!(
+            Trigger::MatchEnd {
+                winner: None,
+                won: false
+            }
+            .summary(),
+            "the match is over, nobody won"
+        );
+    }
 
     #[test]
     fn ids_and_recorded_types_round_trip() {

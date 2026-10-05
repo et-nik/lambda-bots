@@ -118,6 +118,10 @@ const HELP: &[(&str, &str)] = &[
         "what the bots remember of a player; read the notes on players and the provider settings again",
     ),
     (
+        "chat transcript [on|off]",
+        "write every request to the model and its answer to logs/chat.<date>.log",
+    ),
+    (
         "record [start [seconds]|stop]",
         "record the next map for `lb-cli replay` (starts with the map, see docs/replay.md)",
     ),
