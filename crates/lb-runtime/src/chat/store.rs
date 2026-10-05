@@ -146,17 +146,21 @@ impl Notes {
     }
 
     fn entry(&self, key: &str, name: &str) -> Option<&Entry> {
-        self.by_key
-            .get(key)
-            .or_else(|| self.by_name.get(&name.trim().to_lowercase()))
+        if let Some(entry) = self.by_key.get(key) {
+            Some(entry)
+        } else if key.is_empty() || key.starts_with("name:") {
+            self.by_name.get(&name.trim().to_lowercase())
+        } else {
+            None
+        }
     }
 
-    /// The note on a player by memory key, else by name.
+    /// The note on a player by memory key, else by name when the player has no SteamID or it is not known (`""`).
     pub fn get(&self, key: &str, name: &str) -> Option<&str> {
         self.entry(key, name).map(|e| e.note.as_str()).filter(|n| !n.is_empty())
     }
 
-    /// What the bots call a player, the main name first, by memory key, else by name.
+    /// What the bots call a player, the main name first, by memory key, else by name as [`Notes::get`] does.
     pub fn aliases(&self, key: &str, name: &str) -> &[String] {
         self.entry(key, name).map_or(&[], |e| e.aliases.as_slice())
     }
@@ -202,6 +206,11 @@ mod tests {
             "the SteamID keeps the aliases"
         );
         assert_eq!(notes.aliases("name:et^nik", "et^nik"), ["Ник"]);
+        assert_eq!(notes.aliases("", "ET^NiK"), ["Ник"], "a player not known");
+        assert!(
+            notes.aliases("STEAM_0:0:3", "ET^NiK").is_empty(),
+            "a nickname's entry is not for a player with a SteamID"
+        );
         assert_eq!(notes.get("name:et^nik", "ET^NiK"), None, "an alias without a note");
         assert!(notes.aliases("name:112s", "112S").is_empty());
         let memory = dir.join("memory.json");

@@ -73,8 +73,9 @@ An alias is what the bots call a player instead of a hard nickname, one name or 
 The prompt names the player by them everywhere: `Атлас или Атласыч (ник ATLAS Gamer)` in the list of players, where
 the bots may mix the names, and the main one, `Атлас`, in the kill feed and the chat. Should the model still write the
 whole nickname, the line says the main alias instead. With a SteamID as `id` the note and the aliases go to that
-SteamID only (`name` is for you to read) and stay when the player changes nickname. Players without an alias are
-called briefly too: the rules ask for nicknames without clan tags and symbols.
+SteamID only (`name` is for you to read) and stay when the player changes nickname; a nickname as `id` serves bots
+and players without a SteamID only. Players without an alias are called briefly too: the rules ask for nicknames
+without clan tags and symbols.
 `lb chat reload` reads the file again.
 
 ## Settings
@@ -113,9 +114,9 @@ called briefly too: the rules ask for nicknames without clan tags and symbols.
 
 The key never leaves the chat worker: recordings and `lb config show` show `<redacted>` (the header values too).
 Keep it out of `config/` when that is a link into a repository (`--link-config` on the stand): use `api_key_file`
-outside it or `api_key_env`. Plain `http://` carries a key, the API key or a header named like one (`authorization`,
-`x-api-key`, `x-gateway-token`), only to this machine (`localhost`, `127.0.0.1`, `[::1]`): a gateway elsewhere needs
-`https://`.
+outside it or `api_key_env`. Plain `http://` carries a key, the API key, a header named like one (`authorization`,
+`x-api-key`, `x-gateway-token`) or `user:password@` in `base_url`, only to this machine (`localhost`, `127.0.0.1`,
+`[::1]`): a gateway elsewhere needs `https://`.
 
 Notes on models:
 

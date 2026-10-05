@@ -97,10 +97,15 @@ impl Client {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(LlmError::Config(format!("base_url `{base}` is not an http(s) URL")));
         }
-        let secret = settings.key.as_ref().map(|_| "the API key".to_string()).or_else(|| {
-            let (name, _) = settings.headers.iter().find(|(name, _)| credential(name))?;
-            Some(format!("the {name} header"))
-        });
+        let secret = settings
+            .key
+            .as_ref()
+            .map(|_| "the API key".to_string())
+            .or_else(|| {
+                let (name, _) = settings.headers.iter().find(|(name, _)| credential(name))?;
+                Some(format!("the {name} header"))
+            })
+            .or_else(|| userinfo(&base).then(|| "the user and password in it".to_string()));
         if let Some(secret) = secret
             && base.starts_with("http://")
             && !loopback(&base)
@@ -166,6 +171,12 @@ fn loopback(url: &str) -> bool {
     let host = uri.host().unwrap_or_default();
     let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `http://user:password@host`: the agent sends the user and the password as basic authorization.
+fn userinfo(url: &str) -> bool {
+    url.parse::<ureq::http::Uri>()
+        .is_ok_and(|uri| uri.authority().is_some_and(|a| a.as_str().contains('@')))
 }
 
 /// A header that carries a credential, judged by its name: `authorization`, `x-api-key`, `x-gateway-token` and the like.
@@ -356,6 +367,7 @@ mod tests {
             "http://localhost:11434/v1",
             "http://[::1]:8080/v1",
             "https://gw.example.com/v1",
+            "http://lb:secret@localhost:8099/v1",
         ] {
             assert!(Client::new(settings(Kind::OpenAi, base)).is_ok(), "{base}");
             assert!(keyless(base, Some("X-Gateway-Key")).is_ok(), "{base}");
@@ -364,6 +376,7 @@ mod tests {
             "http://192.168.8.10:8080/v1",
             "http://gw.example.com/v1",
             "http://127.0.0.1@gw.example.com/v1",
+            "http://lb:secret@gw.example.com/v1",
         ] {
             assert!(
                 matches!(Client::new(settings(Kind::OpenAi, base)), Err(LlmError::Config(_))),
@@ -375,7 +388,11 @@ mod tests {
                     "{base}: {name}"
                 );
             }
-            assert!(keyless(base, None).is_ok(), "{base}: x-gateway carries no key");
+            assert_eq!(
+                keyless(base, None).is_ok(),
+                !base.contains('@'),
+                "{base}: x-gateway carries no key, a user in the URL does"
+            );
         }
     }
 }

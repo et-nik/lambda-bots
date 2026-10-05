@@ -470,7 +470,8 @@ impl Worker {
             .events
             .iter()
             .flat_map(|r| r.event.people())
-            .chain(req.trigger.about());
+            .chain(req.trigger.about())
+            .filter(|w| !req.scene.players.iter().any(|p| p.name == w.name));
         for who in people {
             aliases.insert(&who.name, self.notes.aliases("", &who.name));
         }
@@ -820,6 +821,27 @@ mod tests {
         );
         assert!(asked.body.contains("Гордон writes to you"), "{}", asked.body);
         w.shutdown(Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nickname_entry_is_for_players_without_a_steamid() {
+        let root = dir("nickname");
+        std::fs::create_dir_all(root.join("config/chat")).unwrap();
+        std::fs::write(
+            root.join("config/chat/players.yaml"),
+            "schema: lambdabots/chat-players@1\nplayers:\n  - id: Gordon\n    alias: Гордон\n",
+        )
+        .unwrap();
+        let w = Worker::new(config("http://127.0.0.1:9"), Paths::new(&root), Arc::default());
+        let mut req = request(1);
+        assert_eq!(
+            w.aliases(&req).of("Gordon"),
+            None,
+            "Gordon has a SteamID, and writes the trigger"
+        );
+        req.scene.players[0].key = Some("name:gordon".into());
+        assert_eq!(w.aliases(&req).of("Gordon"), Some("Гордон"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
