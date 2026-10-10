@@ -39,6 +39,18 @@ pub fn file_of(dir: &Path, day: &str) -> PathBuf {
     dir.join(format!("chat.{day}.log"))
 }
 
+/// Whether `name` is a day's file, `chat.YYYY-MM-DD.log`.
+fn is_day_file(name: &str) -> bool {
+    let Some(day) = name.strip_prefix("chat.").and_then(|n| n.strip_suffix(".log")) else {
+        return false;
+    };
+    day.len() == 10
+        && day.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+}
+
 /// Today's file in `dir`.
 pub fn today(dir: &Path) -> PathBuf {
     file_of(dir, &now().0)
@@ -78,11 +90,7 @@ impl Transcript {
         let mut days: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("chat.") && n.ends_with(".log"))
-            })
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_day_file))
             .collect();
         days.sort();
         for old in days.iter().rev().skip(KEEP) {
@@ -122,12 +130,14 @@ mod tests {
 
     #[test]
     fn exchanges_read_as_text_and_old_days_go() {
-        let dir = std::env::temp_dir().join(format!("lb-chat-transcript-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lb-transcript-prune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for day in 1..=9 {
             std::fs::write(dir.join(format!("chat.2020-01-0{day}.log")), "old").unwrap();
         }
+        let other = dir.join("chat.backup.log");
+        std::fs::write(&other, "kept").unwrap();
         let mut t = Transcript::new(dir.clone());
         let wire = Exchange {
             url: "https://api.example.com/v1/chat/completions".into(),
@@ -155,8 +165,9 @@ mod tests {
             text.contains("<<< no answer after 840 ms\n=== failed: timed out"),
             "{text}"
         );
+        assert!(other.exists(), "only day files are pruned");
         let files = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(files, KEEP, "a week of transcripts is kept");
+        assert_eq!(files, KEEP + 1, "a week of transcripts is kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
