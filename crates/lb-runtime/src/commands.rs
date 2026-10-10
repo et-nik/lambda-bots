@@ -106,6 +106,22 @@ const HELP: &[(&str, &str)] = &[
         "scripted motor measurement",
     ),
     (
+        "chat [status|log [n]|on|off]",
+        "bots in the game chat: what they do, the last lines and decisions (docs/chat.md)",
+    ),
+    (
+        "chat say|test|prompt <bot> <text>",
+        "a line typed by hand; a player's line to a bot, answered by the model; the prompt it would get",
+    ),
+    (
+        "chat memory <player> [forget] | chat reload",
+        "what the bots remember of a player; read the notes on players and the provider settings again",
+    ),
+    (
+        "chat transcript [on|off]",
+        "write every request to the model and its answer to logs/chat.<date>.log",
+    ),
+    (
         "record [start [seconds]|stop]",
         "record the next map for `lb-cli replay` (starts with the map, see docs/replay.md)",
     ),
@@ -201,6 +217,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "debug" => debug(rt, host, rest),
         "record" => record(rt, rest),
         "watch" => watch(rt, rest),
+        "chat" => crate::chat::command(rt, host, rest),
         other => vec![format!("lb: unknown command `{other}`, see `lb help`")],
     }
 }
@@ -1779,7 +1796,7 @@ fn config(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
         Some("reload") => rt.reload(host),
         _ => {
             let mut out = vec![format!("# source: {}", rt.config_source)];
-            match lb_config::yaml::to_string(&rt.config) {
+            match lb_config::yaml::to_string(&rt.config.redacted()) {
                 Ok(text) => out.extend(text.lines().map(String::from)),
                 Err(e) => out.push(e.to_string()),
             }

@@ -40,6 +40,8 @@ lb-runtime = { path = "crates/lb-runtime" }
 lb-plugin = { path = "crates/lb-plugin" }
 lb-testkit = { path = "crates/lb-testkit" }
 lb-mapmesh = { path = "crates/lb-mapmesh" }
+lb-chat = { path = "crates/lb-chat" }
+lb-llm = { path = "crates/lb-llm" }
 
 thiserror = "2"
 anyhow = "1"
@@ -82,6 +84,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "signal", "time"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.7", default-features = false, features = ["compression-gzip"] }
+# HTTPS for the chat models: rustls with ring (no aws-lc), roots from the system (webpki-roots is CDLA-licensed).
+ureq = { version = "~3.4", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

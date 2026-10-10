@@ -1,0 +1,22 @@
+[package]
+name = "lb-chat"
+description = "Bots in the game chat: journal of the match, who speaks and when, typing, prompts, replies, memory of players"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+lb-core.workspace = true
+lb-styles.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+postcard.workspace = true
+insta.workspace = true
+
+[lints]
+workspace = true

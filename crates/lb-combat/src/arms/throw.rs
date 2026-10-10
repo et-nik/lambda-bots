@@ -931,17 +931,19 @@ impl Barrage {
     }
 }
 
-/// The game releases a snark only with free space 20–64 units in front of the thrower (`CSqueak::PrimaryAttack`).
 /// The run at the target for a throw; up to a ledge only (the target on a floor below), braking there: the throw goes
-/// from the edge, or not at all.
+/// from the edge, or not at all. With a drop behind as well (a beam, a narrow ledge) the bot stands.
 fn run_at(h: &Hands<'_>, tracer: &mut dyn Tracer, toward: lb_core::Vec2) -> MoveIntent {
-    let edge = crate::fight::drops(tracer, h.origin, toward * RUN_UP_SPEED);
-    MoveIntent {
-        dir: if edge { -toward } else { toward },
-        speed: RUN_UP_SPEED,
-    }
+    [toward, -toward]
+        .into_iter()
+        .find(|d| !crate::fight::drops(tracer, h.origin, *d * RUN_UP_SPEED))
+        .map_or_else(stop, |dir| MoveIntent {
+            dir,
+            speed: RUN_UP_SPEED,
+        })
 }
 
+/// The game releases a snark only with free space 20–64 units in front of the thrower (`CSqueak::PrimaryAttack`).
 fn room_ahead(h: &Hands<'_>, tracer: &mut dyn Tracer) -> bool {
     let (forward, _, _) = view_angle_vectors(h.view);
     let tr = tracer.trace(&TraceQuery::line(
@@ -1642,12 +1644,15 @@ mod tests {
 
     #[test]
     fn a_run_at_a_target_on_a_floor_below_stops_at_the_edge() {
-        /// A floor at z = -36 for x under 100, nothing under it beyond (a ring's edge, the target a floor below).
-        struct Edge;
+        /// A floor at z = -36 for x from `back` to 100, nothing under it beyond (a ring's edge, the target a floor
+        /// below).
+        struct Edge {
+            back: f32,
+        }
         impl Tracer for Edge {
             fn trace(&mut self, q: &TraceQuery) -> lb_worldq::Trace {
                 let mut t = Floor.trace(q);
-                if q.start.x >= 100.0 {
+                if !(self.back..100.0).contains(&q.start.x) {
                     t = lb_worldq::Trace::clear(q.end);
                 }
                 t
@@ -1669,7 +1674,7 @@ mod tests {
             dll: DllProfile::resolve("auto", true),
         };
         scene.prediction.weapons[WeaponId::Satchel as usize] = Some(PredictedWeapon::default());
-        let run = |th: &mut Thrower, h: &Hands<'_>| match th.update(h, &mut Edge) {
+        let run = |th: &mut Thrower, h: &Hands<'_>, back: f32| match th.update(h, &mut Edge { back }) {
             Status::Running(r) => r.movement.expect("a run-up").dir,
             other => panic!("{other:?}"),
         };
@@ -1677,12 +1682,17 @@ mod tests {
         // Well short of the edge: at the target.
         let mut h = scene.hands(0.0, WeaponId::Satchel);
         h.velocity = Vec3::new(100.0, 0.0, 0.0);
-        assert!(run(&mut th, &h).x > 0.99);
+        assert!(run(&mut th, &h, f32::NEG_INFINITY).x > 0.99);
         // Running at it a fifth of a second short of the edge: braking, not off it.
         h.now = SimTime(0.3);
         h.origin = Vec3::new(60.0, 0.0, 0.0);
         h.velocity = Vec3::new(300.0, 0.0, 0.0);
-        assert!(run(&mut th, &h).x < -0.99);
+        assert!(run(&mut th, &h, f32::NEG_INFINITY).x < -0.99);
+        // As close to the edge on a beam, a drop behind it as well: standing, not off the other side.
+        let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0)).on_the_run();
+        let mut h = scene.hands(0.0, WeaponId::Satchel);
+        h.origin = Vec3::new(60.0, 0.0, 0.0);
+        assert_eq!(run(&mut th, &h, 20.0), lb_core::Vec2::ZERO);
     }
 
     #[test]

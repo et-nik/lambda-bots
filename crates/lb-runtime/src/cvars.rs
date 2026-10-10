@@ -25,6 +25,7 @@ pub enum Cv {
     LogLevel,
     NavSource,
     Editor,
+    Chat,
 }
 
 pub const ALL: &[Cv] = &[
@@ -47,6 +48,7 @@ pub const ALL: &[Cv] = &[
     Cv::LogLevel,
     Cv::NavSource,
     Cv::Editor,
+    Cv::Chat,
 ];
 
 impl Cv {
@@ -71,6 +73,7 @@ impl Cv {
             Cv::LogLevel => "lb_log_level",
             Cv::NavSource => "lb_nav_source",
             Cv::Editor => "lb_editor",
+            Cv::Chat => "lb_chat",
         }
     }
 }

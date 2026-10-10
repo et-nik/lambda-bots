@@ -1,0 +1,20 @@
+[package]
+name = "lb-llm"
+description = "Chat models over HTTPS: the Anthropic Messages API and OpenAI-compatible chat completions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+
+[lints]
+workspace = true

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::chat_players::ChatPlayersFile;
 use crate::names::NamesFile;
 use crate::overlay::OverlayFile;
 use crate::profiles::ProfilesFile;
@@ -33,6 +34,7 @@ pub fn check_text(text: &str, path: &str) -> Result<String, ConfigError> {
         "difficulty" => DifficultyFile::parse(text, path).map(|_| ()),
         "style" => StyleFile::parse(text, path).map(|_| ()),
         "overlay" => OverlayFile::parse(text, path).map(|_| ()),
+        "chat-players" => ChatPlayersFile::parse(text, path).map(|_| ()),
         other => Err(ConfigError::Invalid {
             path: path.to_string(),
             field: "schema".into(),

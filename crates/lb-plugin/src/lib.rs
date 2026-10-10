@@ -175,6 +175,7 @@ pub extern "C" fn lb_core_shutdown(reason: u32) {
             && let Some(mut p) = lock.take()
         {
             p.rec.finish(&mut p.rt, "shutdown");
+            p.rt.shutdown(reason);
             tracing::info!("shutdown (reason {reason})");
             let (lines, _) = lb_runtime::logging::drain_console(64);
             for line in lines {

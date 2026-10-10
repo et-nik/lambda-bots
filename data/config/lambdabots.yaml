@@ -107,3 +107,42 @@ disguise:
   avatars: false
   fake_steamid: false
   hide_bots_in_queries: false
+
+# Bots talking in the game chat through a chat model (docs/chat.md): they answer players and now and then say
+# something about the game; an alive bot stands still while it types, a dead one types before it respawns. Off until
+# enabled; nothing is sent while no human is on the server. language: what the bots write in unless a player speaks
+# to them in another; server: a line about the server for the bots, e.g. "GunGame server hldm.org".
+chat:
+  enabled: false
+  language: ru
+  server: ""
+  require_humans: true
+  provider:
+    kind: anthropic         # anthropic (Messages API) | openai (OpenAI-compatible chat completions)
+    base_url: ""            # "" = https://api.anthropic.com; a gateway in front of the API goes here; openai needs
+                            # one, e.g. http://127.0.0.1:11434/v1
+    model: claude-haiku-4-5
+    api_key: ""             # the key, else api_key_file (a file holding it), else the api_key_env variable
+    api_key_file: ""
+    api_key_env: ANTHROPIC_API_KEY
+    ca_file: ""             # PEM certificates trusted on top of the system's (a gateway's own CA)
+    headers: {}             # extra HTTP headers for every request, e.g. a gateway's own key
+    timeout: 12             # seconds a request may take
+    max_tokens: 100
+    # temperature: 0.9      # sent only when set: some models refuse it
+    extra_body: ""          # JSON object merged into every request, e.g. '{"output_config": {"effort": "low"}}'
+  limits:
+    lines_per_minute: 2     # all bots together
+    remark_gap: 60          # seconds between two lines nobody asked for
+    bot_remark_gap: 240     # the same for one bot
+    requests_per_minute: 6
+    tokens_per_day: 2000000 # in and out, UTC day; 0 = no limit
+  typing:
+    cpm: [150, 330]         # characters a minute, for personalities without their own speed
+    calm: 3                 # seconds without an enemy before an alive bot starts typing
+  memory:
+    enabled: true           # remember players between maps and restarts (data/chat/memory.json)
+    ai_notes: true          # one request after each map updates notes about the players met
+    forget_after_days: 120
+  blocked: [rtv, rockthevote, nominate, timeleft, nextmap, thetime, currentmap]   # plugin chat commands
+  transcript: false         # every request to the model and its answer in logs/chat.<date>.log (kept 7 days)

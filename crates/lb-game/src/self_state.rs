@@ -35,6 +35,8 @@ pub struct Body {
 }
 
 pub const FL_ONGROUND: u32 = 1 << 9;
+/// Frozen in place: GunGame freezes everyone once a match is won.
+pub const FL_FROZEN: u32 = 1 << 12;
 pub const FL_DUCKING: u32 = 1 << 14;
 /// `basevelocity` is what a push field set this frame, not momentum left from one.
 pub const FL_BASEVELOCITY: u32 = 1 << 22;

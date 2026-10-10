@@ -1,6 +1,7 @@
-//! `config/lambdabots.yaml`: server-level settings (quota, engine, telemetry, access, logging).
+//! `config/lambdabots.yaml`: server-level settings (quota, engine, telemetry, access, logging, chat).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,7 @@ pub struct MainConfig {
     pub game: GameConfig,
     pub tricks: TricksConfig,
     pub disguise: DisguiseConfig,
+    pub chat: ChatConfig,
 }
 
 impl Default for MainConfig {
@@ -46,6 +48,7 @@ impl Default for MainConfig {
             game: GameConfig::default(),
             tricks: TricksConfig::default(),
             disguise: DisguiseConfig::default(),
+            chat: ChatConfig::default(),
         }
     }
 }
@@ -446,6 +449,194 @@ pub struct DisguiseConfig {
     pub hide_bots_in_queries: bool,
 }
 
+/// A string kept out of logs and printouts: `Debug` only tells whether it is set.
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl Secret {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_empty() { "\"\"" } else { REDACTED })
+    }
+}
+
+/// What secrets read as in recordings and printouts.
+pub const REDACTED: &str = "<redacted>";
+
+/// Bots talking in the game chat through a chat model.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChatConfig {
+    pub enabled: bool,
+    /// The language bots write in unless a player speaks to them in another (`ru`, `en`, …).
+    pub language: String,
+    /// A line about the server for the bots ("GunGame server hldm.org").
+    pub server: String,
+    /// No requests while no human is on the server.
+    pub require_humans: bool,
+    pub provider: ChatProvider,
+    pub limits: ChatLimits,
+    pub typing: ChatTyping,
+    pub memory: ChatMemory,
+    /// Chat commands of server plugins: a bot never says a line starting with one, and a player's line starting
+    /// with one is not chat.
+    pub blocked: Vec<String>,
+    /// Every request to the model and its answer go to `logs/chat.<date>.log`, as they went over the wire.
+    pub transcript: bool,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        ChatConfig {
+            enabled: false,
+            language: "ru".into(),
+            server: String::new(),
+            require_humans: true,
+            provider: ChatProvider::default(),
+            limits: ChatLimits::default(),
+            typing: ChatTyping::default(),
+            memory: ChatMemory::default(),
+            blocked: [
+                "rtv",
+                "rockthevote",
+                "nominate",
+                "timeleft",
+                "nextmap",
+                "thetime",
+                "currentmap",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            transcript: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    /// The Anthropic Messages API.
+    Anthropic,
+    /// OpenAI-compatible chat completions.
+    Openai,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChatProvider {
+    pub kind: ProviderKind,
+    /// Empty: `https://api.anthropic.com` for anthropic; openai needs one (`http://127.0.0.1:11434/v1`). A gateway
+    /// in front of the API goes here.
+    pub base_url: String,
+    pub model: String,
+    /// The key itself, else a file holding it, else an environment variable. Only the chat worker reads them.
+    pub api_key: Secret,
+    pub api_key_file: String,
+    pub api_key_env: String,
+    /// PEM certificates trusted on top of the system's (a gateway's own CA).
+    pub ca_file: String,
+    /// Extra HTTP headers for every request.
+    pub headers: BTreeMap<String, Secret>,
+    /// Seconds a request may take.
+    pub timeout: f32,
+    pub max_tokens: u32,
+    /// Sent only when set: some models refuse sampling parameters.
+    pub temperature: Option<f32>,
+    /// A JSON object merged into every request body (`{"output_config": {"effort": "low"}}`); empty for none.
+    pub extra_body: String,
+}
+
+impl Default for ChatProvider {
+    fn default() -> Self {
+        ChatProvider {
+            kind: ProviderKind::Anthropic,
+            base_url: String::new(),
+            model: "claude-haiku-4-5".into(),
+            api_key: Secret::default(),
+            api_key_file: String::new(),
+            api_key_env: "ANTHROPIC_API_KEY".into(),
+            ca_file: String::new(),
+            headers: BTreeMap::new(),
+            timeout: 12.0,
+            max_tokens: 100,
+            temperature: None,
+            extra_body: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChatLimits {
+    /// Lines all bots together may say a minute.
+    pub lines_per_minute: f32,
+    /// Seconds between two lines nobody asked for, whoever says them.
+    pub remark_gap: f32,
+    /// Seconds between two lines nobody asked for from one bot.
+    pub bot_remark_gap: f32,
+    pub requests_per_minute: f32,
+    /// Tokens (in and out) a day, UTC; 0 = no limit.
+    pub tokens_per_day: u64,
+}
+
+impl Default for ChatLimits {
+    fn default() -> Self {
+        ChatLimits {
+            lines_per_minute: 2.0,
+            remark_gap: 60.0,
+            bot_remark_gap: 240.0,
+            requests_per_minute: 6.0,
+            tokens_per_day: 2_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChatTyping {
+    /// Characters a minute; a personality without its own speed gets one from this range.
+    pub cpm: [f32; 2],
+    /// Seconds without an enemy seen or heard before an alive bot starts typing.
+    pub calm: f32,
+}
+
+impl Default for ChatTyping {
+    fn default() -> Self {
+        ChatTyping {
+            cpm: [150.0, 330.0],
+            calm: 3.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChatMemory {
+    /// Remember players between maps and restarts (`data/chat/memory.json`).
+    pub enabled: bool,
+    /// After each map, one request updates short notes about the players the bots met.
+    pub ai_notes: bool,
+    /// Players not seen for this many days are forgotten.
+    pub forget_after_days: u32,
+}
+
+impl Default for ChatMemory {
+    fn default() -> Self {
+        ChatMemory {
+            enabled: true,
+            ai_notes: true,
+            forget_after_days: 120,
+        }
+    }
+}
+
 impl MainConfig {
     pub fn parse(text: &str, path: &str) -> Result<MainConfig, ConfigError> {
         let cfg: MainConfig = yaml::from_str(text, path)?;
@@ -514,7 +705,112 @@ impl MainConfig {
         if !DLL_NAMES.iter().any(|n| n.eq_ignore_ascii_case(self.game.dll.trim())) {
             return err("game.dll", "expected auto, bugfixed, hl25 or classic");
         }
+        self.chat.validate(path)
+    }
+
+    /// The config with every secret replaced by [`REDACTED`], for printing.
+    pub fn redacted(&self) -> MainConfig {
+        let mut c = self.clone();
+        for secret in [&mut c.telemetry.secret, &mut c.access.password] {
+            if !secret.is_empty() {
+                *secret = REDACTED.into();
+            }
+        }
+        c.chat.redact();
+        c
+    }
+}
+
+impl ChatConfig {
+    fn validate(&self, path: &str) -> Result<(), ConfigError> {
+        let err = |field: &str, message: &str| {
+            Err(ConfigError::Invalid {
+                path: path.to_string(),
+                field: format!("chat.{field}"),
+                message: message.to_string(),
+            })
+        };
+        let lang = self.language.trim();
+        if !(2..=8).contains(&lang.len()) || !lang.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+            return err("language", "expected a language code such as ru or en");
+        }
+        if self.server.chars().count() > 200 {
+            return err("server", "must be at most 200 characters");
+        }
+        let p = &self.provider;
+        let base = p.base_url.trim();
+        if !base.is_empty() && !base.starts_with("http://") && !base.starts_with("https://") {
+            return err("provider.base_url", "must start with http:// or https://");
+        }
+        if p.kind == ProviderKind::Openai && base.is_empty() {
+            return err(
+                "provider.base_url",
+                "an openai provider needs one, e.g. http://127.0.0.1:11434/v1",
+            );
+        }
+        if p.model.trim().is_empty() {
+            return err("provider.model", "must not be empty");
+        }
+        if !(1.0..=120.0).contains(&p.timeout) {
+            return err("provider.timeout", "must be in 1..=120 seconds");
+        }
+        if !(16..=4096).contains(&p.max_tokens) {
+            return err("provider.max_tokens", "must be in 16..=4096");
+        }
+        if p.temperature.is_some_and(|t| !(0.0..=2.0).contains(&t)) {
+            return err("provider.temperature", "must be in 0..=2");
+        }
+        if !p.extra_body.trim().is_empty()
+            && !serde_json::from_str::<serde_json::Value>(&p.extra_body).is_ok_and(|v| v.is_object())
+        {
+            return err("provider.extra_body", "must be a JSON object");
+        }
+        let token = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
+        if let Some(name) = p.headers.keys().find(|k| !token(k)) {
+            return err("provider.headers", &format!("`{name}` is not a header name"));
+        }
+        // An HTTP header carries printable ASCII only.
+        let header_text = |s: &str| s.bytes().all(|b| b == b' ' || b.is_ascii_graphic());
+        if p.headers.values().any(|v| !header_text(&v.0)) {
+            return err("provider.headers", "values must be printable ASCII on one line");
+        }
+        if !p.api_key.0.trim().bytes().all(|b| b.is_ascii_graphic()) {
+            return err("provider.api_key", "must be printable ASCII without spaces");
+        }
+        let l = &self.limits;
+        if !(0.1..=60.0).contains(&l.lines_per_minute) {
+            return err("limits.lines_per_minute", "must be in 0.1..=60");
+        }
+        if !(0.1..=120.0).contains(&l.requests_per_minute) {
+            return err("limits.requests_per_minute", "must be in 0.1..=120");
+        }
+        if !(0.0..=3600.0).contains(&l.remark_gap) || !(0.0..=3600.0).contains(&l.bot_remark_gap) {
+            return err("limits", "remark gaps must be in 0..=3600 seconds");
+        }
+        let t = &self.typing;
+        if !(30.0 <= t.cpm[0] && t.cpm[0] <= t.cpm[1] && t.cpm[1] <= 1500.0) {
+            return err("typing.cpm", "must be [min, max] with 30 <= min <= max <= 1500");
+        }
+        if !(0.0..=30.0).contains(&t.calm) {
+            return err("typing.calm", "must be in 0..=30 seconds");
+        }
+        if self.memory.forget_after_days == 0 {
+            return err("memory.forget_after_days", "must be at least 1");
+        }
+        if self.blocked.iter().any(|b| b.trim().is_empty()) {
+            return err("blocked", "entries must not be empty");
+        }
         Ok(())
+    }
+
+    /// Replaces the key and the header values (a gateway's own key may be one) by [`REDACTED`].
+    pub fn redact(&mut self) {
+        if !self.provider.api_key.is_empty() {
+            self.provider.api_key = Secret(REDACTED.into());
+        }
+        for value in self.provider.headers.values_mut() {
+            *value = Secret(REDACTED.into());
+        }
     }
 }
 
@@ -554,6 +850,41 @@ mod tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn chat_section() {
+        let text = "schema: lambdabots/main@1\nchat:\n  enabled: true\n  provider:\n    kind: openai\n    base_url: http://127.0.0.1:8080/v1\n    api_key: sk-123\n    headers: { x-gateway-key: g-456 }\n    temperature: 0.8\n    extra_body: '{\"top_k\": 40}'\n";
+        let cfg = MainConfig::parse(text, "t.yaml").unwrap();
+        assert!(cfg.chat.enabled);
+        assert_eq!(cfg.chat.provider.kind, ProviderKind::Openai);
+        assert_eq!(cfg.chat.provider.temperature, Some(0.8));
+        assert_eq!(cfg.chat.limits, ChatLimits::default());
+        let shown = format!("{:?}{}", cfg.redacted(), yaml::to_string(&cfg.redacted()).unwrap());
+        assert!(!shown.contains("sk-123") && !shown.contains("g-456"), "{shown}");
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("sk-123") && !debug.contains("g-456"), "{debug}");
+        let bad = |body: &str| MainConfig::parse(&format!("schema: lambdabots/main@1\nchat:\n{body}"), "t").is_err();
+        assert!(bad("  provider: { kind: openai }\n"), "openai without base_url");
+        assert!(bad("  provider: { base_url: api.anthropic.com }\n"));
+        assert!(bad("  provider: { extra_body: '[1]' }\n"));
+        assert!(bad("  provider: { headers: { \"bad header\": x } }\n"));
+        assert!(bad("  provider: { headers: { x-key: ключ } }\n"));
+        assert!(bad("  provider: { api_key: \"sk-ваш-ключ\" }\n"));
+        assert!(bad("  typing: { cpm: [300, 100] }\n"));
+        assert!(bad("  language: русский\n"));
+        assert!(bad("  limits: { lines_per_minute: 0 }\n"));
+        assert!(bad("  mood: calm\n"));
+    }
+
+    #[test]
+    fn redaction_keeps_empty_secrets_empty() {
+        let mut cfg = MainConfig::default();
+        cfg.telemetry.secret = "t".into();
+        let r = cfg.redacted();
+        assert_eq!(r.telemetry.secret, REDACTED);
+        assert_eq!(r.access.password, "");
+        assert!(r.chat.provider.api_key.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -569,6 +900,7 @@ mod shipped {
         assert_eq!(cfg.engine, EngineConfig::default());
         assert_eq!(cfg.bots, BotsConfig::default());
         assert_eq!(cfg.roster, RosterConfig::default());
+        assert_eq!(cfg.chat, ChatConfig::default());
     }
 
     #[test]

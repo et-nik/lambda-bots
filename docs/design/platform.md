@@ -89,7 +89,9 @@ LICENSE (MIT)  NOTICE (YaPB MIT copyright, PODBot credit, observer tool origin) 
 | lb-ai *(AI arch.)* | lib | beliefs, decision, actions, combat, motor, CommandEncoder | lb-core, lb-config, lb-game (model only), lb-sense (Observation), lb-nav | **lb-host, lb-ffi** |
 | lb-bsp / lb-nav *(nav arch.)* | lib | BSP, graph, generation, paths | lb-core, lb-config | **lb-host** (traces go through lb-core traits) |
 | lb-telemetry | lib | protocol v2, encoder, UDP sink, rate limits, HMAC command channel, trace rings, crash dumps | lb-core | lb-host, lb-ai |
-| lb-ext | lib | event bus, extension traits (chat/LLM, scripting host), mlua later | lb-core | lb-host |
+| lb-ext | lib | event bus, extension traits (scripting host), mlua later | lb-core | lb-host |
+| lb-chat | lib | chat: journal of the map from public events, director (who speaks, limits), a bot's line from request to `say`, prompts, text rules, memory of players | lb-core, lb-styles | lb-host |
+| lb-llm | lib | chat models over HTTPS (Anthropic Messages, OpenAI-compatible), blocking, for a worker thread | — | lb-host |
 | lb-runtime | lib | frame pipeline, scheduler, budgets, workers, BotManager and QuotaPolicy, commands/cvars, config apply, compat assembly, diagnostics | all | — |
 | lb-plugin | staticlib+rlib | `extern "C" lb_core_*`, `ffi_guard` (catch_unwind), global Runtime | lb-runtime, lb-host, lb-ffi | — |
 | lb-testkit | lib (dev) | MockHost, frame builders, recorded message fixtures, scenario DSL | lb-host, lb-runtime | — |
@@ -251,7 +253,7 @@ A single re-entrancy rule applies to every hook: it only records into the arena.
 | DLL `ClientPutInServer` | post | `EV_CLIENT{PUT_IN_SERVER}` |
 | DLL `ClientDisconnect` | pre | `EV_CLIENT{DISCONNECT}` (guaranteed queue); slot table cleared |
 | DLL `ClientUserInfoChanged` | post | `EV_CLIENT{INFO, name, model, colors}` |
-| DLL `ClientCommand` | pre | our bot inside our own command → IGNORED; argv0 `lb` from a human → `EV_CLIENT_CMD` + SUPERCEDE (access check is in Rust); `say`/`say_team` → `EV_CLIENT_CMD{SAY}` (chat bus) |
+| DLL `ClientCommand` | pre | our bot inside our own command → IGNORED; argv0 `lb` from a human → `EV_CLIENT_CMD` + SUPERCEDE (access check is in Rust); `say`/`say_team` → `EV_CLIENT_CMD` (the chat's journal, `docs/chat.md`) |
 | DLL `ServerActivate` | post | epoch++, edict scan, resolve message ids, → `lb_core_map_start` |
 | DLL `ServerDeactivate` | pre | `lb_core_map_end`, registry and slot reset |
 | DLL `StartFrame` | pre | fixangle emulation, adopt clients that skipped our connect hooks (other plugins' bots put in the game with `MDLL_*`, as jk_botti does) → `EV_CLIENT{CONNECT, PUT_IN_SERVER}`, snapshots, swap arena → `lb_core_frame_pre` |
@@ -647,8 +649,8 @@ profiles:
 | TeamInfo / GameMode | b idx, str / b | Teams / `teamplay_reported` | per-map team cache |
 | ResetHUD / InitHUD | — | lifecycle markers | — |
 | SetFOV / ScreenFade | — | zoom / blinded | — |
-| TextMsg / SayText / HudText | — | event bus (future chat) | — |
-| SVC_TEMPENTITY (TE_EXPLOSION…), SVC_INTERMISSION | — | raw visual/audio stimuli; match end | new |
+| TextMsg / SayText / HudText | — | decoded, unused: players' chat comes from `ClientCommand` (lines AMXX sends are not seen) | — |
+| SVC_TEMPENTITY (TE_EXPLOSION…), SVC_INTERMISSION | — | raw visual/audio stimuli; match end (the chat's gg) | new |
 
 **SelfState.** Health, armor, `weapons_mask` (from pev), clip and ammo per weapon and type, current weapon (confirmed vs requested), longjump (physinfo `slj`), zoom, on-ground/duck/water/ladder, deadflag, spawn time, damage events, own score, protection estimate, and prediction data (M2). Fields start as `Known<T>::Unknown` and are never assumed zero (v2 §4.1).
 
@@ -960,7 +962,7 @@ If GunGame is detected but no `hello` arrives, Rust sends `lb_gg_sync` at map st
 | **M4** | perf metrics (p50/p95/p99), telemetry subscriptions, soak v2, difficulty/weapon YAML complete, GunGame bridge + inference, item rules YAML + learner | GunGame run on the VM; soak with 8 bots, 60 min clean |
 | **M5** | teamplay join and balance, full event/sound classification (all 14 weapons, tripmine beams), disguise port (fakeping, avatars, SteamID, A2S), rotation and join/quit simulation | toggles verified individually; team switches correct |
 | **M6** | load tests (8 bots + 16 humans; 12 + 12) on the ReHLDS VM, profiling, Windows smoke, release packaging, docs | budgets held; release artifacts |
-| **M7** | `lb-ext` scripting host (mlua, instruction-count hook, memory-limited allocator), map-scenario QuotaPolicy hooks, chat event-bus consumer interface | a scenario is added through the bounded API without breaking lifecycle, budgets or honesty |
+| **M7** | `lb-ext` scripting host (mlua, instruction-count hook, memory-limited allocator), map-scenario QuotaPolicy hooks (chat came earlier, without the bus: `docs/chat.md`) | a scenario is added through the bounded API without breaking lifecycle, budgets or honesty |
 
 **Risks** (mitigation in parentheses):
 
@@ -994,7 +996,7 @@ If GunGame is detected but no `hello` arrives, Rust sends `lb_gg_sync` at map st
 - `lb_game::model::{SelfState, Known<T>, PublicRules, GameModeState, Scoreboard, WeaponRegistry}` and `lb_game::events::{KillEvent, DamageTaken, Pickup*, SpawnEvent}`: visible to decision code.
 - `lb_core::services::{TraceService, LosService}` (budgeted; `TraceResult` carries hit render info).
 - `lb_host::driver::{BotInput{view_angles, move_world→encoded fwd/side/up, buttons_state, edges, impulse, weapon_cmd}, MotorFeedback{sent, frame_no, self_after}}`.
-- Scheduler task registration with desired rates and cost units; `lb_core::rng::BotRng`; `lb_core::trace::TraceSink`; pinned config snapshots (difficulty, style, weapon policy); `lb_ext::bus` (chat events, say requests).
+- Scheduler task registration with desired rates and cost units; `lb_core::rng::BotRng`; `lb_core::trace::TraceSink`; pinned config snapshots (difficulty, style, weapon policy); chat requests and replies (`lb_chat`, replies as a recorded outside input).
 
 **Navigation (lb-bsp, lb-nav):**
 - `BspSource{bytes: Arc<[u8]>, fingerprint: u128, worldmap_crc: Option<u32>, map}` delivered at map start.
