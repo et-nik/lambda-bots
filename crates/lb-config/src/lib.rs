@@ -2,7 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat_bots;
+pub mod chat_maps;
+pub mod chat_phrases;
 pub mod chat_players;
+pub mod chat_server;
 pub mod check;
 pub mod main_config;
 pub mod map_tests;

@@ -371,6 +371,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unpaid_429_is_billing() {
+        let body = json!({"error": {
+            "message": "Your account org-test <ak-test> is suspended due to insufficient balance, please recharge \
+                        your account or check your plan and billing details",
+            "type": "exceeded_current_quota_error"
+        }});
+        let server = MockServer::start(vec![Canned::json(429, &body.to_string())]);
+        let client = Client::new(settings(Kind::OpenAi, &format!("{}/v1", server.url()))).unwrap();
+        let e = client.complete(&prompt()).unwrap_err();
+        assert_eq!(e.class(), crate::ErrorClass::Billing, "{e}");
+        assert!(
+            matches!(&e, LlmError::Status { status: 429, kind, .. } if kind == "exceeded_current_quota_error"),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(
+            text.starts_with("HTTP 429: Your account org-test <ak-test> is suspended"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn exchanges_keep_the_bodies_but_no_credentials() {
         let server = MockServer::start(vec![Canned::json(
             200,

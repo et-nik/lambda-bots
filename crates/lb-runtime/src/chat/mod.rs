@@ -1,9 +1,12 @@
 //! Bots in the game chat. The map's journal is kept from the kill feed, the players' chat and the scoreboard; the
 //! director picks who says something; requests go to the chat worker, and its replies come back as a recorded
 //! outside input, so a replay types the same lines at the same frames. An alive bot types standing still, in a calm
-//! moment; a dead one types at once and holds its respawn. The line ends as `say`.
+//! moment; a dead one types at once and holds its respawn. The line ends as `say`. Talks, the bots' recent lines and
+//! the humans seen lately go on over map changes ([`Social`]); the chat log takes every line and every player coming
+//! and going, and is never read.
 
 mod backend;
+mod chatlog;
 mod command;
 mod store;
 mod transcript;
@@ -12,23 +15,28 @@ mod worker;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
+use lb_chat::addressing::{self, Noise};
 use lb_chat::botchat::{notice_secs, think_secs, typing_secs};
+use lb_chat::journal::Entry;
 use lb_chat::lang::Lang;
 use lb_chat::memory::player_key;
+use lb_chat::prompt::{self, CHAT_WINDOW, GAME_WINDOW};
 use lb_chat::request::{PlayerMap, Recent, request_id};
 use lb_chat::{
     BotCard, Can, Carry, Cause, ChatRequest, Director, Event, Journal, Limits, MapSummary, Notable, Outcome,
-    PlayerCard, Priority, Reply, Scene, Speak, Speaker, Trigger, Who, sanitize,
+    PlayerCard, Priority, Reply, Scene, Social, Speak, Speaker, Trigger, Who, sanitize,
 };
 use lb_core::time::SimTime;
 use lb_game::dll::DllKind;
 use lb_game::gungame::{GunGame, Kit, SLOTS};
+use lb_game::mode::GameModeKind;
 use lb_game::self_state::{FL_FROZEN, FL_ONGROUND, MOVETYPE_FLY};
 use lb_raw::{ClientEvent, ClientEventKind, CommandEvent};
 
 #[cfg(test)]
 pub use backend::FakeBackend;
 pub use backend::{ChatBackend, Job, NullBackend};
+pub use chatlog::ChatLog;
 pub(crate) use command::command;
 
 use crate::Runtime;
@@ -42,8 +50,6 @@ pub const RESPAWN_HOLD: f64 = 5.0;
 const KEEP_ANSWER: f64 = 25.0;
 const KEEP_REMARK: f64 = 15.0;
 const KEEP_MATCH_END: f64 = 12.0;
-/// Seconds of the journal a request shows.
-const EVENTS_WINDOW: f64 = 180.0;
 /// Shortest time between two lines of one bot: faster ones the game drops.
 const SAY_GAP: f64 = 1.5;
 /// A bot killed while typing may complain this long after.
@@ -60,32 +66,46 @@ const DANGER_RANGE: f32 = 800.0;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counts {
     pub asked: u64,
+    /// The model's lines that came to be typed.
+    pub lines: u64,
+    /// Ready phrases that came to be typed.
+    pub phrases: u64,
     pub said: u64,
     pub silent: u64,
     pub failed: u64,
 }
 
+/// A line asked of a bot; once its text came, a line on its way into the chat.
 struct Pending {
     id: u64,
     slot: u8,
     generation: u32,
-    /// The player the line answers.
-    to: Option<i32>,
+    /// The player the line answers or greets.
+    to: Option<Who>,
+    /// It greets them: a talk it opens stays short until they answer.
+    greeting: bool,
+    /// It took one of the hour's lines nobody asked for ([`Speak::unasked`]).
+    unasked: bool,
 }
 
 pub struct ChatRuntime {
     pub journal: Journal,
     director: Director,
+    /// What the chat keeps from map to map: talks, the bots' recent lines, the humans lately, the hour's remarks.
+    pub social: Social,
     pub backend: Box<dyn ChatBackend>,
+    /// `logs/chatlog.<date>.log`; none in a replay or a test.
+    pub chatlog: Option<ChatLog>,
     epoch: u32,
     seq: u32,
+    /// Lines asked for whose reply has not come.
     pending: Vec<Pending>,
-    /// Bots whose line on its way answers a player: (bot slot, player userid).
-    answering: Vec<(u8, i32)>,
+    /// Lines on their way, their text known.
+    answering: Vec<Pending>,
     causes: Vec<Cause>,
     /// Humans of this map by `userid`, with the keys the memory knows them by.
     keys: BTreeMap<i32, String>,
-    /// Humans who were on the server when the last map ended: they are not greeted again.
+    /// Humans who were on the server when the last map ended: they are not new on this one.
     returning: Vec<i32>,
     /// Moments of this map with humans in them, for the memory.
     moments: Vec<(i32, Notable)>,
@@ -109,11 +129,15 @@ impl ChatRuntime {
             requests_per_minute: 1.0,
             remark_gap: 0.0,
             bot_remark_gap: 0.0,
+            remarks_per_hour: 0.0,
+            language: String::new(),
         };
         ChatRuntime {
             journal: Journal::new("", SimTime::ZERO),
             director: Director::new(0, SimTime::ZERO, &limits),
+            social: Social::default(),
             backend: Box::new(NullBackend),
+            chatlog: None,
             epoch: 0,
             seq: 0,
             pending: Vec::new(),
@@ -134,15 +158,17 @@ impl ChatRuntime {
         }
     }
 
-    /// What carries over a map change.
+    /// What carries over a map change: taken after the map's end, whose times it is already moved back by.
     pub fn carry(&self) -> Carry {
         Carry {
             humans: self.returning.clone(),
+            social: self.social.clone(),
         }
     }
 
     pub fn restore(&mut self, carry: Carry) {
         self.returning = carry.humans;
+        self.social = carry.social;
     }
 
     fn log(&mut self, now: SimTime, line: String) {
@@ -151,6 +177,34 @@ impl ChatRuntime {
         while self.log.len() > LOG_LINES {
             self.log.pop_front();
         }
+    }
+
+    /// A line that will not be said: one nobody asked for gives its remark back.
+    fn unsaid(&mut self, p: &Pending) {
+        if p.unasked {
+            self.social.remarks.give();
+        }
+    }
+
+    /// The lines asked for or on their way that `which` picks will not be said.
+    fn unsay(&mut self, which: impl Fn(&Pending) -> bool) {
+        let mut unasked = 0;
+        for lines in [&mut self.pending, &mut self.answering] {
+            lines.retain(|p| {
+                let gone = which(p);
+                unasked += usize::from(gone && p.unasked);
+                !gone
+            });
+        }
+        for _ in 0..unasked {
+            self.social.remarks.give();
+        }
+    }
+
+    /// The line on its way the bot in `slot` has just said.
+    fn line_said(&mut self, slot: u8) -> Option<Pending> {
+        let i = self.answering.iter().position(|p| p.slot == slot)?;
+        Some(self.answering.swap_remove(i))
     }
 }
 
@@ -166,6 +220,8 @@ fn limits(c: &lb_config::main_config::ChatConfig) -> Limits {
         requests_per_minute: c.limits.requests_per_minute,
         remark_gap: c.limits.remark_gap,
         bot_remark_gap: c.limits.bot_remark_gap,
+        remarks_per_hour: c.limits.remarks_per_hour,
+        language: c.language.clone(),
     }
 }
 
@@ -225,14 +281,31 @@ impl Runtime {
         }
     }
 
+    /// `lb config reload`: chat on or off as the config says now; a worker already running takes the settings, reads
+    /// `config/chat/` again and tries the provider at once. The chat log lets its file go, to open it with the next
+    /// line.
+    pub(crate) fn chat_reload(&mut self) {
+        if !self.config.chat.enabled {
+            self.chat_switched_off();
+        }
+        let live = self.chat.backend.live();
+        self.chat_sync_backend();
+        if live {
+            self.chat.backend.send(Job::Reload);
+        }
+        if let Some(log) = self.chat.chatlog.as_mut() {
+            log.close();
+        }
+    }
+
     /// Chat was switched off: nothing on its way any more.
     pub(crate) fn chat_switched_off(&mut self) {
         for bot in &mut self.bots {
             bot.chat.reset();
         }
-        self.chat.pending.clear();
-        self.chat.answering.clear();
+        self.chat.unsay(|_| true);
         self.chat.causes.clear();
+        self.chat.director.clear_waiting();
     }
 
     pub(crate) fn chat_map_start(&mut self, map: &str, epoch: u32, late_load: bool) {
@@ -240,6 +313,10 @@ impl Runtime {
         let seed = lb_core::rng::splitmix64(self.master_seed ^ u64::from(epoch).wrapping_mul(0x9e37_79b9));
         c.journal = Journal::new(map, SimTime::ZERO);
         c.director = Director::new(seed, SimTime::ZERO, &limits(&self.config.chat));
+        c.social.map_start();
+        if let Some(log) = c.chatlog.as_mut() {
+            log.map(map);
+        }
         c.epoch = epoch;
         c.seq = 0;
         c.pending.clear();
@@ -255,41 +332,37 @@ impl Runtime {
         c.late_load = late_load;
     }
 
-    /// The map ends: its summary goes to the memory; the humans on the server now are not new on the next map.
+    /// The map ends: its summary goes to the memory, the new lines of the talks with it; the humans on the server now
+    /// are not new on the next map, and what the chat keeps goes on with them, its times moved back by the map's. All
+    /// of it before a recording of the next map takes what carries over.
     pub(crate) fn chat_map_end(&mut self) {
-        let present: Vec<i32> = self
+        let humans: Vec<&ClientInfo> = self
             .clients
             .slots
             .iter()
             .filter(|c| c.connected && !c.is_fake)
-            .map(|c| c.userid)
             .collect();
+        let present: Vec<i32> = humans.iter().map(|c| c.userid).collect();
+        let names: Vec<String> = humans.iter().map(|c| c.name.clone()).collect();
         if self.config.chat.enabled
             && self.config.chat.memory.enabled
             && let Some(summary) = self.chat_summary()
         {
             self.chat.backend.send(Job::MapEnd(Box::new(summary)));
+            self.chat.social.mark_saved();
         }
+        self.chat.unsay(|_| true);
         self.chat.keys.retain(|id, _| present.contains(id));
+        self.chat.social.present(&names, self.now);
+        self.chat.social.map_end(self.now, &present);
         self.chat.returning = present;
     }
 
     fn chat_push(&mut self, event: Event) {
+        self.chat.journal.gungame = matches!(self.game.mode, Some(GameModeKind::GunGame { .. }));
         let notable = self.chat.journal.push(self.now, event);
         for n in notable {
-            let humans: Vec<i32> = match &n {
-                Notable::Nemesis { killer, victim, .. }
-                | Notable::Humiliation { killer, victim }
-                | Notable::Revenge { killer, victim } => [killer, victim]
-                    .into_iter()
-                    .filter(|w| !w.bot)
-                    .map(|w| w.userid)
-                    .collect(),
-                Notable::OwnBlast { victim: w, .. }
-                | Notable::Multikill { killer: w, .. }
-                | Notable::Streak { killer: w, .. }
-                | Notable::RageQuit { who: w, .. } => (!w.bot).then_some(w.userid).into_iter().collect(),
-            };
+            let humans: Vec<i32> = n.people().into_iter().filter(|w| !w.bot).map(|w| w.userid).collect();
             for id in humans {
                 if self.chat.moments.len() < MOMENTS {
                     self.chat.moments.push((id, n.clone()));
@@ -299,7 +372,23 @@ impl Runtime {
         }
     }
 
-    /// A client event; `before` is the slot as it was.
+    /// Whether a human put in the server at `at` is back from the map change, not new: on the server when the last
+    /// map ended, or already there when the plugin was loaded into a game under way.
+    fn chat_back(&self, userid: i32, at: SimTime) -> bool {
+        self.chat.returning.contains(&userid) || (self.chat.late_load && at.secs() < 2.0)
+    }
+
+    /// Writes to the chat log, when there is one and `chat.chatlog` is on.
+    fn chatlog(&mut self, write: impl FnOnce(&mut ChatLog, u32)) {
+        let c = &self.config.chat;
+        if c.chatlog
+            && let Some(log) = self.chat.chatlog.as_mut()
+        {
+            write(log, c.chatlog_days);
+        }
+    }
+
+    /// A client event; `before` is the slot as it was. Who is on the server is kept with chat off too.
     pub(crate) fn chat_on_client(&mut self, e: &ClientEvent, before: Option<ClientInfo>) {
         if e.is_ours {
             return;
@@ -313,16 +402,21 @@ impl Runtime {
                     return;
                 }
                 self.chat.keys.insert(c.userid, player_key(&c.auth_id, &c.name));
-                let back = self.chat.returning.contains(&c.userid) || (self.chat.late_load && self.now.secs() < 2.0);
+                let back = self.chat_back(c.userid, self.now);
+                let arrived = self.chat.social.arrive(&c.name, self.now);
+                if !back {
+                    self.chatlog(|log, days| log.join(days, &c.name));
+                }
                 let who = who_of(e.slot, &c);
                 self.chat_push(Event::Join { who: who.clone() });
-                if !back {
+                if !back && arrived {
                     self.chat.causes.push(Cause::Join { who });
                 }
             }
             ClientEventKind::Disconnect => {
                 if let Some(c) = before.filter(|c| c.in_game && !c.is_fake) {
-                    self.chat.returning.retain(|id| *id != c.userid);
+                    self.chat.social.left(&c.name, self.now);
+                    self.chatlog(|log, days| log.leave(days, &c.name));
                     self.chat_push(Event::Leave {
                         who: who_of(e.slot, &c),
                     });
@@ -335,6 +429,8 @@ impl Runtime {
                     && old.name != c.name
                     && !old.name.is_empty()
                 {
+                    self.chat.social.left(&old.name, self.now);
+                    self.chat.social.arrive(&c.name, self.now);
                     self.chat_push(Event::Rename {
                         who: who_of(e.slot, &c),
                         old: old.name,
@@ -383,16 +479,21 @@ impl Runtime {
         self.chat_push(event);
     }
 
-    /// A human's `say` or `say_team`.
+    /// A human's `say` or `say_team`: to the chat log as typed, plugin commands too; the rest is chat. A team line
+    /// outside the modes with teams only its writer sees (the SDK's `Host_Say`): it is in the log alone.
     pub(crate) fn chat_on_say(&mut self, c: &CommandEvent) {
         let team = c.argv.first().map(|a| a.as_slice()) == Some(b"say_team");
         let text = sanitize::player_line(&String::from_utf8_lossy(&c.line));
-        if text.is_empty() || sanitize::is_command(&text, &self.config.chat.blocked) {
-            return;
-        }
         let Some(from) = self.clients.get(c.slot).map(|info| who_of(c.slot, info)) else {
             return;
         };
+        if text.is_empty() {
+            return;
+        }
+        self.chatlog(|log, days| log.say(days, &from.name, false, team, &text));
+        if sanitize::is_command(&text, &self.config.chat.blocked) || (team && !self.team_mode()) {
+            return;
+        }
         let from_team = self.teams().get(c.slot as usize).copied().unwrap_or(0);
         self.chat_push(Event::Chat {
             from: from.clone(),
@@ -510,6 +611,8 @@ impl Runtime {
                         name: c.name.clone(),
                         bot: true,
                     },
+                    persona: b.persona.name.clone(),
+                    calls: b.persona.chat.call.clone(),
                     team: teams.get(b.id.slot as usize).copied().unwrap_or(0),
                     chattiness: b.persona.chat.chattiness,
                     alive: b.state == BotState::Alive,
@@ -601,6 +704,7 @@ impl Runtime {
         });
         let card = BotCard {
             name,
+            persona: bot.persona.name.clone(),
             userid: bot.userid,
             skill: bot.persona.skill,
             style: bot.persona.style.as_str().to_string(),
@@ -650,79 +754,93 @@ impl Runtime {
         }
         .and_then(|s| self.clients.get(s))
         .map(|c| c.name.clone());
-        let since = SimTime(now.secs() - EVENTS_WINDOW);
-        let events = self
-            .chat
-            .journal
+        let recent = |e: &Entry| Recent {
+            age: now.since(e.t),
+            event: e.event.clone(),
+        };
+        let journal = &self.chat.journal;
+        let events = journal
             .entries()
-            .filter(|e| e.t >= since)
+            .filter(|e| now.since(e.t) <= GAME_WINDOW)
             .filter(|e| match &e.event {
-                Event::Chat { from, team: true, .. } => teams.get(from.slot as usize).copied().unwrap_or(0) == my_team,
+                Event::Chat { .. } => false,
+                Event::Join { who } => !self.chat_back(who.userid, e.t),
                 _ => true,
             })
-            .map(|e| Recent {
-                age: now.since(e.t),
-                event: e.event.clone(),
+            .map(recent)
+            .collect();
+        let team_mode = self.team_mode();
+        let chat = journal
+            .entries()
+            .filter(|e| now.since(e.t) <= CHAT_WINDOW)
+            .filter(|e| match &e.event {
+                Event::Chat { from, team: true, .. } => {
+                    team_mode && teams.get(from.slot as usize).copied().unwrap_or(0) == my_team
+                }
+                Event::Chat { .. } => true,
+                _ => false,
             })
+            .map(recent)
             .collect();
         let language = self.config.chat.language.clone();
         // Cyrillic letters take two bytes.
         let per_char = if Lang::of(&language) == Lang::Ru { 2 } else { 1 };
-        ChatRequest {
+        let mut req = ChatRequest {
             id,
             bot: card,
             trigger,
             scene: Scene {
-                map: self.chat.journal.map.clone(),
+                map: journal.map.clone(),
                 gungame: board.is_some(),
-                teamplay: matches!(self.game.mode, Some(lb_game::mode::GameModeKind::Teamplay)),
-                elapsed: now.since(self.chat.journal.started),
+                teamplay: matches!(self.game.mode, Some(GameModeKind::Teamplay)),
+                elapsed: now.since(journal.started),
                 players,
                 leader,
             },
             events,
+            chat,
+            own: self.chat.social.talks.own(now, &bot.persona.name),
+            talk: Vec::new(),
             language,
             max_chars: (self.chat_budget(slot, team) / per_char).clamp(16, 120),
             team,
+        };
+        if let Some(player) = prompt::partner(&req).map(|w| w.userid) {
+            req.talk = self.chat.social.talks.talk(now, &bot.persona.name, player);
         }
+        req
     }
 
-    /// Asks the worker for a bot's line.
+    /// Asks the worker for a bot's line; one it had on its way is not said.
     fn chat_ask(&mut self, s: Speak) {
         let Some(i) = self.bots.iter().position(|b| b.id.slot == s.slot && b.is_active()) else {
+            if s.unasked {
+                self.chat.social.remarks.give();
+            }
             return;
         };
         let id = request_id(self.chat.epoch, self.chat.seq);
         self.chat.seq += 1;
         let request = self.chat_request(&self.bots[i], id, s.trigger.clone(), s.team);
-        let read = match &s.trigger {
-            Trigger::Addressed { text, .. } | Trigger::Continued { text, .. } | Trigger::Overheard { text, .. } => {
-                text.chars().count()
-            }
-            _ => 0,
-        };
+        let read = s.trigger.line().map_or(0, |(_, text)| text.chars().count());
         let keep = match s.priority {
             Priority::Answer => KEEP_ANSWER,
             Priority::MatchEnd => KEEP_MATCH_END,
             Priority::Greeting | Priority::Remark => KEEP_REMARK,
         };
-        let to = s
-            .trigger
-            .is_answer()
-            .then(|| s.trigger.about().map(|w| w.userid))
-            .flatten();
         let now = self.now;
         let bot = &mut self.bots[i];
         let notice = notice_secs(&mut bot.rng.cosmetic, read);
         bot.chat.ask(id, s.priority, s.team, now, notice, keep);
         let (slot, generation, name) = (bot.id.slot, bot.id.generation, bot.persona.name.clone());
-        self.chat.pending.retain(|p| p.slot != slot);
-        self.chat.answering.retain(|(s, _)| *s != slot);
+        self.chat.unsay(|p| p.slot == slot);
         self.chat.pending.push(Pending {
             id,
             slot,
             generation,
-            to,
+            to: s.trigger.to().cloned(),
+            greeting: matches!(s.trigger, Trigger::Joined { .. } | Trigger::Greeted { .. }),
+            unasked: s.unasked,
         });
         self.chat.counts.asked += 1;
         self.chat
@@ -730,6 +848,8 @@ impl Runtime {
         self.chat.backend.send(Job::Ask(Box::new(request)));
     }
 
+    /// The worker's reply: the model's line or a ready phrase to type, or nothing. A request that brought no line to
+    /// type gives its line back to the director, a phrase its request too (it asked nothing of the model).
     fn chat_apply(&mut self, reply: Reply) {
         let Some(at) = self.chat.pending.iter().position(|p| p.id == reply.id) else {
             return;
@@ -740,6 +860,7 @@ impl Runtime {
             .iter()
             .position(|b| b.id.slot == p.slot && b.id.generation == p.generation && b.is_active())
         else {
+            self.chat.unsaid(&p);
             return;
         };
         let now = self.now;
@@ -747,17 +868,29 @@ impl Runtime {
         let budget = self.chat_budget(p.slot, team);
         let ascii = self.chat_ascii_needed();
         let line = match &reply.outcome {
-            Outcome::Line(text) => sanitize::fit_say(text, budget, &self.config.chat.blocked, ascii),
+            Outcome::Line(text) | Outcome::Phrase(text) => {
+                sanitize::fit_say(text, budget, &self.config.chat.blocked, ascii)
+            }
             Outcome::Skip | Outcome::Failed(_) => None,
         };
         let bot = &mut self.bots[i];
         let think = line.as_deref().map_or(0.0, |l| think_secs(&mut bot.rng.cosmetic, l));
         let name = bot.persona.name.clone();
         if !bot.chat.answer(reply.id, line.clone(), now, think) {
+            self.chat.unsaid(&p);
             return;
         }
+        let typed = line.is_some();
+        let phrase = matches!(reply.outcome, Outcome::Phrase(_));
         match (&reply.outcome, line) {
-            (_, Some(line)) => self.chat.log(now, format!("{name} will type: {line}")),
+            (_, Some(line)) if phrase => {
+                self.chat.counts.phrases += 1;
+                self.chat.log(now, format!("{name} will type a phrase: {line}"));
+            }
+            (_, Some(line)) => {
+                self.chat.counts.lines += 1;
+                self.chat.log(now, format!("{name} will type: {line}"));
+            }
             (Outcome::Failed(why), None) => {
                 self.chat.counts.failed += 1;
                 self.chat.log(now, format!("{name}: no line ({why:?})"));
@@ -767,13 +900,15 @@ impl Runtime {
                 self.chat.log(now, format!("{name} keeps quiet"));
             }
         }
-        if !matches!(reply.outcome, Outcome::Line(_)) || self.bots[i].chat.busy().is_none() {
-            self.chat.director.refund(&limits(&self.config.chat));
+        let limits = limits(&self.config.chat);
+        if phrase {
+            self.chat.director.refund_request(&limits);
         }
-        if let Some(to) = p.to
-            && self.bots[i].chat.busy().is_some()
-        {
-            self.chat.pending_to(p.slot, to);
+        if typed {
+            self.chat.answering.push(p);
+        } else {
+            self.chat.director.refund(&limits);
+            self.chat.unsaid(&p);
         }
     }
 
@@ -803,15 +938,30 @@ impl Runtime {
             }
         }
         let causes = std::mem::take(&mut self.chat.causes);
-        if !causes.is_empty() {
+        if self.chat.director.has_waiting() || !causes.is_empty() {
             let humans = !self.config.chat.require_humans || self.clients.humans(false) > 0;
             let limits = limits(&self.config.chat);
-            for cause in causes {
+            if self.chat.director.has_waiting() {
                 let speakers = self.chat_speakers();
                 let speaks = self
                     .chat
                     .director
-                    .react(now, &cause, &speakers, &self.chat.journal, humans, &limits);
+                    .ready(now, &speakers, &mut self.chat.social, humans, &limits);
+                for s in speaks {
+                    self.chat_ask(s);
+                }
+            }
+            for cause in causes {
+                let speakers = self.chat_speakers();
+                let speaks = self.chat.director.react(
+                    now,
+                    &cause,
+                    &speakers,
+                    &self.chat.journal,
+                    &mut self.chat.social,
+                    humans,
+                    &limits,
+                );
                 for s in speaks {
                     self.chat_ask(s);
                 }
@@ -838,11 +988,19 @@ impl Runtime {
             }
             let (slot, userid, name) = (bot.id.slot, bot.userid, bot.persona.name.clone());
             let netname = self.clients.get(slot).map_or_else(|| name.clone(), |c| c.name.clone());
-            let to = self.chat.talk_to(slot);
-            self.chat.director.said(now, slot, to);
+            let asked = self.chat.line_said(slot);
+            let to = asked
+                .as_ref()
+                .and_then(|p| p.to.as_ref())
+                .filter(|w| self.clients.find_userid(w.userid).is_some());
+            let greeting = asked.as_ref().is_some_and(|p| p.greeting);
+            self.chat
+                .social
+                .said(now, &name, to.map(|w| (w.userid, w.name.as_str())), greeting, &line);
             self.chat.counts.said += 1;
             self.chat.log(now, format!("{name}: {line}"));
             tracing::info!("chat {netname}: {line}");
+            self.chatlog(|log, days| log.say(days, &netname, true, team, &line));
             self.chat_push(Event::Chat {
                 from: Who {
                     slot,
@@ -854,6 +1012,13 @@ impl Runtime {
                 team,
             });
         }
+        // Lines dropped unsaid (too old, interrupted twice), or whose bot left.
+        let bots = &self.bots;
+        self.chat.unsay(|p| {
+            !bots.iter().any(|b| {
+                b.id.slot == p.slot && b.id.generation == p.generation && b.is_active() && b.chat.busy().is_some()
+            })
+        });
     }
 
     /// `lb chat test`: as if `from` wrote `text` to the bot in `slot`.
@@ -861,13 +1026,29 @@ impl Runtime {
         let speakers = self.chat_speakers();
         let limits = limits(&self.config.chat);
         let cause = Cause::Test { bot: slot, from, text };
-        let speaks = self
-            .chat
-            .director
-            .react(self.now, &cause, &speakers, &self.chat.journal, true, &limits);
+        let speaks = self.chat.director.react(
+            self.now,
+            &cause,
+            &speakers,
+            &self.chat.journal,
+            &mut self.chat.social,
+            true,
+            &limits,
+        );
         for s in speaks {
             self.chat_ask(s);
         }
+    }
+
+    /// `lb chat event`: the bot in `slot` speaks of a moment of the game as if it came, past the director.
+    pub(crate) fn chat_event(&mut self, slot: u8, trigger: Trigger) {
+        self.chat_ask(Speak {
+            slot,
+            trigger,
+            priority: Priority::Remark,
+            team: false,
+            unasked: false,
+        });
     }
 
     /// `lb chat prompt`: the prompt a line of the bot in `slot` would get, printed by the worker.
@@ -880,7 +1061,8 @@ impl Runtime {
         true
     }
 
-    /// The map for the memory: every human who played it, against which bot, what they wrote.
+    /// The map for the memory: every human who played it, against which bot, what they wrote (noise left out), the
+    /// lines of their talks with the bots the memory has not had.
     fn chat_summary(&self) -> Option<MapSummary> {
         let journal = &self.chat.journal;
         let lang = Lang::of(&self.config.chat.language);
@@ -913,7 +1095,11 @@ impl Runtime {
                 let lines = journal
                     .entries()
                     .filter_map(|e| match &e.event {
-                        Event::Chat { from, text, .. } if from.userid == *id => Some((end.since(e.t), text.clone())),
+                        Event::Chat { from, text, .. }
+                            if from.userid == *id && !addressing::noise(text).is_some_and(Noise::hard) =>
+                        {
+                            Some((end.since(e.t), text.clone()))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -934,6 +1120,7 @@ impl Runtime {
                     won: winner.as_ref().is_some_and(|w| w.userid == *id),
                     lines,
                     moments,
+                    talk: self.chat.social.unsaved(*id, end),
                 })
             })
             .collect();
@@ -985,18 +1172,5 @@ impl Runtime {
             _ => Duration::from_millis(500),
         };
         self.chat.backend.shutdown(wait);
-    }
-}
-
-impl ChatRuntime {
-    /// Who the bot in `slot` answers with its line on the way.
-    fn pending_to(&mut self, slot: u8, to: i32) {
-        self.answering.retain(|(s, _)| *s != slot);
-        self.answering.push((slot, to));
-    }
-
-    fn talk_to(&mut self, slot: u8) -> Option<i32> {
-        let i = self.answering.iter().position(|(s, _)| *s == slot)?;
-        Some(self.answering.swap_remove(i).1)
     }
 }

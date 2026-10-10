@@ -10,6 +10,8 @@ use lb_llm::Exchange;
 
 /// Days of transcripts kept.
 const KEEP: usize = 7;
+/// The transcript's day files are `chat.<date>.log`.
+const PREFIX: &str = "chat";
 
 pub struct Transcript {
     dir: PathBuf,
@@ -18,7 +20,7 @@ pub struct Transcript {
 }
 
 /// Today (UTC) as `2026-10-05`, and the time as `21:14:03`.
-fn now() -> (String, String) {
+pub fn now() -> (String, String) {
     let s = crate::roster::stamp();
     (
         format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8]),
@@ -34,26 +36,25 @@ fn as_yaml(body: &str) -> String {
     }
 }
 
-/// The file of `day` in `dir`.
-pub fn file_of(dir: &Path, day: &str) -> PathBuf {
-    dir.join(format!("chat.{day}.log"))
+/// The file of `day` in `dir`, `<prefix>.<day>.log`.
+pub fn file_of(dir: &Path, prefix: &str, day: &str) -> PathBuf {
+    dir.join(format!("{prefix}.{day}.log"))
 }
 
-/// Whether `name` is a day's file, `chat.YYYY-MM-DD.log`.
-fn is_day_file(name: &str) -> bool {
-    let Some(day) = name.strip_prefix("chat.").and_then(|n| n.strip_suffix(".log")) else {
-        return false;
-    };
-    day.len() == 10
+/// The day of a day's file `<prefix>.YYYY-MM-DD.log`; `None` for any other name.
+pub fn day_of<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    let day = name.strip_prefix(prefix)?.strip_prefix('.')?.strip_suffix(".log")?;
+    let date = day.len() == 10
         && day.bytes().enumerate().all(|(i, b)| match i {
             4 | 7 => b == b'-',
             _ => b.is_ascii_digit(),
-        })
+        });
+    date.then_some(day)
 }
 
 /// Today's file in `dir`.
 pub fn today(dir: &Path) -> PathBuf {
-    file_of(dir, &now().0)
+    file_of(dir, PREFIX, &now().0)
 }
 
 impl Transcript {
@@ -69,7 +70,7 @@ impl Transcript {
     fn open(&mut self, day: &str) -> Option<&mut File> {
         if self.day != day || self.file.is_none() {
             let _ = std::fs::create_dir_all(&self.dir);
-            let path = file_of(&self.dir, day);
+            let path = file_of(&self.dir, PREFIX, day);
             self.file = match OpenOptions::new().create(true).append(true).open(&path) {
                 Ok(f) => Some(f),
                 Err(e) => {
@@ -90,7 +91,11 @@ impl Transcript {
         let mut days: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_day_file))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| day_of(n, PREFIX).is_some())
+            })
             .collect();
         days.sort();
         for old in days.iter().rev().skip(KEEP) {

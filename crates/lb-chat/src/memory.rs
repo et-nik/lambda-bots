@@ -1,11 +1,13 @@
 //! What the bots remember of players between maps and restarts, kept by the chat worker in `data/chat/memory.json`:
-//! the names a player used, the score against each bot, favourite weapons, wins, a few lines they wrote, moments
-//! worth remembering, the model's notes, and the last maps.
+//! the names a player used, the score against each bot, favourite weapons, wins, a few lines they wrote, their talks
+//! with the bots, moments worth remembering, the model's notes, and the last maps.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::addressing::{self, Noise};
+use crate::profanity;
 use crate::request::MapSummary;
 
 pub const SCHEMA: &str = "lambdabots/chat-memory@1";
@@ -14,6 +16,10 @@ const LINES: usize = 10;
 const MOMENTS: usize = 6;
 const WEAPONS: usize = 5;
 const MAPS: usize = 3;
+/// Lines of a player's talk kept for each bot.
+const TALK_LINES: usize = 12;
+/// Bots a player's talks are kept with; the talk that ended longest ago goes first.
+const TALK_BOTS: usize = 3;
 pub const NOTES_MAX: usize = 300;
 /// Players kept; the ones seen longest ago go first.
 pub const MAX_PLAYERS: usize = 2000;
@@ -50,6 +56,8 @@ pub struct PlayerMemory {
     pub wins: u32,
     /// Lines the player wrote: (unix seconds, text), the latest last.
     pub lines: Vec<(u64, String)>,
+    /// Talks with the bots, by the bot's persona: (unix seconds, the bot's own line, text), the latest last.
+    pub talks: BTreeMap<String, Vec<(u64, bool, String)>>,
     /// Moments worth remembering: (unix seconds, text), the latest last.
     pub moments: Vec<(u64, String)>,
     /// The model's notes on the player.
@@ -102,6 +110,37 @@ fn push_capped<T>(list: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+/// Whether a player's line is worth remembering: no noise ([`Noise::hard`]), no swearing, no slurs. `names`:
+/// nicknames, left out first.
+pub fn memorable(line: &str, names: &[String]) -> bool {
+    !addressing::noise(line).is_some_and(Noise::hard) && !profanity::has(line, names) && !profanity::slur(line, names)
+}
+
+/// The names in a map's summary: its players, the bots they fought, everyone who wrote.
+fn names(s: &MapSummary) -> Vec<String> {
+    let players = s
+        .players
+        .iter()
+        .flat_map(|p| std::iter::once(&p.name).chain(p.vs_bots.iter().map(|(bot, ..)| bot)));
+    let writers = s.chat.iter().map(|(_, name, ..)| name);
+    let mut names: Vec<String> = players.chain(writers).cloned().collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Drops the talks beyond [`TALK_BOTS`], the one whose last line is oldest first.
+fn cap_talks(talks: &mut BTreeMap<String, Vec<(u64, bool, String)>>) {
+    let mut last: Vec<(u64, String)> = talks
+        .iter()
+        .map(|(bot, lines)| (lines.last().map_or(0, |l| l.0), bot.clone()))
+        .collect();
+    last.sort();
+    for (_, bot) in last.into_iter().take(talks.len().saturating_sub(TALK_BOTS)) {
+        talks.remove(&bot);
+    }
+}
+
 impl Memory {
     pub fn parse(text: &str) -> Result<Memory, String> {
         let m: Memory = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -117,6 +156,7 @@ impl Memory {
 
     /// Adds a map that ended at `now` (unix seconds).
     pub fn merge(&mut self, s: &MapSummary, now: u64) {
+        let names = names(s);
         for p in &s.players {
             let m = self.players.entry(p.key.clone()).or_default();
             if m.first_seen == 0 {
@@ -145,9 +185,14 @@ impl Memory {
                 .map(String::from)
                 .collect();
             m.weapons.retain(|w, _| keep.contains(w));
-            for (age, line) in &p.lines {
+            for (age, line) in p.lines.iter().filter(|(_, line)| memorable(line, &names)) {
                 push_capped(&mut m.lines, (now.saturating_sub(*age as u64), line.clone()), LINES);
             }
+            for (age, bot, mine, text) in &p.talk {
+                let talk = m.talks.entry(bot.clone()).or_default();
+                push_capped(talk, (now.saturating_sub(*age as u64), *mine, text.clone()), TALK_LINES);
+            }
+            cap_talks(&mut m.talks);
             for moment in &p.moments {
                 push_capped(&mut m.moments, (now, moment.clone()), MOMENTS);
             }
@@ -223,9 +268,28 @@ mod tests {
                 won: winner,
                 lines: vec![(120.0, "изи".into())],
                 moments: vec!["убил DUT9 ATLASA ломом".into()],
+                talk: Vec::new(),
             }],
             chat: Vec::new(),
         }
+    }
+
+    /// A map where Gordon talked with the bots.
+    fn talker(talk: Vec<(f64, String, bool, String)>) -> MapSummary {
+        MapSummary {
+            map: "gg_cold_rock".into(),
+            players: vec![PlayerMap {
+                key: "STEAM_0:1:42".into(),
+                name: "Gordon".into(),
+                talk,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn line(age: f64, bot: &str, mine: bool, text: &str) -> (f64, String, bool, String) {
+        (age, bot.into(), mine, text.into())
     }
 
     #[test]
@@ -285,5 +349,93 @@ mod tests {
         m.prune(6000, 120);
         assert_eq!(m.players.len(), MAX_PLAYERS);
         assert!(!m.players.contains_key("STEAM_0:0:219579426"), "the oldest go first");
+    }
+
+    #[test]
+    fn talks_are_kept_with_the_last_bots() {
+        let mut m = Memory::default();
+        m.merge(
+            &talker(vec![
+                line(300.0, "Plutonium", false, "Привет Плутон!"),
+                line(290.0, "Plutonium", true, "здарова"),
+                line(250.0, "Kleiner", false, "kleiner, hi"),
+            ]),
+            10_000,
+        );
+        let talks = &m.players["STEAM_0:1:42"].talks;
+        assert_eq!(
+            talks["Plutonium"],
+            [(9_700, false, "Привет Плутон!".into()), (9_710, true, "здарова".into())]
+        );
+        assert_eq!(talks["Kleiner"], [(9_750, false, "kleiner, hi".into())]);
+        let long = (0..20)
+            .map(|i| line(f64::from(100 - i), "Plutonium", i % 2 == 1, &format!("строка {i}")))
+            .collect();
+        m.merge(&talker(long), 20_000);
+        let lines = &m.players["STEAM_0:1:42"].talks["Plutonium"];
+        assert_eq!(lines.len(), TALK_LINES);
+        assert_eq!(lines.last().unwrap(), &(19_919, true, "строка 19".into()));
+        m.merge(
+            &talker(vec![
+                line(50.0, "Barney", false, "barney?"),
+                line(40.0, "Alyx", false, "alyx, where to?"),
+            ]),
+            30_000,
+        );
+        let bots: Vec<&str> = m.players["STEAM_0:1:42"].talks.keys().map(String::as_str).collect();
+        assert_eq!(
+            bots,
+            ["Alyx", "Barney", "Plutonium"],
+            "the talk with Kleiner ended longest ago"
+        );
+        assert_eq!(Memory::parse(&m.to_json()).unwrap(), m);
+        assert!(m.forget("gordon").is_some());
+        assert!(m.players.is_empty(), "talks go with the player");
+    }
+
+    #[test]
+    fn a_memory_from_before_talks_loads() {
+        let old = r#"{"schema": "lambdabots/chat-memory@1", "players": {"STEAM_0:1:42": {"names": ["Gordon"],
+            "first_seen": 1000, "last_seen": 2000, "maps": 3, "kills": 40, "deaths": 7, "vs_bots": {"Kleiner": [4, 1]},
+            "weapons": {"crowbar": 30}, "wins": 1, "lines": [[1900, "изи"]], "moments": [], "notes": "любит лом"}},
+            "maps": []}"#;
+        let m = Memory::parse(old).unwrap();
+        let p = &m.players["STEAM_0:1:42"];
+        assert!(p.talks.is_empty());
+        assert_eq!(
+            (p.maps, p.vs_bots["Kleiner"], p.notes.as_str()),
+            (3, [4, 1], "любит лом")
+        );
+    }
+
+    #[test]
+    fn noise_and_swearing_are_not_remembered() {
+        let mut s = talker(Vec::new());
+        s.players[0].lines = [
+            "ахахахах",
+            "DIIIIIEEEEE!!!!1",
+            "gg_cold_rock",
+            "бляяя",
+            "хохлы",
+            "ок",
+            "где рельсы?",
+            "_FUCK_ опять тут",
+        ]
+        .into_iter()
+        .map(|l| (10.0, l.to_string()))
+        .collect();
+        s.chat.push((5.0, "_FUCK_".into(), "всем привет".into(), false));
+        let mut m = Memory::default();
+        m.merge(&s, 1000);
+        let kept: Vec<&str> = m.players["STEAM_0:1:42"]
+            .lines
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(
+            kept,
+            ["ок", "где рельсы?", "_FUCK_ опять тут"],
+            "a nickname is no swearing"
+        );
     }
 }

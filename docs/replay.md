@@ -66,10 +66,14 @@ source differs, only when the core version number does.
   - cvar values and interned strings;
   - personalities that come back and those asked for with `lb add`;
   - the master seed and the random state;
+  - the chat's state: the players present, the talks under way, the bots' recent lines, when each nickname was last
+    on the server (for greetings), the gist of players' recent lines (for repeats) and the hourly cap of lines nobody
+    asked for;
 - the files the runtime reads:
   - `config/lambdabots.yaml`, `config/difficulty.yaml`, `config/styles/`;
   - `profiles/`, `names/`, `data/profiles.yaml`;
   - the map's BSP, its navigation graph and its overlays (`maps/<map>/editor.yaml`, `overlay.yaml`);
+  - not `config/chat/` or `data/chat/`: only the chat worker reads them;
 - a hash of what the runtime made of those files. A replay warns if its own differs.
 
 **Steps**, one per call of the adapter into the core (map start, frame start and end, console command). Each step
@@ -81,7 +85,8 @@ holds:
   - cvar values, entity snapshots and weapon data;
   - the outcome of creating a bot, and the feedback of the moves;
 - what the runtime took from outside the engine: the frame at which the navigation loader had finished, commands
-  from the telemetry command channel, and the chat worker's replies (the lines the bots then type, `docs/chat.md`).
+  from the telemetry command channel, and the chat worker's replies (`docs/chat.md`): the model's lines and the ready
+  phrases the bots then type, silences (a line the filter dropped among them) and failures.
 
 Calls without an answer are not kept: prints, server commands, debug drawing. The core makes some of them from log
 lines, which other threads write at their own pace.
@@ -96,9 +101,11 @@ as the runtime does not use it either. Everything else stays as the server had i
 `setinfo` values the core read from clients included: share a recording only with people you would give the
 server's config to. The players' chat and the bots' lines are in it too.
 
-The file starts with `LBREC\0\r\n` and a format version. Then come blocks: a compressed length and an lz4 block of
-postcard-encoded records. ABI structures are stored as their bytes, so a recording is tied to the ABI version,
-which the replay checks.
+The file starts with `LBREC\0\r\n` and a format version, 4 since the chat's phrases and talks came in. Then come
+blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored as their bytes,
+so a recording is tied to the ABI version, which the replay checks. A recording of another format is refused
+(`recording format 3, this build reads 4`): replay it with the `lb-cli` of its own release, and build `lb-cli`
+together with the plugin.
 
 ## What a replay checks
 
@@ -116,7 +123,8 @@ which the replay checks.
 
 A replay can only match if the core's decisions depend on nothing but the recorded input. The rules:
 
-- **Time is simulation time** from the frame header. Wall-clock time is only measured (`lb perf`) and never decides.
+- **Time is simulation time** from the frame header. Wall-clock time is only measured (`lb perf`) and stamps the
+  lines of the chat log; it never decides.
 - **Randomness** comes from seeded PCG streams (`lb_core::rng`). The master seed is recorded.
 - **Hash maps iterate in a fixed order.** `std::collections::HashMap` is disallowed by `clippy.toml`.
 - **Transcendental math comes from `lb_core::dmath`**, a pure Rust libm port. `f32::sin`, `atan2`, `exp` and the rest
@@ -126,10 +134,13 @@ A replay can only match if the core's decisions depend on nothing but the record
 - **Other threads reach the core only through recorded outside inputs.** The navigation loader works on its own
   thread. Its result is applied at the frame the recording names, and a replay waits for its own loader there. The
   chat worker's replies are taken once at the start of every `frame_post`; a replay takes the recorded ones there
-  and asks no model. Whatever the worker reads (the key, the memory of players, the clock) stays on its side: the
-  core decides nothing by it.
+  and asks no model. Whatever the worker reads (the key, the memory of players, `config/chat/`, the clock) and
+  whatever it decides (a ready phrase or the model, which phrase, the filter's verdict, whether a player is known)
+  stays on its side: the core gets only the reply. Who a player's line names comes from the recorded profiles
+  (`chat.call`), never from `config/chat/bots.yaml`.
 - **A replay opens no sockets** (`InitData::sandbox`), so no telemetry goes out and no commands come in. Recorded
-  channel commands are fed in at their frames.
+  channel commands are fed in at their frames. Nor does it write the chat log: the log is only ever written, and
+  nothing reads it back.
 
 ## Results (M2)
 
@@ -147,7 +158,7 @@ recording with a changed master seed is caught at the first differing random see
 ## Limits
 
 - A recording starts with a map, not mid-map, and covers one map.
-- It is tied to the build that made it (see above) and to the ABI version.
+- It is tied to the build that made it (see above), to its format and to the ABI version.
 - The replay was checked on the machine that recorded. Cross-platform replays (a Linux i386 server, a macOS
   developer) should match too, since the core uses IEEE arithmetic and `dmath`, but they have not been tried yet.
 - The files the runtime reads are taken when the recording starts. If they were edited on disk and not reloaded,

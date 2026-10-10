@@ -474,7 +474,7 @@ pub const REDACTED: &str = "<redacted>";
 #[serde(deny_unknown_fields, default)]
 pub struct ChatConfig {
     pub enabled: bool,
-    /// The language bots write in unless a player speaks to them in another (`ru`, `en`, …).
+    /// The language bots write in (`ru`, `en`, …); a player writing English gets English, other languages no answer.
     pub language: String,
     /// A line about the server for the bots ("GunGame server hldm.org").
     pub server: String,
@@ -484,11 +484,17 @@ pub struct ChatConfig {
     pub limits: ChatLimits,
     pub typing: ChatTyping,
     pub memory: ChatMemory,
-    /// Chat commands of server plugins: a bot never says a line starting with one, and a player's line starting
-    /// with one is not chat.
+    /// Chat commands of server plugins, one word each: a bot never says a line starting with one, and a player's
+    /// line starting with one is not chat.
     pub blocked: Vec<String>,
     /// Every request to the model and its answer go to `logs/chat.<date>.log`, as they went over the wire.
     pub transcript: bool,
+    /// Every line of the game chat, and players joining and leaving, go to `logs/chatlog.<date>.log`, chat on or
+    /// off.
+    pub chatlog: bool,
+    /// Days of chat logs kept.
+    pub chatlog_days: u32,
+    pub phrases: ChatPhrases,
 }
 
 impl Default for ChatConfig {
@@ -506,15 +512,30 @@ impl Default for ChatConfig {
                 "rtv",
                 "rockthevote",
                 "nominate",
+                "nominations",
                 "timeleft",
                 "nextmap",
                 "thetime",
                 "currentmap",
+                "listmaps",
+                "recentmaps",
+                "votemap",
+                "callvote",
+                "agstart",
+                "agabort",
+                "agpause",
+                "agallow",
+                "agmap",
+                "agnextmap",
+                "agnextmode",
             ]
             .into_iter()
             .map(String::from)
             .collect(),
             transcript: false,
+            chatlog: true,
+            chatlog_days: 30,
+            phrases: ChatPhrases::default(),
         }
     }
 }
@@ -581,6 +602,9 @@ pub struct ChatLimits {
     pub remark_gap: f32,
     /// Seconds between two lines nobody asked for from one bot.
     pub bot_remark_gap: f32,
+    /// Lines nobody asked for (game moments, greetings, answers to lines meant for everybody) all bots together may
+    /// say an hour; 0 = none.
+    pub remarks_per_hour: f32,
     pub requests_per_minute: f32,
     /// Tokens (in and out) a day, UTC; 0 = no limit.
     pub tokens_per_day: u64,
@@ -592,6 +616,7 @@ impl Default for ChatLimits {
             lines_per_minute: 2.0,
             remark_gap: 60.0,
             bot_remark_gap: 240.0,
+            remarks_per_hour: 6.0,
             requests_per_minute: 6.0,
             tokens_per_day: 2_000_000,
         }
@@ -610,7 +635,7 @@ pub struct ChatTyping {
 impl Default for ChatTyping {
     fn default() -> Self {
         ChatTyping {
-            cpm: [150.0, 330.0],
+            cpm: [200.0, 380.0],
             calm: 3.0,
         }
     }
@@ -633,6 +658,25 @@ impl Default for ChatMemory {
             enabled: true,
             ai_notes: true,
             forget_after_days: 120,
+        }
+    }
+}
+
+/// Ready lines from `config/chat/phrases.yaml` for game moments and greetings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChatPhrases {
+    /// Off, every line comes from the model.
+    pub enabled: bool,
+    /// The share of moments the model gets instead of a phrase.
+    pub ai_share: f32,
+}
+
+impl Default for ChatPhrases {
+    fn default() -> Self {
+        ChatPhrases {
+            enabled: true,
+            ai_share: 0.15,
         }
     }
 }
@@ -721,6 +765,11 @@ impl MainConfig {
     }
 }
 
+/// A language code as `chat.language` and the sections of `config/chat/phrases.yaml` take it (`ru`, `en`, `pt-br`).
+pub fn language_code(code: &str) -> bool {
+    (2..=8).contains(&code.len()) && code.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+}
+
 impl ChatConfig {
     fn validate(&self, path: &str) -> Result<(), ConfigError> {
         let err = |field: &str, message: &str| {
@@ -730,8 +779,7 @@ impl ChatConfig {
                 message: message.to_string(),
             })
         };
-        let lang = self.language.trim();
-        if !(2..=8).contains(&lang.len()) || !lang.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+        if !language_code(self.language.trim()) {
             return err("language", "expected a language code such as ru or en");
         }
         if self.server.chars().count() > 200 {
@@ -787,6 +835,9 @@ impl ChatConfig {
         if !(0.0..=3600.0).contains(&l.remark_gap) || !(0.0..=3600.0).contains(&l.bot_remark_gap) {
             return err("limits", "remark gaps must be in 0..=3600 seconds");
         }
+        if !(0.0..=600.0).contains(&l.remarks_per_hour) {
+            return err("limits.remarks_per_hour", "must be in 0..=600");
+        }
         let t = &self.typing;
         if !(30.0 <= t.cpm[0] && t.cpm[0] <= t.cpm[1] && t.cpm[1] <= 1500.0) {
             return err("typing.cpm", "must be [min, max] with 30 <= min <= max <= 1500");
@@ -799,6 +850,18 @@ impl ChatConfig {
         }
         if self.blocked.iter().any(|b| b.trim().is_empty()) {
             return err("blocked", "entries must not be empty");
+        }
+        if self.blocked.iter().any(|b| b.trim().contains(char::is_whitespace)) {
+            return err(
+                "blocked",
+                "entries are single words: only a line's first word is compared",
+            );
+        }
+        if self.chatlog_days == 0 {
+            return err("chatlog_days", "must be at least 1");
+        }
+        if !(0.0..=1.0).contains(&self.phrases.ai_share) {
+            return err("phrases.ai_share", "must be in 0..=1");
         }
         Ok(())
     }
@@ -874,6 +937,38 @@ mod tests {
         assert!(bad("  language: русский\n"));
         assert!(bad("  limits: { lines_per_minute: 0 }\n"));
         assert!(bad("  mood: calm\n"));
+        assert!(bad("  limits: { remarks_per_hour: -1 }\n"));
+        assert!(bad("  limits: { remarks_per_hour: 601 }\n"));
+        assert!(bad("  limits: { remarks_per_hour: .nan }\n"));
+        assert!(bad("  chatlog_days: 0\n"));
+        assert!(bad("  phrases: { ai_share: 1.5 }\n"));
+        assert!(bad("  phrases: { ai_share: -0.1 }\n"));
+        assert!(bad("  phrases: { ai_share: .nan }\n"));
+        assert!(bad("  phrases: { share: 0.5 }\n"));
+        assert!(bad("  blocked: [rtv, \"vote map\"]\n"));
+        assert!(bad("  blocked: [rtv, \" \"]\n"));
+        let text = "schema: lambdabots/main@1\nchat:\n  chatlog: false\n  chatlog_days: 1\n  phrases: { enabled: false, ai_share: 1 }\n  limits: { remarks_per_hour: 0 }\n  blocked: [\" rtv \", agstart]\n";
+        let chat = MainConfig::parse(text, "t").unwrap().chat;
+        assert_eq!((chat.chatlog, chat.chatlog_days), (false, 1));
+        assert_eq!(
+            chat.phrases,
+            ChatPhrases {
+                enabled: false,
+                ai_share: 1.0
+            }
+        );
+        assert_eq!(chat.limits.remarks_per_hour, 0.0);
+        assert_eq!(chat.typing, ChatTyping::default());
+    }
+
+    #[test]
+    fn language_codes() {
+        for code in ["ru", "en", "pt-br", "uk"] {
+            assert!(language_code(code), "{code}");
+        }
+        for code in ["", "r", "русский", "en_US", "toolonglang", "e n"] {
+            assert!(!language_code(code), "{code}");
+        }
     }
 
     #[test]

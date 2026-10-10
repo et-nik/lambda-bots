@@ -38,7 +38,10 @@ Game DLL: BugfixedHL-Rebased (production) and hlsdk-portable. Only the `valve` m
    normal skill).
 
 When upgrading, replace `config/difficulty.yaml` too unless you changed it on purpose: the file overrides the built-in
-skill table, and the server warns about every parameter that differs from it.
+skill table, and the server warns about every parameter that differs from it. Copy the new templates of
+`config/chat/` you do not have yet (`server.yaml`, `bots.yaml`, `maps.yaml`, `phrases.yaml`) next to your
+`players.yaml`; without `phrases.yaml` the bots use the ready phrases built into the module. Build `lb-cli` from the
+same release: recordings of another format do not replay.
 
 The module depends only on glibc 2.27+ (Linux) or system libraries (Windows, macOS).
 
@@ -73,11 +76,15 @@ Details and the `lb brain` decision trace: `docs/behavior.md`.
 ## Chat
 
 Bots talk in the game chat through a chat model (the Anthropic Messages API or any OpenAI-compatible endpoint, a
-gateway of your own included): they answer players who speak to them, greet, say gg, grumble about a nemesis, in the
-server's language or the player's. A line takes as long to type as a player's would: an alive bot types standing
-still in a calm moment, a dead one holds its respawn until the line is out. They remember the players they met
-between maps and restarts (`data/chat/memory.json`, with your own notes in `config/chat/players.yaml`). Off until
-`chat.enabled`; nothing is sent while no human plays. Details: `docs/chat.md`.
+gateway of your own included): they answer players who speak to them and keep the talk going, greet, say gg, grumble
+about a nemesis, in the server's language, or in English to players who write English. Game moments mostly get ready
+phrases (`config/chat/phrases.yaml`, a set is built in), which cost nothing. A line takes as long to type as a
+player's would: an alive bot types standing still in a calm moment, a dead one holds its respawn until the line is
+out. They remember the players they met and their talks between maps and restarts (`data/chat/memory.json`). What
+you tell them goes in `config/chat/`: regular players (`players.yaml`), the server (`server.yaml`), single bots
+(`bots.yaml`), maps (`maps.yaml`). Off until `chat.enabled`; nothing is sent while no human plays. Every line of the
+game chat, with players joining and leaving, goes to `logs/chatlog.<date>.log` (a file a UTC day, kept 30 days), chat
+on or off. Details: `docs/chat.md`.
 
 ## Navigation
 
@@ -137,7 +144,10 @@ run them from their own console.
 | `lb selftest [name]`                     | check the game DLL's weapon rules live (needs `sv_cheats 1`)    |
 | `lb chat [status\|log [n]\|on\|off]`     | bots in the chat: what they type, the last lines and decisions  |
 | `lb chat say\|test\|prompt <bot> <text>` | a line by hand; a player's line answered by the model; a prompt |
+| `lb chat event <bot> <key>`              | a game moment for a bot: a ready phrase or the model's line     |
 | `lb chat memory <player> [forget]`       | what the bots remember of a player                              |
+| `lb chat reload`                         | read `config/chat/` again, retry the provider at once           |
+| `lb chat transcript [on\|off]`           | requests to the model and its answers in `logs/chat.<date>.log` |
 
 | cvar            | Default   | Purpose                                             |
 |-----------------|-----------|-----------------------------------------------------|
@@ -212,7 +222,7 @@ scripts/stand/lbcmd.sh --stop
 | `crates/lb-knowledge`  | beliefs: tracks of players, hypotheses from sounds and damage                   |
 | `crates/lb-brain`      | per-bot senses, beliefs and attention                                           |
 | `crates/lb-runtime`    | frame pipeline, bot manager, commands, cvars, logging, recorder, chat worker    |
-| `crates/lb-chat`       | chat: journal of the map, who speaks, typing, prompts, memory of players        |
+| `crates/lb-chat`       | chat: journal of the map, who speaks, talks, typing, prompts, phrases, memory   |
 | `crates/lb-llm`        | chat models over HTTPS: Anthropic Messages, OpenAI-compatible completions       |
 | `crates/lb-plugin`     | exported `lb_core_*`, panic isolation                                           |
 | `crates/lb-cli`        | config check, replay, `nav gen/coverage/path/try/validate-overlay/tracecheck`   |

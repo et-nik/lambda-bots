@@ -8,7 +8,7 @@ use lb_config::main_config::ChatConfig;
 
 pub enum Job {
     Ask(Box<ChatRequest>),
-    /// A map ended: the memory takes it in, and the model may update its notes.
+    /// A map ended: the memory takes it in at once; the model may update its notes once nothing else waits.
     MapEnd(Box<MapSummary>),
     /// New settings.
     Configure(Box<ChatConfig>),
@@ -19,7 +19,7 @@ pub enum Job {
         query: String,
         forget: bool,
     },
-    /// Read the admin's notes again, and try the provider again after it refused the settings.
+    /// Read `config/chat/` again, and try the provider at once, whatever it answered last.
     Reload,
 }
 
@@ -27,7 +27,8 @@ pub trait ChatBackend: Send {
     fn send(&mut self, job: Job);
     /// Replies that came in since the last poll.
     fn poll(&mut self) -> Vec<Reply>;
-    /// What the backend is doing, for `lb chat status`; nothing decides by it.
+    /// What the backend is doing, for `lb chat status`: whether requests go first, a line for each thing it tells;
+    /// nothing decides by it.
     fn status(&self) -> String;
     /// Stops it, waiting at most `wait` for it to keep what it remembers.
     fn shutdown(&mut self, wait: Duration);
@@ -60,6 +61,8 @@ impl ChatBackend for NullBackend {
 pub struct Sent {
     pub asked: Vec<ChatRequest>,
     pub summaries: Vec<MapSummary>,
+    /// [`Job::Reload`]s.
+    pub reloads: usize,
 }
 
 /// Tests: answers each request on the next poll with the next canned outcome, the last one over and over.
@@ -97,6 +100,7 @@ impl ChatBackend for FakeBackend {
                 sent.asked.push(*req);
             }
             Job::MapEnd(s) => sent.summaries.push(*s),
+            Job::Reload => sent.reloads += 1,
             _ => {}
         }
     }

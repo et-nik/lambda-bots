@@ -1,5 +1,6 @@
 //! Short names players go by (`Атлас` or `Атласыч` for `ATLAS Gamer`, `Ник` for `ET^NiK`): the prompt shows players
-//! by them, and a bot's line says the main one instead of the full nickname.
+//! by them, and a bot's line says the main one instead of the full nickname. A player without one goes by the
+//! nickname without its tags ([`short`]).
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Aliases {
@@ -8,7 +9,7 @@ pub struct Aliases {
 }
 
 /// Where `needle` starts in `hay` at char boundary `from` or later, ignoring case: (start, end) byte offsets.
-fn find_ci(hay: &str, needle: &str, from: usize) -> Option<(usize, usize)> {
+pub(crate) fn find_ci(hay: &str, needle: &str, from: usize) -> Option<(usize, usize)> {
     let needle: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
     if needle.is_empty() {
         return None;
@@ -76,6 +77,15 @@ impl Aliases {
         self.of(nick).unwrap_or(nick)
     }
 
+    /// Every nickname with aliases and every alias: names a line may hold, to leave out of its checks.
+    pub fn words(&self) -> Vec<String> {
+        self.names
+            .iter()
+            .flat_map(|(nick, aliases)| std::iter::once(nick).chain(aliases))
+            .cloned()
+            .collect()
+    }
+
     /// `line` with every whole nickname that has aliases written as the main one: of overlapping nicknames the longest
     /// wins, and an alias written is never taken for a nickname in turn.
     pub fn apply(&self, line: &str) -> String {
@@ -103,6 +113,56 @@ impl Aliases {
         out.push_str(&line[at..]);
         out
     }
+}
+
+/// `s` without the bracketed group of ten characters at most it starts with (`[B] x` → ` x`).
+fn lead_group(s: &str) -> Option<&str> {
+    let open = s.chars().next()?;
+    let close = match open {
+        '[' => ']',
+        '(' => ')',
+        '{' => '}',
+        '<' => '>',
+        _ => return None,
+    };
+    let end = s.find(close)? + 1;
+    (s[..end].chars().count() <= 10).then(|| &s[end..])
+}
+
+/// `s` without the bracketed group of ten characters at most it ends with (`x (1)` → `x `).
+fn tail_group(s: &str) -> Option<&str> {
+    let close = s.chars().next_back()?;
+    let open = match close {
+        ']' => '[',
+        ')' => '(',
+        '}' => '{',
+        '>' => '<',
+        _ => return None,
+    };
+    let start = s.rfind(open)?;
+    (s[start..].chars().count() <= 10).then(|| &s[..start])
+}
+
+/// `nick` without clan tags and decoration, for a line that names a player who has no alias: `[B] K o H T p E` →
+/// `K o H T p E`, `=Кошка=` → `Кошка`, `^2TriM` → `TriM`. The nickname itself when fewer than two letters or
+/// digits would be left.
+pub fn short(nick: &str) -> String {
+    let alnum = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).count();
+    let mut s = nick.trim();
+    while let Some(rest) = [lead_group(s), tail_group(s)]
+        .into_iter()
+        .flatten()
+        .find(|rest| alnum(rest) >= 2)
+    {
+        s = rest.trim();
+    }
+    if let Some(rest) = s.strip_prefix('^')
+        && rest.starts_with(|c: char| c.is_ascii_digit())
+    {
+        s = &rest[1..];
+    }
+    let s = s.trim_matches(|c: char| !c.is_alphanumeric());
+    if alnum(s) >= 2 { s } else { nick.trim() }.to_string()
 }
 
 #[cfg(test)]
@@ -139,8 +199,8 @@ mod tests {
     fn lines_say_aliases_for_whole_nicknames() {
         let a = aliases();
         assert_eq!(
-            a.apply("ATLAS Gamer, сам ты читер"),
-            "Атлас, сам ты читер",
+            a.apply("ATLAS Gamer, сам ты кемпер"),
+            "Атлас, сам ты кемпер",
             "the main alias"
         );
         assert_eq!(
@@ -159,5 +219,39 @@ mod tests {
             "Атлас и Геймер, Атлашка",
             "the longer nickname wins, an alias written stays"
         );
+    }
+
+    #[test]
+    fn every_name_to_leave_out() {
+        let a = aliases();
+        let words = a.words();
+        for name in ["ATLAS Gamer", "Атлас", "Атласыч", "ET^NiK", "Ник", "Bobby", "Бобби"] {
+            assert!(words.iter().any(|w| w == name), "{name}");
+        }
+        assert_eq!(words.len(), 9);
+        assert!(Aliases::default().words().is_empty());
+    }
+
+    #[test]
+    fn short_names_drop_tags_and_decoration() {
+        for (nick, short_name) in [
+            ("[B] K o H T p E", "K o H T p E"),
+            ("=Кошка=", "Кошка"),
+            ("[gs-m] half-life", "half-life"),
+            ("6i6a :>>>>>", "6i6a"),
+            ("-|NoS|-", "NoS"),
+            ("^2TriM", "TriM"),
+            ("(1)player", "player"),
+            ("PUTOS VAGOSSS", "PUTOS VAGOSSS"),
+            ("0-BuTaJIuK-0", "0-BuTaJIuK-0"),
+            ("[hldm]_rafik", "rafik"),
+            ("Gordon (2)", "Gordon"),
+            ("[TAG][X] Gordon", "Gordon"),
+            ("[ABC]", "ABC"),
+            ("[X]", "[X]"),
+            ("*^*", "*^*"),
+        ] {
+            assert_eq!(short(nick), short_name, "{nick}");
+        }
     }
 }

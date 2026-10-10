@@ -117,18 +117,33 @@ pub struct Entry {
 pub enum Notable {
     /// `victim` died `times` times in a row to `killer`.
     Nemesis { killer: Who, victim: Who, times: u32 },
-    /// A crowbar kill.
+    /// A crowbar kill, outside GunGame.
     Humiliation { killer: Who, victim: Who },
     /// Blew themselves up.
     OwnBlast { victim: Who, weapon: String },
-    /// Killed the player who killed them last.
-    Revenge { killer: Who, victim: Who },
-    /// `count` kills within a few seconds.
-    Multikill { killer: Who, count: u32 },
-    /// `count` kills without dying.
-    Streak { killer: Who, count: u32 },
+    /// Killed the player who killed them last; `run`: how many times in a row that player had killed them.
+    Revenge { killer: Who, victim: Who, run: u32 },
+    /// `count` kills within a few seconds; `humans`: how many of the victims were humans.
+    Multikill { killer: Who, count: u32, humans: u32 },
+    /// `count` kills without dying; `humans`: how many of the victims were humans.
+    Streak { killer: Who, count: u32, humans: u32 },
     /// Left soon after dying `deaths` times in a row.
     RageQuit { who: Who, deaths: u32 },
+}
+
+impl Notable {
+    /// The players in the moment, the one it is about first.
+    pub fn people(&self) -> Vec<&Who> {
+        match self {
+            Notable::Nemesis { killer, victim, .. }
+            | Notable::Humiliation { killer, victim }
+            | Notable::Revenge { killer, victim, .. } => vec![killer, victim],
+            Notable::Multikill { killer: who, .. }
+            | Notable::Streak { killer: who, .. }
+            | Notable::OwnBlast { victim: who, .. }
+            | Notable::RageQuit { who, .. } => vec![who],
+        }
+    }
 }
 
 /// One player's map so far.
@@ -141,13 +156,15 @@ pub struct Score {
     pub suicides: u32,
     /// Kills since the last death.
     pub streak: u32,
+    /// Humans among the streak's victims.
+    pub streak_humans: u32,
     /// Deaths since the last kill.
     pub deaths_in_row: u32,
-    /// Who killed this player last, and how many times in a row.
+    /// Who killed this player last, and how many times in a row; over once this player kills them back.
     pub run: Option<(i32, u32)>,
-    pub last_killer: Option<i32>,
     pub last_death: Option<SimTime>,
-    recent_kills: VecDeque<SimTime>,
+    /// Kills of the last few seconds: when, and whether the victim was human.
+    recent_kills: VecDeque<(SimTime, bool)>,
     /// Kills by weapon.
     pub weapons: BTreeMap<String, u32>,
     /// Kills of each other player, by `userid`.
@@ -159,6 +176,9 @@ pub struct Score {
 pub struct Journal {
     pub map: String,
     pub started: SimTime,
+    /// GunGame: the crowbar is the warmup's and the last level's weapon, so a crowbar kill is no humiliation. Set
+    /// before each push: the mode is found out after the map starts.
+    pub gungame: bool,
     entries: VecDeque<Entry>,
     scores: BTreeMap<i32, Score>,
 }
@@ -168,6 +188,7 @@ impl Journal {
         Journal {
             map: map.to_string(),
             started,
+            gungame: false,
             entries: VecDeque::new(),
             scores: BTreeMap::new(),
         }
@@ -218,25 +239,26 @@ impl Journal {
         let mut notable = Vec::new();
         match &event {
             Event::Kill { killer, victim, weapon } => {
+                let human = !victim.bot;
                 let k = self.score_mut(killer);
                 k.kills += 1;
                 k.streak += 1;
+                k.streak_humans += u32::from(human);
                 k.deaths_in_row = 0;
                 *k.weapons.entry(weapon.to_ascii_lowercase()).or_default() += 1;
                 *k.victims.entry(victim.userid).or_default() += 1;
-                k.recent_kills.retain(|&at| t.since(at) <= MULTIKILL_WINDOW);
-                k.recent_kills.push_back(t);
-                let (streak, quick) = (k.streak, k.recent_kills.len() as u32);
-                let revenge = k.last_killer == Some(victim.userid);
-                if revenge {
-                    k.last_killer = None;
-                }
+                k.recent_kills.retain(|&(at, _)| t.since(at) <= MULTIKILL_WINDOW);
+                k.recent_kills.push_back((t, human));
+                let quick = k.recent_kills.len() as u32;
+                let quick_humans = k.recent_kills.iter().filter(|&&(_, h)| h).count() as u32;
+                let (streak, streak_humans) = (k.streak, k.streak_humans);
+                let revenge = k.run.take_if(|(id, _)| *id == victim.userid).map(|(_, run)| run);
                 let v = self.score_mut(victim);
                 v.deaths += 1;
                 v.streak = 0;
+                v.streak_humans = 0;
                 v.deaths_in_row += 1;
                 v.last_death = Some(t);
-                v.last_killer = Some(killer.userid);
                 let times = match v.run {
                     Some((id, n)) if id == killer.userid => n + 1,
                     _ => 1,
@@ -249,28 +271,31 @@ impl Journal {
                         times,
                     });
                 }
-                if weapon.eq_ignore_ascii_case("crowbar") {
+                if weapon.eq_ignore_ascii_case("crowbar") && !self.gungame {
                     notable.push(Notable::Humiliation {
                         killer: killer.clone(),
                         victim: victim.clone(),
                     });
                 }
-                if revenge {
+                if let Some(run) = revenge {
                     notable.push(Notable::Revenge {
                         killer: killer.clone(),
                         victim: victim.clone(),
+                        run,
                     });
                 }
                 if quick >= 3 {
                     notable.push(Notable::Multikill {
                         killer: killer.clone(),
                         count: quick,
+                        humans: quick_humans,
                     });
                 }
                 if streak.is_multiple_of(STREAK_STEP) {
                     notable.push(Notable::Streak {
                         killer: killer.clone(),
                         count: streak,
+                        humans: streak_humans,
                     });
                 }
             }
@@ -280,6 +305,7 @@ impl Journal {
                 v.deaths += 1;
                 v.suicides += u32::from(own);
                 v.streak = 0;
+                v.streak_humans = 0;
                 v.deaths_in_row += 1;
                 v.last_death = Some(t);
                 if own && is_explosive(weapon) {
@@ -364,13 +390,123 @@ mod tests {
             n,
             vec![Notable::Revenge {
                 killer: bot.clone(),
-                victim: atlas.clone()
+                victim: atlas.clone(),
+                run: 4
             }]
         );
         assert_eq!(j.duel(atlas.userid, bot.userid), (4, 1));
         assert!(j.fought(bot.userid, atlas.userid, SimTime(70.0)));
         assert!(!j.fought(bot.userid, atlas.userid, SimTime(81.0)));
         assert_eq!(j.score(atlas.userid).unwrap().weapons["shotgun"], 3);
+    }
+
+    #[test]
+    fn a_revenge_tells_the_run_and_ends_it() {
+        let (h, bot, x) = (who(1, "h", false), who(2, "bot", true), who(3, "x", false));
+        let mut j = Journal::new("x", SimTime(0.0));
+        for t in [1.0, 20.0, 40.0] {
+            kill(&mut j, t, &h, &bot, "shotgun");
+        }
+        let revenge = Notable::Revenge {
+            killer: bot.clone(),
+            victim: h.clone(),
+            run: 3,
+        };
+        assert_eq!(kill(&mut j, 60.0, &bot, &h, "shotgun"), vec![revenge]);
+        assert!(kill(&mut j, 80.0, &bot, &h, "shotgun").is_empty(), "one revenge a run");
+        kill(&mut j, 100.0, &h, &bot, "shotgun");
+        kill(&mut j, 120.0, &h, &bot, "shotgun");
+        let n = kill(&mut j, 140.0, &h, &bot, "shotgun");
+        assert!(
+            n.contains(&Notable::Nemesis {
+                killer: h.clone(),
+                victim: bot.clone(),
+                times: 3
+            }),
+            "the bot got one back, so the count began again: {n:?}"
+        );
+        kill(&mut j, 160.0, &x, &bot, "shotgun");
+        assert!(
+            kill(&mut j, 180.0, &bot, &h, "shotgun").is_empty(),
+            "x killed the bot last"
+        );
+    }
+
+    #[test]
+    fn no_humiliation_in_gungame() {
+        let (h, bot) = (who(1, "h", false), who(2, "bot", true));
+        let mut j = Journal::new("gg_cold_rock", SimTime(0.0));
+        j.gungame = true;
+        assert!(kill(&mut j, 1.0, &h, &bot, "crowbar").is_empty());
+        j.gungame = false;
+        assert_eq!(
+            kill(&mut j, 30.0, &h, &bot, "crowbar"),
+            vec![Notable::Humiliation {
+                killer: h.clone(),
+                victim: bot.clone()
+            }]
+        );
+    }
+
+    #[test]
+    fn multikills_and_streaks_count_the_humans_killed() {
+        let (bot, other, h1, h2) = (
+            who(1, "bot", true),
+            who(2, "other", true),
+            who(3, "h1", false),
+            who(4, "h2", false),
+        );
+        let mut j = Journal::new("x", SimTime(0.0));
+        kill(&mut j, 1.0, &bot, &other, "9mmAR");
+        kill(&mut j, 2.0, &bot, &h1, "9mmAR");
+        let n = kill(&mut j, 3.0, &bot, &other, "9mmAR");
+        assert!(
+            n.contains(&Notable::Multikill {
+                killer: bot.clone(),
+                count: 3,
+                humans: 1
+            }),
+            "{n:?}"
+        );
+        kill(&mut j, 20.0, &bot, &h2, "gauss");
+        let n = kill(&mut j, 40.0, &bot, &other, "gauss");
+        assert!(
+            n.contains(&Notable::Streak {
+                killer: bot.clone(),
+                count: 5,
+                humans: 2
+            }),
+            "{n:?}"
+        );
+        j.push(
+            SimTime(50.0),
+            Event::Died {
+                victim: bot.clone(),
+                weapon: "world".into(),
+            },
+        );
+        let s = j.score(bot.userid).unwrap();
+        assert_eq!((s.streak, s.streak_humans), (0, 0), "a death ends the streak");
+        let n: Vec<Notable> = [60.0, 61.0, 62.0, 80.0, 100.0]
+            .into_iter()
+            .flat_map(|t| kill(&mut j, t, &bot, &other, "gauss"))
+            .collect();
+        assert!(
+            n.contains(&Notable::Multikill {
+                killer: bot.clone(),
+                count: 3,
+                humans: 0
+            }),
+            "{n:?}"
+        );
+        assert!(
+            n.contains(&Notable::Streak {
+                killer: bot.clone(),
+                count: 5,
+                humans: 0
+            }),
+            "{n:?}"
+        );
     }
 
     #[test]
@@ -387,13 +523,15 @@ mod tests {
         let n = kill(&mut j, 5.0, &a, &d, "9mmAR");
         assert!(n.contains(&Notable::Multikill {
             killer: a.clone(),
-            count: 3
+            count: 3,
+            humans: 3
         }));
         kill(&mut j, 30.0, &a, &b, "gauss");
         let n = kill(&mut j, 60.0, &a, &b, "gauss");
         assert!(n.contains(&Notable::Streak {
             killer: a.clone(),
-            count: 5
+            count: 5,
+            humans: 5
         }));
         let n = j.push(
             SimTime(70.0),

@@ -77,6 +77,8 @@ pub struct ChatTraits {
     pub style: Option<String>,
     pub manner: u8,
     pub about: Option<String>,
+    /// More names players call it by (`chat.call`): a line with one of them speaks to it.
+    pub call: Vec<String>,
 }
 
 impl ChatTraits {
@@ -107,6 +109,12 @@ impl ChatTraits {
             style: text(spec.style),
             manner,
             about: text(spec.about),
+            call: spec
+                .call
+                .into_iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect(),
         }
     }
 }
@@ -360,6 +368,7 @@ mod tests {
                 typing_cpm: Some(400.0),
                 style: Some("  ".into()),
                 about: Some("loves the crossbow".into()),
+                call: vec![" Джина ".into(), "Джинка".into()],
             }),
             ..base
         };
@@ -374,6 +383,8 @@ mod tests {
             (b.chat.style.as_deref(), b.chat.about.as_deref()),
             (None, Some("loves the crossbow"))
         );
+        assert!(a.chat.call.is_empty());
+        assert_eq!(b.chat.call, ["Джина", "Джинка"], "names trimmed");
         assert_eq!((a.chat.manner, a.chat.typing_rank), (b.chat.manner, b.chat.typing_rank));
     }
 
