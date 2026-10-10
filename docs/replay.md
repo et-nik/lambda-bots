@@ -66,9 +66,9 @@ source differs, only when the core version number does.
   - cvar values and interned strings;
   - personalities that come back and those asked for with `lb add`;
   - the master seed and the random state;
-  - the chat's state: the players present, the talks under way, the bots' recent lines, when each nickname was last
-    on the server (for greetings), the gist of players' recent lines (for repeats) and the hourly cap of lines nobody
-    asked for;
+  - the chat's state: the players in the game when the last map ended, the talks under way, the bots' recent lines,
+    when each nickname was last on the server (for greetings), the gist of players' recent lines and the bots asked
+    to answer them (for repeats) and the hourly cap of lines nobody asked for;
 - the files the runtime reads:
   - `config/lambdabots.yaml`, `config/difficulty.yaml`, `config/styles/`;
   - `profiles/`, `names/`, `data/profiles.yaml`;

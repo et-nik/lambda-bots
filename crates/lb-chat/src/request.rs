@@ -247,7 +247,8 @@ pub struct ChatRequest {
     pub chat: Vec<Recent>,
     /// The bot's own lines lately, oldest first.
     pub own: Vec<Said>,
-    /// Lines of the talk with the trigger's player older than what `chat` shows, oldest first.
+    /// The bot's talk with the player the request is for ([`crate::prompt::partner`]), oldest first; the prompt shows
+    /// only the lines `chat` does not.
     pub talk: Vec<Said>,
     pub language: String,
     /// Characters the line may take.
@@ -289,8 +290,8 @@ pub struct Reply {
     pub outcome: Outcome,
 }
 
-/// What chat carries across a map change: who was on the server, so they are not greeted again, and what the chat
-/// keeps from map to map, its times already moved back by the old map's length ([`Social::map_end`]).
+/// What chat carries across a map change: who was in the game, so they are not greeted again, and what the chat keeps
+/// from map to map, its times already moved back by the old map's length ([`Social::map_end`]).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Carry {
     pub humans: Vec<i32>,
@@ -489,7 +490,7 @@ mod tests {
         social
             .players
             .wrote("Gordon", SimTime(590.0), crate::addressing::gist("Привет Плутон!", &[]));
-        social.players.answered("Gordon", SimTime(590.0));
+        social.players.answered("Gordon", SimTime(590.0), "Plutonium");
         social.players.greet("Gordon", SimTime(10.0));
         assert!(social.remarks.take(SimTime(400.0), 6.0));
         social.mark_saved();

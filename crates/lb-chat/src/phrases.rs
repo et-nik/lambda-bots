@@ -10,7 +10,7 @@ use lb_core::rng::Pcg32;
 use lb_styles::persona::CHAT_MANNERS;
 
 use crate::aliases::{self, Aliases};
-use crate::journal::{Event, Notable, Who};
+use crate::journal::{Event, Notable, STREAK_SPOKEN, Who};
 use crate::lang::{self, Lang};
 use crate::profanity;
 use crate::prompt;
@@ -18,19 +18,19 @@ use crate::request::{BotCard, ChatRequest, Recent, Trigger};
 
 /// Phrases the ring keeps: one of them is not picked again while others are left.
 pub const RING: usize = 30;
-/// Kills in a row from which another player's streak is a moment.
-const STREAK_OTHER: u32 = 10;
 
-/// The moment `trigger` is for the bot whose `userid` is `bot`: its own streak or another player's, a greeting for a
-/// player who joined or said hi to everybody. `None` for an answer to a player's line, and for the sides of a moment
-/// no phrase is for (a revenge on the bot, the bot as a nemesis, a rage quit).
+/// The moment `trigger` is for the bot whose `userid` is `bot`: its own streak or another player's (from
+/// [`STREAK_SPOKEN`] kills), a greeting for a player who joined or said hi to everybody. `None` for an answer to a
+/// player's line, and for the sides of a moment no phrase is for (a revenge on the bot, the bot as a nemesis, a rage
+/// quit, a map another bot or nobody won).
 pub fn key(trigger: &Trigger, bot: i32) -> Option<Moment> {
     let me = |w: &Who| w.userid == bot;
     match trigger {
         Trigger::Joined { .. } | Trigger::Greeted { .. } => Some(Moment::Greet),
         Trigger::Notable(n) => match n {
+            Notable::Streak { count, .. } if *count < STREAK_SPOKEN => None,
             Notable::Streak { killer, .. } if me(killer) => Some(Moment::Streak),
-            Notable::Streak { count, .. } => (*count >= STREAK_OTHER).then_some(Moment::StreakOther),
+            Notable::Streak { .. } => Some(Moment::StreakOther),
             Notable::Multikill { killer, .. } if me(killer) => Some(Moment::Multikill),
             Notable::Multikill { .. } => Some(Moment::MultikillOther),
             Notable::Revenge { killer, .. } => me(killer).then_some(Moment::Revenge),
@@ -44,7 +44,8 @@ pub fn key(trigger: &Trigger, bot: i32) -> Option<Moment> {
         Trigger::KilledWhileTyping { .. } => Some(Moment::KilledTyping),
         Trigger::LastLevel => Some(Moment::LastLevel),
         Trigger::MatchEnd { won: true, .. } => Some(Moment::Win),
-        Trigger::MatchEnd { .. } => Some(Moment::Gg),
+        Trigger::MatchEnd { winner: Some(w), .. } if !w.bot => Some(Moment::Gg),
+        Trigger::MatchEnd { .. } => None,
         Trigger::Addressed { .. }
         | Trigger::Continued { .. }
         | Trigger::Question { .. }
@@ -145,7 +146,7 @@ pub fn pool(file: &ChatPhrasesFile, code: &str, persona: &str, nick: &str, momen
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fill {
     /// `{name}`: the other player of the moment, a human ([`prompt::partner`]), as the bots call them; none when the
-    /// name swears.
+    /// name swears or holds a slur ([`profanity::nick`]).
     pub name: Option<String>,
     /// `{count}`: kills in a row or at once, or how many times in a row the player killed the bot.
     pub count: Option<u32>,
@@ -167,7 +168,7 @@ impl Fill {
                     .of(&w.name)
                     .map_or_else(|| aliases::short(&w.name), str::to_string)
             })
-            .filter(|name| !profanity::has(name, &[]) && !profanity::slur(name, &[]));
+            .filter(|name| !profanity::nick(name));
         let (count, weapon) = match &req.trigger {
             Trigger::Notable(Notable::Streak { count, .. } | Notable::Multikill { count, .. }) => (Some(*count), None),
             Trigger::Notable(Notable::Nemesis { times, .. }) => (Some(*times), None),
@@ -414,9 +415,15 @@ mod tests {
             count,
             humans: 3,
         };
-        assert_eq!(of(streak(&me, 10)), Some(Moment::Streak));
-        assert_eq!(of(streak(&h, 10)), Some(Moment::StreakOther));
-        assert_eq!(of(streak(&h, 5)), None, "another player's streak from 10");
+        assert_eq!(of(streak(&me, STREAK_SPOKEN)), Some(Moment::Streak));
+        assert_eq!(of(streak(&h, STREAK_SPOKEN)), Some(Moment::StreakOther));
+        for killer in [&me, &h] {
+            assert_eq!(
+                of(streak(killer, STREAK_SPOKEN - 1)),
+                None,
+                "a streak from STREAK_SPOKEN"
+            );
+        }
         let multikill = |killer: &Who| Notable::Multikill {
             killer: killer.clone(),
             count: 3,
@@ -482,6 +489,20 @@ mod tests {
                     won: false,
                 },
                 Some(Moment::Gg),
+            ),
+            (
+                Trigger::MatchEnd {
+                    winner: Some(other.clone()),
+                    won: false,
+                },
+                None,
+            ),
+            (
+                Trigger::MatchEnd {
+                    winner: None,
+                    won: false,
+                },
+                None,
             ),
             (
                 Trigger::Addressed {
@@ -584,7 +605,7 @@ bots:
         assert_eq!(lang(&req, &[]), "en", "an English writer");
         req.trigger = Trigger::Joined { who: gordon() };
         assert_eq!(lang(&req, &[]), "ru");
-        assert_eq!(lang(&req, &["i dont understand cyrillic"]), "en", "the memory tells");
+        assert_eq!(lang(&req, &["i cant read cyrillic"]), "en", "the memory tells");
         req.chat = vec![Recent {
             age: 10.0,
             event: Event::Chat {
@@ -638,17 +659,23 @@ bots:
             who: who(3, name, false),
         };
         assert_eq!(
-            of(joined("[B] K o H T p E"), Lang::Ru, &none).name.as_deref(),
-            Some("K o H T p E")
+            of(joined("[N] C o B A"), Lang::Ru, &none).name.as_deref(),
+            Some("C o B A")
         );
         let mut aliases = Aliases::default();
-        aliases.insert("[B] K o H T p E", &["Контра", "Контрик"]);
+        aliases.insert("[N] C o B A", &["Сова", "Совушка"]);
         assert_eq!(
-            of(joined("[B] K o H T p E"), Lang::Ru, &aliases).name.as_deref(),
-            Some("Контра")
+            of(joined("[N] C o B A"), Lang::Ru, &aliases).name.as_deref(),
+            Some("Сова")
         );
-        for name in ["FUCK_YOU_MOTHER_player", "hohol.ua", "Пидор228"] {
+        for name in ["FUCK_THIS_GAME_noob", "xoxol_007", "Пидор228"] {
             assert_eq!(of(joined(name), Lang::Ru, &none).name, None, "{name}");
+        }
+        for name in ["pedik777", "xX_Piderok_Xx", "Pid0r_99", "suka1337", "h0h0l_x"] {
+            assert_eq!(of(joined(name), Lang::Ru, &none).name, None, "{name}");
+        }
+        for name in ["Spiderman", "pedikur_pro", "Nordwind"] {
+            assert_eq!(of(joined(name), Lang::Ru, &none).name.as_deref(), Some(name));
         }
         let gg = |winner: Who| Trigger::MatchEnd {
             winner: Some(winner),
@@ -856,6 +883,11 @@ bots:
 
         req.trigger = Trigger::MatchEnd {
             winner: None,
+            won: false,
+        };
+        assert!(Offer::of(&f, &req, &Aliases::default(), &[]).is_none(), "nobody won");
+        req.trigger = Trigger::MatchEnd {
+            winner: Some(who(5, "pedik777", false)),
             won: false,
         };
         let offer = Offer::of(&f, &req, &Aliases::default(), &[]).unwrap();

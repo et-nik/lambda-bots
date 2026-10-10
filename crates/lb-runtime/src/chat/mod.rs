@@ -80,10 +80,19 @@ struct Pending {
     id: u64,
     slot: u8,
     generation: u32,
+    /// The bot's persona: the director marked the player's line answered by it.
+    persona: String,
     /// The player the line answers or greets.
     to: Option<Who>,
+    /// When the player's line it answers came ([`Speak::line_at`]).
+    line_at: Option<SimTime>,
+    /// That line, when the director left it out of the bot's talk with the player (a line or a question to
+    /// everybody, a hello): it goes into the talk with the answer.
+    unheard: Option<String>,
     /// It greets them: a talk it opens stays short until they answer.
     greeting: bool,
+    /// Asking for it marked them greeted: when they were greeted before ([`Speak::greeted`]).
+    greeted: Option<Option<SimTime>>,
     /// It took one of the hour's lines nobody asked for ([`Speak::unasked`]).
     unasked: bool,
 }
@@ -105,7 +114,7 @@ pub struct ChatRuntime {
     causes: Vec<Cause>,
     /// Humans of this map by `userid`, with the keys the memory knows them by.
     keys: BTreeMap<i32, String>,
-    /// Humans who were on the server when the last map ended: they are not new on this one.
+    /// Humans who were in the game when the last map ended: they are not new on this one.
     returning: Vec<i32>,
     /// Moments of this map with humans in them, for the memory.
     moments: Vec<(i32, Notable)>,
@@ -179,25 +188,33 @@ impl ChatRuntime {
         }
     }
 
-    /// A line that will not be said: one nobody asked for gives its remark back.
+    /// A line that will not be said: one nobody asked for gives its remark back, and what asking for it marked is
+    /// taken back, the player's line answered by the bot and the player greeted.
     fn unsaid(&mut self, p: &Pending) {
         if p.unasked {
             self.social.remarks.give();
+        }
+        let Some(to) = &p.to else {
+            return;
+        };
+        if let Some(at) = p.line_at {
+            self.social.unanswered(&to.name, at, &p.persona);
+        }
+        if let Some(before) = p.greeted {
+            self.social.ungreet(&to.name, before);
         }
     }
 
     /// The lines asked for or on their way that `which` picks will not be said.
     fn unsay(&mut self, which: impl Fn(&Pending) -> bool) {
-        let mut unasked = 0;
+        let mut gone = Vec::new();
         for lines in [&mut self.pending, &mut self.answering] {
-            lines.retain(|p| {
-                let gone = which(p);
-                unasked += usize::from(gone && p.unasked);
-                !gone
-            });
+            let (out, kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(lines).into_iter().partition(|p| which(p));
+            *lines = kept;
+            gone.extend(out);
         }
-        for _ in 0..unasked {
-            self.social.remarks.give();
+        for p in &gone {
+            self.unsaid(p);
         }
     }
 
@@ -316,6 +333,7 @@ impl Runtime {
         c.social.map_start();
         if let Some(log) = c.chatlog.as_mut() {
             log.map(map);
+            log.prune_daily(self.config.chat.chatlog_days);
         }
         c.epoch = epoch;
         c.seq = 0;
@@ -332,9 +350,10 @@ impl Runtime {
         c.late_load = late_load;
     }
 
-    /// The map ends: its summary goes to the memory, the new lines of the talks with it; the humans on the server now
-    /// are not new on the next map, and what the chat keeps goes on with them, its times moved back by the map's. All
-    /// of it before a recording of the next map takes what carries over.
+    /// The map ends: its summary goes to the memory, the new lines of the talks with it; the humans in the game now
+    /// are not new on the next map (one still connecting is), and what the chat keeps goes on with those on the
+    /// server, its times moved back by the map's. All of it before a recording of the next map takes what carries
+    /// over.
     pub(crate) fn chat_map_end(&mut self) {
         let humans: Vec<&ClientInfo> = self
             .clients
@@ -343,7 +362,9 @@ impl Runtime {
             .filter(|c| c.connected && !c.is_fake)
             .collect();
         let present: Vec<i32> = humans.iter().map(|c| c.userid).collect();
-        let names: Vec<String> = humans.iter().map(|c| c.name.clone()).collect();
+        let in_game = || humans.iter().filter(|c| c.in_game);
+        let names: Vec<String> = in_game().map(|c| c.name.clone()).collect();
+        let returning: Vec<i32> = in_game().map(|c| c.userid).collect();
         if self.config.chat.enabled
             && self.config.chat.memory.enabled
             && let Some(summary) = self.chat_summary()
@@ -355,7 +376,7 @@ impl Runtime {
         self.chat.keys.retain(|id, _| present.contains(id));
         self.chat.social.present(&names, self.now);
         self.chat.social.map_end(self.now, &present);
-        self.chat.returning = present;
+        self.chat.returning = returning;
     }
 
     fn chat_push(&mut self, event: Event) {
@@ -372,8 +393,8 @@ impl Runtime {
         }
     }
 
-    /// Whether a human put in the server at `at` is back from the map change, not new: on the server when the last
-    /// map ended, or already there when the plugin was loaded into a game under way.
+    /// Whether a human put in the server at `at` is back from the map change, not new: in the game when the last map
+    /// ended, or already there when the plugin was loaded into a game under way.
     fn chat_back(&self, userid: i32, at: SimTime) -> bool {
         self.chat.returning.contains(&userid) || (self.chat.late_load && at.secs() < 2.0)
     }
@@ -479,8 +500,9 @@ impl Runtime {
         self.chat_push(event);
     }
 
-    /// A human's `say` or `say_team`: to the chat log as typed, plugin commands too; the rest is chat. A team line
-    /// outside the modes with teams only its writer sees (the SDK's `Host_Say`): it is in the log alone.
+    /// A human's `say` or `say_team`: to the chat log as typed, plugin commands too, a password masked; the rest is
+    /// chat. A login or registration line ([`sanitize::secret`]) is in the log alone, and so is a team line outside the
+    /// modes with teams, which only its writer sees (the SDK's `Host_Say`).
     pub(crate) fn chat_on_say(&mut self, c: &CommandEvent) {
         let team = c.argv.first().map(|a| a.as_slice()) == Some(b"say_team");
         let text = sanitize::player_line(&String::from_utf8_lossy(&c.line));
@@ -491,7 +513,10 @@ impl Runtime {
             return;
         }
         self.chatlog(|log, days| log.say(days, &from.name, false, team, &text));
-        if sanitize::is_command(&text, &self.config.chat.blocked) || (team && !self.team_mode()) {
+        if sanitize::is_command(&text, &self.config.chat.blocked)
+            || sanitize::secret(&text)
+            || (team && !self.team_mode())
+        {
             return;
         }
         let from_team = self.teams().get(c.slot as usize).copied().unwrap_or(0);
@@ -834,12 +859,22 @@ impl Runtime {
         bot.chat.ask(id, s.priority, s.team, now, notice, keep);
         let (slot, generation, name) = (bot.id.slot, bot.id.generation, bot.persona.name.clone());
         self.chat.unsay(|p| p.slot == slot);
+        let unheard = match &s.trigger {
+            Trigger::Overheard { text, .. }
+            | Trigger::Greeted { text, .. }
+            | Trigger::Question { text, to_me: false, .. } => Some(text.clone()),
+            _ => None,
+        };
         self.chat.pending.push(Pending {
             id,
             slot,
             generation,
+            persona: name.clone(),
             to: s.trigger.to().cloned(),
+            line_at: s.line_at,
+            unheard,
             greeting: matches!(s.trigger, Trigger::Joined { .. } | Trigger::Greeted { .. }),
+            greeted: s.greeted,
             unasked: s.unasked,
         });
         self.chat.counts.asked += 1;
@@ -994,6 +1029,11 @@ impl Runtime {
                 .and_then(|p| p.to.as_ref())
                 .filter(|w| self.clients.find_userid(w.userid).is_some());
             let greeting = asked.as_ref().is_some_and(|p| p.greeting);
+            if let (Some(w), Some(p)) = (to, &asked)
+                && let (Some(at), Some(text)) = (p.line_at, &p.unheard)
+            {
+                self.chat.social.answering(at, &name, w, text);
+            }
             self.chat
                 .social
                 .said(now, &name, to.map(|w| (w.userid, w.name.as_str())), greeting, &line);
@@ -1048,6 +1088,8 @@ impl Runtime {
             priority: Priority::Remark,
             team: false,
             unasked: false,
+            line_at: None,
+            greeted: None,
         });
     }
 

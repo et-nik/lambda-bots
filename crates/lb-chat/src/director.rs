@@ -9,7 +9,7 @@ use lb_core::time::SimTime;
 
 use crate::addressing::{self, BotsTalk, Noise};
 use crate::botchat::Priority;
-use crate::journal::{Event, Journal, Notable, Who};
+use crate::journal::{Event, Journal, NEMESIS, Notable, STREAK_SPOKEN, Who};
 use crate::lang;
 use crate::request::Trigger;
 use crate::talk::{AWAY, GIST_KEEP, Social};
@@ -20,7 +20,7 @@ const FOUGHT_WINDOW: f64 = 60.0;
 const MATCH_END_BOTS: usize = 1;
 /// Seconds an answer waits for its bot, or for the line bucket.
 pub const WAIT_KEEP: f64 = 30.0;
-/// Seconds the same line again, once answered, is a repeat.
+/// Seconds the same line again, once answered (by a bot it names, when it names any), is a repeat.
 const REPEAT: f64 = 300.0;
 /// Seconds from which the same line again, not naming a bot, is one the player keeps sending: a bind.
 const LONG_REPEAT: f64 = 20.0;
@@ -119,6 +119,12 @@ pub struct Speak {
     /// It took one of the hour's lines nobody asked for: give it back ([`crate::talk::Remarks::give`]) when no line
     /// comes of it.
     pub unasked: bool,
+    /// When the player's line it answers came: asking for it marked the line answered by the bot, which
+    /// [`Social::unanswered`] takes back when no line comes of it.
+    pub line_at: Option<SimTime>,
+    /// It marked the player greeted: when they were greeted before it (`Some(None)`: never), which
+    /// [`Social::ungreet`] puts back when no line comes of it.
+    pub greeted: Option<Option<SimTime>>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +198,8 @@ struct Heard<'a> {
     text: &'a str,
     team: bool,
     from_team: u8,
+    /// When it came.
+    at: SimTime,
     /// What it says ([`addressing::gist`]).
     gist: Vec<String>,
 }
@@ -210,6 +218,8 @@ impl Heard<'_> {
             priority,
             team: self.team,
             unasked,
+            line_at: Some(self.at),
+            greeted: None,
         }
     }
 
@@ -236,6 +246,8 @@ fn to_all(bot: &Speaker, trigger: Trigger, priority: Priority, unasked: bool) ->
         priority,
         team: false,
         unasked,
+        line_at: None,
+        greeted: None,
     }
 }
 
@@ -254,6 +266,18 @@ fn waits(trigger: &Trigger) -> bool {
 fn asks_only(text: &str) -> bool {
     let text = text.trim();
     !text.is_empty() && text.chars().all(|c| c == '?')
+}
+
+/// Whether a bot's line asks something: it ends with `?`, smileys and brackets after it aside (`?)`, `? :)`).
+fn ends_asking(text: &str) -> bool {
+    text.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?')
+        .ends_with('?')
+}
+
+/// Whether a line is a yes or a no in signs: `+`, `++`, `-`, three at most.
+fn plus_or_minus(text: &str) -> bool {
+    let text = text.trim();
+    (1..=3).contains(&text.chars().count()) && text.chars().all(|c| c == '+' || c == '-')
 }
 
 /// Whether `last` is at least `secs` ago, or never.
@@ -291,22 +315,15 @@ fn fought(view: &View<'_>, bot: &Speaker, player: &Who) -> bool {
 }
 
 /// How likely the bot answers a player's line in their talk: a question nearly always; a short reply seldom, unless
-/// the bot asked something; anything long after the talk's last line less often.
-fn going_on(text: &str, noise: Option<Noise>, bot: &Speaker, idle: f64, bot_asked: bool) -> f32 {
+/// the bot asked something.
+fn going_on(text: &str, noise: Option<Noise>, bot: &Speaker, bot_asked: bool) -> f32 {
     if addressing::question(text, true) {
         return 0.95;
     }
-    let p = match noise {
+    match noise {
         Some(_) if bot_asked => 0.6,
         Some(_) => Director::chatty(0.15, bot),
         None => 0.75 + 0.2 * bot.chattiness,
-    };
-    p * if idle > 90.0 {
-        0.45
-    } else if idle > 45.0 {
-        0.7
-    } else {
-        1.0
     }
 }
 
@@ -366,6 +383,8 @@ impl Director {
                 priority: Priority::Answer,
                 team: false,
                 unasked: false,
+                line_at: None,
+                greeted: None,
             }];
         }
         if !humans {
@@ -388,6 +407,7 @@ impl Director {
                 text,
                 team: *team,
                 from_team: *from_team,
+                at: now,
                 gist: addressing::gist(text, &bot_words(bots)),
             }),
             _ => None,
@@ -397,22 +417,17 @@ impl Director {
             None => self.event(&view, social, cause),
         };
         let mut out = Vec::new();
-        for speak in wanted {
+        for mut speak in wanted {
             let Some(bot) = bots.iter().find(|b| b.who.slot == speak.slot) else {
                 continue;
             };
             if bot.free(speak.priority) && self.admit(now, speak.priority, speak.unasked, social, limits) {
-                self.spoke(now, &speak, social);
+                self.spoke(now, &mut speak, &bot.persona, social);
                 out.push(speak);
             } else if speak.priority == Priority::Answer && waits(&speak.trigger) {
                 let gist = heard.as_ref().map_or_else(Vec::new, |h| h.gist.clone());
                 self.hold(now, speak, &bot.persona, gist);
             }
-        }
-        if let Some(line) = &heard
-            && !out.is_empty()
-        {
-            social.players.answered(&line.from.name, now);
         }
         out
     }
@@ -445,11 +460,8 @@ impl Director {
             if !self.admit(now, w.speak.priority, w.speak.unasked, social, limits) {
                 break;
             }
-            let w = self.waiting.remove(i);
-            if let Some((from, _)) = w.speak.trigger.line() {
-                social.players.answered(&from.name, w.since);
-            }
-            self.spoke(now, &w.speak, social);
+            let mut w = self.waiting.remove(i);
+            self.spoke(now, &mut w.speak, &w.persona, social);
             out.push(w.speak);
         }
         out
@@ -512,14 +524,20 @@ impl Director {
         taken
     }
 
-    /// What a line asked for uses up: the gap between remarks, a greeting, a player's unasked answer or answered
-    /// question.
-    fn spoke(&mut self, now: SimTime, speak: &Speak, social: &mut Social) {
+    /// What a line asked of the bot `persona` uses up: the gap between remarks, the player's line answered by the bot,
+    /// a greeting, a player's unasked answer or answered question.
+    fn spoke(&mut self, now: SimTime, speak: &mut Speak, persona: &str, social: &mut Social) {
         if speak.priority == Priority::Remark || matches!(speak.trigger, Trigger::Overheard { .. }) {
             self.last_remark = Some(now);
         }
+        if let (Some((from, _)), Some(at)) = (speak.trigger.line(), speak.line_at) {
+            social.players.answered(&from.name, at, persona);
+        }
         match &speak.trigger {
-            Trigger::Joined { who } | Trigger::Greeted { from: who, .. } => social.players.greet(&who.name, now),
+            Trigger::Joined { who } | Trigger::Greeted { from: who, .. } => {
+                speak.greeted = Some(social.players.get(&who.name).and_then(|p| p.greeted));
+                social.players.greet(&who.name, now);
+            }
             Trigger::Overheard { from, .. } => social.players.answer_unasked(&from.name, now),
             Trigger::Question { from, to_me: false, .. } => social.players.answer_question(&from.name, now),
             _ => {}
@@ -547,27 +565,6 @@ impl Director {
         let (now, from, text) = (view.now, line.from, line.text);
         let name = from.name.as_str();
         let hearing: Vec<&Speaker> = view.bots.iter().filter(|b| line.reaches(b)).collect();
-        let language = social.players.language(name, lang::detect(text));
-        if language.is_some_and(|code| lang::foreign(&code, &view.limits.language)) {
-            return Vec::new();
-        }
-        let repeat = social
-            .players
-            .answered_since(name, &line.gist, SimTime(now.secs() - REPEAT))
-            || self.waiting.iter().any(|w| {
-                w.speak.trigger.line().is_some_and(|(who, _)| who.userid == from.userid)
-                    && addressing::same_gist(&w.gist, &line.gist)
-            });
-        let long_repeat = social.players.wrote_between(
-            name,
-            &line.gist,
-            SimTime(now.secs() - GIST_KEEP),
-            SimTime(now.secs() - LONG_REPEAT),
-        );
-        social.players.wrote(name, now, line.gist.clone());
-        if repeat {
-            return Vec::new();
-        }
         let me = name.trim().to_lowercase();
         let others: Vec<String> = social.players.here().filter(|n| *n != me).map(String::from).collect();
         let mut names: Vec<String> = view
@@ -578,9 +575,53 @@ impl Director {
             .cloned()
             .collect();
         names.push(from.name.clone());
+        let language = social.players.language(name, lang::detect_without(text, &names));
+        if language.is_some_and(|code| lang::foreign(&code, &view.limits.language)) {
+            return Vec::new();
+        }
+        let named: Vec<&Speaker> = hearing.iter().copied().filter(|b| b.called(text)).collect();
+        let talk = social
+            .talks
+            .partner(now, from.userid, |p| hearing.iter().any(|b| b.persona == p))
+            .map(|t| {
+                let asked = t.last_mine().filter(|l| ends_asking(&l.text)).map(|l| l.at);
+                (t.bot.clone(), asked)
+            });
+        let partner = talk
+            .as_ref()
+            .and_then(|(p, _)| hearing.iter().copied().find(|b| b.persona == *p));
+        let bot_asked = talk.as_ref().and_then(|(_, asked)| *asked);
+        let noise = addressing::noise(text);
+        // In a talk, a short reply to the bot's question is no repeat unless the player already gave it since the
+        // question; a question is no bind, and another line is one only when sent twice before.
+        let reply = bot_asked.is_some_and(|asked| {
+            (noise.is_some_and(|n| !n.hard()) || plus_or_minus(text))
+                && social.players.last_wrote(name, &line.gist).is_none_or(|t| t < asked)
+        });
+        let asks = partner.is_some() && noise.is_none() && addressing::question(text, true);
+        let to: Vec<&str> = named.iter().map(|b| b.persona.as_str()).collect();
+        let repeat = !reply
+            && (social
+                .players
+                .answered_since(name, &line.gist, SimTime(now.secs() - REPEAT), &to)
+                || self.waiting.iter().any(|w| {
+                    w.speak.trigger.line().is_some_and(|(who, _)| who.userid == from.userid)
+                        && (to.is_empty() || to.contains(&w.persona.as_str()))
+                        && addressing::same_gist(&w.gist, &line.gist)
+                }));
+        let copies = social.players.times_wrote(
+            name,
+            &line.gist,
+            SimTime(now.secs() - GIST_KEEP),
+            SimTime(now.secs() - LONG_REPEAT),
+        );
+        let long_repeat = !reply && !asks && copies >= if partner.is_some() { 2 } else { 1 };
+        social.players.wrote(name, now, line.gist.clone());
+        if repeat {
+            return Vec::new();
+        }
         let touchy = addressing::touchy(text, &names);
         let at_another = touchy && others.iter().any(|o| addressing::names_other(text, o));
-        let named: Vec<&Speaker> = hearing.iter().copied().filter(|b| b.called(text)).collect();
         if !named.is_empty() {
             if at_another {
                 return Vec::new();
@@ -595,18 +636,7 @@ impl Director {
                 .map(|b| line.answer(b, line.addressed(), Priority::Answer, false))
                 .collect();
         }
-        let talk = social
-            .talks
-            .partner(now, from.userid, |p| hearing.iter().any(|b| b.persona == p))
-            .map(|t| {
-                let asked = t.last_mine().is_some_and(|l| l.trim_end().ends_with('?'));
-                (t.bot.clone(), now.since(t.last), asked)
-            });
-        let partner = talk
-            .as_ref()
-            .and_then(|(p, ..)| hearing.iter().copied().find(|b| b.persona == *p));
-        let noise = addressing::noise(text);
-        if noise.is_some_and(Noise::hard) || long_repeat {
+        if (noise.is_some_and(Noise::hard) && !reply) || long_repeat {
             let Some(bot) = partner else {
                 return Vec::new();
             };
@@ -629,11 +659,11 @@ impl Director {
             social.players.set_aside(other, now);
             return Vec::new();
         }
-        if let (Some(bot), Some((_, idle, asked))) = (partner, &talk) {
+        if let Some(bot) = partner {
             if at_another {
                 return Vec::new();
             }
-            let p = going_on(text, noise, bot, *idle, *asked);
+            let p = going_on(text, noise, bot, bot_asked.is_some());
             social.talks.heard(now, &bot.persona, from, text, false);
             if self.chance(p) {
                 return vec![line.answer(bot, line.continued(), Priority::Answer, false)];
@@ -884,13 +914,13 @@ impl Director {
                 None if human(victim) => (self.pick(any, Priority::Remark), 0.08),
                 None => (None, 0.0),
             },
-            Notable::Revenge { killer, victim, run } if human(victim) && *run >= 3 => (bot(killer), 0.2),
+            Notable::Revenge { killer, victim, run } if human(victim) && *run >= NEMESIS => (bot(killer), 0.2),
             Notable::Multikill { killer, count, humans } => match bot(killer) {
                 Some(k) if *humans > 0 => (Some(k), if *count >= 4 { 0.35 } else { 0.2 }),
                 None if human(killer) => (self.pick(any, Priority::Remark), 0.08),
                 _ => (None, 0.0),
             },
-            Notable::Streak { killer, count, humans } if *count >= 10 => match bot(killer) {
+            Notable::Streak { killer, count, humans } if *count >= STREAK_SPOKEN => match bot(killer) {
                 Some(k) if *humans > 0 => (Some(k), 0.12),
                 None if human(killer) => (self.pick(any, Priority::Remark), 0.15),
                 _ => (None, 0.0),
@@ -1154,14 +1184,7 @@ mod tests {
     #[test]
     fn binds_and_laughs_in_a_talk_are_not_answered() {
         let gordon = who(1, "Gordon", false);
-        let noise = [
-            "DIIIIIIEEEEE!!!!1",
-            "ахахаха",
-            "LOL :)",
-            "FUCK YOU!",
-            "gg_cold_rock",
-            "%l",
-        ];
+        let noise = ["RUUUUN!!!1", "ахахаха", "LOL :)", "FUCK OFF!", "gg_cold_rock", "%l"];
         let mut asked = 0;
         for seed in 0..100 {
             let mut r = Room::new(seed, vec![speaker(2, "Plutonium")], roomy());
@@ -1195,6 +1218,62 @@ mod tests {
             );
         }
         assert!(english >= 42, "{english}");
+    }
+
+    /// How many of 100 seeds Plutonium answers Gordon's `last` line by name, after his `before` lines 10 s apart,
+    /// with `here` on the server and the server's language `language`.
+    fn named_answers(language: &str, here: &[&str], before: &[&str], last: &str) -> usize {
+        let gordon = who(1, "Gordon", false);
+        let limits = Limits {
+            language: language.into(),
+            ..roomy()
+        };
+        (0..100)
+            .filter(|&seed| {
+                let mut r = Room::new(seed, vec![speaker(2, "Plutonium")], limits.clone());
+                for name in here {
+                    r.s.arrive(name, SimTime::ZERO);
+                }
+                for (i, line) in before.iter().enumerate() {
+                    r.say(1.0 + 10.0 * i as f64, &gordon, line);
+                }
+                r.say(30.0, &gordon, last)
+                    .iter()
+                    .any(|s| s.slot == 2 && matches!(s.trigger, Trigger::Addressed { .. }))
+            })
+            .count()
+    }
+
+    #[test]
+    fn nicknames_tell_no_language() {
+        let n = named_answers("ru", &["=Glücksritter="], &["gg Glücksritter"], "Plutonium gg");
+        assert!(n >= 85, "a nickname with ü the line before: {n}");
+        let n = named_answers("ru", &["Ben"], &[], "plutonium, kill ben");
+        assert!(n >= 85, "a player named Ben, a Turkish word: {n}");
+        let n = named_answers("ru", &[], &["naber kanka"], "Plutonium gg");
+        assert_eq!(n, 0, "a Turkish line the line before");
+    }
+
+    #[test]
+    fn a_line_naming_two_bots_is_answered_by_both() {
+        let gordon = who(1, "Gordon", false);
+        let bots = vec![speaker(2, "Plutonium"), speaker(3, "Kleiner")];
+        let both = (0..50)
+            .filter(|&seed| {
+                let mut r = Room::new(seed, bots.clone(), roomy());
+                r.say(1.0, &gordon, "kleiner, plutonium, где вы?").len() == 2
+            })
+            .count();
+        assert!(both >= 35, "{both}");
+    }
+
+    #[test]
+    fn a_cyrillic_server_answers_cyrillic_lines() {
+        for line in ["Plutonium, привіт, як справи?", "Plutonium, привет, как дела?"] {
+            let n = named_answers("uk", &[], &[], line);
+            assert!(n >= 85, "{line}: {n}");
+        }
+        assert_eq!(named_answers("uk", &[], &[], "Plutonium naber kanka"), 0, "Turkish");
     }
 
     #[test]
@@ -1288,7 +1367,11 @@ mod tests {
             notables.extend(kill(&mut among_bots, t, &pluto, &gordon, "gauss"));
         }
         notables.extend(among_bots.push(SimTime(61.0), Event::Leave { who: gordon.clone() }));
-        assert!(notables.iter().any(|n| matches!(n, Notable::Streak { count: 10, .. })));
+        assert!(
+            notables
+                .iter()
+                .any(|n| matches!(n, Notable::Streak { count, .. } if *count >= STREAK_SPOKEN))
+        );
         assert!(notables.iter().any(|n| matches!(n, Notable::Nemesis { .. })));
         assert!(notables.iter().any(|n| matches!(n, Notable::RageQuit { .. })));
         let mut gungame = Journal::new("gg_cold_rock", SimTime::ZERO);
@@ -1336,10 +1419,18 @@ mod tests {
                 })
                 .count()
         };
-        assert_eq!(said(&streak(5, 5)), 0, "a streak of its own from 10");
-        assert!(said(&streak(10, 1)) > 0);
-        assert_eq!(said(&revenge(2)), 0, "a revenge after 3 deaths in a row");
-        assert!(said(&revenge(3)) > 0);
+        assert_eq!(
+            said(&streak(STREAK_SPOKEN - 1, 5)),
+            0,
+            "a streak of its own from STREAK_SPOKEN"
+        );
+        assert!(said(&streak(STREAK_SPOKEN, 1)) > 0);
+        assert_eq!(
+            said(&revenge(NEMESIS - 1)),
+            0,
+            "a revenge after NEMESIS deaths in a row"
+        );
+        assert!(said(&revenge(NEMESIS)) > 0);
         let nemesis = Notable::Nemesis {
             killer: gordon.clone(),
             victim: pluto.clone(),
@@ -1418,44 +1509,44 @@ mod tests {
         for seed in 0..100 {
             let mut r = Room::new(seed, bots.clone(), roomy());
             r.s.arrive("Gordon", SimTime::ZERO);
-            r.s.arrive("leps", SimTime::ZERO);
-            assert!(r.say(1.0, &gordon, "лепс, го дуэль на рельсах").is_empty());
+            r.s.arrive("Brek", SimTime::ZERO);
+            assert!(r.say(1.0, &gordon, "брек, го дуэль на рельсах").is_empty());
             let p = &r.s.players;
-            assert!(p.aside("Gordon", SimTime(30.0)) && p.aside("leps", SimTime(30.0)));
+            assert!(p.aside("Gordon", SimTime(30.0)) && p.aside("Brek", SimTime(30.0)));
             assert!(!p.aside("Gordon", SimTime(61.0)));
             assert!(
-                r.say(2.0, &gordon, "плутониум, лепс за путина").is_empty(),
+                r.say(2.0, &gordon, "плутониум, брек за путина").is_empty(),
                 "touchy, and about another human"
             );
         }
         let touchy_to_the_bot = (0..50)
             .filter(|&seed| {
                 let mut r = Room::new(seed, bots.clone(), roomy());
-                r.s.arrive("leps", SimTime::ZERO);
+                r.s.arrive("Brek", SimTime::ZERO);
                 !r.say(1.0, &gordon, "плутониум, а ты за путина?").is_empty()
             })
             .count();
         assert!(touchy_to_the_bot >= 40, "{touchy_to_the_bot}");
         let mut r = Room::new(3, bots.clone(), roomy());
-        r.s.arrive("leps", SimTime::ZERO);
+        r.s.arrive("Brek", SimTime::ZERO);
         r.say(1.0, &gordon, "плутон, привет");
         r.bot_says(3.0, 2, Some(&gordon), "привет");
         assert!(
-            r.say(5.0, &gordon, "лепс тоже тут, кстати").is_empty(),
+            r.say(5.0, &gordon, "брек тоже тут, кстати").is_empty(),
             "called out first"
         );
-        assert!(r.s.players.aside("leps", SimTime(6.0)));
+        assert!(r.s.players.aside("Brek", SimTime(6.0)));
         let goes_on = (0..100)
             .filter(|&seed| {
                 let mut r = Room::new(seed, bots.clone(), roomy());
-                r.s.arrive("leps", SimTime::ZERO);
+                r.s.arrive("Brek", SimTime::ZERO);
                 r.say(1.0, &gordon, "плутон, привет");
                 r.bot_says(3.0, 2, Some(&gordon), "привет");
                 assert!(
-                    r.say(4.0, &gordon, "а лепс за путина").is_empty(),
+                    r.say(4.0, &gordon, "а брек за путина").is_empty(),
                     "touchy, and about another human, in a talk too"
                 );
-                continued_by(&r.say(5.0, &gordon, "а ты видел, как лепс играет?"), 2)
+                continued_by(&r.say(5.0, &gordon, "а ты видел, как брек играет?"), 2)
             })
             .count();
         assert!(goes_on >= 85, "a name inside the line keeps the talk: {goes_on}");
@@ -1617,5 +1708,290 @@ mod tests {
         let mut d = Director::new(1, SimTime(0.0), &limits());
         let out = d.react(SimTime(1.0), &test, &bots, &j, &mut Social::default(), false, &limits());
         assert_eq!(out.len(), 1, "tests need no humans");
+    }
+
+    /// Gordon names Plutonium at 1 s, and it says `answer` to him at 5 s: a talk.
+    fn talk(seed: u64, answer: &str) -> Room {
+        let gordon = who(1, "Gordon", false);
+        let mut r = Room::new(seed, vec![speaker(2, "Plutonium")], roomy());
+        r.say(1.0, &gordon, "плутон, привет");
+        r.bot_says(5.0, 2, Some(&gordon), answer);
+        r
+    }
+
+    #[test]
+    fn questions_and_replies_in_a_talk_are_answered_again() {
+        let gordon = who(1, "Gordon", false);
+        let again: Vec<bool> = (0..)
+            .filter_map(|seed| {
+                let mut r = talk(seed, "привет, как сам?");
+                if !continued_by(&r.say(10.0, &gordon, "а ты?"), 2) {
+                    return None;
+                }
+                r.bot_says(14.0, 2, Some(&gordon), "да норм");
+                r.say(1800.0, &gordon, "плутон, го на рельсы");
+                r.bot_says(1805.0, 2, Some(&gordon), "го");
+                Some(continued_by(&r.say(1810.0, &gordon, "а ты?"), 2))
+            })
+            .take(100)
+            .collect();
+        let n = again.iter().filter(|&&on| on).count();
+        assert!(n >= 85, "a question answered in a talk 30 min before: {n}");
+
+        let (mut first, mut second) = (0, 0);
+        for seed in 0..300 {
+            let mut r = talk(seed, "привет, го на рельсы?");
+            if !continued_by(&r.say(10.0, &gordon, "да"), 2) {
+                continue;
+            }
+            first += 1;
+            assert!(
+                r.say(16.0, &gordon, "да").is_empty(),
+                "seed {seed}: the same reply to the same question"
+            );
+            r.bot_says(65.0, 2, Some(&gordon), "а потом на квад?");
+            second += usize::from(continued_by(&r.say(70.0, &gordon, "да"), 2));
+        }
+        assert!(
+            (first * 45..=first * 75).contains(&(second * 100)),
+            "the same reply to the bot's next question, 0.6: {second} of {first}"
+        );
+
+        let again: Vec<bool> = (0..)
+            .filter_map(|seed| {
+                let mut r = talk(seed, "привет");
+                if !r.say(10.0, &gordon, "а ты где сейчас?").is_empty() {
+                    return None;
+                }
+                Some(continued_by(&r.say(35.0, &gordon, "а ты где сейчас?"), 2))
+            })
+            .take(100)
+            .collect();
+        let n = again.iter().filter(|&&on| on).count();
+        assert!(n >= 85, "a question nobody answered, asked again: {n}");
+
+        let (mut held, mut carried) = (0, 0);
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            r.bots[0].busy = Some(Priority::Answer);
+            r.say(100.0, &gordon, "а ты где сейчас?");
+            if !r.d.has_waiting() {
+                continue;
+            }
+            held += 1;
+            r.s.present(&["Gordon".into()], SimTime(105.0));
+            r.s.map_end(SimTime(105.0), &[gordon.userid]);
+            r.d = Director::new(seed + 1000, SimTime::ZERO, &r.limits);
+            r.j = Journal::new("stalkyard", SimTime::ZERO);
+            r.s.map_start();
+            r.bots[0].busy = None;
+            r.s.arrive("Gordon", SimTime(1.0));
+            carried += usize::from(continued_by(&r.say(30.0, &gordon, "а ты где сейчас?"), 2));
+        }
+        assert!(held >= 85, "{held}");
+        assert!(
+            carried * 100 >= held * 85,
+            "a held question lost with the map, asked again: {carried} of {held}"
+        );
+
+        let late = (0..200)
+            .filter(|&seed| {
+                continued_by(
+                    &talk(seed, "привет").say(100.0, &gordon, "только что зашёл с работы"),
+                    2,
+                )
+            })
+            .count();
+        assert!(late >= 150, "0.75 + 0.2c while the talk lasts: {late}");
+    }
+
+    #[test]
+    fn binds_in_a_talk_get_an_answer_once_or_twice() {
+        let gordon = who(1, "Gordon", false);
+        let mut answered_once = 0;
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut at = Vec::new();
+            for i in 0..40 {
+                let t = 10.0 + 30.0 * f64::from(i);
+                if !r.say(t, &gordon, "кто на рельсы?").is_empty() {
+                    at.push(t);
+                    r.bot_says(t + 4.0, 2, Some(&gordon), "я пойду");
+                }
+            }
+            assert!(at.windows(2).all(|w| w[1] - w[0] >= 300.0), "seed {seed}: {at:?}");
+            assert!(
+                r.s.talks.partner(SimTime(1200.0), gordon.userid, |_| true).is_none(),
+                "seed {seed}: the talk is over"
+            );
+            answered_once += usize::from(!at.is_empty());
+        }
+        assert!(answered_once >= 90, "{answered_once}");
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut answers = 0;
+            for i in 0..40 {
+                let t = 10.0 + 30.0 * f64::from(i);
+                if !r.say(t, &gordon, "ЛОВИ ПОДАРОЧЕК!!!").is_empty() {
+                    answers += 1;
+                    r.bot_says(t + 4.0, 2, Some(&gordon), "держи ответку");
+                }
+            }
+            assert!(answers <= 2, "seed {seed}: {answers}");
+        }
+    }
+
+    #[test]
+    fn a_short_reply_to_the_bot_s_question_is_answered_more_often() {
+        let gordon = who(1, "Gordon", false);
+        let answered = |asked: &str, reply: &str| {
+            (0..300)
+                .filter(|&seed| continued_by(&talk(seed, asked).say(10.0, &gordon, reply), 2))
+                .count()
+        };
+        for asked in ["го на рельсы?", "ну что, ещё раунд?)", "го 1на1? :)"] {
+            for reply in ["да", "+", "--"] {
+                let n = answered(asked, reply);
+                assert!((150..=210).contains(&n), "0.6 after {asked:?}: {reply:?} {n}");
+            }
+        }
+        assert_eq!(answered("привет", "+"), 0, "a plus to no question is noise");
+        let n = answered("привет", "да");
+        assert!(n <= 70, "chatty(0.15) to no question: {n}");
+        assert_eq!(answered("го на рельсы?", "+++++"), 0, "signs, not a yes");
+    }
+
+    #[test]
+    fn the_same_words_to_another_bot_are_no_repeat() {
+        let gordon = who(1, "Gordon", false);
+        let bots = vec![speaker(2, "Plutonium"), speaker(3, "Kleiner")];
+        let addressed = |out: &[Speak], slot: u8| {
+            out.iter()
+                .any(|s| s.slot == slot && matches!(s.trigger, Trigger::Addressed { .. }))
+        };
+        for (first, second) in [("плутон, ты где?", "kleiner, ты где?"), ("gg Plutonium", "gg Kleiner")]
+        {
+            let (mut asked, mut again) = (0, 0);
+            for seed in 0..200 {
+                let mut r = Room::new(seed, bots.clone(), roomy());
+                if !addressed(&r.say(1.0, &gordon, first), 2) {
+                    continue;
+                }
+                asked += 1;
+                let out = r.say(20.0, &gordon, second);
+                again += usize::from(addressed(&out, 3));
+                assert!(!addressed(&out, 2));
+                for t in [23.0, 26.0, 29.0] {
+                    assert!(r.say(t, &gordon, first).is_empty(), "seed {seed}: {first:?} again");
+                }
+            }
+            assert!(asked >= 150, "{first:?}: {asked}");
+            assert!(
+                again * 100 >= asked * 85,
+                "{second:?} after {first:?} was answered: {again} of {asked}"
+            );
+        }
+        let (mut greeted, mut named) = (0, 0);
+        for seed in 0..300 {
+            let mut r = Room::new(seed, vec![chatty(2, "Plutonium"), chatty(3, "Kleiner")], roomy());
+            if !r.say(1.0, &gordon, "привет").iter().any(|s| s.slot == 3) {
+                continue;
+            }
+            greeted += 1;
+            named += usize::from(addressed(&r.say(60.0, &gordon, "Привет Плутон!"), 2));
+        }
+        assert!(greeted >= 30, "{greeted}");
+        assert!(
+            named * 100 >= greeted * 85,
+            "a hello by name after another bot's greeting: {named} of {greeted}"
+        );
+        for seed in 0..50 {
+            let mut r = Room::new(seed, bots.clone(), roomy());
+            if !addressed(&r.say(1.0, &gordon, "плутон, ты где?"), 2) {
+                continue;
+            }
+            assert!(
+                r.say(5.0, &gordon, "плутон, kleiner, ты где?").is_empty(),
+                "one of the bots named answered it"
+            );
+        }
+        let (mut held, mut answered) = (0, 0);
+        for seed in 0..100 {
+            let mut r = Room::new(seed, bots.clone(), roomy());
+            r.bots[1].busy = Some(Priority::Answer);
+            r.say(1.0, &gordon, "kleiner, ты где?");
+            if !r.d.has_waiting() {
+                continue;
+            }
+            held += 1;
+            assert!(
+                r.say(4.0, &gordon, "kleiner, ты где?").is_empty(),
+                "it waits for Kleiner"
+            );
+            answered += usize::from(addressed(&r.say(7.0, &gordon, "плутон, ты где?"), 2));
+        }
+        assert!(held >= 85, "{held}");
+        assert!(
+            answered * 100 >= held * 85,
+            "only Kleiner holds it: {answered} of {held}"
+        );
+    }
+
+    #[test]
+    fn no_remarks_an_hour_leaves_the_answers() {
+        let none = Limits {
+            remarks_per_hour: 0.0,
+            ..roomy()
+        };
+        let bots = vec![chatty(2, "Plutonium")];
+        let (gordon, barney, pluto) = (who(1, "Gordon", false), who(4, "Barney", false), bots[0].who.clone());
+        let run = |limits: &Limits, seed: u64| {
+            let mut r = Room::new(seed, bots.clone(), limits.clone());
+            let blast = Notable::OwnBlast {
+                victim: pluto.clone(),
+                weapon: "satchel".into(),
+            };
+            let unasked = [
+                r.cause(1.0, &Cause::Join { who: barney.clone() }),
+                r.say(2.0, &barney, "прив всем"),
+                r.say(3.0, &gordon, "сегодня карта номер один опять"),
+                r.cause(4.0, &Cause::Notable(blast)),
+                r.cause(5.0, &Cause::LastLevel { bot: 2 }),
+            ]
+            .map(|out| out.len());
+            let addressed = r.say(6.0, &gordon, "плутон, где рельсы?");
+            r.bot_says(8.0, 2, Some(&gordon), "на втором этаже");
+            let continued = r.say(10.0, &gordon, "а ты там был?");
+            let question = r.say(12.0, &barney, "кто лидер сейчас?");
+            let end = r.cause(
+                14.0,
+                &Cause::MatchEnd {
+                    winner: Some(pluto.clone()),
+                },
+            );
+            let asked = [
+                usize::from(addressed.iter().any(|s| matches!(s.trigger, Trigger::Addressed { .. }))),
+                usize::from(continued_by(&continued, 2)),
+                usize::from(question.iter().any(|s| matches!(s.trigger, Trigger::Question { .. }))),
+                end.len(),
+            ];
+            (unasked, asked)
+        };
+        let (mut unasked, mut asked) = ([0; 5], [0; 4]);
+        for seed in 0..200 {
+            let (u, a) = run(&none, seed);
+            assert_eq!(
+                u, [0; 5],
+                "seed {seed}: join, hello, line to everybody, moment, last level"
+            );
+            asked = std::array::from_fn(|i| asked[i] + a[i]);
+            let (u, _) = run(&roomy(), seed);
+            unasked = std::array::from_fn(|i| unasked[i] + u[i]);
+        }
+        assert!(
+            asked.iter().all(|&n| n > 0),
+            "named, in a talk, a question, the match end: {asked:?}"
+        );
+        assert!(unasked.iter().all(|&n| n > 0), "with remarks an hour: {unasked:?}");
     }
 }

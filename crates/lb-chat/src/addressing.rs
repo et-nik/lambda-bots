@@ -230,8 +230,8 @@ fn strict_words(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `word` of a line is `token`, a word of a nickname, the way a line declines or shortens it: `лепса` for
-/// `leps`, `кошку` for `koshka`, `профиль` for `profile1`; not `легенда` for `leger`.
+/// Whether `word` of a line is `token`, a word of a nickname, the way a line declines or shortens it: `брека` for
+/// `brek`, `белку` for `belka`, `капитан` for `kapitan5`; not `картечь` for `karter`.
 fn calls(word: &str, token: &str) -> bool {
     let (w, t) = (word.chars().count(), token.chars().count());
     let stem = match token.strip_suffix(['a', 'e', 'i', 'o', 'u', 'y']) {
@@ -245,14 +245,14 @@ fn calls(word: &str, token: &str) -> bool {
         || (common >= 6 && w.min(t) >= 7)
 }
 
-/// Whether `text` calls the human `name`, strictly: by a word of the nickname that means nothing else (`leps` for
-/// `leps`, not `mother` for `FUCK_YOU_MOTHER_player`).
+/// Whether `text` calls the human `name`, strictly: by a word of the nickname that means nothing else (`brek` for
+/// `Brek`, not `game` for `FUCK_THIS_GAME_noob`).
 pub fn names_other(text: &str, name: &str) -> bool {
     let tokens = strict_words(name);
     !tokens.is_empty() && words(text).iter().any(|w| tokens.iter().any(|t| calls(w, t)))
 }
 
-/// Whether `text` starts or ends calling the human `name` (as [`names_other`] does): `KOZA го`, `го на рельсы, koza`.
+/// Whether `text` starts or ends calling the human `name` (as [`names_other`] does): `ROZA го`, `го на рельсы, roza`.
 pub fn vocative(text: &str, name: &str) -> bool {
     let tokens = strict_words(name);
     let words = words(text);
@@ -270,7 +270,7 @@ fn bot_word(lat: &str) -> Option<bool> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BotsTalk {
     None,
-    /// Of them, to somebody else: `ты че с ботом разговариваешь`, `eto bot?`.
+    /// Of them, to somebody else: `ты зачем с ботом болтаешь`, `eto bot?`.
     About,
     /// To them: `боты, вы где`, `ты бот?`, `эй боты`.
     To,
@@ -368,7 +368,7 @@ fn lettered(text: &str) -> Vec<&str> {
 /// What a line is when it is nothing anyone would answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Noise {
-    /// A plugin's macro the game did not fill in: `recharging @ %l`.
+    /// A plugin's macro the game did not fill in: `medkit @ %l`.
     Macro,
     /// Signs, digits and smileys, `?` alone too: `)))`, `100`, `????`, `¯\_(ツ)_/¯`.
     Symbols,
@@ -376,7 +376,7 @@ pub enum Noise {
     Laugh,
     /// A map's name: `gg_cold_rock`, `dead-dust2`.
     Map,
-    /// A key bind's shout: `DIIIIIEEEEE!!!!1`, `FUCK YOU!`, `WHAT?! o_0`.
+    /// A key bind's shout: `RUUUUN!!!1`, `FUCK OFF!`, `OMG?! o_0`.
     Bind,
     /// Four characters at most, without `?`: `да`, `n1ce`, `x)`.
     Short,
@@ -423,7 +423,7 @@ fn map_name(text: &str) -> bool {
 }
 
 /// Whether `bare` (smileys out) is a bind's shout: three letters or more, all Latin capitals, a `!` or a trailing
-/// `~`, six words at most (`B I T C H` is one).
+/// `~`, six words at most (`S H I T` is one).
 fn shout(bare: &str) -> bool {
     let letters: Vec<char> = bare.chars().filter(|c| c.is_alphabetic()).collect();
     let mut words = 0;
@@ -570,7 +570,7 @@ mod tests {
         assert!(mentions("кляйнеру привет", "Кляйнер"));
         assert!(mentions("nos gg", "-|NoS|-"));
         assert!(mentions("ковбою респект", "Ковбой"));
-        assert!(mentions("плутоныч а как у тебя пинг 0", "Plutonium"));
+        assert!(mentions("плутоныч, ты где сидишь", "Plutonium"));
         assert!(!mentions("нос чешется", "Kleiner"));
         assert!(!mentions("and then", "Andrey"));
         assert!(!mentions("gg", "-|NoS|-"));
@@ -581,25 +581,22 @@ mod tests {
 
     #[test]
     fn other_humans_are_named_strictly() {
-        assert!(names_other("лепс, го дуэль", "leps"));
-        assert!(names_other("KOZA го на рельсы", "KOZA"));
-        assert!(names_other("а лепса кто убил", "leps"));
-        assert!(names_other("дай кошку", "=Кошка="));
-        assert!(names_other("профиль хврэ", "Profile1"));
-        assert!(names_other("педик ку", "pedik228"));
-        assert!(!names_other("плутониум легенда", "Leger"));
-        assert!(!names_other("козел", "KOZA"));
-        assert!(!names_other("fuck you mother", "FUCK_YOU_MOTHER_player"));
-        assert!(!names_other("Sorry for what?", "Sorry for what?"));
-        assert!(
-            !names_other("фик так ты тоже же бот", "FIK"),
-            "three letters are not enough"
-        );
+        assert!(names_other("брек, го дуэль", "Brek"));
+        assert!(names_other("ROZA го на рельсы", "ROZA"));
+        assert!(names_other("а брека кто убил", "Brek"));
+        assert!(names_other("дай белку", "=Белка="));
+        assert!(names_other("капитан, го сюда", "Kapitan5"));
+        assert!(names_other("педик, привет", "pedik777"));
+        assert!(!names_other("плутониум картечь", "Karter"));
+        assert!(!names_other("розовый", "ROZA"));
+        assert!(!names_other("fuck this game", "FUCK_THIS_GAME_noob"));
+        assert!(!names_other("just come back", "Just Come Back"));
+        assert!(!names_other("а мак тоже бот", "MAK"), "three letters are not enough");
         assert!(!names_other("ну и игрок", "Player"));
         assert!(!names_other("сука", "suka228"));
-        assert!(vocative("KOZA го на рельсы", "KOZA"));
-        assert!(vocative("го на рельсы, коза", "KOZA"));
-        assert!(!vocative("а лепс где был", "leps"));
+        assert!(vocative("ROZA го на рельсы", "ROZA"));
+        assert!(vocative("го на рельсы, роза", "ROZA"));
+        assert!(!vocative("а брек где был", "Brek"));
         assert!(!vocative("ну что", "what"));
     }
 
@@ -623,26 +620,26 @@ mod tests {
             assert_eq!(bots_talk(to), BotsTalk::To, "{to}");
         }
         for about in [
-            "ТЫ ЧЕ С БОТОМ РАЗГОВАРИВАЕШЬ",
-            "давно тут этот бот?",
-            "тут все только боты",
-            "не только боты",
-            "фик так ты тоже же бот",
-            "вас бот уебал",
-            "che tam tvoi drug bot",
-            "i think he is something else... i didnt see like such a bot",
-            "botina opyatb proebal",
+            "ТЫ ЗАЧЕМ С БОТОМ БОЛТАЕШЬ",
+            "а этот бот откуда взялся?",
+            "одни боты на сервере",
+            "сервер полон ботов",
+            "а мак тоже бот",
+            "его бот опять убил",
+            "tvoi brat toje bot",
+            "he plays like a bot",
+            "botina opyat slil",
             "eto bot?",
             "eto bot)",
-            "я с ботами играю?",
+            "я тут с ботами один?",
             "u bota aim",
             "у бота аим",
-            "tupoi bot",
+            "kakoi tupoi bot",
             "боты тупые",
         ] {
             assert_eq!(bots_talk(about), BotsTalk::About, "{about}");
         }
-        for none in ["bottle", "привет всем", "fucking aimbot cheater", "ботинки", "ботан"] {
+        for none in ["bottle", "привет всем", "aimbot, really?", "ботинки", "ботан"] {
             assert_eq!(bots_talk(none), BotsTalk::None, "{none}");
         }
     }
@@ -650,61 +647,61 @@ mod tests {
     #[test]
     fn noise_kinds() {
         let cases: [(&str, Option<Noise>); 49] = [
-            ("recharging @ %l", Some(Noise::Macro)),
+            ("medkit @ %l", Some(Noise::Macro)),
             (")))", Some(Noise::Symbols)),
             ("+", Some(Noise::Symbols)),
             (".!.", Some(Noise::Symbols)),
             ("100", Some(Noise::Symbols)),
-            ("100?%", Some(Noise::Symbols)),
-            ("5 5 5 5 5", Some(Noise::Symbols)),
-            (": ¯\\_(ツ)_/¯", Some(Noise::Symbols)),
-            ("( ͡° ͜ʖ ͡°)", Some(Noise::Symbols)),
+            ("50?%", Some(Noise::Symbols)),
+            ("7 7 7 7", Some(Noise::Symbols)),
+            ("¯\\_(ツ)_/¯...", Some(Noise::Symbols)),
+            ("( ͡° ͜ʖ ͡°)))", Some(Noise::Symbols)),
             ("XD", Some(Noise::Symbols)),
             ("????", Some(Noise::Symbols)),
             ("?", Some(Noise::Symbols)),
-            ("$$$$$_$$$$$", Some(Noise::Symbols)),
-            ("ахахаах", Some(Noise::Laugh)),
-            ("HAHAHAHAHHAHAHHAH", Some(Noise::Laugh)),
-            ("lololololo", Some(Noise::Laugh)),
-            ("looooooooooooooool", Some(Noise::Laugh)),
-            ("хехехе", Some(Noise::Laugh)),
-            ("jajaja", Some(Noise::Laugh)),
-            ("ehuehueuhe", Some(Noise::Laugh)),
-            ("axax :D", Some(Noise::Laugh)),
-            ("LOL :)", Some(Noise::Laugh)),
-            ("hihi haha", Some(Noise::Laugh)),
-            ("аъахаха", Some(Noise::Laugh)),
+            ("$$$_$$$$", Some(Noise::Symbols)),
+            ("ахахахаах", Some(Noise::Laugh)),
+            ("HAHAHHAHAHAHH", Some(Noise::Laugh)),
+            ("lolololol", Some(Noise::Laugh)),
+            ("loooooool", Some(Noise::Laugh)),
+            ("хехехехе", Some(Noise::Laugh)),
+            ("jajajaja", Some(Noise::Laugh)),
+            ("huehuehue", Some(Noise::Laugh)),
+            ("axaxax :D", Some(Noise::Laugh)),
+            ("LOL :))", Some(Noise::Laugh)),
+            ("haha hihi", Some(Noise::Laugh)),
+            ("ахъахах", Some(Noise::Laugh)),
             ("азазаз", Some(Noise::Laugh)),
-            ("afafhahaha", Some(Noise::Laugh)),
+            ("ahfahfhaha", Some(Noise::Laugh)),
             ("gg_cold_rock", Some(Noise::Map)),
-            ("agg_Cold_rock", Some(Noise::Map)),
+            ("gg_Cold_Rock2", Some(Noise::Map)),
             ("gg_octagon_v2", Some(Noise::Map)),
             ("dead-dust2", Some(Noise::Map)),
             ("1hp_crazy_rooms_beta5", Some(Noise::Map)),
-            ("DIIIIIIEEEEE!!!!1", Some(Noise::Bind)),
-            ("GTFO!!!)", Some(Noise::Bind)),
-            ("FUCK YOU!", Some(Noise::Bind)),
-            (">:O !!! RAZIBU BLYD!!!1", Some(Noise::Bind)),
-            ("FFFFFFFFFUUUUUUUU~", Some(Noise::Bind)),
-            ("WHAT?! o_0", Some(Noise::Bind)),
-            ("[  !!! KILL THAT  B I T C H !!!", Some(Noise::Bind)),
+            ("RUUUUN!!!1", Some(Noise::Bind)),
+            ("NOOOO!!!)", Some(Noise::Bind)),
+            ("FUCK OFF!", Some(Noise::Bind)),
+            (">:O !!! UBERU VSEH!!!1", Some(Noise::Bind)),
+            ("FFFFUUUUUU~", Some(Noise::Bind)),
+            ("OMG?! o_0", Some(Noise::Bind)),
+            ("[  !!! S H I T  HAPPENS !!!", Some(Noise::Bind)),
             ("n1ce", Some(Noise::Short)),
             ("чмо", Some(Noise::Short)),
             ("x)", Some(Noise::Short)),
-            ("Laramie", Some(Noise::OneWord)),
-            ("СДЕЛАЕМ", Some(Noise::OneWord)),
+            ("Монтана", Some(Noise::OneWord)),
+            ("ПОГНАЛИ", Some(Noise::OneWord)),
             ("где?", None),
-            ("ГДЕ КАРТА АРЕНА ?", None),
-            ("ЛИЧНО ДЛЯ ТЕБЯ)", None),
+            ("ГДЕ ТУТ РЕЛЬСЫ ?", None),
+            ("СПЕЦИАЛЬНО ДЛЯ ТЕБЯ)", None),
             ("100% читер", None),
-            ("A TO)", None),
-            ("ну и в целом.", None),
+            ("I TO)", None),
+            ("ну и вообще.", None),
         ];
         for (text, kind) in cases {
             assert_eq!(noise(text), kind, "{text}");
         }
-        assert_eq!(noise("ПИТОНИУМ ГОВОРИТ )))))"), None);
-        assert_eq!(noise("я так и не смог гранату между колоннами кинуть"), None);
+        assert_eq!(noise("ПЛУТОН ОПЯТЬ ТУТ )))))"), None);
+        assert_eq!(noise("я так и не понял, как тут прыгать на ящик"), None);
         assert_eq!(noise("Ты свою уже приготовил?"), None);
         assert!(Noise::Bind.hard() && !Noise::Short.hard() && !Noise::OneWord.hard());
     }
@@ -714,18 +711,18 @@ mod tests {
         for q in [
             "кто лидер?",
             "почему?",
-            "Опять боты одни?",
-            "кто не бот ?",
+            "А людей тут нет?",
+            "кто живой ?",
             "Ты свою уже приготовил?",
-            "привет, чтог такое сачель?",
-            "есть здесь бхоп?",
-            "Why I start in 1 of healt?",
-            "Чё, живые чтоль?",
-            "как ты меня видел ?",
-            "what is so funny",
-            "why killbox",
+            "слушай, что такое снарк?",
+            "бхоп тут работает?",
+            "Why do I spawn with no armor?",
+            "Есть кто живой?",
+            "как ты так быстро бегаешь ?",
+            "what map is next",
+            "why crossfire again",
             "ты где",
-            "Что не в курсек,",
+            "Что за карта,",
         ] {
             assert!(question(q, false), "{q}");
         }
@@ -733,11 +730,11 @@ mod tests {
             "где?",
             "?",
             "????",
-            "WHAT?! o_0",
-            "hohol?",
+            "OMG?! o_0",
+            "bhop?",
             "как повезло",
-            "kak zaebal bot",
-            "че ты мне чешешь",
+            "kak tak to",
+            "че ты там пишешь",
             "что",
             "кто-то тут кемпит",
         ] {
@@ -746,8 +743,8 @@ mod tests {
         assert!(question("где?", true) && !question("?", true) && !question("о?", true));
         assert!(second_person("Ты свою уже приготовил?"));
         assert!(second_person("ti bot?"));
-        assert!(second_person("plutonium y teb9 4it est?"));
-        assert!(second_person("вы ждали меня дети ?"));
+        assert!(second_person("kleiner, u teb9 ping kakoi?"));
+        assert!(second_person("вы что, без меня играли ?"));
         assert!(!second_person("у него бот"));
         assert!(!second_person("кто лидер?"));
     }
@@ -756,8 +753,8 @@ mod tests {
     fn greetings() {
         for hi in [
             "прив всем",
-            "Hi all !",
-            "hi everyone",
+            "Hello all !",
+            "hey everyone",
             "привет",
             "ку",
             "здарова)",
@@ -781,26 +778,23 @@ mod tests {
     #[test]
     fn repeats_by_gist() {
         let skip = name_words("Plutonium");
-        let a = gist("plutonium, а есть здесь скин \"Стим и не ебёт?", &skip);
-        let b = gist("Plutonium, а есть здесь скин «Стим и не ебёт»??", &skip);
+        let a = gist("plutonium, а где тут \"рельсы и броня?", &skip);
+        let b = gist("Plutonium, а где тут «рельсы и броня»??", &skip);
         assert_eq!(a, b);
         assert!(same_gist(&a, &b));
-        let named = gist("плутон, а есть здесь скин", &skip);
+        let named = gist("плутон, а где тут рельсы", &skip);
         assert!(
-            same_gist(&named, &gist("а есть здесь скин", &[])),
+            same_gist(&named, &gist("а где тут рельсы", &[])),
             "a name is not the gist"
         );
-        assert!(same_gist(
-            &gist("DIIIIIIEEEEE!!!!1", &[]),
-            &gist("DIIIIEEEEEEEE!!1", &[])
-        ));
+        assert!(same_gist(&gist("RUUUUN!!!1", &[]), &gist("RUUUUUUN!!1", &[])));
         assert!(same_gist(
             &gist("кто тут лидер сейчас", &[]),
             &gist("кто тут лидер сейчас вообще", &[])
         ));
         assert!(!same_gist(
-            &gist("а есть здесь скин", &[]),
-            &gist("а есть здесь бхоп", &[])
+            &gist("а где тут рельсы", &[]),
+            &gist("а где тут броня", &[])
         ));
         assert!(!same_gist(&gist("???", &[]), &gist("!!!", &[])));
     }
@@ -816,7 +810,10 @@ mod tests {
             let text: String = (0..len)
                 .map(|_| alphabet[rng.range_i32(0, alphabet.len() as i32 - 1) as usize])
                 .collect();
-            let names = vec![text.chars().take(3).collect::<String>()];
+            let names = vec![
+                text.chars().take(3).collect::<String>(),
+                text.chars().skip(6).take(5).collect(),
+            ];
             noise(&text);
             bots_talk(&text);
             question(&text, true);
@@ -828,6 +825,7 @@ mod tests {
             names_other(&text, &text);
             vocative(&text, &text);
             crate::lang::detect(&text);
+            crate::lang::detect_without(&text, &names);
             profanity::cheating(&text, &names);
             profanity::scrub(&text, &names);
             let g = gist(&text, &names);
@@ -840,13 +838,13 @@ mod tests {
 
     #[test]
     fn touchy_lines() {
-        assert!(touchy("плутониум, мэдкид пидорас ебаный", &[]));
-        assert!(touchy("чурки лучше хохолов", &[]));
+        assert!(touchy("плутониум, ну и пидорас же он", &[]));
+        assert!(touchy("хохлы опять тут", &[]));
         assert!(touchy("а путин то", &[]));
-        assert!(touchy("aaah belarus , the asslickers of russia?", &[]));
+        assert!(touchy("belarus vs russia, who wins?", &[]));
         assert!(touchy("все в НАТО", &[]));
         assert!(!touchy("ну и карта", &[]));
         assert!(!touchy("двойной фраг", &[]));
-        assert!(!touchy("hohol.ua зашёл", &["hohol.ua".into()]));
+        assert!(!touchy("xoxol_007 зашёл", &["xoxol_007".into()]));
     }
 }

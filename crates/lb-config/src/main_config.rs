@@ -474,7 +474,10 @@ pub const REDACTED: &str = "<redacted>";
 #[serde(deny_unknown_fields, default)]
 pub struct ChatConfig {
     pub enabled: bool,
-    /// The language bots write in (`ru`, `en`, …); a player writing English gets English, other languages no answer.
+    /// The language bots write in (`ru`, `en`, …). A player writing English gets English; a line the bots can tell
+    /// is in another language gets no answer (Turkish words; German, Polish, Spanish or Portuguese letters; Cyrillic
+    /// on a server whose language is not written in it). On a server whose language is written in Cyrillic (`uk`,
+    /// `bg`, …), every Cyrillic line counts as its language.
     pub language: String,
     /// A line about the server for the bots ("GunGame server hldm.org").
     pub server: String,
@@ -487,12 +490,13 @@ pub struct ChatConfig {
     /// Chat commands of server plugins, one word each: a bot never says a line starting with one, and a player's
     /// line starting with one is not chat.
     pub blocked: Vec<String>,
-    /// Every request to the model and its answer go to `logs/chat.<date>.log`, as they went over the wire.
+    /// Every request to the model and its answer go to `logs/chat.<date>.log`, as they went over the wire; the newest
+    /// 7 day files are kept.
     pub transcript: bool,
     /// Every line of the game chat, and players joining and leaving, go to `logs/chatlog.<date>.log`, chat on or
     /// off.
     pub chatlog: bool,
-    /// Days of chat logs kept.
+    /// Days of chat logs kept: older day files go at a map start once a UTC day, `chatlog` on or off.
     pub chatlog_days: u32,
     pub phrases: ChatPhrases,
 }
@@ -598,15 +602,16 @@ impl Default for ChatProvider {
 pub struct ChatLimits {
     /// Lines all bots together may say a minute.
     pub lines_per_minute: f32,
-    /// Seconds between two lines nobody asked for, whoever says them.
+    /// Seconds between two game moments, whoever speaks of them; a comment on a line meant for everybody waits for it
+    /// too, and starts it again.
     pub remark_gap: f32,
-    /// Seconds between two lines nobody asked for from one bot.
+    /// Seconds between two game moments of one bot.
     pub bot_remark_gap: f32,
     /// Lines nobody asked for (game moments, greetings, answers to lines meant for everybody) all bots together may
     /// say an hour; 0 = none.
     pub remarks_per_hour: f32,
     pub requests_per_minute: f32,
-    /// Tokens (in and out) a day, UTC; 0 = no limit.
+    /// Tokens (in and out) a day, UTC, then ready phrases only; 0 = no limit.
     pub tokens_per_day: u64,
 }
 

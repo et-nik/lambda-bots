@@ -1,6 +1,6 @@
 //! Swearing, slurs and talk of cheats in a chat line: what a bot's line may not say, what the memory hides, which
 //! lines the bots stay out of. Words are read the way players disguise them (`пiзда` with a Latin `i`, `XУЙ`,
-//! `сууука`), and nicknames and aliases are left out first: `FUCK_YOU_MOTHER_player` is a name, not swearing.
+//! `сууука`), and nicknames and aliases are left out first: `FUCK_THIS_GAME_noob` is a name, not swearing.
 //! Characters are read by hand: there is no regex here.
 
 use std::cmp::Reverse;
@@ -39,11 +39,14 @@ const EB_PREFIXES: [&str; 21] = [
 ];
 /// What may follow `еб` in a swear word, the word's end besides.
 const EB_NEXT: &str = "ауилнызоеяшчтькщю";
-/// Words that hold a root and are clean: `страхуй`, `спидран`, `психуй`, `жидкий`, `хачапури`.
+/// Words that hold a root and are clean: `страхуй`, `спидран`, `психуй`, `жидкий`, `хачапури`, `pedikur`.
 #[rustfmt::skip]
-const CLEAN: [&str; 9] = ["страху", "спидр", "скипидар", "ебол", "псих", "педикюр", "жидк", "нигери", "хачап"];
+const CLEAN: [&str; 12] = [
+    "страху", "спидр", "скипидар", "ебол", "псих", "педикюр", "жидк", "нигери", "хачап", "pedikur", "pedikyur",
+    "pedikjur",
+];
 
-/// Slurs anywhere in a word: `мегапидр`, `pidorasy`.
+/// Slurs anywhere in a word: `суперпидр`, `pidorasy`.
 #[rustfmt::skip]
 const SLUR_INSIDE: [&str; 9] = ["пидор", "пидар", "пидер", "пидр", "pidor", "pidar", "pidr", "nigg", "faggot"];
 /// Slurs a word starts with: `хохлы`, `чурка`. Never `петух`: bots go by it (`>I<apeHbIu_neTyX`), and lines about
@@ -58,6 +61,9 @@ const SLUR_START: [&str; 16] = [
 const SLUR_WORDS: [&str; 12] = [
     "fag", "fags", "homo", "homos", "хач", "хача", "хачи", "хачей", "хачам", "хачами", "хачах", "хачом",
 ];
+/// Slurs in Latin letters a word of a nickname starts with: `Piderok`, `pedik777`. For nicknames alone ([`nick`]):
+/// a line keeps such a word as the name of the player it calls ([`crate::addressing::names_other`]).
+const NICK_SLUR_START: [&str; 2] = ["pider", "pedik"];
 
 /// Cheat words, whole, in Latin letters with digits read as letters (`4it` is `chit`): `чит`, `читы`, `вх`, `wh`.
 #[rustfmt::skip]
@@ -71,7 +77,8 @@ const CHEAT_START: [&str; 8] = [
     "chiter", "chitak", "chitor", "cheat", "aimbot", "aimshik", "wallhack", "hacker",
 ];
 
-/// Where whole `names` stand in `text`, case-insensitively, the longest first: (start, end) byte offsets.
+/// Where whole `names` stand in `text`, case-insensitively: (start, end) byte offsets in the order they stand. Of
+/// overlapping names the longest wins.
 fn name_spans(text: &str, names: &[String]) -> Vec<(usize, usize)> {
     let mut names: Vec<&str> = names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).collect();
     names.sort_by_key(|n| Reverse(n.chars().count()));
@@ -87,7 +94,21 @@ fn name_spans(text: &str, names: &[String]) -> Vec<(usize, usize)> {
             }
         }
     }
+    found.sort_unstable();
     found
+}
+
+/// `text` with each whole one of the `names` in it (nicknames and aliases) written as a space.
+pub(crate) fn without_names(text: &str, names: &[String]) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in name_spans(text, names) {
+        kept.push_str(&text[at..start]);
+        kept.push(' ');
+        at = end;
+    }
+    kept.push_str(&text[at..]);
+    kept
 }
 
 /// The words of `text`, as byte ranges: letters, digits and apostrophes inside them.
@@ -154,16 +175,9 @@ fn look_alike(c: char) -> char {
 }
 
 /// The words of `text` without the `names` in it (nicknames and aliases), as the lists spell them; three or more
-/// letters in a row spelt apart (`B I T C H`) make one word.
+/// letters in a row spelt apart (`S H I T`) make one word.
 pub(crate) fn words(text: &str, names: &[String]) -> Vec<String> {
-    let mut kept = String::with_capacity(text.len());
-    let mut at = 0;
-    for (start, end) in name_spans(text, names) {
-        kept.push_str(&text[at..start]);
-        kept.push(' ');
-        at = end;
-    }
-    kept.push_str(&text[at..]);
+    let kept = without_names(text, names);
     let mut out = Vec::new();
     let mut spelt = Vec::new();
     for (s, e) in spans(&kept) {
@@ -229,6 +243,36 @@ pub fn slur(text: &str, names: &[String]) -> bool {
     words(text, names).iter().any(|w| either(w, slurring))
 }
 
+/// `word` with the digits players write for letters read as those letters: `pid0r` is `pidor`, `h0h0l` is `hohol`.
+fn leet(word: &str) -> String {
+    word.chars()
+        .map(|c| match c {
+            '0' => 'o',
+            '1' => 'i',
+            '3' => 'e',
+            '4' => 'a',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Whether a word (as the lists spell it) starts with a slur only nicknames are read for ([`NICK_SLUR_START`]).
+fn nick_slurring(word: &str) -> bool {
+    NICK_SLUR_START.iter().any(|r| word.starts_with(r))
+}
+
+/// Whether a nickname swears or holds a slur, so that no phrase says it: a word of it swears or is a slur as it is,
+/// without its digits (`suka1337`) or with digits read as letters (`Pid0r_99`), or starts with a Latin slur lines are
+/// not read for (`xX_Piderok_Xx`).
+pub fn nick(name: &str) -> bool {
+    words(name, &[]).iter().any(|word| {
+        let digitless: String = word.chars().filter(|c| !c.is_ascii_digit()).collect();
+        [leet(word), digitless, word.clone()]
+            .iter()
+            .any(|w| either(w, swearing) || either(w, slurring) || either(w, nick_slurring))
+    })
+}
+
 /// `word` in Latin letters with digits read as letters, the way cheat words are compared: `4it` → `chit`.
 fn spoken(word: &str) -> String {
     let lat = latin(word);
@@ -278,32 +322,32 @@ mod tests {
     #[test]
     fn swearing_is_found_however_written() {
         for line in [
-            "уже два раза пiзда, считаешь плохо",
-            "6i6a сам уже пизданулся с моего респа",
-            "Lobo залетел, щас начнётся ебля?",
-            "о аниме зашёл щас fuck полетит)",
-            "shittie bot говоришь m0ordzieK? лол",
+            "опять пiзда моему счёту",
+            "Гордон опять пизданулся с крыши",
+            "Аликс зашла, щас будет ебля?",
+            "щас опять fuck полетит в чат)",
+            "shittie карта, говорю же, лол",
             "заебал",
             "наебнулся",
             "долбоеб",
             "спиздил",
-            "ЭТО НЕ ПОМОГАЕТ НИХУЯ)",
+            "ДА ТУТ НИХУЯ НЕ ВИДНО)",
             "ахуеть",
-            "в киеве или сьебався?",
-            "пздц бот",
-            "МСУКААААААААААААА",
+            "сьебался уже с карты?",
+            "пздц карта",
+            "ЫСУКАААААААААААА",
             "yсука",
-            "ахаха, ты школяр сюка",
-            "СУКААААААААААААААААААААААА",
-            "бляяяя",
-            "TОБI ПIЗДА!!!",
-            "HA XУЮ MOЁМ ПОПРЫГАЙ, ПЕТУШОК",
-            "da ne pizdi yj mne",
-            "DJ EBAN",
-            "kak zaebal bot",
-            "fuckkkk",
-            "hfuck yeqqqh",
-            "cockscuker",
+            "сюка, опять с рельсов снял",
+            "СУУУУКАААААААА",
+            "бляяяяяяя",
+            "ЩО ЗА ПIЗДЕЦЬ!!!",
+            "ДA HA XУЮ BEРTEЛ TAKУЮ KAРTУ",
+            "ne pizdi, ja tut byl",
+            "nu ty ebanko",
+            "zaebali eti boty",
+            "fuuuckkk",
+            "ohfuck nooo",
+            "cocksukerr",
             "пиздец",
             "сууука",
             "нахуй",
@@ -313,15 +357,16 @@ mod tests {
             "fuck you",
             "bullshit",
             "motherfucker",
-            "0_o Ніхуясобібля! щє в'єбав",
+            "ну ти й в'єбав, ніхуя собі",
             "3аебал",
             "выебали",
-            "мегапидр",
+            "суперпидр",
             "ПЗДИЛ",
-            ": П И Д А Р А С И Н А !",
-            "KILL THAT  B I T C H !!!",
-            "отсаси мой клитор",
-            "буратино биба любит сосать",
+            ": С У К А !",
+            "S H I T  HAPPENS!!!",
+            "отсасывай",
+            "клиторище",
+            "пусть идёт сосать",
         ] {
             assert!(has(line, &none()), "{line}");
         }
@@ -330,7 +375,7 @@ mod tests {
     #[test]
     fn clean_words_stay_clean() {
         for line in [
-            "эээ кто-нибудь поставил рекорд моего спидрана?",
+            "спидраны на этой карте норм",
             "ребята",
             "небо",
             "хлеб",
@@ -370,7 +415,7 @@ mod tests {
             "Не читаешь что?",
             "значит",
             "считать",
-            "ломом по петуху прошёлся, изи",
+            "петуха снял ломом, чисто",
             "хулиганы тут",
             "убедил",
             "пребывать",
@@ -388,31 +433,52 @@ mod tests {
 
     #[test]
     fn names_are_not_swearing() {
-        let names = vec!["_FUCK_".to_string(), "FUCK_YOU_MOTHER_player".into()];
+        let names = vec!["_FUCK_".to_string(), "FUCK_THIS_GAME_noob".into()];
         assert!(!has("_FUCK_ опять тут", &names));
         assert!(has("fuck, _FUCK_", &names));
-        assert!(!has("gg FUCK_YOU_MOTHER_player", &names));
+        assert!(!has("gg FUCK_THIS_GAME_noob", &names));
         assert!(has("_fuck_x", &names), "not a whole name");
-        assert!(!slur("hohol.ua зашёл", &["hohol.ua".into()]));
+        assert!(!slur("xoxol_007 зашёл", &["xoxol_007".into()]));
+        let bots = vec!["Kleiner".to_string(), "Plutonium".into(), "Shit_Happens".into()];
+        assert!(
+            !has("kleiner, plutonium, shit_happens, привет", &bots),
+            "a shorter name first"
+        );
+        assert!(has("kleiner, plutonium, бля", &bots));
+        assert_eq!(without_names("kleiner и plutonium", &bots), "  и  ");
+    }
+
+    #[test]
+    fn nicknames_are_read_harder_than_lines() {
+        for name in ["pedik777", "xX_Piderok_Xx", "Pid0r_99", "suka1337", "h0h0l_x"] {
+            assert!(nick(name), "{name}");
+        }
+        for name in ["Spiderman", "pedikur_pro", "Nordwind", "Ass4ssin"] {
+            assert!(!nick(name), "{name}");
+        }
+        assert!(
+            !slur("ну привет, Piderok", &none()) && !has("suka1337 опять тут", &none()),
+            "a line may call such a player"
+        );
     }
 
     #[test]
     fn slurs() {
         for line in [
-            "чурки лучше хохолов",
-            "hi lambda hohol",
+            "хохлы и чурки опять тут",
+            "hohol is back",
             "пидор",
             "хохол",
             "faggot",
-            "noobziek hoholy pidorasy?",
-            "you are ukranian homos",
+            "hoholy vezde, pidorasy",
+            "homos everywhere",
             "жиды",
             "хачи понаехали",
         ] {
             assert!(slur(line, &none()), "{line}");
         }
         for line in [
-            "ломом по петуху прошёлся, изи",
+            "петуха снял ломом, чисто",
             "жидкий стул",
             "хачапури",
             "сукно",
@@ -426,39 +492,39 @@ mod tests {
     fn cheats_by_whole_words() {
         for line in [
             "nice wh",
-            "аимщик штоли)",
-            "у чела читы",
-            "читоры побеждают?",
-            "stop aim bot",
-            "plutonium y teb9 4it est?",
-            "posidi v specte i posmotri gde ya 4iter",
+            "ну и аимщик",
+            "у него читы",
+            "опять читоры тут",
+            "is that an aim bot",
+            "4it vklu4il?",
+            "ya ne 4iter, prosto vezu4ij",
             "читер",
             "читак",
             "aimbot",
             "cheater",
             "вх",
-            "Lobo разошёлся, читерство налицо",
-            "koza 10 стрик? читы включил чтоли",
-            "profile чит включил? 4 за секунду лол",
-            "ага чит называется скилл",
+            "это уже читерство какое-то",
+            "10 подряд? читы включил?",
+            "три за секунду, точно чит",
+            "это не чит, это скилл",
         ] {
             assert!(cheating(line, &none()), "{line}");
         }
         for line in [
-            "упс ему значит, ну посмотрим",
-            "Lobo 9 подряд, уже сбился считать",
-            "5 подряд и всё из гаусса, учитесь",
-            "доктор сам себя не вылечит",
-            "забил уже а кричит громче всех))",
-            "Mibanco серия кончится, обещаю",
-            "ломом серьезно Profile1? аим сломался что ли",
+            "значит, ещё раунд",
+            "считать фраги лень",
+            "учитесь стрелять из гаусса",
+            "медик опять не вылечит",
+            "он кричит, а я играю",
+            "серия скоро кончится",
+            "аим сломался, ломом добил",
             "Не читаешь что?",
             "читаю) это Атлас тут",
             "читаешь",
             "прочитал",
             "читай",
-            "what is so funny",
-            "son of a whore",
+            "what is that",
+            "whose turn",
             "why",
             "вход",
         ] {
@@ -469,11 +535,11 @@ mod tests {
 
     #[test]
     fn scrubbed_words_become_an_ellipsis() {
-        assert_eq!(scrub("удивлённое «ебля?»", &none()), "удивлённое «…?»");
+        assert_eq!(scrub("кричит «ебля?»", &none()), "кричит «…?»");
         assert_eq!(scrub("ну ты и пиздец, хохол", &none()), "ну ты и …, …");
         assert_eq!(
-            scrub("FUCK_YOU_MOTHER_player fuck", &["FUCK_YOU_MOTHER_player".into()]),
-            "FUCK_YOU_MOTHER_player …"
+            scrub("FUCK_THIS_GAME_noob fuck", &["FUCK_THIS_GAME_noob".into()]),
+            "FUCK_THIS_GAME_noob …"
         );
         assert_eq!(scrub("gg wp", &none()), "gg wp");
     }

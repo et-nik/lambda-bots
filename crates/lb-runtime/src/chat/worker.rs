@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use lb_chat::memory::{Memory, PlayerMemory};
 use lb_chat::phrases::{self, Offer, Ring};
 use lb_chat::prompt::{self, Context, Known, Rendered};
-use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, Who, profanity, sanitize};
+use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, profanity, sanitize};
 use lb_config::chat_phrases::Moment;
 use lb_config::main_config::{ChatConfig, ProviderKind};
 use lb_core::rng::{Pcg32, splitmix64};
@@ -299,6 +299,9 @@ impl Worker {
     fn state(&self) -> String {
         let now = Instant::now();
         let waiting = self.backoff_until.filter(|&until| until > now);
+        if !self.config.enabled {
+            return "chat is off: no requests".into();
+        }
         if let Some(why) = &self.disabled {
             return format!("disabled: {why}");
         }
@@ -398,11 +401,11 @@ impl Worker {
         limit > 0 && self.usage.on(unix_now() / 86_400) >= limit
     }
 
-    /// Why a request cannot go now, if it cannot: settings refused; out of API credit until the next try; the day's
-    /// tokens spent; a wait after failures.
+    /// Why a request cannot go now, if it cannot: chat switched off or settings refused; out of API credit until the
+    /// next try; the day's tokens spent; a wait after failures.
     fn blocked(&self) -> Option<Failure> {
         let waiting = self.backoff_until.is_some_and(|t| t > Instant::now());
-        if self.disabled.is_some() {
+        if self.disabled.is_some() || !self.config.enabled {
             Some(Failure::Disabled)
         } else if waiting && self.out_of_credit.is_some() {
             Some(Failure::Billing)
@@ -633,10 +636,14 @@ impl Worker {
         true
     }
 
-    /// New settings; another provider starts afresh.
+    /// New settings; another provider starts afresh, and chat switched off drops the notes requests waiting.
     fn configure(&mut self, config: ChatConfig) {
         if self.config.provider != config.provider {
             self.start_over();
+        }
+        if !config.enabled {
+            self.notes_due = None;
+            self.overdue.clear();
         }
         self.config = config;
         self.sync_transcript();
@@ -728,14 +735,18 @@ impl Worker {
     /// time in `chat.phrases.ai_share`.
     fn models_turn(&self, req: &ChatRequest, offer: &Offer, rng: &mut Pcg32) -> bool {
         match offer.moment {
-            Moment::Greet => prompt::partner(req).is_some_and(|who| self.knows(req, who)),
+            Moment::Greet => self.knows(req),
             _ => rng.next_f32() < self.config.phrases.ai_share,
         }
     }
 
-    /// Whether the bots know a player: the memory has them by their key or by a name they used, or `players.yaml` has
-    /// an entry for them (by nickname, or with aliases alone, too).
-    fn knows(&self, req: &ChatRequest, who: &Who) -> bool {
+    /// Whether the bots know the player a request is for ([`prompt::partner`]): the memory has them by their key or by
+    /// a name they used ([`Worker::partner_memory`]), or `players.yaml` has an entry for them (by nickname, or with
+    /// aliases alone, too).
+    fn knows(&self, req: &ChatRequest) -> bool {
+        let Some(who) = prompt::partner(req) else {
+            return false;
+        };
         let key = req
             .scene
             .players
@@ -743,9 +754,7 @@ impl Worker {
             .find(|p| p.name == who.name)
             .and_then(|p| p.key.as_deref())
             .unwrap_or("");
-        self.memory.players.contains_key(key)
-            || self.memory.find(&who.name).is_some()
-            || self.library.players.has(key, &who.name)
+        self.partner_memory(req).is_some() || self.library.players.has(key, &who.name)
     }
 
     /// A phrase of the offer, picked past the ring; `model`: why the model does not meet the moment, for the log.
@@ -773,7 +782,7 @@ impl Worker {
             rendered.system,
             rendered.user
         );
-        let names = names(req, aliases);
+        let names = prompt::words(req, &self.known(req), aliases);
         let title = format!("{} · {}", req.bot.name, req.trigger.summary());
         let done = self.complete(rendered, &title, |done| match verdict(req, aliases, &names, done) {
             Ok(line) => format!("line: {line}"),
@@ -803,7 +812,7 @@ impl Worker {
         let map = self.library.map(&req.scene.map);
         let talks = self
             .partner_memory(req)
-            .and_then(|m| m.talks.get(&req.bot.persona))
+            .and_then(|(_, m)| m.talks.get(&req.bot.persona))
             .map_or(&[][..], Vec::as_slice);
         let ctx = Context {
             server: &self.config.server,
@@ -815,8 +824,11 @@ impl Worker {
         prompt::render(req, &known, &aliases, &self.memory.maps, &ctx, unix_now())
     }
 
-    /// What the bots know of the players a request shows, and of the player it is for when they are gone.
+    /// What the bots know of the players a request shows, and of the player it is for when they are gone; that
+    /// player's memory as [`Worker::partner_memory`] finds it.
     fn known<'a>(&'a self, req: &'a ChatRequest) -> Vec<Known<'a>> {
+        let partner = prompt::partner(req);
+        let found = self.partner_memory(req);
         let mut known: Vec<Known<'a>> = req
             .scene
             .players
@@ -825,7 +837,10 @@ impl Worker {
             .filter_map(|p| {
                 let key = p.key.as_deref()?;
                 let note = self.library.players.get(key, &p.name);
-                let memory = self.memory.players.get(key);
+                let memory = match partner {
+                    Some(who) if who.name == p.name => found.map(|(_, m)| m),
+                    _ => self.memory.players.get(key),
+                };
                 (note.is_some() || memory.is_some()).then_some(Known {
                     name: &p.name,
                     note,
@@ -833,14 +848,10 @@ impl Worker {
                 })
             })
             .collect();
-        if let Some(who) = prompt::partner(req)
+        if let Some(who) = partner
             && !req.scene.players.iter().any(|p| p.name == who.name)
         {
-            let found = self.memory.find(&who.name);
-            let note = self
-                .library
-                .players
-                .get(found.map_or("", |(key, _)| key.as_str()), &who.name);
+            let note = self.library.players.get(found.map_or("", |(key, _)| key), &who.name);
             let memory = found.map(|(_, m)| m);
             if note.is_some() || memory.is_some() {
                 known.push(Known {
@@ -853,20 +864,24 @@ impl Worker {
         known
     }
 
-    /// The memory of the player a request is for ([`prompt::partner`]): by their key when they are on the
-    /// scoreboard, else by name.
-    fn partner_memory(&self, req: &ChatRequest) -> Option<&PlayerMemory> {
+    /// The memory of the player a request is for ([`prompt::partner`]), with its key: by their key on the scoreboard,
+    /// else the player seen last who used their name ([`Memory::named`]), as with a new SteamID or one still pending.
+    fn partner_memory(&self, req: &ChatRequest) -> Option<(&str, &PlayerMemory)> {
         let who = prompt::partner(req)?;
-        match req.scene.players.iter().find(|p| p.name == who.name) {
-            Some(p) => self.memory.players.get(p.key.as_deref()?),
-            None => self.memory.find(&who.name).map(|(_, m)| m),
-        }
+        req.scene
+            .players
+            .iter()
+            .find(|p| p.name == who.name)
+            .and_then(|p| p.key.as_deref())
+            .and_then(|key| self.memory.players.get_key_value(key))
+            .or_else(|| self.memory.named(&who.name))
+            .map(|(key, m)| (key.as_str(), m))
     }
 
     /// The lines the memory keeps of the player a request is for: those they wrote, and theirs in their talks with
     /// the bot.
     fn remembered(&self, req: &ChatRequest) -> Vec<&str> {
-        let Some(m) = self.partner_memory(req) else {
+        let Some((_, m)) = self.partner_memory(req) else {
             return Vec::new();
         };
         let talked = m
@@ -907,7 +922,8 @@ impl Worker {
             return;
         }
         let now = unix_now();
-        self.memory.merge(&s, now);
+        let aliases = self.summary_aliases(&s);
+        self.memory.merge(&s, &aliases, now);
         self.memory.prune(now, self.config.memory.forget_after_days);
         self.memory_dirty = true;
         self.save();
@@ -916,9 +932,13 @@ impl Worker {
         }
     }
 
-    /// Asks the model for notes on a map's players, on top of those it wrote before.
+    /// Asks the model for notes on a map's players, on top of those it wrote before; nothing while chat is off.
     fn ask_notes(&mut self, s: &MapSummary) {
-        if !self.config.memory.enabled || !self.config.memory.ai_notes || self.blocked().is_some() {
+        if !self.config.enabled
+            || !self.config.memory.enabled
+            || !self.config.memory.ai_notes
+            || self.blocked().is_some()
+        {
             return;
         }
         let previous: BTreeMap<String, String> = s
@@ -961,10 +981,26 @@ impl Worker {
         aliases
     }
 
+    /// Leaves a forgotten player out of the notes requests waiting, as a map's winner too; a map left without players
+    /// goes.
+    fn forget_in_notes(&mut self, key: &str) {
+        for s in self.notes_due.iter_mut().chain(self.overdue.iter_mut()) {
+            if let Some(name) = s.players.iter().find(|p| p.key == key).map(|p| p.name.clone()) {
+                s.players.retain(|p| p.key != key);
+                if s.winner.as_deref() == Some(name.as_str()) {
+                    s.winner = None;
+                }
+            }
+        }
+        self.notes_due = self.notes_due.take().filter(|s| !s.players.is_empty());
+        self.overdue.retain(|s| !s.players.is_empty());
+    }
+
     fn memory_command(&mut self, query: &str, forget: bool) {
         let out = if forget {
             match self.memory.forget(query) {
                 Some(key) => {
+                    self.forget_in_notes(&key);
                     self.memory_dirty = true;
                     self.save();
                     format!("chat: forgot {key}")
@@ -1034,17 +1070,6 @@ impl Worker {
     }
 }
 
-/// The names a request's line may hold, which the filter leaves out: the scoreboard's, the trigger's, every alias.
-fn names(req: &ChatRequest, aliases: &Aliases) -> Vec<String> {
-    req.scene
-        .players
-        .iter()
-        .map(|p| p.name.clone())
-        .chain(req.trigger.people().into_iter().map(|w| w.name.clone()))
-        .chain(aliases.words())
-        .collect()
-}
-
 /// Whether the player a request is for ([`prompt::partner`]) spoke of cheats: in the line it answers, or in their
 /// lines it shows.
 fn raised(req: &ChatRequest, names: &[String]) -> bool {
@@ -1070,7 +1095,7 @@ fn raised(req: &ChatRequest, names: &[String]) -> bool {
 /// What of the model's answer goes into the chat, in this order: nothing when it refused or kept quiet; the line
 /// cleaned up, players called by their aliases; nothing when the line holds a slur (whatever the bot's `profanity`),
 /// swearing from a bot without `profanity`, or talk of cheats the player did not start ([`raised`]). `names`: those
-/// the line may hold ([`names`]). `Err`: why there is no line, a dropped one with it.
+/// the line may hold ([`prompt::words`]). `Err`: why there is no line, a dropped one with it.
 fn verdict(req: &ChatRequest, aliases: &Aliases, names: &[String], done: &Completion) -> Result<String, String> {
     if done.stop == Stop::Refusal {
         return Err("the model refused".into());
@@ -1496,7 +1521,10 @@ mod tests {
     #[test]
     fn no_key_for_the_anthropic_api_disables_chat() {
         let root = dir("nokey");
-        let mut c = ChatConfig::default();
+        let mut c = ChatConfig {
+            enabled: true,
+            ..ChatConfig::default()
+        };
         c.provider.api_key_env = "LB_TEST_SURELY_UNSET_KEY".into();
         let mut w = WorkerBackend::start(c, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
@@ -1789,15 +1817,27 @@ mod tests {
         w.memory.players.insert("STEAM_0:1:42".into(), PlayerMemory::default());
         assert_eq!(wake(&mut w, vec![ask(joined(2))])[0].outcome, model, "by the key");
         w.memory.players.clear();
-        let pending = PlayerMemory {
+        let used = |last_seen: u64, notes: &str| PlayerMemory {
             names: vec!["Gordon".into()],
+            last_seen,
+            notes: notes.into(),
             ..Default::default()
         };
-        w.memory.players.insert("name:gordon".into(), pending);
+        w.memory
+            .players
+            .insert("STEAM_0:0:7".into(), used(100, "Camps by the rails."));
+        w.memory
+            .players
+            .insert("name:gordon".into(), used(200, "Loves the gauss."));
         assert_eq!(
             wake(&mut w, vec![ask(joined(3))])[0].outcome,
             model,
             "by a name they used"
+        );
+        let asked = &server.requests()[1].body;
+        assert!(
+            asked.contains("Loves the gauss") && !asked.contains("Camps by the rails"),
+            "the prompt holds the memory of the one seen last by that name: {asked}"
         );
         w.memory.players.clear();
         std::fs::create_dir_all(root.join("config/chat")).unwrap();
@@ -1857,7 +1897,8 @@ mod tests {
     fn the_filter_drops_what_a_bot_may_not_say() {
         let mut aliases = Aliases::default();
         aliases.insert("Gordon", &["Гордон"]);
-        let say = |req: &ChatRequest, text: &str| verdict(req, &aliases, &names(req, &aliases), &said(text));
+        let say =
+            |req: &ChatRequest, text: &str| verdict(req, &aliases, &prompt::words(req, &[], &aliases), &said(text));
         let req = request(1);
         assert_eq!(say(&req, "Kleiner: \"hey Gordon\""), Ok("hey Гордон".into()));
         assert_eq!(say(&req, "-"), Err("the model keeps quiet".into()));
@@ -1886,15 +1927,34 @@ mod tests {
             Ok("FUCK_YOU_player, gg".into()),
             "a nickname is no swearing"
         );
+        let used = PlayerMemory {
+            names: vec!["Gordon".into(), "Shit_Happens".into()],
+            ..Default::default()
+        };
+        let known = [Known {
+            name: "Gordon",
+            note: None,
+            memory: Some(&used),
+        }];
+        assert_eq!(
+            verdict(
+                &req,
+                &aliases,
+                &prompt::words(&req, &known, &aliases),
+                &said("Shit_Happens, gg")
+            ),
+            Ok("Shit_Happens, gg".into()),
+            "a name the memory keeps, as the prompt leaves it"
+        );
         assert_eq!(say(&req, "да ты читер"), Err("dropped (cheating): да ты читер".into()));
         let mut asked = request(1);
         asked.trigger = Trigger::Addressed {
             from: who(1, "Gordon"),
-            text: "y teb9 4it est?".into(),
+            text: "4it vklu4il?".into(),
         };
         assert_eq!(
-            say(&asked, "ага, чит называется скилл"),
-            Ok("ага, чит называется скилл".into()),
+            say(&asked, "это не чит, это скилл"),
+            Ok("это не чит, это скилл".into()),
             "the player spoke of cheats first"
         );
         let mut earlier = request(1);
@@ -2023,6 +2083,92 @@ mod tests {
         assert_eq!(server.requests().len(), 2, "no notes once the worker stops");
         assert!(w.overdue.is_empty());
         assert_eq!(kept().players["STEAM_0:1:42"].maps, 3, "the map is kept all the same");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A map Gordon won against Barney; each wrote a line.
+    fn played(map: &str) -> Box<MapSummary> {
+        let player = |key: &str, name: &str, line: &str| PlayerMap {
+            key: key.into(),
+            name: name.into(),
+            vs_bots: vec![("Kleiner".into(), 3, 1)],
+            kills: 3,
+            deaths: 1,
+            lines: vec![(10.0, line.into())],
+            ..Default::default()
+        };
+        Box::new(MapSummary {
+            map: map.into(),
+            language: "en".into(),
+            minutes: 10,
+            winner: Some("Gordon".into()),
+            players: vec![
+                player("STEAM_0:1:42", "Gordon", "the rails are mine tonight"),
+                player("STEAM_0:0:9", "Barney", "anyone seen my helmet"),
+            ],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn no_notes_go_once_chat_is_off() {
+        let server = MockServer::start(vec![answer("{\"STEAM_0:0:9\": \"looks for his helmet\"}")]);
+        let root = dir("notes-off");
+        let c = config(&server.url());
+        let mut w = worker(&root, c.clone());
+        wake(&mut w, vec![Job::MapEnd(played("crossfire"))]);
+        assert!(w.notes_due.is_some(), "the notes wait for a quiet moment");
+        let off = ChatConfig { enabled: false, ..c };
+        wake(&mut w, vec![Job::Configure(Box::new(off))]);
+        assert!(w.notes_due.is_none() && w.overdue.is_empty(), "chat off drops them");
+        let got = wake(&mut w, vec![ask(request(1))]);
+        assert_eq!(*of(&got, 1), Outcome::Failed(Failure::Disabled), "nor does a line");
+        assert!(status(&w).starts_with("chat is off"), "{}", status(&w));
+        wake(
+            &mut w,
+            vec![Job::MapEnd(played("stalkyard")), Job::MapEnd(played("bounce"))],
+        );
+        let quiet = w.notes_due.take().unwrap();
+        w.ask_notes(&quiet);
+        assert!(
+            server.requests().is_empty(),
+            "neither the overdue notes nor those after a quiet moment"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_player_forgotten_is_left_out_of_the_notes_waiting() {
+        let server = MockServer::start(vec![answer("{\"STEAM_0:0:9\": \"looks for his helmet\"}")]);
+        let root = dir("notes-forget");
+        let mut w = worker(&root, config(&server.url()));
+        let forget = |query: &str| Job::Memory {
+            query: query.into(),
+            forget: true,
+        };
+        wake(
+            &mut w,
+            vec![
+                Job::MapEnd(played("crossfire")),
+                Job::MapEnd(played("stalkyard")),
+                forget("gordon"),
+            ],
+        );
+        let quiet = w.notes_due.take().unwrap();
+        w.ask_notes(&quiet);
+        let asked = server.requests();
+        assert_eq!(asked.len(), 2, "the overdue notes, then those after a quiet moment");
+        for body in asked.iter().map(|r| &r.body) {
+            assert!(body.contains("anyone seen my helmet"), "{body}");
+            for gone in ["Gordon", "STEAM_0:1:42", "the rails are mine tonight"] {
+                assert!(!body.contains(gone), "{gone}: {body}");
+            }
+        }
+        let mut alone = played("bounce");
+        alone.players.truncate(1);
+        wake(&mut w, vec![Job::MapEnd(alone), forget("STEAM_0:1:42")]);
+        assert!(w.notes_due.is_none(), "a map left without players goes");
+        assert_eq!(server.requests().len(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

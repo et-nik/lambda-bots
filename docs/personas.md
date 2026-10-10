@@ -166,7 +166,8 @@ When the quota needs a bot, the choice goes in this order:
 A new personality gets a free nickname from `names/<language>.yaml`. Its style is drawn by the weights in
 `roster.generate.styles` (only styles allowed by `lb_style`), its skill inside the `lb_difficulty` band, more often
 near the middle. Model, colors and traits come from the nickname. All of it is written to `data/profiles.yaml`
-right away.
+right away, and the bot plays as written there from its first map (aggression and fear rounded to two decimals), the
+same as after a restart and in a replay.
 
 `pool` sets the size of the regular cast: with a quota of 8 and `pool: 16` the server first creates 16
 personalities and then rotates among them. `pool: 8` gives exactly eight regulars; `generate.enabled: false`

@@ -393,7 +393,7 @@ mod tests {
     fn notes_by_id_and_name() {
         let notes = players(
             "  - id: STEAM_0:0:1\n    name: ATLAS Gamer\n    alias: [Атлас, Атласыч]\n    note: strong\n  - id: 112S\n    \
-             note: chatty\n  - id: ET^NiK\n    alias: Ник\n",
+             note: chatty\n  - id: xX_Bobr_Xx\n    alias: Бобр\n",
         );
         assert_eq!(notes.get("STEAM_0:0:1", "whoever"), Some("strong"));
         assert_eq!(
@@ -410,13 +410,17 @@ mod tests {
             ["Атлас", "Атласыч"],
             "the SteamID keeps the aliases"
         );
-        assert_eq!(notes.aliases("name:et^nik", "et^nik"), ["Ник"]);
-        assert_eq!(notes.aliases("", "ET^NiK"), ["Ник"], "a player not known");
+        assert_eq!(notes.aliases("name:xx_bobr_xx", "xx_bobr_xx"), ["Бобр"]);
+        assert_eq!(notes.aliases("", "xX_Bobr_Xx"), ["Бобр"], "a player not known");
         assert!(
-            notes.aliases("STEAM_0:0:3", "ET^NiK").is_empty(),
+            notes.aliases("STEAM_0:0:3", "xX_Bobr_Xx").is_empty(),
             "a nickname's entry is not for a player with a SteamID"
         );
-        assert_eq!(notes.get("name:et^nik", "ET^NiK"), None, "an alias without a note");
+        assert_eq!(
+            notes.get("name:xx_bobr_xx", "xX_Bobr_Xx"),
+            None,
+            "an alias without a note"
+        );
         assert!(notes.aliases("name:112s", "112S").is_empty());
         let dir = dir("memory");
         let memory = dir.join("memory.json");

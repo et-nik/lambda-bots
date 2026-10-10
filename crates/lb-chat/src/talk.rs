@@ -64,6 +64,24 @@ impl Social {
         self.talks.said(now, persona, to, greeting, text);
     }
 
+    /// The bot's line about to go out ([`Social::said`]) answers the player's line that came at `at`, one the talk
+    /// does not have (to everybody, a question to everybody, a hello): the line goes into the talk by its time, and
+    /// nothing else of the talk changes.
+    pub fn answering(&mut self, at: SimTime, persona: &str, who: &Who, text: &str) {
+        self.talks.answering(at, persona, who, text);
+    }
+
+    /// The bot's answer to the player's line written at `at` will not be said: the bot no longer counts as answering
+    /// it, another one may still.
+    pub fn unanswered(&mut self, name: &str, at: SimTime, persona: &str) {
+        self.players.unanswered(name, at, persona);
+    }
+
+    /// A bot's greeting of the player will not be said: they were last greeted at `before`, as before it was asked.
+    pub fn ungreet(&mut self, name: &str, before: Option<SimTime>) {
+        self.players.ungreet(name, before);
+    }
+
     /// A human was put in the server, back from a map change too. Whether they are new or were away for [`AWAY`]
     /// or longer: a bot may greet them.
     pub fn arrive(&mut self, name: &str, now: SimTime) -> bool {
@@ -75,7 +93,7 @@ impl Social {
         self.players.left(name, now);
     }
 
-    /// The map ends with these humans on the server: they were there just now.
+    /// The map ends with these humans in the game: they were there just now.
     pub fn present(&mut self, names: &[String], now: SimTime) {
         for name in names {
             self.players.seen(name, now);
@@ -150,8 +168,8 @@ impl Thread {
     }
 
     /// The bot's last line in the talk.
-    pub fn last_mine(&self) -> Option<&str> {
-        self.lines.iter().rev().find(|l| l.mine).map(|l| l.text.as_str())
+    pub fn last_mine(&self) -> Option<&Line> {
+        self.lines.iter().rev().find(|l| l.mine)
     }
 
     fn push(&mut self, at: SimTime, mine: bool, text: &str) {
@@ -268,6 +286,28 @@ impl Talks {
         t.push(now, false, text);
     }
 
+    /// See [`Social::answering`].
+    fn answering(&mut self, at: SimTime, bot: &str, who: &Who, text: &str) {
+        if who.userid < 0 {
+            return;
+        }
+        let t = self.open(at, bot, who.userid, &who.name);
+        t.name.clone_from(&who.name);
+        let i = t.lines.iter().rposition(|l| l.at <= at).map_or(0, |i| i + 1);
+        t.lines.insert(
+            i,
+            Line {
+                at,
+                mine: false,
+                text: text.to_string(),
+                saved: false,
+            },
+        );
+        while t.lines.len() > THREAD_LINES {
+            t.lines.pop_front();
+        }
+    }
+
     /// A player's line that only shows the talk is still on.
     pub(crate) fn touch(&mut self, now: SimTime, bot: &str, player: i32) {
         if let Some(t) = self.threads.iter_mut().find(|t| t.bot == bot && t.player == player) {
@@ -347,8 +387,8 @@ pub struct Gist {
     pub at: SimTime,
     /// See [`addressing::gist`].
     pub words: Vec<String>,
-    /// A bot was asked to answer it.
-    pub answered: bool,
+    /// The bots (personas) asked to answer it, whose answer may still come or came.
+    pub by: Vec<String>,
 }
 
 /// A human the chat knows lately.
@@ -461,43 +501,75 @@ impl Players {
         p.gists.push_back(Gist {
             at: now,
             words,
-            answered: false,
+            by: Vec::new(),
         });
         while p.gists.len() > GISTS {
             p.gists.pop_front();
         }
     }
 
-    /// A bot was asked to answer the player's line written at `at`.
-    pub(crate) fn answered(&mut self, name: &str, at: SimTime) {
-        if let Some(p) = self.entry(name)
-            && let Some(g) = p.gists.iter_mut().rev().find(|g| g.at == at)
+    /// The player's line written at `at`.
+    fn gist_mut(&mut self, name: &str, at: SimTime) -> Option<&mut Gist> {
+        let p = self.by_name.get_mut(&key(name)?)?;
+        p.gists.iter_mut().rev().find(|g| g.at == at)
+    }
+
+    /// The bot `persona` was asked to answer the player's line written at `at`.
+    pub(crate) fn answered(&mut self, name: &str, at: SimTime, persona: &str) {
+        if let Some(g) = self.gist_mut(name, at)
+            && !g.by.iter().any(|b| b == persona)
         {
-            g.answered = true;
+            g.by.push(persona.to_string());
         }
     }
 
-    /// Whether the player wrote what `words` say since `since`, and a bot was asked to answer it.
-    pub fn answered_since(&self, name: &str, words: &[String], since: SimTime) -> bool {
+    fn unanswered(&mut self, name: &str, at: SimTime, persona: &str) {
+        if let Some(g) = self.gist_mut(name, at) {
+            g.by.retain(|b| b != persona);
+        }
+    }
+
+    /// Whether the player wrote what `words` say since `since`, and a bot was asked to answer it: one of `bots`, any
+    /// when it is empty.
+    pub fn answered_since(&self, name: &str, words: &[String], since: SimTime, bots: &[&str]) -> bool {
         self.get(name).is_some_and(|p| {
-            p.gists
-                .iter()
-                .any(|g| g.answered && g.at >= since && addressing::same_gist(&g.words, words))
+            p.gists.iter().any(|g| {
+                g.at >= since
+                    && g.by.iter().any(|b| bots.is_empty() || bots.contains(&b.as_str()))
+                    && addressing::same_gist(&g.words, words)
+            })
         })
     }
 
-    /// Whether the player wrote what `words` say between `from` and `to`, answered or not.
-    pub fn wrote_between(&self, name: &str, words: &[String], from: SimTime, to: SimTime) -> bool {
-        self.get(name).is_some_and(|p| {
+    /// How many times the player wrote what `words` say between `from` and `to`, answered or not.
+    pub fn times_wrote(&self, name: &str, words: &[String], from: SimTime, to: SimTime) -> usize {
+        self.get(name).map_or(0, |p| {
             p.gists
                 .iter()
-                .any(|g| g.at >= from && g.at <= to && addressing::same_gist(&g.words, words))
+                .filter(|g| g.at >= from && g.at <= to && addressing::same_gist(&g.words, words))
+                .count()
         })
+    }
+
+    /// When the player last wrote what `words` say.
+    pub fn last_wrote(&self, name: &str, words: &[String]) -> Option<SimTime> {
+        self.get(name)?
+            .gists
+            .iter()
+            .rev()
+            .find(|g| addressing::same_gist(&g.words, words))
+            .map(|g| g.at)
     }
 
     pub(crate) fn greet(&mut self, name: &str, now: SimTime) {
         if let Some(p) = self.entry(name) {
             p.greeted = Some(now);
+        }
+    }
+
+    fn ungreet(&mut self, name: &str, before: Option<SimTime>) {
+        if let Some(p) = key(name).and_then(|k| self.by_name.get_mut(&k)) {
+            p.greeted = before;
         }
     }
 
@@ -568,7 +640,7 @@ impl Players {
 }
 
 /// The hour's lines nobody asked for, all bots together: two at once at most, refilled at
-/// `chat.limits.remarks_per_hour`.
+/// `chat.limits.remarks_per_hour`; none at all while that is 0.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Remarks {
     tokens: f64,
@@ -585,8 +657,13 @@ impl Default for Remarks {
 }
 
 impl Remarks {
-    /// Takes a line nobody asked for, if one is left.
+    /// Takes a line nobody asked for, if one is left; never one while the hour has none, and the time it had none
+    /// adds nothing.
     pub(crate) fn take(&mut self, now: SimTime, per_hour: f32) -> bool {
+        if per_hour <= 0.0 {
+            self.at = now;
+            return false;
+        }
         self.tokens = (self.tokens + now.since(self.at).max(0.0) * f64::from(per_hour) / 3600.0).min(REMARKS);
         self.at = now;
         if self.tokens >= 1.0 {
@@ -639,8 +716,12 @@ mod tests {
         assert!(s.talks.with(t(6.0), "Plutonium", 11, 1800.0));
         assert!(!s.talks.with(t(6.0), "Kleiner", 11, 1800.0));
         assert_eq!(
-            s.talks.partner(t(150.0), 11, any).unwrap().last_mine(),
-            Some("привет, Гордон")
+            s.talks
+                .partner(t(150.0), 11, any)
+                .unwrap()
+                .last_mine()
+                .map(|l| (l.at, l.text.as_str())),
+            Some((t(5.0), "привет, Гордон"))
         );
         let said = s.talks.talk(t(10.0), "Plutonium", 11);
         assert_eq!(said.len(), 2);
@@ -685,6 +766,46 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_to_everybody_takes_the_player_s_line_into_the_talk() {
+        let mut s = Social::default();
+        let (gordon, barney) = (who(11, "Gordon"), who(12, "Barney"));
+        s.answering(t(10.0), "Plutonium", &gordon, "кто тут лучший на рельсах?");
+        assert!(
+            s.talks.partner(t(11.0), 11, |_| true).is_none(),
+            "no talk before the answer is out"
+        );
+        s.said(t(14.0), "Plutonium", Some((11, "Gordon")), false, "я, конечно");
+        let lines = |s: &Social, now: f64| -> Vec<(f64, bool)> {
+            s.talks
+                .talk(t(now), "Plutonium", 11)
+                .iter()
+                .map(|l| (l.age, l.mine))
+                .collect()
+        };
+        assert_eq!(lines(&s, 20.0), [(10.0, false), (6.0, true)]);
+        assert_eq!(s.unsaved(11, t(20.0)).len(), 2, "both go to the memory");
+
+        s.talks.heard(t(40.0), "Plutonium", &gordon, "докажи", true);
+        s.answering(t(38.0), "Plutonium", &gordon, "ну-ну");
+        assert_eq!(
+            lines(&s, 50.0),
+            [(40.0, false), (36.0, true), (12.0, false), (10.0, false)],
+            "in the order the lines came"
+        );
+        assert_eq!(s.talks.partner(t(50.0), 11, |_| true).unwrap().last, t(40.0));
+
+        s.answering(t(30.0), "Kleiner", &barney, "прив всем");
+        s.said(t(33.0), "Kleiner", Some((12, "Barney")), true, "привет");
+        assert!(s.talks.partner(t(77.0), 12, |_| true).is_some());
+        assert!(
+            s.talks.partner(t(79.0), 12, |_| true).is_none(),
+            "a hello answered is a greeting's talk"
+        );
+        s.answering(t(60.0), "Kleiner", &who(-1, "admin"), "тест");
+        assert!(s.talks.threads().iter().all(|t| t.player >= 0), "the console is nobody");
+    }
+
+    #[test]
     fn own_lines_are_few_and_recent() {
         let mut s = Social::default();
         for i in 0..10 {
@@ -719,12 +840,29 @@ mod tests {
 
         let gist = addressing::gist("где рельсы?", &[]);
         p.wrote("Gordon", t(10.0), gist.clone());
-        assert!(!p.answered_since("Gordon", &gist, t(0.0)));
-        p.answered("Gordon", t(10.0));
-        assert!(p.answered_since("Gordon", &gist, t(0.0)));
-        assert!(!p.answered_since("Gordon", &gist, t(11.0)));
-        assert!(p.wrote_between("Gordon", &gist, t(0.0), t(10.0)));
-        assert!(!p.wrote_between("Barney", &gist, t(0.0), t(10.0)));
+        assert!(!p.answered_since("Gordon", &gist, t(0.0), &[]));
+        p.answered("Gordon", t(10.0), "Plutonium");
+        p.answered("Gordon", t(10.0), "Kleiner");
+        assert!(p.answered_since("Gordon", &gist, t(0.0), &[]));
+        assert!(!p.answered_since("Gordon", &gist, t(11.0), &[]));
+        assert!(p.answered_since("Gordon", &gist, t(0.0), &["Gina", "Kleiner"]));
+        assert!(!p.answered_since("Gordon", &gist, t(0.0), &["Gina"]), "by another bot");
+        s.unanswered("Gordon", t(10.0), "Kleiner");
+        let p = &mut s.players;
+        assert!(
+            !p.answered_since("Gordon", &gist, t(0.0), &["Kleiner"]),
+            "its answer was not said"
+        );
+        assert!(p.answered_since("Gordon", &gist, t(0.0), &[]), "the other one's may be");
+        s.unanswered("Gordon", t(10.0), "Plutonium");
+        let p = &mut s.players;
+        assert!(!p.answered_since("Gordon", &gist, t(0.0), &[]));
+        assert_eq!(p.times_wrote("Gordon", &gist, t(0.0), t(10.0)), 1);
+        assert_eq!(p.times_wrote("Barney", &gist, t(0.0), t(10.0)), 0);
+        p.wrote("Gordon", t(12.0), addressing::gist("рельсы где", &[]));
+        assert_eq!(p.times_wrote("Gordon", &gist, t(0.0), t(20.0)), 2);
+        assert_eq!(p.last_wrote("Gordon", &gist), Some(t(12.0)));
+        assert_eq!(p.last_wrote("Gordon", &addressing::gist("да", &[])), None);
         for i in 0..30 {
             p.wrote("Gordon", t(20.0 + f64::from(i)), vec![format!("w{i}")]);
         }
@@ -733,6 +871,16 @@ mod tests {
         p.greet("Gordon", t(10.0));
         assert!(p.greeted_within("Gordon", t(10.0 + AWAY - 1.0), AWAY));
         assert!(!p.greeted_within("Gordon", t(10.0 + AWAY), AWAY));
+        p.greet("Gordon", t(3000.0));
+        s.ungreet("Gordon", Some(t(10.0)));
+        s.ungreet("Eli", None);
+        assert!(s.players.get("Eli").is_none(), "no record is made");
+        let p = &mut s.players;
+        assert_eq!(
+            p.get("Gordon").unwrap().greeted,
+            Some(t(10.0)),
+            "as before the greeting that was not said"
+        );
         p.set_aside("Barney", t(10.0));
         assert!(p.aside("barney", t(69.0)) && !p.aside("barney", t(70.0)));
 
@@ -805,6 +953,10 @@ mod tests {
 
     #[test]
     fn the_hour_holds_two_remarks_at_once() {
+        assert!(
+            !Remarks::default().take(t(0.0), 0.0),
+            "none an hour is none from the start"
+        );
         let mut r = Remarks::default();
         assert!(r.take(t(0.0), 6.0) && r.take(t(1.0), 6.0));
         assert!(!r.take(t(2.0), 6.0));

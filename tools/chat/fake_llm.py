@@ -4,7 +4,10 @@ what it was asked, so the chat can be tried without a model or a key.
 
 With --fail STATUS it refuses every request instead, notes included, answering {"error": {"message", "type"}} with
 that status; the message and type default to Moonshot's for an account out of money, which it sends with a 429.
---fail-for limits the refusals to the first seconds after the start, to see the chat come back.
+--fail-for limits the refusals to the first seconds after the start, to see the chat come back: after a refusal for
+lack of money (402, or 400, 403 or 429 with the default message) the worker tries again 10 minutes after the last
+one, or at once on `lb chat reload`; after 401 or 404 only on `lb chat reload`; after 408, 409 or 5xx within a
+minute.
 
 Point the stand's config at it:
     chat: { enabled: true, require_humans: false,
@@ -38,7 +41,9 @@ def main():
     parser.add_argument("--error-type", default="exceeded_current_quota_error", metavar="TYPE",
                         help="the refusal's type (default: %(default)s)")
     parser.add_argument("--fail-for", type=float, default=0, metavar="SECONDS",
-                        help="refuse only this long after the start (default: 0, always)")
+                        help="refuse only this long after the start (default: 0, always); the worker still waits "
+                             "after the last refusal: 10 min for lack of money, until `lb chat reload` after 401 "
+                             "or 404")
     args = parser.parse_args()
     if args.fail is not None and not 400 <= args.fail <= 599:
         parser.error("--fail takes an HTTP error status, 400-599")

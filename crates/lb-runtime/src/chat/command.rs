@@ -1,6 +1,7 @@
 //! `lb chat`: what the chat does, its log, lines, moments and tests by hand, the memory of players.
 
 use lb_chat::botchat::Phase;
+use lb_chat::journal::{MULTIKILL, NEMESIS, STREAK_SPOKEN};
 use lb_chat::{Notable, Trigger, Who, sanitize};
 use lb_config::chat_phrases::Moment;
 use lb_host::Host;
@@ -67,33 +68,33 @@ fn moment_trigger(moment: Moment, me: Who, other: Who) -> Trigger {
         Moment::Greet => Trigger::Joined { who: other },
         Moment::Streak => Trigger::Notable(Notable::Streak {
             killer: me,
-            count: 10,
-            humans: 10,
+            count: STREAK_SPOKEN,
+            humans: STREAK_SPOKEN,
         }),
         Moment::StreakOther => Trigger::Notable(Notable::Streak {
             killer: other,
-            count: 10,
+            count: STREAK_SPOKEN,
             humans: 0,
         }),
         Moment::Multikill => Trigger::Notable(Notable::Multikill {
             killer: me,
-            count: 3,
-            humans: 3,
+            count: MULTIKILL,
+            humans: MULTIKILL,
         }),
         Moment::MultikillOther => Trigger::Notable(Notable::Multikill {
             killer: other,
-            count: 3,
+            count: MULTIKILL,
             humans: 0,
         }),
         Moment::Revenge => Trigger::Notable(Notable::Revenge {
             killer: me,
             victim: other,
-            run: 3,
+            run: NEMESIS,
         }),
         Moment::Nemesis => Trigger::Notable(Notable::Nemesis {
             killer: other,
             victim: me,
-            times: 3,
+            times: NEMESIS,
         }),
         Moment::Crowbarred => Trigger::Notable(Notable::Humiliation {
             killer: other,
@@ -219,11 +220,10 @@ pub(crate) fn command(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> V
             rt.cvars.set(host, Cv::Chat, if on { "1" } else { "0" });
             if on != rt.config.chat.enabled {
                 rt.config.chat.enabled = on;
-                if on {
-                    rt.chat_sync_backend();
-                } else {
+                if !on {
                     rt.chat_switched_off();
                 }
+                rt.chat_sync_backend();
             }
             vec![format!("chat {}", if on { "on" } else { "off" })]
         }

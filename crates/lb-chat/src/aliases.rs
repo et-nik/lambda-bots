@@ -1,6 +1,6 @@
-//! Short names players go by (`Атлас` or `Атласыч` for `ATLAS Gamer`, `Ник` for `ET^NiK`): the prompt shows players
-//! by them, and a bot's line says the main one instead of the full nickname. A player without one goes by the
-//! nickname without its tags ([`short`]).
+//! Short names players go by (`Атлас` or `Атласыч` for `ATLAS Gamer`, `Бобр` for `xX_Bobr_Xx`): the prompt shows
+//! players by them, and a bot's line says the main one instead of the full nickname. A player without one goes by
+//! the nickname without its tags ([`short`]).
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Aliases {
@@ -115,45 +115,75 @@ impl Aliases {
     }
 }
 
-/// `s` without the bracketed group of ten characters at most it starts with (`[B] x` → ` x`).
-fn lead_group(s: &str) -> Option<&str> {
-    let open = s.chars().next()?;
-    let close = match open {
-        '[' => ']',
-        '(' => ')',
-        '{' => '}',
-        '<' => '>',
-        _ => return None,
-    };
+/// The bracket that closes `open`.
+fn closing(open: char) -> Option<char> {
+    match open {
+        '[' => Some(']'),
+        '(' => Some(')'),
+        '{' => Some('}'),
+        '<' => Some('>'),
+        _ => None,
+    }
+}
+
+/// The bracket that opens `close`.
+fn opening(close: char) -> Option<char> {
+    match close {
+        ']' => Some('['),
+        ')' => Some('('),
+        '}' => Some('{'),
+        '>' => Some('<'),
+        _ => None,
+    }
+}
+
+/// `s` without the bracketed group it starts with (`[B] x` → ` x`), and the group's length in characters.
+fn lead_group(s: &str) -> Option<(&str, usize)> {
+    let close = closing(s.chars().next()?)?;
     let end = s.find(close)? + 1;
-    (s[..end].chars().count() <= 10).then(|| &s[end..])
+    Some((&s[end..], s[..end].chars().count()))
 }
 
-/// `s` without the bracketed group of ten characters at most it ends with (`x (1)` → `x `).
-fn tail_group(s: &str) -> Option<&str> {
-    let close = s.chars().next_back()?;
-    let open = match close {
-        ']' => '[',
-        ')' => '(',
-        '}' => '{',
-        '>' => '<',
-        _ => return None,
-    };
+/// `s` without the bracketed group it ends with (`x (1)` → `x `), and the group's length in characters.
+fn tail_group(s: &str) -> Option<(&str, usize)> {
+    let open = opening(s.chars().next_back()?)?;
     let start = s.rfind(open)?;
-    (s[start..].chars().count() <= 10).then(|| &s[..start])
+    Some((&s[..start], s[start..].chars().count()))
 }
 
-/// `nick` without clan tags and decoration, for a line that names a player who has no alias: `[B] K o H T p E` →
-/// `K o H T p E`, `=Кошка=` → `Кошка`, `^2TriM` → `TriM`. The nickname itself when fewer than two letters or
-/// digits would be left.
+/// `s` without what is neither a letter nor a digit at its edges, but for a bracket whose pair stays inside:
+/// `[Long Clan Tag]Xy` keeps its `[`, `(x)` is `x`.
+fn trim_edges(s: &str) -> &str {
+    let plain = |c: char| !c.is_alphanumeric();
+    let (start, end) = (
+        s.len() - s.trim_start_matches(plain).len(),
+        s.trim_end_matches(plain).len(),
+    );
+    if start >= end {
+        return "";
+    }
+    let inner = &s[start..end];
+    let start = s[..start]
+        .char_indices()
+        .find(|&(_, c)| closing(c).is_some_and(|close| inner.contains(close)))
+        .map_or(start, |(i, _)| i);
+    let end = s[end..]
+        .char_indices()
+        .rfind(|&(_, c)| opening(c).is_some_and(|open| inner.contains(open)))
+        .map_or(end, |(i, c)| end + i + c.len_utf8());
+    &s[start..end]
+}
+
+/// `nick` without clan tags and decoration, for a line that names a player who has no alias: `[N] C o B A` →
+/// `C o B A`, `=Белка=` → `Белка`, `^5Krot` → `Krot`. A bracketed group at an edge goes when two letters or
+/// digits are left without it, one longer than ten characters only when three letters are (`Calm guy (the quiet
+/// one)` → `Calm guy`). The nickname itself when fewer than two letters or digits would be left.
 pub fn short(nick: &str) -> String {
     let alnum = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).count();
+    let letters = |s: &str| s.chars().filter(|c| c.is_alphabetic()).count();
+    let goes = |&(rest, len): &(&str, usize)| (len <= 10 && alnum(rest) >= 2) || letters(rest) >= 3;
     let mut s = nick.trim();
-    while let Some(rest) = [lead_group(s), tail_group(s)]
-        .into_iter()
-        .flatten()
-        .find(|rest| alnum(rest) >= 2)
-    {
+    while let Some((rest, _)) = [lead_group(s), tail_group(s)].into_iter().flatten().find(goes) {
         s = rest.trim();
     }
     if let Some(rest) = s.strip_prefix('^')
@@ -161,7 +191,7 @@ pub fn short(nick: &str) -> String {
     {
         s = &rest[1..];
     }
-    let s = s.trim_matches(|c: char| !c.is_alphanumeric());
+    let s = trim_edges(s);
     if alnum(s) >= 2 { s } else { nick.trim() }.to_string()
 }
 
@@ -172,7 +202,7 @@ mod tests {
     fn aliases() -> Aliases {
         let mut a = Aliases::default();
         a.insert("ATLAS Gamer", &["Атлас", "Атласыч"]);
-        a.insert("ET^NiK", &["Ник"]);
+        a.insert("xX_Bobr_Xx", &["Бобр"]);
         a.insert("Bob", &["Бобик"]);
         a.insert("Bobby", &["Бобби"]);
         a
@@ -182,7 +212,7 @@ mod tests {
     fn lookup_ignores_case_and_noise() {
         let a = aliases();
         assert_eq!(a.of("atlas gamer"), Some("Атлас"));
-        assert_eq!(a.of(" ET^NiK "), Some("Ник"));
+        assert_eq!(a.of(" xX_Bobr_Xx "), Some("Бобр"));
         assert_eq!(a.of("112S"), None);
         assert_eq!(a.call("112S"), "112S");
         assert_eq!(a.all("atlas gamer"), ["Атлас", "Атласыч"]);
@@ -204,12 +234,12 @@ mod tests {
             "the main alias"
         );
         assert_eq!(
-            a.apply("ну atlas gamer и et^nik опять вдвоём"),
-            "ну Атлас и Ник опять вдвоём"
+            a.apply("ну atlas gamer и xx_bobr_xx опять вдвоём"),
+            "ну Атлас и Бобр опять вдвоём"
         );
         assert_eq!(a.apply("Bobby и Bob"), "Бобби и Бобик", "the longest nickname first");
         assert_eq!(a.apply("Bobcat"), "Bobcat", "inside a word stays");
-        assert_eq!(a.apply("gg ET^NiK)))"), "gg Ник)))");
+        assert_eq!(a.apply("gg xX_Bobr_Xx)))"), "gg Бобр)))");
         assert_eq!(a.apply("без ников"), "без ников");
         let mut b = aliases();
         b.insert("Gamer", &["Геймер"]);
@@ -225,7 +255,15 @@ mod tests {
     fn every_name_to_leave_out() {
         let a = aliases();
         let words = a.words();
-        for name in ["ATLAS Gamer", "Атлас", "Атласыч", "ET^NiK", "Ник", "Bobby", "Бобби"] {
+        for name in [
+            "ATLAS Gamer",
+            "Атлас",
+            "Атласыч",
+            "xX_Bobr_Xx",
+            "Бобр",
+            "Bobby",
+            "Бобби",
+        ] {
             assert!(words.iter().any(|w| w == name), "{name}");
         }
         assert_eq!(words.len(), 9);
@@ -235,21 +273,27 @@ mod tests {
     #[test]
     fn short_names_drop_tags_and_decoration() {
         for (nick, short_name) in [
-            ("[B] K o H T p E", "K o H T p E"),
-            ("=Кошка=", "Кошка"),
-            ("[gs-m] half-life", "half-life"),
-            ("6i6a :>>>>>", "6i6a"),
+            ("[N] C o B A", "C o B A"),
+            ("=Белка=", "Белка"),
+            ("[rk-t] black-mesa", "black-mesa"),
+            ("3e6pa :>>>", "3e6pa"),
             ("-|NoS|-", "NoS"),
-            ("^2TriM", "TriM"),
+            ("^5Krot", "Krot"),
             ("(1)player", "player"),
-            ("PUTOS VAGOSSS", "PUTOS VAGOSSS"),
-            ("0-BuTaJIuK-0", "0-BuTaJIuK-0"),
-            ("[hldm]_rafik", "rafik"),
+            ("GATOS LOCOSSS", "GATOS LOCOSSS"),
+            ("0-ByJIKaH-0", "0-ByJIKaH-0"),
+            ("[mesa]_tolik", "tolik"),
             ("Gordon (2)", "Gordon"),
             ("[TAG][X] Gordon", "Gordon"),
             ("[ABC]", "ABC"),
             ("[X]", "[X]"),
-            ("*^*", "*^*"),
+            ("~*~", "~*~"),
+            ("[VeryLongClanTag]Warrior", "Warrior"),
+            ("Calm guy (the quiet one)", "Calm guy"),
+            ("[Very Long Clan Tag]Xy", "[Very Long Clan Tag]Xy"),
+            ("Xy (the very quiet one)", "Xy (the very quiet one)"),
+            ("==[Tag]=Name", "[Tag]=Name"),
+            ("(x)abc(", "abc"),
         ] {
             assert_eq!(short(nick), short_name, "{nick}");
         }

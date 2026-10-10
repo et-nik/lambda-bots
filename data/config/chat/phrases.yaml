@@ -1,10 +1,10 @@
 schema: lambdabots/chat-phrases@1
 # Ready lines the bots say on game moments when the AI chat is on (chat.enabled and chat.phrases.enabled). A moment
 # gets one of its phrases unless the model's share (chat.phrases.ai_share) comes up, and always while the model is
-# out of reach: no key, no credit, the day's tokens spent. Players the bots know are greeted by the model. Players
-# who write in English get the en phrases, everyone else those of chat.language (en when there are none). A phrase
-# said lately (the last 30 of all bots) is not picked again while others are left. A bot without its own chat.style
-# says the common phrases in its manner: lower case, now and then a smile.
+# out of reach: no key, no credit, the day's tokens spent, a wait after failures. Players the bots know are greeted by
+# the model. Players who write in English get the en phrases, everyone else those of chat.language (en when there are
+# none). A phrase said lately (the last 30 of all bots) is not picked again while others are left. A bot without its
+# own chat.style says the common phrases in its manner: lower case, now and then a smile.
 #
 # bots: a bot's own phrases, said as written and added to the common ones; with replace: true they replace the
 # common ones for the moments the bot lists. name: the personality's name as `lb list` shows it, or the nickname in
@@ -25,12 +25,13 @@ schema: lambdabots/chat-phrases@1
 #   killed_typing    a player kills the bot while it types                            {name}
 #   last_level       the bot reaches the last GunGame level
 #   win              the bot wins the map
-#   gg               a player wins the map                                            {name}
-# {name} is the other player: their alias from players.yaml, else the nickname without clan tags. Put it where it
-# needs no case ending: "{name}, привет", "{name} в ударе". {count} is a number; put it where it needs no
-# agreement: "{count} подряд", "уже {count}", "{count}-й раз". {weapon} reads "сачелем", "из ракетницы",
-# "with a rocket", as in "сам себя {weapon}". A phrase is skipped when a placeholder has no value or the
-# filled-in line is too long.
+#   gg               a human player wins the map                                      {name}
+# A map another bot or nobody won gets the model's word, or none while the model is out of reach.
+# {name} is the other player: their alias from players.yaml, else the nickname without clan tags; none when a word of
+# it swears or is a slur, so keep some phrases without it. Put it where it needs no case ending: "{name}, привет",
+# "{name} в ударе". {count} is a number; put it where it needs no agreement: "{count} подряд", "уже {count}",
+# "{count}-й раз". {weapon} reads "сачелем", "из ракетницы", "with a rocket", as in "сам себя {weapon}". A phrase is
+# skipped when a placeholder has no value or the filled-in line is too long.
 #
 # Quote every phrase: unquoted, - {name}, hi is read as a YAML mapping and breaks the file. A phrase is 1 to 60
 # characters (keep it under 45: bots with long nicknames get shorter chat lines), without " or %, and does not start
@@ -138,7 +139,7 @@ phrases:
     crowbar_kill:
       - "сорри, {name}, патроны кончились"
       - "ломом вышло случайно, {name}"
-      - "по-старинке, сорян"
+      - "по старинке, сорян"
       - "извини, {name}, ближний бой"
       - "без обид, {name})"
       - "лом тоже оружие, если что"
@@ -229,6 +230,10 @@ phrases:
       - "было интересно, {name}, gg"
       - "чисто сделано, {name}"
       - "уважаю, {name}, gg"
+      - "снимаю шляпу, отличная игра"
+      - "победа по делу, поздравляю"
+      - "достойный победитель, gg"
+      - "заслуженно, без вопросов"
   en:
     greet:
       - "hey {name}"
@@ -417,6 +422,10 @@ phrases:
       - "strong game, {name}"
       - "can't argue with that, {name}"
       - "props to {name}"
+      - "hats off to the winner"
+      - "deserved win, no doubt"
+      - "way too good today, congrats"
+      - "great game, well earned"
 bots: []
 #  - name: "Plutonium"
 #    replace: false

@@ -63,6 +63,8 @@ pub struct Sent {
     pub summaries: Vec<MapSummary>,
     /// [`Job::Reload`]s.
     pub reloads: usize,
+    /// Whether each of the [`Job::Configure`]s had chat on.
+    pub enabled: Vec<bool>,
 }
 
 /// Tests: answers each request on the next poll with the next canned outcome, the last one over and over.
@@ -101,6 +103,7 @@ impl ChatBackend for FakeBackend {
             }
             Job::MapEnd(s) => sent.summaries.push(*s),
             Job::Reload => sent.reloads += 1,
+            Job::Configure(c) => sent.enabled.push(c.enabled),
             _ => {}
         }
     }

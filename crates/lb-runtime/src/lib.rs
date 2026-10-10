@@ -2183,11 +2183,10 @@ impl Runtime {
                     let on = value.trim() != "0";
                     if on != self.config.chat.enabled {
                         self.config.chat.enabled = on;
-                        if on {
-                            self.chat_sync_backend();
-                        } else {
+                        if !on {
                             self.chat_switched_off();
                         }
+                        self.chat_sync_backend();
                         tracing::info!("chat {}", if on { "on" } else { "off" });
                     }
                 }

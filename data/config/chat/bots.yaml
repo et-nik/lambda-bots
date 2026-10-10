@@ -1,7 +1,7 @@
 schema: lambdabots/chat-bots@1
 # What one bot should know of itself, on top of its profile (profiles/*.yaml): who it is here, whom it knows, what
 # it likes to talk about. name: the personality's name as `lb list` shows it, or the bot's nickname in the game
-# (quote it: names like [B] … break YAML otherwise); context: at most 1000 characters, sent with each of that bot's
+# (quote it: names like [KZ] … break YAML otherwise); context: at most 1000 characters, sent with each of that bot's
 # requests to the model.
 bots: []
 #  - name: "Plutonium"

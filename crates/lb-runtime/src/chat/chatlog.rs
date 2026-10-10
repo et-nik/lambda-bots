@@ -8,12 +8,12 @@ use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use lb_chat::sanitize;
+
 use super::transcript::{day_of, file_of, now};
 
 /// The log's day files are `chatlog.<date>.log`.
 const PREFIX: &str = "chatlog";
-/// First words of a line that a password follows: login and registration commands.
-const SECRET_WORDS: [&str; 8] = ["login", "reg", "register", "password", "pass", "pw", "setpw", "auth"];
 
 pub struct ChatLog {
     dir: PathBuf,
@@ -25,6 +25,8 @@ pub struct ChatLog {
     headed: bool,
     /// The UTC day opening or writing the file failed: nothing more is tried that day.
     failed: Option<String>,
+    /// The UTC day the old day files last went.
+    pruned: Option<String>,
 }
 
 /// A line of the log as it goes after the time: a space for a player, `»` for our bot, `+` for a player coming in,
@@ -65,6 +67,7 @@ impl ChatLog {
             map: String::new(),
             headed: false,
             failed: None,
+            pruned: None,
         }
     }
 
@@ -72,6 +75,12 @@ impl ChatLog {
     pub fn map(&mut self, map: &str) {
         self.map = one_line(map);
         self.headed = false;
+    }
+
+    /// Removes the day files more than `keep_days` days old, at most once a UTC day, whether the log is written or
+    /// not.
+    pub fn prune_daily(&mut self, keep_days: u32) {
+        self.prune_once(&now().0, keep_days);
     }
 
     /// Lets the file go and forgets a failure: the next line opens the file again, under the map's header.
@@ -165,8 +174,16 @@ impl ChatLog {
         Ok(file)
     }
 
+    /// [`ChatLog::prune`] unless the day files already went on `today`.
+    fn prune_once(&mut self, today: &str, keep_days: u32) {
+        if self.pruned.as_deref() != Some(today) {
+            self.prune(today, keep_days);
+        }
+    }
+
     /// Removes the day files dated more than `keep_days` days before `today`; no other file is touched.
-    fn prune(&self, today: &str, keep_days: u32) {
+    fn prune(&mut self, today: &str, keep_days: u32) {
+        self.pruned = Some(today.to_string());
         let Some(today) = days_from_civil(today) else {
             return;
         };
@@ -200,17 +217,12 @@ fn unseen(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
 }
 
-/// A player's line with its password hidden: when the first word, lower-cased and without one leading `/`, `!` or
-/// `.`, is a login or registration command, all after it becomes `***` (`/login ***`).
+/// A player's line with its password hidden: after a login or registration command ([`sanitize::secret`]) all
+/// becomes `***` (`/login ***`).
 pub fn masked(text: &str) -> Cow<'_, str> {
-    let mut words = text.split_whitespace();
-    let first = words.next().unwrap_or_default();
-    let command = first.to_lowercase();
-    let command = command.strip_prefix(['/', '!', '.']).unwrap_or(&command);
-    if SECRET_WORDS.contains(&command) && words.next().is_some() {
-        Cow::Owned(format!("{first} ***"))
-    } else {
-        Cow::Borrowed(text)
+    match text.split_whitespace().next() {
+        Some(first) if sanitize::secret(text) => Cow::Owned(format!("{first} ***")),
+        _ => Cow::Borrowed(text),
     }
 }
 
@@ -269,33 +281,33 @@ mod tests {
         let dir = dir("format");
         let mut log = ChatLog::new(dir.clone());
         log.map("gg_cold_rock");
-        log.write_at(DAY, "06:55:30", 30, Line::Join("leps"));
-        log.write_at(DAY, "06:55:37", 30, player("leps", "потно"));
+        log.write_at(DAY, "21:14:03", 30, Line::Join("Gordon"));
+        log.write_at(DAY, "21:14:10", 30, player("Gordon", "всем привет"));
         let bot = Line::Say {
             name: "Plutonium",
             bot: true,
             team: false,
-            text: "знаю, leps, но player то утащил",
+            text: "привет, Gordon",
         };
-        log.write_at(DAY, "06:56:06", 30, bot);
+        log.write_at(DAY, "21:14:13", 30, bot);
         let team = Line::Say {
-            name: "KOZA",
+            name: "Alyx",
             bot: false,
             team: true,
             text: "го на рельсы",
         };
-        log.write_at(DAY, "06:56:10", 30, team);
-        log.write_at(DAY, "06:57:02", 30, player("leps", "/login secret"));
-        log.write_at(DAY, "07:10:02", 30, Line::Leave("leps"));
+        log.write_at(DAY, "21:15:02", 30, team);
+        log.write_at(DAY, "21:15:40", 30, player("Gordon", "/login secret"));
+        log.write_at(DAY, "21:31:55", 30, Line::Leave("Gordon"));
         assert_eq!(
             read(&dir, DAY),
             "---- gg_cold_rock ----\n\
-             06:55:30 + leps\n\
-             06:55:37   leps: потно\n\
-             06:56:06 » Plutonium: знаю, leps, но player то утащил\n\
-             06:56:10   KOZA (team): го на рельсы\n\
-             06:57:02   leps: /login ***\n\
-             07:10:02 - leps\n"
+             21:14:03 + Gordon\n\
+             21:14:10   Gordon: всем привет\n\
+             21:14:13 » Plutonium: привет, Gordon\n\
+             21:15:02   Alyx (team): го на рельсы\n\
+             21:15:40   Gordon: /login ***\n\
+             21:31:55 - Gordon\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -305,10 +317,10 @@ mod tests {
         let dir = dir("clock");
         let mut log = ChatLog::new(dir.clone());
         log.map("crossfire");
-        log.join(30, "leps");
-        log.say(30, "leps", false, false, "hi");
+        log.join(30, "Gordon");
+        log.say(30, "Gordon", false, false, "hi");
         log.say(30, "Plutonium", true, true, "hello");
-        log.leave(30, "leps");
+        log.leave(30, "Gordon");
         let today = log.today();
         let name = today.file_name().and_then(|n| n.to_str()).unwrap();
         assert!(day_of(name, PREFIX).is_some(), "{name}");
@@ -317,7 +329,7 @@ mod tests {
         files.sort();
         let text: String = files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
         let lines: Vec<&str> = text.lines().filter(|l| *l != "---- crossfire ----").collect();
-        let ends = [" + leps", "   leps: hi", " » Plutonium (team): hello", " - leps"];
+        let ends = [" + Gordon", "   Gordon: hi", " » Plutonium (team): hello", " - Gordon"];
         assert_eq!(lines.len(), ends.len(), "{text}");
         for (line, end) in lines.iter().zip(ends) {
             let (time, rest) = line.split_at(8);
@@ -348,20 +360,20 @@ mod tests {
         let mut log = ChatLog::new(dir.clone());
         log.map("crossfire");
         log.map("gg_cold_rock");
-        log.write_at(DAY, "10:00:00", 30, player("leps", "раз"));
-        log.write_at(DAY, "10:00:05", 30, player("leps", "два"));
+        log.write_at(DAY, "10:00:00", 30, player("Gordon", "раз"));
+        log.write_at(DAY, "10:00:05", 30, player("Gordon", "два"));
         log.close();
-        log.write_at(DAY, "10:00:10", 30, player("leps", "три"));
+        log.write_at(DAY, "10:00:10", 30, player("Gordon", "три"));
         log.map("");
-        log.write_at(DAY, "10:00:15", 30, player("leps", "четыре"));
+        log.write_at(DAY, "10:00:15", 30, player("Gordon", "четыре"));
         assert_eq!(
             read(&dir, DAY),
             "---- gg_cold_rock ----\n\
-             10:00:00   leps: раз\n\
-             10:00:05   leps: два\n\
+             10:00:00   Gordon: раз\n\
+             10:00:05   Gordon: два\n\
              ---- gg_cold_rock ----\n\
-             10:00:10   leps: три\n\
-             10:00:15   leps: четыре\n"
+             10:00:10   Gordon: три\n\
+             10:00:15   Gordon: четыре\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -371,15 +383,15 @@ mod tests {
         let dir = dir("midnight");
         let mut log = ChatLog::new(dir.clone());
         log.map("stalkyard");
-        log.write_at("2026-10-09", "23:59:58", 30, player("leps", "до полуночи"));
-        log.write_at("2026-10-10", "00:00:01", 30, player("leps", "после"));
+        log.write_at("2026-10-09", "23:59:58", 30, player("Gordon", "до полуночи"));
+        log.write_at("2026-10-10", "00:00:01", 30, player("Gordon", "после"));
         assert_eq!(
             read(&dir, "2026-10-09"),
-            "---- stalkyard ----\n23:59:58   leps: до полуночи\n"
+            "---- stalkyard ----\n23:59:58   Gordon: до полуночи\n"
         );
         assert_eq!(
             read(&dir, "2026-10-10"),
-            "---- stalkyard ----\n00:00:01   leps: после\n"
+            "---- stalkyard ----\n00:00:01   Gordon: после\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -401,7 +413,7 @@ mod tests {
             std::fs::write(dir.join(name), "old\n").unwrap();
         }
         let mut log = ChatLog::new(dir.clone());
-        log.write_at(DAY, "12:00:00", 30, player("leps", "hi"));
+        log.write_at(DAY, "12:00:00", 30, player("Gordon", "hi"));
         let mut left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -429,6 +441,43 @@ mod tests {
     }
 
     #[test]
+    fn old_day_files_go_once_a_day_without_a_line_written() {
+        let dir = dir("daily");
+        let files = |names: &[&str]| {
+            for name in names {
+                std::fs::write(dir.join(name), "old\n").unwrap();
+            }
+        };
+        let left = || {
+            let mut left: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            left.sort();
+            left
+        };
+        files(&["chatlog.2026-09-01.log", "chatlog.2026-09-10.log", "notes.txt"]);
+        let mut log = ChatLog::new(dir.clone());
+        log.prune_once(DAY, 30);
+        assert_eq!(left(), ["chatlog.2026-09-10.log", "notes.txt"], "and no file opened");
+        files(&["chatlog.2026-09-02.log"]);
+        log.prune_once(DAY, 30);
+        assert_eq!(
+            left(),
+            ["chatlog.2026-09-02.log", "chatlog.2026-09-10.log", "notes.txt"],
+            "once a day"
+        );
+        log.prune_once("2026-10-11", 30);
+        assert_eq!(left(), ["notes.txt"]);
+
+        files(&["chatlog.2000-01-01.log"]);
+        ChatLog::new(dir.clone()).prune_daily(30);
+        assert_eq!(left(), ["notes.txt"], "today by the clock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn dates_count_in_days() {
         assert_eq!(days_from_civil("1970-01-01"), Some(0));
         assert_eq!(days_from_civil("2000-03-01"), Some(11_017));
@@ -451,14 +500,16 @@ mod tests {
         );
         assert_eq!(masked("/login"), "/login", "nothing after the command to hide");
         assert_eq!(masked("//login secret"), "//login secret");
+        assert_eq!(masked("pass hunter2"), "pass ***");
+        assert_eq!(masked("pass the gauss"), "pass the gauss", "chat, not a password");
         assert!(matches!(masked("gg all"), Cow::Borrowed(_)));
         let tab = Line::Say {
-            name: "leps",
+            name: "Gordon",
             bot: false,
             team: true,
             text: "/register\tsecret secret",
         };
-        assert_eq!(tab.to_string(), "  leps (team): /register ***");
+        assert_eq!(tab.to_string(), "  Gordon (team): /register ***");
         let bot = Line::Say {
             name: "Plutonium",
             bot: true,
@@ -479,13 +530,16 @@ mod tests {
         std::fs::write(&logs, "a file where the directory should be").unwrap();
         let mut log = ChatLog::new(logs.clone());
         log.map("crossfire");
-        log.write_at(DAY, "10:00:00", 30, player("leps", "раз"));
+        log.write_at(DAY, "10:00:00", 30, player("Gordon", "раз"));
         assert_eq!(log.failed.as_deref(), Some(DAY));
         std::fs::remove_file(&logs).unwrap();
-        log.write_at(DAY, "10:00:05", 30, player("leps", "два"));
+        log.write_at(DAY, "10:00:05", 30, player("Gordon", "два"));
         assert!(!logs.exists(), "not tried again the same day");
-        log.write_at("2026-10-11", "00:00:01", 30, player("leps", "три"));
-        assert_eq!(read(&logs, "2026-10-11"), "---- crossfire ----\n00:00:01   leps: три\n");
+        log.write_at("2026-10-11", "00:00:01", 30, player("Gordon", "три"));
+        assert_eq!(
+            read(&logs, "2026-10-11"),
+            "---- crossfire ----\n00:00:01   Gordon: три\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -496,11 +550,11 @@ mod tests {
         std::fs::write(&logs, "a file where the directory should be").unwrap();
         let mut log = ChatLog::new(logs.clone());
         log.map("crossfire");
-        log.write_at(DAY, "10:00:00", 30, player("leps", "раз"));
+        log.write_at(DAY, "10:00:00", 30, player("Gordon", "раз"));
         std::fs::remove_file(&logs).unwrap();
         log.close();
-        log.write_at(DAY, "10:00:05", 30, player("leps", "два"));
-        assert_eq!(read(&logs, DAY), "---- crossfire ----\n10:00:05   leps: два\n");
+        log.write_at(DAY, "10:00:05", 30, player("Gordon", "два"));
+        assert_eq!(read(&logs, DAY), "---- crossfire ----\n10:00:05   Gordon: два\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

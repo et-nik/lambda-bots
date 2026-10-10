@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use lb_styles::persona::CHAT_MANNERS;
 
 use crate::addressing::squeeze;
+use crate::profanity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
@@ -274,9 +275,9 @@ fn by_letters(text: &str) -> Option<&'static str> {
 }
 
 /// The language `text` is written in, when it shows: `ru` for Cyrillic or Russian in Latin letters (`privet`,
-/// `teb9`, `slovarnij`), `en`, `tr`, and `de`, `pl`, `es`, `pt` by their letters, unless the words are plainly
-/// English (`6İ6A FUCK YOU`, typed on a Turkish keyboard). `None` for a line of no language (`gg`, `hi`, `)))`,
-/// `A TO)`); the player's other lines may tell.
+/// `teb9`, `krasivyj`), `en`, `tr`, and `de`, `pl`, `es`, `pt` by their letters, unless the words are plainly
+/// English (`GİVE ME THİS GAUSS`, typed on a Turkish keyboard). `None` for a line of no language (`gg`, `hi`, `)))`,
+/// `I TO)`); the player's other lines may tell.
 pub fn detect(text: &str) -> Option<&'static str> {
     if text.chars().filter(|&c| cyrillic(c) && c.is_alphabetic()).count() >= 3 {
         return Some("ru");
@@ -310,20 +311,51 @@ pub fn detect(text: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether a line in `code` (as [`detect`] tells it) is in neither the server's language (`chat.language`, by its
-/// primary subtag: `ru` of `ru-RU`) nor English: nobody answers it.
-pub fn foreign(code: &str, server: &str) -> bool {
-    !code.eq_ignore_ascii_case(primary(server)) && !code.eq_ignore_ascii_case("en")
+/// The language `text` is written in ([`detect`]) with the `names` in it left out: each of them whole, and each word
+/// of four letters or more of them. A nickname's letters or words tell nothing: `gg Glücksritter` for
+/// `=Glücksritter=`, `kill ben` to a player named `Ben`.
+pub fn detect_without(text: &str, names: &[String]) -> Option<&'static str> {
+    let mut left_out: Vec<String> = Vec::new();
+    for name in names {
+        left_out.push(name.clone());
+        left_out.extend(
+            name.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 4)
+                .map(String::from),
+        );
+    }
+    detect(&profanity::without_names(text, &left_out))
 }
 
-/// The language a player writes in, as [`detect`] tells it: their `line`, else the one most of their `others` are
-/// in. `None` when none tells, or two languages tie.
-pub fn writes<'a>(line: Option<&str>, others: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
-    if let Some(code) = line.and_then(detect) {
+/// Server languages written in Cyrillic besides Russian: [`detect`] tells every Cyrillic line `ru`.
+const CYRILLIC: [&str; 11] = ["uk", "be", "bg", "sr", "mk", "kk", "ky", "tg", "mn", "tt", "ba"];
+
+/// Whether a line in `code` (as [`detect`] tells it) is in the server's language (`chat.language`, by its primary
+/// subtag: `ru` of `ru-RU`); any Cyrillic line is on a server whose language is written in Cyrillic (`uk`, `bg`…).
+fn same_as_server(code: &str, server: &str) -> bool {
+    let server = primary(server);
+    code.eq_ignore_ascii_case(server)
+        || (code.eq_ignore_ascii_case("ru") && CYRILLIC.iter().any(|c| server.eq_ignore_ascii_case(c)))
+}
+
+/// Whether a line in `code` (as [`detect`] tells it) is in neither the server's language (`chat.language`, by its
+/// primary subtag; any Cyrillic on a server whose language is written in Cyrillic) nor English: nobody answers it.
+pub fn foreign(code: &str, server: &str) -> bool {
+    !same_as_server(code, server) && !code.eq_ignore_ascii_case("en")
+}
+
+/// The language a player writes in, as [`detect_without`] tells it with the `names` left out: their `line`, else the
+/// one most of their `others` are in. `None` when none tells, or two languages tie.
+pub fn writes<'a>(
+    line: Option<&str>,
+    others: impl IntoIterator<Item = &'a str>,
+    names: &[String],
+) -> Option<&'static str> {
+    if let Some(code) = line.and_then(|l| detect_without(l, names)) {
         return Some(code);
     }
     let mut votes: Vec<(&'static str, usize)> = Vec::new();
-    for code in others.into_iter().filter_map(detect) {
+    for code in others.into_iter().filter_map(|l| detect_without(l, names)) {
         match votes.iter_mut().find(|(c, _)| *c == code) {
             Some((_, n)) => *n += 1,
             None => votes.push((code, 1)),
@@ -336,9 +368,10 @@ pub fn writes<'a>(line: Option<&str>, others: impl IntoIterator<Item = &'a str>)
 }
 
 /// What the reason for a line adds for a player who writes `code` on a server of `server` (`chat.language`): answer
-/// in English, or in Russian. Nothing for the server's own language, nor for any other: lines in it get no answer.
+/// in English, or in Russian. Nothing for the server's own language (any Cyrillic on a server whose language is
+/// written in Cyrillic), nor for any other: lines in it get no answer.
 pub fn spoken(lang: Lang, code: &str, server: &str) -> Option<&'static str> {
-    if code.eq_ignore_ascii_case(primary(server)) {
+    if same_as_server(code, server) {
         return None;
     }
     match (lang, code) {
@@ -379,17 +412,14 @@ mod tests {
 
     #[test]
     fn a_player_s_language_and_the_hint_for_it() {
-        assert_eq!(writes(Some("where are you hiding?"), ["привет всем"]), Some("en"));
+        assert_eq!(writes(Some("where are you hiding?"), ["привет всем"], &[]), Some("en"));
         assert_eq!(
-            writes(
-                Some("hi"),
-                ["i dont understand cyrillic", "привет", "where is everyone"]
-            ),
+            writes(Some("hi"), ["i cant read cyrillic", "привет", "where is everyone"], &[]),
             Some("en")
         );
-        assert_eq!(writes(Some("gg"), ["привет", "where are you"]), None, "a tie");
-        assert_eq!(writes(None, ["lol", ")))"]), None);
-        assert_eq!(writes(None, ["где все", "gg", "го рельсы"]), Some("ru"));
+        assert_eq!(writes(Some("gg"), ["привет", "where are you"], &[]), None, "a tie");
+        assert_eq!(writes(None, ["lol", ")))"], &[]), None);
+        assert_eq!(writes(None, ["где все", "gg", "го рельсы"], &[]), Some("ru"));
         assert_eq!(
             spoken(Lang::Ru, "en", "ru-RU"),
             Some("Пишет по-английски — ответь по-английски.")
@@ -447,56 +477,53 @@ mod tests {
     }
 
     #[test]
-    fn languages_of_real_lines() {
+    fn languages_of_lines_as_players_write_them() {
         for (line, code) in [
-            ("Lambda loser", Some("en")),
-            ("DAMN.", Some("en")),
+            ("such a loser", Some("en")),
+            ("DAMN!!", Some("en")),
             ("me too", Some("en")),
-            ("Plutonium,fuck you", Some("en")),
-            ("i dont understand cyrillic", Some("en")),
-            ("i don't understand", Some("en")),
-            ("whwre u from bro", Some("en")),
-            ("stop aim bot", Some("en")),
-            ("plutonium shittie bot", Some("en")),
-            (
-                "i think he is something else... i didnt see like such a bot",
-                Some("en"),
-            ),
-            ("you 2 are boyfriends?", Some("en")),
-            ("cheater player orospu cocug", Some("tr")),
-            ("HİÇ GÜZEL Bİ OYUN OLMADI BEN SİZİ VURAMIYORM", Some("tr")),
-            ("ananı gotunden sıkeyım player", Some("tr")),
-            ("mol4it, obi4no pogovorit' ljubit", Some("ru")),
-            ("plutonium y teb9 4it est?", Some("ru")),
-            ("2 4ela vs 2 bota)", Some("ru")),
-            ("posidi v specte i posmotri gde ya 4iter", Some("ru")),
-            ("slovarnij zapas nemmalin'kij", Some("ru")),
+            ("Gordon,fuck off", Some("en")),
+            ("i cant read cyrillic", Some("en")),
+            ("i don't get it", Some("en")),
+            ("bro wher r u from", Some("en")),
+            ("stop camping bro", Some("en")),
+            ("what a shittie map", Some("en")),
+            ("i think he is not a bot, he plays like a human", Some("en")),
+            ("you 2 are a team?", Some("en")),
+            ("amk cheater", Some("tr")),
+            ("BU OYUN HİÇ GÜZEL DEĞİL", Some("tr")),
+            ("bır oyun daha kanka", Some("tr")),
+            ("po4emu mol4ish, pogovorit' ne hochesh", Some("ru")),
+            ("kleiner a u teb9 aim est?", Some("ru")),
+            ("3 4ela protiv bota", Some("ru")),
+            ("posmotri gde ya sizhu, ne 4iter", Some("ru")),
+            ("krasivyj vystrel, malen'kij", Some("ru")),
             ("ti bot?", Some("ru")),
-            ("ta lan", Some("ru")),
-            ("bot tupoi", Some("ru")),
-            ("nu daa", Some("ru")),
-            ("debil eto bot", Some("ru")),
-            ("ESLI CHE TAK", Some("ru")),
-            ("kak zaebal bot", Some("ru")),
+            ("da lan", Some("ru")),
+            ("ty tupoi", Some("ru")),
+            ("nu daaa", Some("ru")),
+            ("eto ne bot", Some("ru")),
+            ("NU TAK CHE", Some("ru")),
+            ("zaebal uzhe", Some("ru")),
             ("spasibo", Some("ru")),
             ("привет", Some("ru")),
             ("ок да", Some("ru")),
-            ("plutonium пропиши agstart", Some("ru")),
-            ("0_o Ніхуясобібля! щє в'єбав... е", Some("ru")),
+            ("gordon, скажи agstart", Some("ru")),
+            ("ну ти й в'єбав, ніхуя собі... е", Some("ru")),
             ("spaß", Some("de")),
-            ("6İ6A FUCK YOU MOTHER", Some("en")),
-            ("fuck you mother profıl1", Some("en")),
-            ("bır goool dahaaaaa", Some("tr")),
+            ("GİVE ME THİS FUCKİNG GAUSS", Some("en")),
+            ("fuck you Kılıç99", Some("en")),
+            ("seeeelam kankaaa, nasılsın", Some("tr")),
             ("been there", Some("en")),
             ("seen", None),
-            ("tüh", Some("de")),
-            ("sorry mama netu takoi zemli", Some("ru")),
-            ("cgc gkenjybev", None),
-            ("HAHAHHA noob", None),
-            ("O,zagovoril)))", None),
+            ("süper", Some("de")),
+            ("sorry, netu takoi karty", Some("ru")),
+            ("ghbdtn dctv", None),
+            ("XAXAXA noob", None),
+            ("O,zarabotalo)))", None),
             ("gg", None),
             ("hi", None),
-            ("A TO)", None),
+            ("I TO)", None),
             ("lol", None),
             ("))", None),
             ("gg_cold_rock", None),
@@ -509,9 +536,50 @@ mod tests {
     }
 
     #[test]
+    fn names_in_a_line_tell_no_language() {
+        let names: Vec<String> = ["=Glücksritter=", "Ben", "Plutonium", "Gordon"]
+            .map(String::from)
+            .into();
+        assert_eq!(detect("gg Glücksritter"), Some("de"));
+        for line in ["gg Glücksritter", "gg =Glücksritter=", "GLÜCKSRITTER, gg"] {
+            assert_eq!(detect_without(line, &names), None, "{line}");
+        }
+        assert_eq!(detect("plutonium, kill ben"), Some("tr"));
+        assert_eq!(detect_without("plutonium, kill ben", &names), Some("en"));
+        assert_eq!(detect_without("ben, где ты?", &names), Some("ru"));
+        assert_eq!(
+            detect_without("bence kanka", &names),
+            Some("tr"),
+            "a name inside a word stays"
+        );
+        assert_eq!(detect_without("naber kanka", &[]), Some("tr"));
+        assert_eq!(
+            writes(Some("gg Glücksritter"), ["where are you"], &names),
+            Some("en"),
+            "the player's other lines tell"
+        );
+    }
+
+    #[test]
     fn foreign_lines() {
         assert!(foreign("tr", "ru") && foreign("de", "ru-RU"));
         assert!(!foreign("ru", "ru") && !foreign("ru", "RU_ru") && !foreign("en", "ru") && !foreign("en", "en"));
         assert!(foreign("ru", "de") && !foreign("de", "de"));
+    }
+
+    #[test]
+    fn any_cyrillic_is_the_language_of_a_cyrillic_server() {
+        assert!(!foreign("ru", "uk") && !foreign("ru", "be-BY") && !foreign("RU", "bg"));
+        assert!(foreign("tr", "uk") && foreign("ru", "fr"));
+        assert_eq!(spoken(Lang::En, "ru", "uk"), None);
+        assert_eq!(spoken(Lang::En, "ru", "kk"), None);
+        assert_eq!(
+            spoken(Lang::En, "en", "uk"),
+            Some("They write in English: answer in English.")
+        );
+        assert_eq!(
+            spoken(Lang::En, "ru", "en"),
+            Some("They write in Russian: answer in Russian.")
+        );
     }
 }

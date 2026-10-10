@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::addressing::{self, Noise};
+use crate::aliases::Aliases;
 use crate::profanity;
 use crate::request::MapSummary;
 
@@ -116,14 +117,15 @@ pub fn memorable(line: &str, names: &[String]) -> bool {
     !addressing::noise(line).is_some_and(Noise::hard) && !profanity::has(line, names) && !profanity::slur(line, names)
 }
 
-/// The names in a map's summary: its players, the bots they fought, everyone who wrote.
-fn names(s: &MapSummary) -> Vec<String> {
+/// The names a map's summary may hold, which are no swearing: its players, the bots they fought, everyone who wrote,
+/// and every alias. The memory and the request for notes leave them out of their checks.
+pub fn names(s: &MapSummary, aliases: &Aliases) -> Vec<String> {
     let players = s
         .players
         .iter()
         .flat_map(|p| std::iter::once(&p.name).chain(p.vs_bots.iter().map(|(bot, ..)| bot)));
     let writers = s.chat.iter().map(|(_, name, ..)| name);
-    let mut names: Vec<String> = players.chain(writers).cloned().collect();
+    let mut names: Vec<String> = players.chain(writers).cloned().chain(aliases.words()).collect();
     names.sort();
     names.dedup();
     names
@@ -154,9 +156,9 @@ impl Memory {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// Adds a map that ended at `now` (unix seconds).
-    pub fn merge(&mut self, s: &MapSummary, now: u64) {
-        let names = names(s);
+    /// Adds a map that ended at `now` (unix seconds); `aliases`: those of its players.
+    pub fn merge(&mut self, s: &MapSummary, aliases: &Aliases, now: u64) {
+        let names = names(s, aliases);
         for p in &s.players {
             let m = self.players.entry(p.key.clone()).or_default();
             if m.first_seen == 0 {
@@ -229,14 +231,18 @@ impl Memory {
         }
     }
 
-    /// A player by key or by any name they used, case-insensitive.
+    /// A player by key, else by a name they used ([`Memory::named`]).
     pub fn find(&self, query: &str) -> Option<(&String, &PlayerMemory)> {
-        let q = query.trim().to_lowercase();
-        self.players.get_key_value(query.trim()).or_else(|| {
-            self.players
-                .iter()
-                .find(|(_, p)| p.names.iter().any(|n| n.to_lowercase() == q))
-        })
+        self.players.get_key_value(query.trim()).or_else(|| self.named(query))
+    }
+
+    /// The player seen last of those who used `name`, case-insensitive: many keys may share a nickname.
+    pub fn named(&self, name: &str) -> Option<(&String, &PlayerMemory)> {
+        let name = name.trim().to_lowercase();
+        self.players
+            .iter()
+            .filter(|(_, p)| p.names.iter().any(|n| n.to_lowercase() == name))
+            .max_by_key(|(_, p)| p.last_seen)
     }
 
     pub fn forget(&mut self, query: &str) -> Option<String> {
@@ -305,8 +311,8 @@ mod tests {
     #[test]
     fn merges_round_trips_and_prunes() {
         let mut m = Memory::default();
-        m.merge(&summary(false), 1_000_000);
-        m.merge(&summary(true), 1_000_900);
+        m.merge(&summary(false), &Aliases::default(), 1_000_000);
+        m.merge(&summary(true), &Aliases::default(), 1_000_900);
         let p = &m.players["STEAM_0:0:219579426"];
         assert_eq!((p.maps, p.kills, p.wins), (2, 80, 1));
         assert_eq!(p.vs_bots["DUT9 ATLASA"], [8, 2]);
@@ -332,7 +338,7 @@ mod tests {
     fn caps_hold() {
         let mut m = Memory::default();
         for i in 0..20 {
-            m.merge(&summary(false), 1000 + i);
+            m.merge(&summary(false), &Aliases::default(), 1000 + i);
         }
         let p = &m.players["STEAM_0:0:219579426"];
         assert_eq!((p.lines.len(), p.moments.len(), p.names.len()), (LINES, MOMENTS, 1));
@@ -360,6 +366,7 @@ mod tests {
                 line(290.0, "Plutonium", true, "здарова"),
                 line(250.0, "Kleiner", false, "kleiner, hi"),
             ]),
+            &Aliases::default(),
             10_000,
         );
         let talks = &m.players["STEAM_0:1:42"].talks;
@@ -371,7 +378,7 @@ mod tests {
         let long = (0..20)
             .map(|i| line(f64::from(100 - i), "Plutonium", i % 2 == 1, &format!("строка {i}")))
             .collect();
-        m.merge(&talker(long), 20_000);
+        m.merge(&talker(long), &Aliases::default(), 20_000);
         let lines = &m.players["STEAM_0:1:42"].talks["Plutonium"];
         assert_eq!(lines.len(), TALK_LINES);
         assert_eq!(lines.last().unwrap(), &(19_919, true, "строка 19".into()));
@@ -380,6 +387,7 @@ mod tests {
                 line(50.0, "Barney", false, "barney?"),
                 line(40.0, "Alyx", false, "alyx, where to?"),
             ]),
+            &Aliases::default(),
             30_000,
         );
         let bots: Vec<&str> = m.players["STEAM_0:1:42"].talks.keys().map(String::as_str).collect();
@@ -413,9 +421,9 @@ mod tests {
         let mut s = talker(Vec::new());
         s.players[0].lines = [
             "ахахахах",
-            "DIIIIIEEEEE!!!!1",
+            "RUUUUN!!!1",
             "gg_cold_rock",
-            "бляяя",
+            "бляяяяяя",
             "хохлы",
             "ок",
             "где рельсы?",
@@ -426,7 +434,7 @@ mod tests {
         .collect();
         s.chat.push((5.0, "_FUCK_".into(), "всем привет".into(), false));
         let mut m = Memory::default();
-        m.merge(&s, 1000);
+        m.merge(&s, &Aliases::default(), 1000);
         let kept: Vec<&str> = m.players["STEAM_0:1:42"]
             .lines
             .iter()
@@ -437,5 +445,29 @@ mod tests {
             ["ок", "где рельсы?", "_FUCK_ опять тут"],
             "a nickname is no swearing"
         );
+    }
+
+    #[test]
+    fn a_name_finds_the_player_seen_last() {
+        let seen = |last_seen: u64, notes: &str| PlayerMemory {
+            names: vec!["Nordwind".into()],
+            last_seen,
+            notes: notes.into(),
+            ..Default::default()
+        };
+        let mut m = Memory::default();
+        m.players.insert("STEAM_0:1:7".into(), seen(100, "older"));
+        m.players.insert("name:nordwind".into(), seen(200, "newer"));
+        assert_eq!(
+            m.named(" NORDWIND ").map(|(key, _)| key.as_str()),
+            Some("name:nordwind")
+        );
+        assert_eq!(m.find("nordwind").map(|(_, p)| p.notes.as_str()), Some("newer"));
+        assert_eq!(
+            m.find("STEAM_0:1:7").map(|(_, p)| p.notes.as_str()),
+            Some("older"),
+            "a key first"
+        );
+        assert!(m.named("Barney").is_none());
     }
 }

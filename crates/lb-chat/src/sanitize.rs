@@ -3,6 +3,8 @@
 
 /// What a plugin's chat command starts with (`/top15`, `!level`, `@admin`).
 const COMMAND_PREFIXES: [char; 3] = ['/', '!', '@'];
+/// First words of a line that a password follows: login and registration commands.
+const SECRET_WORDS: [&str; 8] = ["login", "reg", "register", "password", "pass", "pw", "setpw", "auth"];
 
 /// Bytes a line may take: `Host_Say` builds `"\x02<name>: <text>\n"` in 128 bytes (`say_team` adds `(TEAM) `) and
 /// cuts the text to fit.
@@ -32,6 +34,20 @@ fn first_word_blocked(text: &str, blocked: &[String]) -> bool {
     let first = text.split_whitespace().next().unwrap_or("");
     let first = first.trim_end_matches(|c: char| c.is_ascii_punctuation());
     !first.is_empty() && blocked.iter().any(|b| first.eq_ignore_ascii_case(b.trim()))
+}
+
+/// A login or registration command with a password after it, which is no chat: the first word, in lower case and
+/// without one leading `/`, `!` or `.`, is one of `SECRET_WORDS` and something follows it. After `pass` and `pw`
+/// exactly one word does, so `pass the gauss` stays chat.
+pub fn secret(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let first = words.next().unwrap_or_default().to_lowercase();
+    let command = first.strip_prefix(['/', '!', '.']).unwrap_or(&first);
+    let after = words.count();
+    match command {
+        "pass" | "pw" => after == 1,
+        _ => after > 0 && SECRET_WORDS.contains(&command),
+    }
 }
 
 /// The model's answer as one chat line: the first line, without quotes around it or the bot's own name in front.
@@ -147,6 +163,38 @@ mod tests {
         assert!(is_command("RTV!", &blocked()));
         assert!(!is_command("rtv это зло", &[]));
         assert!(!is_command("ну ты и кемпер", &blocked()));
+    }
+
+    #[test]
+    fn login_lines_carry_a_password() {
+        for line in [
+            "/login hunter2",
+            ".login hunter2",
+            "login hunter2",
+            "!REG hunter2 hunter2",
+            "Register hunter2",
+            "password hunter2",
+            "pass hunter2",
+            ".PW hunter2",
+            "setpw hunter2",
+            "  auth\t1234 ",
+        ] {
+            assert!(secret(line), "{line}");
+        }
+        for line in [
+            "login",
+            "/login",
+            "pass",
+            "pass the gauss",
+            "pw is not easy here",
+            "I can't login, what is the password",
+            "loginhunter2 now",
+            "//login hunter2",
+            "gg",
+            "",
+        ] {
+            assert!(!secret(line), "{line}");
+        }
     }
 
     #[test]

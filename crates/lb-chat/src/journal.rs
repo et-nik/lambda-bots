@@ -9,9 +9,14 @@ use crate::lang::is_explosive;
 
 /// Entries kept; older ones are summed up in the scores only.
 pub const KEEP: usize = 256;
+/// Kills within `MULTIKILL_WINDOW` seconds that make a multikill.
+pub const MULTIKILL: u32 = 3;
 const MULTIKILL_WINDOW: f64 = 6.0;
-/// Deaths in a row to one killer that make them a nemesis (and every two more after).
-const NEMESIS: u32 = 3;
+/// Deaths in a row to one killer that make them a nemesis (and every two more after); a revenge after as many is
+/// worth a word.
+pub const NEMESIS: u32 = 3;
+/// Kills without dying from which a streak is worth a word, the bot's own or another player's.
+pub const STREAK_SPOKEN: u32 = 10;
 const STREAK_STEP: u32 = 5;
 /// A player leaving this soon after dying `RAGE_DEATHS` times in a row rage quits.
 const RAGE_WINDOW: f64 = 30.0;
@@ -284,7 +289,7 @@ impl Journal {
                         run,
                     });
                 }
-                if quick >= 3 {
+                if quick >= MULTIKILL {
                     notable.push(Notable::Multikill {
                         killer: killer.clone(),
                         count: quick,

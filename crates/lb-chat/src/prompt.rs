@@ -449,8 +449,9 @@ pub fn partner(req: &ChatRequest) -> Option<&Who> {
         .find(|w| w.userid != req.bot.userid && !w.bot)
 }
 
-/// The language the partner ([`partner`]) writes in ([`lang::writes`]): the trigger's line, else most of their lines
-/// in the request's chat and talk and of `remembered` (theirs that the memory keeps).
+/// The language the partner ([`partner`]) writes in ([`lang::writes`], the names the request holds left out): the
+/// trigger's line, else most of their lines in the request's chat and talk and of `remembered` (theirs that the memory
+/// keeps), each line once wherever it shows.
 pub fn partner_language(req: &ChatRequest, remembered: &[&str]) -> Option<&'static str> {
     let who = partner(req)?;
     let line = req.trigger.line().map(|(_, text)| text);
@@ -459,7 +460,13 @@ pub fn partner_language(req: &ChatRequest, remembered: &[&str]) -> Option<&'stat
         _ => None,
     });
     let talk = req.talk.iter().filter(|s| !s.mine).map(|s| s.text.as_str());
-    lang::writes(line, chat.chain(talk).chain(remembered.iter().copied()))
+    let mut lines: Vec<&str> = Vec::new();
+    for text in chat.chain(talk).chain(remembered.iter().copied()) {
+        if !lines.iter().any(|l| same(l, text)) {
+            lines.push(text);
+        }
+    }
+    lang::writes(line, lines, &words(req, &[], &Aliases::default()))
 }
 
 fn trigger_text(names: &Names<'_>, t: &Trigger, team: bool) -> String {
@@ -693,9 +700,10 @@ fn known_lines(
         .collect()
 }
 
-/// The names a request's lines may hold: everyone on the scoreboard, in the trigger and in the memory, and every
-/// alias.
-fn words(req: &ChatRequest, known: &[Known<'_>], aliases: &Aliases) -> Vec<String> {
+/// The names a request's lines may hold, which are no swearing: everyone on the scoreboard, in the trigger and in the
+/// memory (`known`), and every alias. The prompt leaves them out of its checks, and so does the filter of the model's
+/// line.
+pub fn words(req: &ChatRequest, known: &[Known<'_>], aliases: &Aliases) -> Vec<String> {
     let mut words: Vec<String> = req
         .scene
         .players
@@ -1257,24 +1265,12 @@ pub fn render(
     }
 }
 
-/// The names a map's summary may hold: its players, the bots they fought, and every alias.
-fn summary_words(s: &MapSummary, aliases: &Aliases) -> Vec<String> {
-    let mut words: Vec<String> = s
-        .players
-        .iter()
-        .flat_map(|p| std::iter::once(p.name.clone()).chain(p.vs_bots.iter().map(|(bot, ..)| bot.clone())))
-        .chain(aliases.words())
-        .collect();
-    words.sort();
-    words.dedup();
-    words
-}
-
 /// The request for notes on the players of a map worth remembering; `None` when nobody is. Lines with noise,
-/// swearing or slurs are left out, and the old notes say no swear words.
+/// swearing or slurs are left out as the memory leaves them out ([`memory::names`]), and the old notes say no swear
+/// words.
 pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases: &Aliases) -> Option<Rendered> {
     let lang = Lang::of(&s.language);
-    let words = summary_words(s, aliases);
+    let words = memory::names(s, aliases);
     let lines = |p: &PlayerMap| -> Vec<String> {
         p.lines
             .iter()
@@ -2113,7 +2109,7 @@ mod tests {
         req.talk.clear();
         assert!(!reason(&req, &[]).contains(hint));
         let memory = PlayerMemory {
-            lines: vec![(NOW, "i dont understand cyrillic".into())],
+            lines: vec![(NOW, "i cant read cyrillic".into())],
             ..Default::default()
         };
         let known = [Known {
@@ -2137,6 +2133,78 @@ mod tests {
             "{}",
             r.user
         );
+    }
+
+    #[test]
+    fn each_line_of_the_player_tells_their_language_once() {
+        let nord = who(6, "Nordwind", false);
+        let both = "кто со мной на склад";
+        let req = ChatRequest {
+            trigger: Trigger::MatchEnd {
+                winner: Some(nord.clone()),
+                won: false,
+            },
+            chat: vec![
+                recent(90.0, say(&nord, "anyone up for rails")),
+                recent(60.0, say(&nord, "that was a close one")),
+                recent(30.0, say(&nord, both)),
+            ],
+            talk: vec![said(30.0, false, both)],
+            ..request("ru")
+        };
+        assert_eq!(
+            partner_language(&req, &[]),
+            Some("en"),
+            "the talk's copy of a chat line"
+        );
+        assert_eq!(partner_language(&req, &[both]), Some("en"), "the memory's copy");
+    }
+
+    #[test]
+    fn names_on_the_scoreboard_tell_no_language() {
+        let s112 = s112();
+        let mut req = request("ru");
+        req.scene.players.push(PlayerCard {
+            name: "=Glücksritter=".into(),
+            key: Some("name:=glücksritter=".into()),
+            frags: 0,
+            deaths: 0,
+            level: None,
+            me: false,
+            duel: (0, 0),
+        });
+        req.trigger = Trigger::Addressed {
+            from: s112.clone(),
+            text: "Glücksritter, nice shot".into(),
+        };
+        req.chat = vec![recent(30.0, say(&s112, "where is everyone"))];
+        req.talk.clear();
+        assert_eq!(partner_language(&req, &[]), Some("en"), "a nickname's ü tells nothing");
+        req.scene.players.pop();
+        assert_eq!(partner_language(&req, &[]), Some("de"), "nobody is named so");
+    }
+
+    #[test]
+    fn the_memory_and_the_notes_keep_the_same_lines() {
+        let line = "Shit_Happens снова тут";
+        let summary = MapSummary {
+            map: "crossfire".into(),
+            language: "ru".into(),
+            minutes: 12,
+            players: vec![PlayerMap {
+                key: "STEAM_0:1:77".into(),
+                name: "Nordwind".into(),
+                lines: vec![(30.0, line.into())],
+                ..Default::default()
+            }],
+            chat: vec![(20.0, "Shit_Happens".into(), "всем привет".into(), false)],
+            ..Default::default()
+        };
+        let mut m = Memory::default();
+        m.merge(&summary, &Aliases::default(), NOW);
+        assert_eq!(m.players["STEAM_0:1:77"].lines, [(NOW - 30, line.to_string())]);
+        let r = render_notes(&summary, &BTreeMap::new(), &Aliases::default()).unwrap();
+        assert!(r.user.contains(&format!("писал: «{line}»")), "{}", r.user);
     }
 
     #[test]

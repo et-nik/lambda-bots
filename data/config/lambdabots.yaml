@@ -111,9 +111,10 @@ disguise:
 # Bots talking in the game chat through a chat model (docs/chat.md): they answer players and now and then say
 # something about the game; an alive bot stands still while it types, a dead one types before it respawns. Off until
 # enabled; nothing is sent while no human is on the server. language: what the bots write in (a player writing English
-# gets English; lines in other languages get no answer); server: a line about the server for the bots, e.g. "GunGame
-# server hldm.org". The rest is in config/chat/: players.yaml (regular players), server.yaml (the server), bots.yaml
-# (single bots), maps.yaml (maps) and phrases.yaml (ready lines for game moments).
+# gets English; a line the bots can tell is in another language gets no answer, and on a server whose language is
+# written in Cyrillic, such as uk or bg, every Cyrillic line counts as its language); server: a line about the server
+# for the bots, e.g. "GunGame server hldm.org". The rest is in config/chat/: players.yaml (regular players),
+# server.yaml (the server), bots.yaml (single bots), maps.yaml (maps) and phrases.yaml (ready lines for game moments).
 chat:
   enabled: false
   language: ru
@@ -135,12 +136,12 @@ chat:
     extra_body: ""          # JSON object merged into every request, e.g. '{"output_config": {"effort": "low"}}'
   limits:
     lines_per_minute: 2     # all bots together
-    remark_gap: 60          # seconds between two lines nobody asked for
-    bot_remark_gap: 240     # the same for one bot
+    remark_gap: 60          # seconds between game moments and comments on lines meant for everybody
+    bot_remark_gap: 240     # seconds between two game moments of one bot
     remarks_per_hour: 6     # lines nobody asked for, all bots together: game moments, greetings, answers to lines
                             # meant for everybody; 0 = none
     requests_per_minute: 6
-    tokens_per_day: 2000000 # in and out, UTC day; 0 = no limit
+    tokens_per_day: 2000000 # in and out, UTC day, then ready phrases only; 0 = no limit
   typing:
     cpm: [200, 380]         # characters a minute, for personalities without their own speed
     calm: 3                 # seconds without an enemy before an alive bot starts typing
@@ -151,9 +152,9 @@ chat:
   # Plugin chat commands, one word each: a player's line starting with one is not chat, and no bot says one.
   blocked: [rtv, rockthevote, nominate, nominations, timeleft, nextmap, thetime, currentmap, listmaps, recentmaps,
             votemap, callvote, agstart, agabort, agpause, agallow, agmap, agnextmap, agnextmode]
-  transcript: false         # every request to the model and its answer in logs/chat.<date>.log (kept 7 days)
+  transcript: false         # every request to the model and its answer in logs/chat.<date>.log (the newest 7 kept)
   chatlog: true             # the game chat, joins and leaves in logs/chatlog.<date>.log (UTC days), chat on or off
-  chatlog_days: 30          # days of chat logs kept
+  chatlog_days: 30          # days of chat logs kept; older ones go at a map start once a UTC day, chatlog on or off
   phrases:
     enabled: true           # ready lines from config/chat/phrases.yaml for game moments and greetings
     ai_share: 0.15          # the share of moments the model gets instead of a phrase
