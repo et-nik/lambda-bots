@@ -2,7 +2,7 @@
 //! the names a player used, the score against each bot, favourite weapons, wins, a few lines they wrote, their talks
 //! with the bots, moments worth remembering, the model's notes, and the last maps.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,8 @@ const TALK_BOTS: usize = 3;
 pub const NOTES_MAX: usize = 300;
 /// Players kept; the ones seen longest ago go first.
 pub const MAX_PLAYERS: usize = 2000;
+/// The engine's nickname for a player who never set one.
+const DEFAULT_NICKNAME: &str = "Player";
 
 /// The key a player is remembered by: a real SteamID, else the nickname in lower case.
 pub fn player_key(auth_id: &str, name: &str) -> String {
@@ -37,6 +39,35 @@ pub fn player_key(auth_id: &str, name: &str) -> String {
     } else {
         format!("name:{}", name.trim().to_lowercase())
     }
+}
+
+/// `name` without the `(1)` the engine puts before a nickname already taken on the server: `(1)Gordon` → `Gordon`.
+fn unnumbered(name: &str) -> &str {
+    let name = name.trim();
+    let Some((n, rest)) = name.strip_prefix('(').and_then(|rest| rest.split_once(')')) else {
+        return name;
+    };
+    if (1..=2).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()) && !rest.is_empty() {
+        rest
+    } else {
+        name
+    }
+}
+
+/// Whether two nicknames are the same but for case and the `(1)` the engine puts before a nickname already taken, as
+/// those of a player who reconnected and of the ghost of their earlier connection, which still holds the nickname.
+pub fn same_nickname(a: &str, b: &str) -> bool {
+    nickname(a) == nickname(b)
+}
+
+/// A nickname as [`same_nickname`] compares it: trimmed, without the engine's `(1)`, in lower case.
+fn nickname(name: &str) -> String {
+    unnumbered(name).to_lowercase()
+}
+
+/// Whether `name` is the engine's default nickname, `Player`, in any case, with the engine's `(1)` too.
+pub fn default_nickname(name: &str) -> bool {
+    unnumbered(name).eq_ignore_ascii_case(DEFAULT_NICKNAME)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -143,6 +174,64 @@ fn cap_talks(talks: &mut BTreeMap<String, Vec<(u64, bool, String)>>) {
     }
 }
 
+/// Whether a player used the nickname `name`, given trimmed and in lower case.
+fn used(p: &PlayerMemory, name: &str) -> bool {
+    p.names.iter().any(|n| n.trim().to_lowercase() == name)
+}
+
+/// Clears a map's winner and drops its best scores when they go under one of `names` (in lower case).
+fn unname(names: &BTreeSet<String>, winner: &mut Option<String>, top: &mut Vec<(String, i32)>) {
+    let named = |n: &str| names.contains(&n.trim().to_lowercase());
+    if winner.as_deref().is_some_and(named) {
+        *winner = None;
+    }
+    top.retain(|(n, _)| !named(n));
+}
+
+/// Players [`Memory::forget`] forgot, for the maps that end after: their keys, the nicknames forgotten by name
+/// (without the engine's `(1)`), and every name they used, the last two in lower case.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Forgotten {
+    keys: BTreeSet<String>,
+    nicknames: BTreeSet<String>,
+    names: BTreeSet<String>,
+}
+
+impl Forgotten {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The keys, in order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.keys.iter().map(String::as_str)
+    }
+
+    /// Takes in players forgotten since.
+    pub fn add(&mut self, more: Forgotten) {
+        self.keys.extend(more.keys);
+        self.nicknames.extend(more.nicknames);
+        self.names.extend(more.names);
+    }
+
+    /// Leaves them out of a map's summary: the players under their keys or under a nickname forgotten by name, with
+    /// the engine's `(1)` before it too, and the winner and the best scores under a name they used.
+    pub fn leave_out(&self, s: &mut MapSummary) {
+        if self.is_empty() {
+            return;
+        }
+        let mut names = self.names.clone();
+        s.players.retain(|p| {
+            let gone = self.keys.contains(&p.key) || self.nicknames.contains(&nickname(&p.name));
+            if gone {
+                names.insert(p.name.trim().to_lowercase());
+            }
+            !gone
+        });
+        unname(&names, &mut s.winner, &mut s.top);
+    }
+}
+
 impl Memory {
     pub fn parse(text: &str) -> Result<Memory, String> {
         let m: Memory = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -238,17 +327,49 @@ impl Memory {
 
     /// The player seen last of those who used `name`, case-insensitive: many keys may share a nickname.
     pub fn named(&self, name: &str) -> Option<(&String, &PlayerMemory)> {
+        self.named_except(name, &[])
+    }
+
+    /// [`Memory::named`] but for the players under the keys `skip`.
+    pub fn named_except(&self, name: &str, skip: &[&str]) -> Option<(&String, &PlayerMemory)> {
         let name = name.trim().to_lowercase();
         self.players
             .iter()
-            .filter(|(_, p)| p.names.iter().any(|n| n.to_lowercase() == name))
+            .filter(|(key, p)| !skip.contains(&key.as_str()) && used(p, &name))
             .max_by_key(|(_, p)| p.last_seen)
     }
 
-    pub fn forget(&mut self, query: &str) -> Option<String> {
-        let key = self.find(query)?.0.clone();
-        self.players.remove(&key);
-        Some(key)
+    /// Forgets the player under the key `query`, else every player who used the nickname `query` (case-insensitive,
+    /// with the engine's `(1)` before it or without, [`same_nickname`]), and their names in the last maps' winners
+    /// and best scores: who was forgotten, nobody when the memory has no such player.
+    pub fn forget(&mut self, query: &str) -> Forgotten {
+        let query = query.trim();
+        let mut gone = Forgotten::default();
+        let keys: Vec<String> = if self.players.contains_key(query) {
+            vec![query.to_string()]
+        } else {
+            let name = nickname(query);
+            let keys: Vec<String> = self
+                .players
+                .iter()
+                .filter(|(_, p)| p.names.iter().any(|n| nickname(n) == name))
+                .map(|(key, _)| key.clone())
+                .collect();
+            if !keys.is_empty() {
+                gone.nicknames.insert(name);
+            }
+            keys
+        };
+        for key in keys {
+            if let Some(p) = self.players.remove(&key) {
+                gone.names.extend(p.names.iter().map(|n| n.trim().to_lowercase()));
+                gone.keys.insert(key);
+            }
+        }
+        for m in &mut self.maps {
+            unname(&gone.names, &mut m.winner, &mut m.top);
+        }
+        gone
     }
 }
 
@@ -397,7 +518,7 @@ mod tests {
             "the talk with Kleiner ended longest ago"
         );
         assert_eq!(Memory::parse(&m.to_json()).unwrap(), m);
-        assert!(m.forget("gordon").is_some());
+        assert!(!m.forget("gordon").is_empty());
         assert!(m.players.is_empty(), "talks go with the player");
     }
 
@@ -447,27 +568,206 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_name_finds_the_player_seen_last() {
-        let seen = |last_seen: u64, notes: &str| PlayerMemory {
-            names: vec!["Nordwind".into()],
+    /// A player who used `names`, seen last at `last_seen`.
+    fn seen(names: &[&str], last_seen: u64, notes: &str) -> PlayerMemory {
+        PlayerMemory {
+            names: names.iter().map(|n| n.to_string()).collect(),
             last_seen,
             notes: notes.into(),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn a_name_finds_the_player_seen_last() {
         let mut m = Memory::default();
-        m.players.insert("STEAM_0:1:7".into(), seen(100, "older"));
-        m.players.insert("name:nordwind".into(), seen(200, "newer"));
+        m.players
+            .insert("STEAM_0:0:3".into(), seen(&["Nordwind"], 100, "oldest"));
+        m.players
+            .insert("STEAM_0:1:7".into(), seen(&["Nordwind"], 300, "newest"));
+        m.players
+            .insert("name:nordwind".into(), seen(&["Nordwind"], 200, "older"));
         assert_eq!(
             m.named(" NORDWIND ").map(|(key, _)| key.as_str()),
-            Some("name:nordwind")
+            Some("STEAM_0:1:7"),
+            "neither the first key nor the last"
         );
-        assert_eq!(m.find("nordwind").map(|(_, p)| p.notes.as_str()), Some("newer"));
+        assert_eq!(m.find("nordwind").map(|(_, p)| p.notes.as_str()), Some("newest"));
         assert_eq!(
-            m.find("STEAM_0:1:7").map(|(_, p)| p.notes.as_str()),
-            Some("older"),
+            m.find("STEAM_0:0:3").map(|(_, p)| p.notes.as_str()),
+            Some("oldest"),
             "a key first"
         );
         assert!(m.named("Barney").is_none());
+        assert_eq!(
+            m.named_except("Nordwind", &["STEAM_0:1:7"])
+                .map(|(key, _)| key.as_str()),
+            Some("name:nordwind"),
+            "the one seen last but for the keys skipped"
+        );
+        assert!(
+            m.named_except("Nordwind", &["STEAM_0:0:3", "STEAM_0:1:7", "name:nordwind"])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn nicknames_the_engine_gives() {
+        for (a, b) in [
+            ("(1)Gordon", "gordon"),
+            ("Gordon", "(12)GORDON"),
+            ("(1)Gordon", "(2)Gordon"),
+        ] {
+            assert!(same_nickname(a, b), "{a} {b}");
+        }
+        for (a, b) in [
+            ("Gordon", "Gordon2"),
+            ("(x)Gordon", "Gordon"),
+            ("(123)Gordon", "Gordon"),
+            ("(1)", "(2)"),
+        ] {
+            assert!(!same_nickname(a, b), "{a} {b}");
+        }
+        for name in ["Player", "player", " PLAYER ", "(1)Player", "(2)player"] {
+            assert!(default_nickname(name), "{name}");
+        }
+        for name in ["Player2", "[TAG]Player", "(1)", "Players"] {
+            assert!(!default_nickname(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_nickname_forgets_every_player_who_used_it() {
+        let mut m = Memory::default();
+        m.players
+            .insert("STEAM_0:0:7".into(), seen(&["Gordon"], 100, "first visit"));
+        m.players
+            .insert("STEAM_0:1:42".into(), seen(&["Freeman", "gordon"], 200, "second visit"));
+        m.players
+            .insert("STEAM_0:0:9".into(), seen(&["Barney"], 300, "the guard"));
+        m.maps = ["crossfire", "stalkyard"]
+            .into_iter()
+            .map(|map| MapRecap {
+                map: map.into(),
+                winner: Some(if map == "crossfire" { "Freeman" } else { "Barney" }.into()),
+                top: vec![("Freeman".into(), 30), ("Barney".into(), 20), ("Gordon".into(), 10)],
+                ..Default::default()
+            })
+            .collect();
+        let gone = m.forget(" GORDON ");
+        assert_eq!(gone.keys().collect::<Vec<_>>(), ["STEAM_0:0:7", "STEAM_0:1:42"]);
+        assert_eq!(m.players.keys().collect::<Vec<_>>(), ["STEAM_0:0:9"]);
+        assert_eq!(
+            m.maps.iter().map(|r| r.winner.as_deref()).collect::<Vec<_>>(),
+            [None, Some("Barney")],
+            "every name they used goes from the last maps"
+        );
+        assert!(m.maps.iter().all(|r| r.top == [("Barney".to_string(), 20)]));
+        assert!(m.forget("gordon").is_empty(), "nobody left");
+        let gone = m.forget("STEAM_0:0:9");
+        assert_eq!(gone.keys().collect::<Vec<_>>(), ["STEAM_0:0:9"]);
+        assert!(m.players.is_empty());
+    }
+
+    /// A map Gordon won against Barney.
+    fn gordon_won() -> MapSummary {
+        let player = |key: &str, name: &str| PlayerMap {
+            key: key.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        MapSummary {
+            map: "stalkyard".into(),
+            winner: Some("Gordon".into()),
+            top: vec![("Gordon".into(), 30), ("Barney".into(), 20)],
+            players: vec![player("STEAM_0:1:42", "Gordon"), player("STEAM_0:0:9", "Barney")],
+            ..Default::default()
+        }
+    }
+
+    fn keys_of(s: &MapSummary) -> Vec<&str> {
+        s.players.iter().map(|p| p.key.as_str()).collect()
+    }
+
+    #[test]
+    fn a_player_forgotten_leaves_the_maps() {
+        let mut m = Memory::default();
+        m.merge(&gordon_won(), &Aliases::default(), 1000);
+        let gone = m.forget("STEAM_0:1:42");
+        assert_eq!(m.maps[0].winner, None);
+        assert_eq!(m.maps[0].top, [("Barney".to_string(), 20)]);
+        let mut s = gordon_won();
+        gone.leave_out(&mut s);
+        assert_eq!(keys_of(&s), ["STEAM_0:0:9"]);
+        assert_eq!((s.winner, s.top), (None, vec![("Barney".to_string(), 20)]));
+        let mut kept = gordon_won();
+        Forgotten::default().leave_out(&mut kept);
+        assert_eq!(kept, gordon_won(), "nobody forgotten");
+    }
+
+    #[test]
+    fn a_steamid_forgets_that_player_alone() {
+        let mut m = Memory::default();
+        m.players
+            .insert("STEAM_0:0:7".into(), seen(&["Gordon"], 100, "first visit"));
+        m.players
+            .insert("STEAM_0:1:42".into(), seen(&["Gordon"], 200, "second visit"));
+        let mut gone = m.forget("STEAM_0:1:42");
+        assert_eq!(gone.keys().collect::<Vec<_>>(), ["STEAM_0:1:42"]);
+        assert_eq!(m.players.keys().collect::<Vec<_>>(), ["STEAM_0:0:7"]);
+        let mut s = gordon_won();
+        s.players[0].key = "STEAM_0:1:5".into();
+        let mut by_key = s.clone();
+        gone.leave_out(&mut by_key);
+        assert_eq!(keys_of(&by_key), ["STEAM_0:1:5", "STEAM_0:0:9"], "the SteamID alone");
+        assert_eq!(
+            (by_key.winner, by_key.top),
+            (None, vec![("Barney".to_string(), 20)]),
+            "but no win or score under a name they used"
+        );
+        gone.add(m.forget("gordon"));
+        gone.leave_out(&mut s);
+        assert_eq!(keys_of(&s), ["STEAM_0:0:9"], "whoever plays under a nickname forgotten");
+    }
+
+    #[test]
+    fn a_nickname_forgotten_holds_for_one_who_reconnects() {
+        let mut m = Memory::default();
+        m.players
+            .insert("STEAM_0:1:42".into(), seen(&["Gordon"], 100, "first visit"));
+        m.players
+            .insert("STEAM_0:0:5".into(), seen(&["(1)Gordon"], 200, "after a crash"));
+        m.players
+            .insert("STEAM_0:0:9".into(), seen(&["Barney"], 300, "the guard"));
+        let gone = m.forget("gordon");
+        assert_eq!(
+            gone.keys().collect::<Vec<_>>(),
+            ["STEAM_0:0:5", "STEAM_0:1:42"],
+            "one who used it only after a reconnect too"
+        );
+        assert_eq!(m.players.keys().collect::<Vec<_>>(), ["STEAM_0:0:9"]);
+        let player = |key: &str, name: &str| PlayerMap {
+            key: key.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut s = MapSummary {
+            map: "stalkyard".into(),
+            winner: Some("(1)Gordon".into()),
+            top: vec![("(1)Gordon".into(), 30), ("Barney".into(), 20)],
+            players: vec![
+                player("STEAM_0:1:777", "(1)Gordon"),
+                player("STEAM_0:0:9", "Barney"),
+                player("name:(1)eli", "(1)Eli"),
+            ],
+            ..Default::default()
+        };
+        gone.leave_out(&mut s);
+        assert_eq!(
+            keys_of(&s),
+            ["STEAM_0:0:9", "name:(1)eli"],
+            "back as (1)Gordon under a new SteamID"
+        );
+        assert_eq!((s.winner, s.top), (None, vec![("Barney".to_string(), 20)]));
     }
 }

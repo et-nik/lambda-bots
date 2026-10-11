@@ -110,11 +110,12 @@ disguise:
 
 # Bots talking in the game chat through a chat model (docs/chat.md): they answer players and now and then say
 # something about the game; an alive bot stands still while it types, a dead one types before it respawns. Off until
-# enabled; nothing is sent while no human is on the server. language: what the bots write in (a player writing English
-# gets English; a line the bots can tell is in another language gets no answer, and on a server whose language is
-# written in Cyrillic, such as uk or bg, every Cyrillic line counts as its language); server: a line about the server
-# for the bots, e.g. "GunGame server hldm.org". The rest is in config/chat/: players.yaml (regular players),
-# server.yaml (the server), bots.yaml (single bots), maps.yaml (maps) and phrases.yaml (ready lines for game moments).
+# enabled; no line is asked for while no human is on the server, but the notes on a map's players still go after it
+# ends. language: what the bots write in (a player writing English gets English; a line the bots can tell is in
+# another language gets no answer, and on a server whose language is written in Cyrillic, such as uk or bg, every
+# Cyrillic line counts as its language); server: a line about the server for the bots, e.g. "GunGame server hldm.org".
+# The rest is in config/chat/: players.yaml (regular players), server.yaml (the server), bots.yaml (single bots),
+# maps.yaml (maps) and phrases.yaml (ready lines for game moments).
 chat:
   enabled: false
   language: ru

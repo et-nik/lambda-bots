@@ -502,6 +502,9 @@ mod tests {
         assert_eq!(masked("//login secret"), "//login secret");
         assert_eq!(masked("pass hunter2"), "pass ***");
         assert_eq!(masked("pass the gauss"), "pass the gauss", "chat, not a password");
+        assert_eq!(masked("/pw oldpass newpass"), "/pw ***");
+        assert_eq!(masked("!pass a b"), "!pass ***");
+        assert_eq!(masked(".pass a b"), ".pass ***");
         assert!(matches!(masked("gg all"), Cow::Borrowed(_)));
         let tab = Line::Say {
             name: "Gordon",

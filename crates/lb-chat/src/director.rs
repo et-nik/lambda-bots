@@ -575,8 +575,9 @@ impl Director {
             .cloned()
             .collect();
         names.push(from.name.clone());
-        let language = social.players.language(name, lang::detect_without(text, &names));
-        if language.is_some_and(|code| lang::foreign(&code, &view.limits.language)) {
+        let server = &view.limits.language;
+        let language = social.players.language(name, lang::verdict(text, &names), server);
+        if language.is_some_and(|heard| lang::foreign(heard, server)) {
             return Vec::new();
         }
         let named: Vec<&Speaker> = hearing.iter().copied().filter(|b| b.called(text)).collect();
@@ -585,20 +586,24 @@ impl Director {
             .partner(now, from.userid, |p| hearing.iter().any(|b| b.persona == p))
             .map(|t| {
                 let asked = t.last_mine().filter(|l| ends_asking(&l.text)).map(|l| l.at);
-                (t.bot.clone(), asked)
+                (t.bot.clone(), t.since, asked)
             });
         let partner = talk
             .as_ref()
-            .and_then(|(p, _)| hearing.iter().copied().find(|b| b.persona == *p));
-        let bot_asked = talk.as_ref().and_then(|(_, asked)| *asked);
+            .and_then(|(p, ..)| hearing.iter().copied().find(|b| b.persona == *p));
+        let (began, bot_asked) = talk
+            .as_ref()
+            .map_or((None, None), |&(_, since, asked)| (Some(since), asked));
         let noise = addressing::noise(text);
-        // In a talk, a short reply to the bot's question is no repeat unless the player already gave it since the
-        // question; a question is no bind, and another line is one only when sent twice before.
-        let reply = bot_asked.is_some_and(|asked| {
-            (noise.is_some_and(|n| !n.hard()) || plus_or_minus(text))
-                && social.players.last_wrote(name, &line.gist).is_none_or(|t| t < asked)
-        });
-        let asks = partner.is_some() && noise.is_none() && addressing::question(text, true);
+        // In a talk, a short reply to the bot's question (a word, the bots' names aside) is no repeat unless the
+        // player already gave it since the question; a question the player last sent before the talk began is no
+        // bind, and another line, or a question sent again within the talk, is one only when sent twice before.
+        let unsent_since = |at: SimTime| social.players.last_wrote(name, &line.gist).is_none_or(|t| t < at);
+        let short =
+            noise.is_some_and(|n| !n.hard()) || (!named.is_empty() && !text.contains('?') && line.gist.len() == 1);
+        let reply = bot_asked.is_some_and(|asked| (short || plus_or_minus(text)) && unsent_since(asked));
+        let asks =
+            partner.is_some() && noise.is_none() && addressing::question(text, true) && began.is_some_and(unsent_since);
         let to: Vec<&str> = named.iter().map(|b| b.persona.as_str()).collect();
         let repeat = !reply
             && (social
@@ -1277,6 +1282,54 @@ mod tests {
     }
 
     #[test]
+    fn a_letter_alone_is_foreign_where_no_alphabet_of_the_server_s_language_has_it() {
+        let n = named_answers("tr", &[], &[], "plutonium gördün mü?");
+        assert!(n >= 85, "ö and ü on a Turkish server: {n}");
+        let n = named_answers("fr", &[], &["ça va les gars"], "plutonium, bonjour");
+        assert!(n >= 85, "after a line with ç on a French server: {n}");
+        assert_eq!(
+            named_answers("ru", &[], &[], "Plutonium, şaka mı?"),
+            0,
+            "Turkish letters on a Russian server"
+        );
+        assert_eq!(
+            named_answers("uk", &[], &[], "plutonium, gördün mü?"),
+            0,
+            "ö and ü on a Ukrainian server"
+        );
+        let n = named_answers("kk", &[], &[], "plutonium, gördün mü?");
+        assert!(
+            n >= 85,
+            "ö and ü on a Kazakh server, whose Latin alphabet has them: {n}"
+        );
+        let n = named_answers("ru", &[], &["şaka mı"], "plutonium gg");
+        assert!(n >= 85, "a letter alone is not the player's language: {n}");
+    }
+
+    #[test]
+    fn a_letter_of_the_server_s_language_forgets_another_one_the_player_wrote() {
+        let n = named_answers("tr", &[], &["привет", "şaka mı"], "plutonium gg");
+        assert!(n >= 85, "Cyrillic, then Turkish letters on a Turkish server: {n}");
+        assert_eq!(
+            named_answers("ru", &[], &["naber kanka", "şaka mı"], "plutonium gg"),
+            0,
+            "Turkish words, then Turkish letters on a Russian server"
+        );
+        for server in ["de", "kk"] {
+            assert_eq!(
+                named_answers(server, &[], &["naber kanka", "şaka mı"], "plutonium gg"),
+                0,
+                "Turkish words, then Turkish letters on {server}"
+            );
+            assert_eq!(
+                named_answers(server, &[], &["naber kanka"], "plutonium, şaka mı"),
+                0,
+                "Turkish letters after Turkish words on {server}"
+            );
+        }
+    }
+
+    #[test]
     fn a_hello_is_answered_once_in_three_quarters_of_an_hour() {
         let gordon = who(1, "Gordon", false);
         let bots = vec![chatty(2, "Plutonium"), chatty(3, "Kleiner")];
@@ -1842,6 +1895,201 @@ mod tests {
     }
 
     #[test]
+    fn a_question_sent_again_in_the_same_talk_is_a_bind() {
+        let gordon = who(1, "Gordon", false);
+        let question = "кто идёт на рельсы?";
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut answers = 0;
+            for i in 0..60 {
+                let t = 10.0 + 30.0 * f64::from(i);
+                if !r.say(t, &gordon, question).is_empty() {
+                    answers += 1;
+                    r.bot_says(t + 4.0, 2, Some(&gordon), "я уже там");
+                }
+                assert!(r.say(t + 15.0, &gordon, "CHAAARGE!!!1").is_empty(), "seed {seed}");
+            }
+            assert!(
+                answers <= 1,
+                "seed {seed}: a shout keeps the talk on, {answers} answers"
+            );
+        }
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut requests = 0;
+            for i in 0..40 {
+                let t = 10.0 + 30.0 * f64::from(i);
+                for s in r.say(t, &gordon, question) {
+                    requests += 1;
+                    r.d.refund(&r.limits);
+                    r.s.unanswered(&gordon.name, s.line_at.unwrap(), "Plutonium");
+                }
+            }
+            assert!(requests <= 2, "seed {seed}: answers never said, {requests} requests");
+        }
+    }
+
+    #[test]
+    fn a_question_in_a_third_talk_is_no_bind() {
+        let gordon = who(1, "Gordon", false);
+        let again: Vec<bool> = (0..)
+            .filter_map(|seed| {
+                let mut r = talk(seed, "привет, как сам?");
+                for start in [0.0, 1800.0] {
+                    if !continued_by(&r.say(start + 10.0, &gordon, "ну а ты?"), 2) {
+                        return None;
+                    }
+                    r.bot_says(start + 14.0, 2, Some(&gordon), "да норм");
+                    r.say(start + 1800.0, &gordon, "плутон, го на квад");
+                    r.bot_says(start + 1805.0, 2, Some(&gordon), "го");
+                }
+                Some(continued_by(&r.say(3610.0, &gordon, "ну а ты?"), 2))
+            })
+            .take(100)
+            .collect();
+        let n = again.iter().filter(|&&on| on).count();
+        assert!(n >= 85, "a question answered in two talks before: {n}");
+    }
+
+    #[test]
+    fn a_question_asked_a_third_time_in_a_talk_is_a_bind() {
+        let gordon = who(1, "Gordon", false);
+        let question = "где тут броня лежит?";
+        let mut lost_twice = 0;
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut asked = 0;
+            for t in [10.0, 40.0] {
+                for s in r.say(t, &gordon, question) {
+                    asked += 1;
+                    r.d.refund(&r.limits);
+                    r.s.unanswered(&gordon.name, s.line_at.unwrap(), "Plutonium");
+                }
+            }
+            if asked < 2 {
+                continue;
+            }
+            lost_twice += 1;
+            assert!(
+                r.say(70.0, &gordon, question).is_empty(),
+                "seed {seed}: both answers lost, no bot line since"
+            );
+        }
+        assert!(lost_twice >= 80, "{lost_twice}");
+    }
+
+    #[test]
+    fn a_question_bind_every_few_minutes_is_answered_twice_at_most() {
+        let gordon = who(1, "Gordon", false);
+        let mut twice = 0;
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut answers = 0;
+            for i in 0..120 {
+                let t = 10.0 + 30.0 * f64::from(i);
+                let asks = i % 12 == 0;
+                let line = if asks {
+                    "кто со мной на склад?"
+                } else {
+                    "MOVE IT!!!"
+                };
+                if !r.say(t, &gordon, line).is_empty() {
+                    answers += usize::from(asks);
+                    r.bot_says(t + 4.0, 2, Some(&gordon), "я с тобой");
+                }
+            }
+            assert!(
+                r.s.talks.partner(SimTime(3600.0), gordon.userid, |_| true).is_some(),
+                "seed {seed}: the shouts keep the talk on"
+            );
+            assert!(
+                answers <= 2,
+                "seed {seed}: a question every 360 s for an hour, {answers} answers"
+            );
+            twice += usize::from(answers == 2);
+        }
+        assert!(
+            twice >= 80,
+            "the second time is answered as another line would be: {twice}"
+        );
+    }
+
+    /// Gordon greets Plutonium by name at the start of each of three maps and asks it the same question right after,
+    /// before its answer.
+    #[test]
+    fn a_question_asked_on_every_map_after_a_hello_is_no_bind() {
+        let gordon = who(1, "Gordon", false);
+        let mut third = 0;
+        for seed in 0..200 {
+            let mut r = Room::new(seed, vec![speaker(2, "Plutonium")], roomy());
+            r.s.arrive("Gordon", SimTime(0.5));
+            for map in 0..3 {
+                if map > 0 {
+                    r.s.present(&["Gordon".into()], SimTime(600.0));
+                    r.s.map_end(SimTime(600.0), &[gordon.userid]);
+                    r.d = Director::new(seed * 7 + map, SimTime::ZERO, &r.limits);
+                    r.j = Journal::new("stalkyard", SimTime::ZERO);
+                    r.s.map_start();
+                    r.s.arrive("Gordon", SimTime(0.5));
+                }
+                r.say(1.0, &gordon, "плутон, привет");
+                let asked = continued_by(&r.say(3.0, &gordon, "как там твой гаусс?"), 2);
+                third += usize::from(map == 2 && asked);
+                r.bot_says(6.0, 2, Some(&gordon), "привет, всё норм");
+                r.bot_says(9.0, 2, Some(&gordon), "да вроде живой");
+            }
+        }
+        assert!(third >= 170, "the third map: {third} of 200");
+    }
+
+    #[test]
+    fn rotating_binds_in_a_talk_get_an_answer_once_or_twice() {
+        let gordon = who(1, "Gordon", false);
+        let cyrillic = [
+            "ДЕРЖИ ГОСТИНЕЦ!!!",
+            "ОТДЫХАЙ, ДРУЖОК!!!",
+            "СЛЕДУЮЩИЙ ПОШЁЛ!!!",
+            "ВОТ ТЕБЕ СЮРПРИЗ!!!",
+            "ПРОЩАЙ, ТУРИСТ!!!",
+        ];
+        let latin = [
+            "BOOM BABY!!!",
+            "TOO SLOW!!!",
+            "SEE YA!!!",
+            "OWNED AGAIN!!!",
+            "NEXT PLEASE!!!",
+        ];
+        for seed in 0..100 {
+            let mut r = talk(seed, "привет");
+            let mut answers = [0; 5];
+            for i in 0..120 {
+                let t = 10.0 + 30.0 * f64::from(i);
+                let k = (i / 2) as usize % 5;
+                let line = if i % 2 == 0 { cyrillic[k] } else { latin[k] };
+                if !r.say(t, &gordon, line).is_empty() {
+                    if i % 2 == 0 {
+                        answers[k] += 1;
+                    }
+                    r.bot_says(t + 4.0, 2, Some(&gordon), "ну-ну, полегче");
+                }
+            }
+            assert!(answers.iter().all(|&n| n <= 2), "seed {seed}: {answers:?}");
+        }
+    }
+
+    #[test]
+    fn a_burst_of_one_named_line_is_answered_once() {
+        let gordon = who(1, "Gordon", false);
+        for seed in 0..50 {
+            let mut r = Room::new(seed, vec![speaker(2, "Plutonium")], roomy());
+            let answers: usize = (0..20)
+                .map(|i| r.say(1.0 + 1.5 * f64::from(i), &gordon, "плутон, ты где засел?").len())
+                .sum();
+            assert_eq!(answers, 1, "seed {seed}");
+        }
+    }
+
+    #[test]
     fn a_short_reply_to_the_bot_s_question_is_answered_more_often() {
         let gordon = who(1, "Gordon", false);
         let answered = |asked: &str, reply: &str| {
@@ -1859,6 +2107,35 @@ mod tests {
         let n = answered("привет", "да");
         assert!(n <= 70, "chatty(0.15) to no question: {n}");
         assert_eq!(answered("го на рельсы?", "+++++"), 0, "signs, not a yes");
+    }
+
+    #[test]
+    fn a_short_reply_naming_the_bot_is_a_reply() {
+        let gordon = who(1, "Gordon", false);
+        let addressed = |out: &[Speak]| {
+            out.iter()
+                .any(|s| s.slot == 2 && matches!(s.trigger, Trigger::Addressed { .. }))
+        };
+        let (mut first, mut named) = (0, 0);
+        for seed in 0..300 {
+            let mut r = talk(seed, "привет, го на рельсы?");
+            if !continued_by(&r.say(10.0, &gordon, "да"), 2) {
+                continue;
+            }
+            first += 1;
+            assert!(
+                r.say(16.0, &gordon, "да").is_empty() && r.say(18.0, &gordon, "да, плутон").is_empty(),
+                "seed {seed}: the same reply to the same question"
+            );
+            r.bot_says(20.0, 2, Some(&gordon), "го");
+            r.bot_says(65.0, 2, Some(&gordon), "а потом на квад?");
+            named += usize::from(addressed(&r.say(70.0, &gordon, "да, плутон")));
+        }
+        assert!(first >= 100, "{first}");
+        assert!(
+            named * 100 >= first * 85,
+            "the same reply by name to the bot's next question: {named} of {first}"
+        );
     }
 
     #[test]

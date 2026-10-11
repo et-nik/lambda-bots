@@ -261,15 +261,46 @@ fn nick_slurring(word: &str) -> bool {
     NICK_SLUR_START.iter().any(|r| word.starts_with(r))
 }
 
-/// Whether a nickname swears or holds a slur, so that no phrase says it: a word of it swears or is a slur as it is,
-/// without its digits (`suka1337`) or with digits read as letters (`Pid0r_99`), or starts with a Latin slur lines are
-/// not read for (`xX_Piderok_Xx`).
+/// The parts of `word` its capitals start (`xXPiderokXx`: `x`, `X`, `Piderok`, `Xx`): a capital after a small
+/// letter or a digit starts one (`1337Pedik`: `1337`, `Pedik`), and so does a capital between a capital and a small
+/// letter (`HLDMKing`: `HLDM`, `King`).
+fn camel(word: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = word.char_indices().collect();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (i, &(at, c)) in chars.iter().enumerate().skip(1) {
+        let before = chars[i - 1].1;
+        let after = chars.get(i + 1).map(|&(_, c)| c);
+        if c.is_uppercase()
+            && (before.is_lowercase()
+                || before.is_ascii_digit()
+                || (before.is_uppercase() && after.is_some_and(char::is_lowercase)))
+        {
+            parts.push(&word[start..at]);
+            start = at;
+        }
+    }
+    parts.push(&word[start..]);
+    parts
+}
+
+/// Whether a nickname swears or holds a slur, so that no phrase says it. Each word of it, and each part of a word its
+/// capitals start (`MegaPedik`, `5Pedik`), is read: it swears or is a slur as it is, without its digits (`suka1337`)
+/// or with digits read as letters (`Pid0r_99`); or it starts with a Latin slur lines are not read for
+/// (`xX_Piderok_Xx`), as it is or with digits read as letters, never without them (`5piderman` stays).
 pub fn nick(name: &str) -> bool {
-    words(name, &[]).iter().any(|word| {
+    let parts = spans(name)
+        .into_iter()
+        .flat_map(|(s, e)| camel(&name[s..e]))
+        .map(normal);
+    words(name, &[]).into_iter().chain(parts).any(|word| {
+        let listed = |w: &str| either(w, swearing) || either(w, slurring);
         let digitless: String = word.chars().filter(|c| !c.is_ascii_digit()).collect();
-        [leet(word), digitless, word.clone()]
-            .iter()
-            .any(|w| either(w, swearing) || either(w, slurring) || either(w, nick_slurring))
+        let lettered = leet(&word);
+        [word.as_str(), lettered.as_str()]
+            .into_iter()
+            .any(|w| listed(w) || either(w, nick_slurring))
+            || listed(&digitless)
     })
 }
 
@@ -460,6 +491,52 @@ mod tests {
             !slur("ну привет, Piderok", &none()) && !has("suka1337 опять тут", &none()),
             "a line may call such a player"
         );
+    }
+
+    #[test]
+    fn nicknames_are_read_by_the_parts_their_capitals_start() {
+        assert_eq!(camel("xXPiderokXx"), ["x", "X", "Piderok", "Xx"]);
+        assert_eq!(camel("HLDMKing"), ["HLDM", "King"]);
+        assert_eq!(camel("СуперГерой"), ["Супер", "Герой"]);
+        assert_eq!(camel("gauss"), ["gauss"]);
+        assert_eq!(camel("Pro1337Pedik"), ["Pro1337", "Pedik"]);
+        assert_eq!(camel("5piderman"), ["5piderman"]);
+        for name in [
+            "MegaPedik",
+            "xXPiderokXx",
+            "SuperPider",
+            "MrHoholX",
+            "SukaBlyat123",
+            "СуперПедик",
+            "5Pedik",
+            "1337Pedik",
+            "Pro1337Pedik",
+        ] {
+            assert!(nick(name), "{name}");
+        }
+        for name in [
+            "5piderman",
+            "3pider",
+            "SpiderMan",
+            "ClassicGamer",
+            "xXSpiderXx",
+            "Player2Pedro",
+        ] {
+            assert!(!nick(name), "{name}");
+        }
+        let words = [
+            "Dark", "Silent", "Rocket", "Night", "Iron", "Crazy", "Happy", "Shadow", "Classic", "Grass", "Glass",
+            "Bass", "Spider", "Sniper", "Gamer", "Hunter", "Wolf", "Knight", "Panda", "Hopper", "Master", "Pass",
+            "Peace", "Gauss", "Bunny", "Lucky", "Mister", "Captain", "Little", "Big", "Snow", "Fox", "King", "Hero",
+        ];
+        for a in words {
+            assert!(!nick(&format!("Mr{a}")), "Mr{a}");
+            for b in words {
+                for name in [format!("{a}{b}"), format!("xX{a}{b}Xx"), format!("{a}{b}2000")] {
+                    assert!(!nick(&name), "{name}");
+                }
+            }
+        }
     }
 
     #[test]

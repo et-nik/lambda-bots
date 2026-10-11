@@ -82,7 +82,10 @@ shows() {
 "$HERE/lbcmd.sh" --wait 1 "lb chat reload" | sed 's/^/  /'
 quiet "no line from the model" "lb chat test \"$BOT\" привет"
 shows "the status tells the credit is out" "out of API credit" "lb chat status"
-check "a phrase without the model" "lb chat event \"$BOT\" win"
+# The worker picks the phrase at once. The bot types it when it can: an alive one only once no enemy is about, and it
+# lets the line go after 15 s, so a bot in a fight may never say it.
+"$HERE/lbcmd.sh" --wait 1 "lb chat event \"$BOT\" win" | sed 's/^/  /'
+shows "a phrase without the model" "will type a phrase" "lb chat log 1"
 shows "the log tells why the test got no line" "no line (Billing)" "lb chat log 20"
 echo "chat credit check: $failures failures"
 (( failures == 0 ))

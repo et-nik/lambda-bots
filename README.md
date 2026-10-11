@@ -82,9 +82,9 @@ phrases (`config/chat/phrases.yaml`, a set is built in), which cost nothing. A l
 player's would: an alive bot types standing still in a calm moment, a dead one holds its respawn until the line is
 out. They remember the players they met and their talks between maps and restarts (`data/chat/memory.json`). What
 you tell them goes in `config/chat/`: regular players (`players.yaml`), the server (`server.yaml`), single bots
-(`bots.yaml`), maps (`maps.yaml`). Off until `chat.enabled`; nothing is sent while no human plays. Every line of the
-game chat, with players joining and leaving, goes to `logs/chatlog.<date>.log` (a file a UTC day, kept 30 days), chat
-on or off. Details: `docs/chat.md`.
+(`bots.yaml`), maps (`maps.yaml`). Off until `chat.enabled`; no line is asked for while no human plays, but the notes
+on a map's players still go after it ends. Every line of the game chat, with players joining and leaving, goes to
+`logs/chatlog.<date>.log` (a file a UTC day, kept 30 days), chat on or off. Details: `docs/chat.md`.
 
 ## Navigation
 

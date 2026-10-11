@@ -274,13 +274,33 @@ fn by_letters(text: &str) -> Option<&'static str> {
     })
 }
 
+/// A line's language as [`detect`] tells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Verdict<'a> {
+    pub code: &'a str,
+    /// Neither a word nor the script tells it, only a letter (`ö`, `ç`), which languages written in Latin letters
+    /// share.
+    pub by_letters: bool,
+}
+
 /// The language `text` is written in, when it shows: `ru` for Cyrillic or Russian in Latin letters (`privet`,
 /// `teb9`, `krasivyj`), `en`, `tr`, and `de`, `pl`, `es`, `pt` by their letters, unless the words are plainly
 /// English (`GİVE ME THİS GAUSS`, typed on a Turkish keyboard). `None` for a line of no language (`gg`, `hi`, `)))`,
 /// `I TO)`); the player's other lines may tell.
 pub fn detect(text: &str) -> Option<&'static str> {
+    read(text).map(|v| v.code)
+}
+
+/// [`detect`], and whether only a letter of `text` tells the language.
+fn read(text: &str) -> Option<Verdict<'static>> {
+    let told = |code| {
+        Some(Verdict {
+            code,
+            by_letters: false,
+        })
+    };
     if text.chars().filter(|&c| cyrillic(c) && c.is_alphabetic()).count() >= 3 {
-        return Some("ru");
+        return told("ru");
     }
     let (mut en, mut ru, mut tr) = (0, 0, 0);
     let lower = text.replace('İ', "i").to_lowercase().replace(['’', 'ʼ', '`'], "'");
@@ -297,16 +317,16 @@ pub fn detect(text: &str) -> Option<&'static str> {
         }
     }
     if tr > 0 && tr >= en && tr > ru {
-        return Some("tr");
+        return told("tr");
     }
     if let Some(code) = by_letters(text)
         && !(en > ru && en > tr)
     {
-        return Some(code);
+        return Some(Verdict { code, by_letters: true });
     }
     match ru.cmp(&en) {
-        Ordering::Greater => Some("ru"),
-        Ordering::Less => Some("en"),
+        Ordering::Greater => told("ru"),
+        Ordering::Less => told("en"),
         Ordering::Equal => None,
     }
 }
@@ -315,6 +335,11 @@ pub fn detect(text: &str) -> Option<&'static str> {
 /// of four letters or more of them. A nickname's letters or words tell nothing: `gg Glücksritter` for
 /// `=Glücksritter=`, `kill ben` to a player named `Ben`.
 pub fn detect_without(text: &str, names: &[String]) -> Option<&'static str> {
+    verdict(text, names).map(|v| v.code)
+}
+
+/// [`detect_without`], and whether only a letter of `text`, the `names` left out, tells the language.
+pub fn verdict(text: &str, names: &[String]) -> Option<Verdict<'static>> {
     let mut left_out: Vec<String> = Vec::new();
     for name in names {
         left_out.push(name.clone());
@@ -324,11 +349,17 @@ pub fn detect_without(text: &str, names: &[String]) -> Option<&'static str> {
                 .map(String::from),
         );
     }
-    detect(&profanity::without_names(text, &left_out))
+    read(&profanity::without_names(text, &left_out))
 }
 
 /// Server languages written in Cyrillic besides Russian: [`detect`] tells every Cyrillic line `ru`.
 const CYRILLIC: [&str; 11] = ["uk", "be", "bg", "sr", "mk", "kk", "ky", "tg", "mn", "tt", "ba"];
+/// Server languages on which a language only a letter tells ([`Verdict::by_letters`]) is another one: English and
+/// the languages written in Cyrillic, where such a letter is most likely another language's. Not Kazakh or Tatar,
+/// whose Latin alphabets have them (`ä ö ü ş ğ ı ñ ç`), nor a language written in Latin letters, whose own they may
+/// be (`ç` in French, `ö` in Turkish). Serbian or Belarusian written in Latin letters counts as Polish by its `ć` or
+/// `ł`.
+const BY_LETTERS_FOREIGN: [&str; 11] = ["en", "ru", "uk", "be", "bg", "mk", "sr", "ky", "tg", "mn", "ba"];
 
 /// Whether a line in `code` (as [`detect`] tells it) is in the server's language (`chat.language`, by its primary
 /// subtag: `ru` of `ru-RU`); any Cyrillic line is on a server whose language is written in Cyrillic (`uk`, `bg`…).
@@ -338,10 +369,16 @@ fn same_as_server(code: &str, server: &str) -> bool {
         || (code.eq_ignore_ascii_case("ru") && CYRILLIC.iter().any(|c| server.eq_ignore_ascii_case(c)))
 }
 
-/// Whether a line in `code` (as [`detect`] tells it) is in neither the server's language (`chat.language`, by its
-/// primary subtag; any Cyrillic on a server whose language is written in Cyrillic) nor English: nobody answers it.
-pub fn foreign(code: &str, server: &str) -> bool {
-    !same_as_server(code, server) && !code.eq_ignore_ascii_case("en")
+/// Whether a line in the `heard` language is in neither the server's language (`chat.language`, by its primary
+/// subtag; any Cyrillic on a server whose language is written in Cyrillic) nor English: nobody answers it. A language
+/// only a letter tells ([`Verdict::by_letters`]) is another one only on an `en` server or one whose language is
+/// written in Cyrillic, `kk` and `tt` aside.
+pub fn foreign(heard: Verdict<'_>, server: &str) -> bool {
+    let code = heard.code;
+    let letters_tell = BY_LETTERS_FOREIGN
+        .iter()
+        .any(|c| primary(server).eq_ignore_ascii_case(c));
+    (letters_tell || !heard.by_letters) && !same_as_server(code, server) && !code.eq_ignore_ascii_case("en")
 }
 
 /// The language a player writes in, as [`detect_without`] tells it with the `names` left out: their `line`, else the
@@ -560,17 +597,52 @@ mod tests {
         );
     }
 
+    /// A language a word or the script tells.
+    fn told(code: &str) -> Verdict<'_> {
+        Verdict {
+            code,
+            by_letters: false,
+        }
+    }
+
     #[test]
     fn foreign_lines() {
-        assert!(foreign("tr", "ru") && foreign("de", "ru-RU"));
-        assert!(!foreign("ru", "ru") && !foreign("ru", "RU_ru") && !foreign("en", "ru") && !foreign("en", "en"));
-        assert!(foreign("ru", "de") && !foreign("de", "de"));
+        assert!(foreign(told("tr"), "ru") && foreign(told("de"), "ru-RU"));
+        assert!(!foreign(told("ru"), "ru") && !foreign(told("ru"), "RU_ru"));
+        assert!(!foreign(told("en"), "ru") && !foreign(told("en"), "en"));
+        assert!(foreign(told("ru"), "de") && !foreign(told("de"), "de"));
+    }
+
+    #[test]
+    fn letters_alone_tell_another_language_where_no_alphabet_of_the_server_s_language_has_them() {
+        for (line, code) in [("gördün mü?", "de"), ("ça va les gars", "pt"), ("şaka mı", "tr")] {
+            let heard = verdict(line, &[]).unwrap();
+            assert_eq!(heard, Verdict { code, by_letters: true }, "{line}");
+            for server in ["ru", "en-US", "uk", "be-BY", "bg", "mk", "sr", "ky", "tg", "mn", "ba"] {
+                assert!(foreign(heard, server), "{line} on {server}");
+            }
+            for server in ["tr", "fr", "es-ES", "kk", "tt"] {
+                assert!(!foreign(heard, server), "{line} on {server}");
+            }
+        }
+        for line in [
+            "BU OYUN HİÇ GÜZEL DEĞİL",
+            "GİVE ME THİS FUCKİNG GAUSS",
+            "привет",
+            "naber kanka",
+        ] {
+            assert!(verdict(line, &[]).is_some_and(|v| !v.by_letters), "{line}");
+        }
+        assert!(
+            foreign(verdict("naber kanka", &[]).unwrap(), "fr"),
+            "Turkish words on a French server"
+        );
     }
 
     #[test]
     fn any_cyrillic_is_the_language_of_a_cyrillic_server() {
-        assert!(!foreign("ru", "uk") && !foreign("ru", "be-BY") && !foreign("RU", "bg"));
-        assert!(foreign("tr", "uk") && foreign("ru", "fr"));
+        assert!(!foreign(told("ru"), "uk") && !foreign(told("ru"), "be-BY") && !foreign(told("RU"), "bg"));
+        assert!(foreign(told("tr"), "uk") && foreign(told("ru"), "fr"));
         assert_eq!(spoken(Lang::En, "ru", "uk"), None);
         assert_eq!(spoken(Lang::En, "ru", "kk"), None);
         assert_eq!(

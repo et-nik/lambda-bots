@@ -37,15 +37,16 @@ fn first_word_blocked(text: &str, blocked: &[String]) -> bool {
 }
 
 /// A login or registration command with a password after it, which is no chat: the first word, in lower case and
-/// without one leading `/`, `!` or `.`, is one of `SECRET_WORDS` and something follows it. After `pass` and `pw`
-/// exactly one word does, so `pass the gauss` stays chat.
+/// without one leading `/`, `!` or `.`, is one of `SECRET_WORDS` and something follows it. After a bare `pass` or
+/// `pw`, without one of these in front, exactly one word does, so `pass the gauss` stays chat.
 pub fn secret(text: &str) -> bool {
     let mut words = text.split_whitespace();
     let first = words.next().unwrap_or_default().to_lowercase();
     let command = first.strip_prefix(['/', '!', '.']).unwrap_or(&first);
+    let prefixed = command.len() != first.len();
     let after = words.count();
     match command {
-        "pass" | "pw" => after == 1,
+        "pass" | "pw" if !prefixed => after == 1,
         _ => after > 0 && SECRET_WORDS.contains(&command),
     }
 }
@@ -178,6 +179,10 @@ mod tests {
             ".PW hunter2",
             "setpw hunter2",
             "  auth\t1234 ",
+            "/pw a b",
+            "!pass a b",
+            ".pass a b",
+            ".pw a b",
         ] {
             assert!(secret(line), "{line}");
         }

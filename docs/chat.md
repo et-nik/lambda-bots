@@ -7,8 +7,9 @@ to a player who just joined, gg when a match ends, a complaint about a nemesis, 
 moments mostly get ready phrases, which cost nothing and never queue behind the model's requests; the model writes
 the rest. The bots remember the players they meet and what they talked about, between maps and restarts.
 
-Chat is off until `chat.enabled: true` (or `lb_chat 1`), and nothing is sent while no human is on the server. The
-chat log, every line of the game chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
+Chat is off until `chat.enabled: true` (or `lb_chat 1`). No line is asked for while no human is on the server, but
+the notes on a map's players still go after it ends (see Memory of players). The chat log, every line of the game
+chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
 
 ## How it plays
 
@@ -24,9 +25,10 @@ chat log, every line of the game chat in `logs/chatlog.<date>.log`, is written w
   answer to a line to everybody, a question to everybody or a hello holds that line of the player's too, once the
   answer is out. In a talk a question is answered nearly always, another line most of the time, a short reply
   (`да`, `ок`, one word) now and then; after the bot asked something (its line ends with `?`, a smiley after it too:
-  `?)`), a short reply, `+` or `-` gets an answer more often than not. The chances hold for the whole 150 s. A bot
-  named or asked while it types or waits for its line answers once it is free, within 30 s; a newer line of the same
-  player replaces the waiting one. What they said goes to the memory, and a talk picked up days later comes with it.
+  `?)`), a short reply, the bot's name in it too (`да, плутон`), `+` or `-` gets an answer more often than not. The
+  chances hold for the whole 150 s. A bot named or asked while it types or waits for its line answers once it is free,
+  within 30 s; a newer line of the same player replaces the waiting one. What they said goes to the memory, and a talk
+  picked up days later comes with it.
 - **Left alone.** `бот` in the third person (`ты с ботом что ли болтаешь`) is players talking among themselves: a
   bot rarely joins in. A line that names another player on the server, and no bot, is left to them; in a talk with a
   bot only a name at the start or the end of the line counts. While a player talks with another human (one called
@@ -36,11 +38,12 @@ chat log, every line of the game chat in `logs/chatlog.<date>.log`, is written w
   `%l`-style macros, map names, binds in Latin capitals (`HEADSHOT!!!`), a lone short word outside a talk. Nor does a
   repeat: the same words answered in the last 5 minutes (when they name bots, by one of those: the same words to
   another bot are new), or sent before within 3 hours without a bot's name, as binds are; an answer that never
-  reached the chat does not count. In a talk a question is never taken for a bind, another line only when sent
-  twice before, and a short reply to the bot's question is no repeat, unless the player already gave it since that
-  question. Swearing, insults, nations and politics get an answer only when they name a bot or come inside a talk
-  with it, and name no other player on the server. A line in another language the bots can tell gets none at all
-  (see Language).
+  reached the chat does not count. In a talk a question the player last sent before this talk began is never taken for
+  a bind; sent again within the same talk, it is one, as another line is, only when sent twice before among the
+  player's last 64 lines of those 3 hours. A short reply to the bot's question, the bot's name in it too, is no
+  repeat, unless the player already gave it since that question. Swearing, insults, nations and politics get an answer
+  only when they name a bot or come inside a talk with it, and name no other player on the server. A line in another
+  language the bots can tell gets none at all (see Language).
 - **How much.** All bots together say at most `limits.lines_per_minute` lines a minute (2 by default) and
   `limits.remarks_per_hour` lines nobody asked for an hour (6, two at once at most; 0 means none at all): game
   moments, greetings, comments on lines meant for everybody. gg at the end of a match and answers to players who name
@@ -69,13 +72,17 @@ chat log, every line of the game chat in `logs/chatlog.<date>.log`, is written w
   GunGame's frozen players) everyone types freely.
 - **Language.** Lines are in `chat.language` (Russian by default). A player who writes in English gets English: the
   model is told so, and phrases come from the `en` section. A line in another language the bots can tell gets no
-  answer: Turkish words; letters such as `ä ö ü ß`, `ą ę ł`, `ñ ¿`, `ã õ ç`; Cyrillic, or Russian in Latin letters,
-  on a server whose language is not written in Cyrillic. The bots cannot tell Cyrillic languages apart: on a server
-  whose language is written in Cyrillic (`ru`, `uk`, `be`, `bg`, `sr`, `mk`, `kk`, `ky`, `tg`, `mn`, `tt`, `ba`),
-  every Cyrillic line counts as the server's language. A line in a language they cannot tell (French, Italian, German
-  without umlauts) is answered like any other; one that tells nothing by itself (`gg`, `ok`, `)))`) goes by the
-  player's earlier lines. Nicknames in a line (the bots', those of the players on the server, the writer's own) tell
-  nothing of its language.
+  answer: Turkish words; Cyrillic, or Russian in Latin letters, on a server whose language is not written in Cyrillic;
+  letters such as `ä ö ü ß`, `ą ę ł`, `ñ ¿`, `ã õ ç`, `ş ğ ı` on an `en` server and on one whose language is written
+  in Cyrillic, but `kk` and `tt`, whose Latin alphabets have them (Serbian and Belarusian in Latin letters count as
+  Polish there by their `ć` and `ł`). On any other server (`tr`, `fr`, `de`, `kk` …) such letters by themselves do not
+  make a line foreign, and such a line makes the bots forget another language they remember for the player. Letters of
+  the language they remember (`ş` after Turkish words) count as its words; nowhere do the letters alone set it. The
+  bots cannot tell Cyrillic languages apart: on a server whose language is written in Cyrillic (`ru`, `uk`, `be`,
+  `bg`, `sr`, `mk`, `kk`, `ky`, `tg`, `mn`, `tt`, `ba`), every Cyrillic line counts as the server's language. A line
+  in a language they cannot tell (French, Italian, German without umlauts) is answered like any other; one that tells
+  nothing by itself (`gg`, `ok`, `)))`) goes by the player's earlier lines. Nicknames in a line (the bots', those of
+  the players on the server, the writer's own) tell nothing of its language.
   On a server whose language is not written in Cyrillic, the model greeting a player who writes Russian, or speaking
   of a moment with them, is told to write Russian.
 - **Tone.** Friendly teasing, never mean; slang for everyone, swearing only for personalities with
@@ -243,10 +250,12 @@ it like any line.
   stop if it writes so, now and then with `))` (` :)` in English) if it likes them. A bot's own phrases are said as
   written.
 - **Names.** `{name}` is the other player: the main alias from `players.yaml`, else the nickname without clan tags
-  and colour codes (`[KZ] Lynx` → `Lynx`, `^1Shephard` → `Shephard`). It has no value when a word of that name
-  swears or is a slur: as written, without its digits, or with digits read as letters (`0` as `o`, `1` as `i`, `3` as
-  `e`, `4` as `a`). A phrase is skipped when a placeholder has no value or the line comes out longer than the bot may
-  send; the moment's phrases without `{name}` are still there.
+  and colour codes (`[KZ] Lynx` → `Lynx`, `^1Shephard` → `Shephard`). It has no value when a word of that name, or a
+  part of a word that a capital starts (`MegaXyz`: `Mega` and `Xyz`; `1337Xyz`: `1337` and `Xyz`), swears or is a
+  slur: as written, without its digits, or with digits read as letters (`0` as `o`, `1` as `i`, `3` as `e`, `4` as
+  `a`); or when it starts with `pider` or `pedik`, as written or with digits read as letters, but not without its
+  digits (`5piderman` keeps its name). A phrase is skipped when a placeholder has no value or the line comes out
+  longer than the bot may send; the moment's phrases without `{name}` are still there.
 
 The moments, when they come, and the placeholders their phrases take:
 
@@ -312,18 +321,22 @@ played, kills and deaths, the score against each bot, favourite weapons, GunGame
 swearing and slurs left out; the map's nicknames and the players' aliases count as neither), their talks with the bots
 (the last 12 lines with each of the 3 bots they talked to last, by the bot's personality), moments worth remembering,
 and notes. After every map one request asks the model to update the notes on the players the bots met (1–2 sentences
-each: how they play, what stood out, how they talk) unless `memory.ai_notes` is off; swearing and slurs are cut out of
-the notes a prompt shows. A map that ends while chat is off is not remembered, and the notes still waiting when chat
-is switched off are never asked for. Players unseen for `memory.forget_after_days` are forgotten when a map is
-remembered; `lb chat memory <player> forget` forgets one now, talks included, and leaves them out of the notes still
-waiting.
+each: how they play, what stood out, how they talk) unless `memory.ai_notes` is off, whoever is on the server then;
+swearing and slurs are cut out of the notes a prompt shows. A map that ends while chat is off is not remembered, and
+notes still waiting when chat is switched off, or whose turn comes while the model is out of reach, are never asked
+for (see Inside). Players unseen for `memory.forget_after_days` are forgotten when a map is remembered;
+`lb chat memory <player> forget` forgets a player at once, talks included: by SteamID that one alone, by nickname
+every player who used it (see Commands and cvar).
 
 A talk comes back when the player talks with that bot again, days later too: the prompt shows its last lines with
 when they were said (`вчера`, `3 дня назад`). While the memory has no entry under a player's key (a SteamID new to
 it, or the nickname while the SteamID is pending), the bots take them for the remembered player seen last under the
 same nickname: the prompt shows that player's notes, scores, lines and talks, and the greeting comes from the model.
-A player whose SteamID changes every visit gets a new entry each time; for aliases and notes of yours that follow
-them, give them a `by_name` entry in `players.yaml`.
+That is never the one remembered under the key of another player on the server, but for the ghost of the player's own
+earlier connection (one who reconnects is `(1)Gordon` while the ghost still holds `Gordon`); still, two players whose
+keys are new to the memory may both be taken for one remembered player who used both their nicknames. A player under
+the default nickname `Player`, `(1)Player` too, is taken for nobody. A player whose SteamID changes every visit gets a
+new entry each time; for aliases and notes of yours that follow them, give them a `by_name` entry in `players.yaml`.
 
 ## Settings
 
@@ -334,7 +347,7 @@ them, give them a `by_name` entry in `players.yaml`.
 | `enabled`                    | `false`                           | chat on (cvar `lb_chat`)                                             |
 | `language`                   | `ru`                              | what bots write in; English to players who write English             |
 | `server`                     | `""`                              | a line about the server for the bots ("GunGame server hldm.org")     |
-| `require_humans`             | `true`                            | no requests while no human is on the server                          |
+| `require_humans`             | `true`                            | no lines asked for while no human plays; a map's notes still go      |
 | `provider.kind`              | `anthropic`                       | `anthropic` or `openai` (OpenAI-compatible)                          |
 | `provider.base_url`          | `""`                              | `""` = `https://api.anthropic.com`; a gateway goes here              |
 | `provider.model`             | `claude-haiku-4-5`                | model name                                                           |
@@ -404,7 +417,7 @@ Notes on models:
   the log gets one warning.
 
 Meanwhile game moments keep their ready phrases; players get no answers, and a match another bot or nobody won no
-word, until the model is back.
+word, until the model is back. A map's notes whose turn comes meanwhile are dropped, as are those whose request fails.
 
 `lb chat reload` and `lb config reload` read `config/chat/` again and lift a refusal, a wait after failures and the
 wait for API credit: the next request goes to the provider at once. The day's spent tokens stay spent.
@@ -476,11 +489,13 @@ runs of spaces become one.
 
 Players' lines are written as typed, plugin commands too (`rtv`, `/top15`), but for a login or registration line:
 when its first word, in lower case and without one leading `/`, `!` or `.`, is `login`, `reg`, `register`,
-`password`, `setpw` or `auth` with anything after it, or `pass` or `pw` with exactly one word after it, what follows
-is written as `***` (`/login ***`, `.pw ***`). A command alone stays as typed, and so does `pass the gauss`, which is
-chat; `@login …` is a command too, but written as typed. A login line is no chat: the bots never see it, and it
-never goes to the model, the transcript or the memory. Not in the log: lines of other plugins' bots, `say` from the
-server console or rcon, plugin messages (`amx_say`, GunGame's announcements). The plugin does not see them as chat.
+`password`, `setpw` or `auth` with anything after it, or `pass` or `pw` with anything after it (typed without the
+`/`, `!` or `.`, with exactly one word after it), what follows is written as `***` (`/login ***`, `!pass ***`,
+`.pw ***`). A command alone stays as typed, and so does `pass the gauss`, which is chat; `@login …` is a command too,
+but written as typed. A login line is no chat: the bots never see it, and it never goes to the model, the transcript
+or the memory; a recording keeps it as typed (`docs/replay.md`). Not in the log: lines of other plugins' bots, `say`
+from the server console or rcon, plugin messages (`amx_say`, GunGame's announcements). The plugin does not see them
+as chat.
 
 A day's file is deleted once its date is more than `chat.chatlog_days` days back (30), by the date in its name; no
 other file in `logs/` is touched. Old files go at a map start, once a UTC day, whether `chat.chatlog` (or chat) is on
@@ -491,18 +506,19 @@ next day's first line, or on `lb config reload`.
 
 ## What is kept, and for how long
 
-| File                         | Holds                                                         | Kept                                                  |
-|------------------------------|---------------------------------------------------------------|-------------------------------------------------------|
-| `logs/chatlog.<date>.log`    | every chat line with its nickname, joins and leaves           | `chat.chatlog_days` days (30), the log on or off      |
-| `data/chat/memory.json`      | per player: names, scores, last lines, talks with bots, notes | `memory.forget_after_days` after the last visit (120) |
-| `logs/chat.<date>.log`       | requests and answers, the chat in them (`chat.transcript`)    | the 7 newest day files, pruned as it writes           |
-| `logs/lambdabots.<date>.log` | the bots' lines with what they answer                         | `logging.max_files` files (7)                         |
-| `records/*.lbrec`            | a recorded map, its chat too (`docs/replay.md`)               | until you delete them                                 |
+| File                         | Holds                                                                 | Kept                                                  |
+|------------------------------|-----------------------------------------------------------------------|-------------------------------------------------------|
+| `logs/chatlog.<date>.log`    | every chat line with its nickname, joins and leaves                   | `chat.chatlog_days` days (30), the log on or off      |
+| `data/chat/memory.json`      | per player: names, scores, last lines, talks with bots, notes         | `memory.forget_after_days` after the last visit (120) |
+| `logs/chat.<date>.log`       | requests and answers, the chat in them (`chat.transcript`)            | the 7 newest day files, pruned as it writes           |
+| `logs/lambdabots.<date>.log` | the bots' lines with what they answer                                 | `logging.max_files` files (7)                         |
+| `records/*.lbrec`            | a recorded map, its chat too, login lines as typed (`docs/replay.md`) | until you delete them                                 |
 
 Old chat logs go at a map start once a UTC day, the log on or off; old transcripts only as the transcript writes. The
 memory forgets players unseen too long after each map it takes in, so not while chat or `memory.enabled` is off.
-`lb chat memory <player> forget` forgets a player at once, talks included. Keep these files as you keep the server's
-other logs.
+`lb chat memory <player> forget` forgets a player at once, talks included, and their name in the last maps; the next
+map the memory takes in leaves them out, and one who keeps playing is remembered again from the map after it (see
+Commands and cvar). Keep these files as you keep the server's other logs.
 
 ## Personalities
 
@@ -546,9 +562,15 @@ failures), today's chat log and what every bot is typing. `lb chat event` takes 
 
 `lb chat off`, `lb_chat 0` and `lb config reload` with `chat.enabled: false` drop every line on its way, the answers
 waiting for their bot and the notes requests still waiting, and no request queued for the model goes out any more;
-the memory stays. `<player>` in `lb chat memory` is a
-SteamID or a nickname the player used (of several players who used it, the one seen last); `forget` also takes them
-out of the notes requests still waiting.
+the memory stays.
+
+`<player>` in `lb chat memory` is a SteamID or a nickname the player used; of several players who used the nickname,
+the one seen last is shown. `forget` with a SteamID forgets that player alone, with a nickname every remembered player
+who used it, the engine's `(1)` before it or not (`(1)Gordon` for `Gordon`), and prints the keys it forgot. It also
+takes them out of the notes requests still waiting and out of the last maps' winners and best scores, and the memory
+leaves them out of the next map it takes in, what they wrote before the forget too (after a nickname, whoever plays
+under it then, `(1)` before it or not): the map under way, or, if that one ends while chat or `memory.enabled` is off
+or with no human on it, the first map after. A player who keeps playing is remembered again from the map after that.
 
 `<bot>` is a personality or in-game name, its beginning, or `#userid`; a name with spaces goes in quotes. The worker's
 output goes to the server console and the log (`logs/lambdabots.<date>.log`: every line with its reason, time and
@@ -572,6 +594,8 @@ tokens, every phrase with its moment; prompts at `debug`).
   model's lines, the phrases, silences (dropped lines among them) and failures. A replay types the same lines at the
   same frames and never asks the model, reads `config/chat/` or writes the chat log. See `docs/replay.md`.
 - After a map the worker saves the memory at once and asks for the notes once it has had nothing to do for 15 s, so
-  answers after a map change go first; at the latest when the next map ends, after the requests waiting then. Notes
-  still waiting when the plugin stops or chat is switched off are dropped.
+  answers after a map change go first; at the latest when the next map ends, after the requests waiting then. They go
+  whether a human is on the server or not. Notes are dropped when the plugin stops or chat is switched off while they
+  wait, when their turn comes while the model is out of reach (no key, refused settings, out of API credit, the day's
+  tokens spent, a wait after failures), and when their request fails.
 - The worker stops with the plugin (`meta unload` waits for a request in flight, up to `provider.timeout + 2` s).

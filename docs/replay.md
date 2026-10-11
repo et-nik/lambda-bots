@@ -99,7 +99,8 @@ values of `lb_telemetry_secret` they are stored as `<redacted>` (`chat.provider.
 `lambdabots.yaml` is written back from what it parses to, without its comments; one that does not parse is left out,
 as the runtime does not use it either. Everything else stays as the server had it, `access.password` and the
 `setinfo` values the core read from clients included: share a recording only with people you would give the
-server's config to. The players' chat and the bots' lines are in it too.
+server's config to. The players' chat, login and registration lines with their passwords as typed, and the bots'
+lines are in it too.
 
 The file starts with `LBREC\0\r\n` and a format version, 4 since the chat's phrases and talks came in. Then come
 blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored as their bytes,

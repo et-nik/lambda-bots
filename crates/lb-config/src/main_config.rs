@@ -475,13 +475,14 @@ pub const REDACTED: &str = "<redacted>";
 pub struct ChatConfig {
     pub enabled: bool,
     /// The language bots write in (`ru`, `en`, …). A player writing English gets English; a line the bots can tell
-    /// is in another language gets no answer (Turkish words; German, Polish, Spanish or Portuguese letters; Cyrillic
-    /// on a server whose language is not written in it). On a server whose language is written in Cyrillic (`uk`,
-    /// `bg`, …), every Cyrillic line counts as its language.
+    /// is in another language gets no answer (Turkish words; Cyrillic, or Russian in Latin letters, on a server whose
+    /// language is not written in Cyrillic; Turkish, German, Polish, Spanish or Portuguese letters on an `en` server
+    /// and on one whose language is written in Cyrillic, but `kk` and `tt`, whose Latin alphabets have them). On a
+    /// server whose language is written in Cyrillic (`uk`, `bg`, …), every Cyrillic line counts as its language.
     pub language: String,
     /// A line about the server for the bots ("GunGame server hldm.org").
     pub server: String,
-    /// No requests while no human is on the server.
+    /// No line is asked for while no human is on the server; the notes on a map's players still go after it ends.
     pub require_humans: bool,
     pub provider: ChatProvider,
     pub limits: ChatLimits,

@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryR
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lb_chat::memory::{Memory, PlayerMemory};
+use lb_chat::memory::{self, Forgotten, Memory, PlayerMemory};
 use lb_chat::phrases::{self, Offer, Ring};
 use lb_chat::prompt::{self, Context, Known, Rendered};
 use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, profanity, sanitize};
@@ -219,6 +219,9 @@ struct Worker {
     notes_due: Option<Box<MapSummary>>,
     /// Maps whose notes request was still waiting when the next map ended: it goes after the requests waiting.
     overdue: VecDeque<Box<MapSummary>>,
+    /// Players forgotten since the last map the memory took in: the next one it takes in leaves them out
+    /// ([`Worker::map_end`]).
+    forgotten: Forgotten,
     /// [`NOTES_IDLE`] and [`UNPAID_WAIT`]; shorter in tests.
     notes_idle: Duration,
     unpaid_wait: Duration,
@@ -246,6 +249,7 @@ impl Worker {
             waiting: VecDeque::new(),
             notes_due: None,
             overdue: VecDeque::new(),
+            forgotten: Forgotten::default(),
             notes_idle: NOTES_IDLE,
             unpaid_wait: UNPAID_WAIT,
         };
@@ -865,16 +869,30 @@ impl Worker {
     }
 
     /// The memory of the player a request is for ([`prompt::partner`]), with its key: by their key on the scoreboard,
-    /// else the player seen last who used their name ([`Memory::named`]), as with a new SteamID or one still pending.
+    /// else the player seen last who used their name ([`Memory::named_except`]), as with a new SteamID or one still
+    /// pending. That one is never under the key of another player on the scoreboard, but for the ghost of the
+    /// player's own earlier connection ([`memory::same_nickname`]); another player there whose key is new to the
+    /// memory may still be taken for the same one, by another name it used. The default nickname `Player` finds
+    /// nobody by name.
     fn partner_memory(&self, req: &ChatRequest) -> Option<(&str, &PlayerMemory)> {
         let who = prompt::partner(req)?;
-        req.scene
-            .players
+        let players = &req.scene.players;
+        players
             .iter()
             .find(|p| p.name == who.name)
             .and_then(|p| p.key.as_deref())
             .and_then(|key| self.memory.players.get_key_value(key))
-            .or_else(|| self.memory.named(&who.name))
+            .or_else(|| {
+                if memory::default_nickname(&who.name) {
+                    return None;
+                }
+                let others: Vec<&str> = players
+                    .iter()
+                    .filter(|p| !memory::same_nickname(&p.name, &who.name))
+                    .filter_map(|p| p.key.as_deref())
+                    .collect();
+                self.memory.named_except(&who.name, &others)
+            })
             .map(|(key, m)| (key.as_str(), m))
     }
 
@@ -914,10 +932,12 @@ impl Worker {
         aliases
     }
 
-    /// A map ended: the memory takes it in and is saved at once; its notes request waits for a quiet moment
-    /// ([`NOTES_IDLE`]). The one still waiting from the map before is due now ([`Worker::overdue`]).
-    fn map_end(&mut self, s: Box<MapSummary>) {
+    /// A map ended: the memory takes it in, without the players forgotten since the last map it took in
+    /// ([`Worker::forgotten`]), and is saved at once; its notes request waits for a quiet moment ([`NOTES_IDLE`]).
+    /// The one still waiting from the map before is due now ([`Worker::overdue`]).
+    fn map_end(&mut self, mut s: Box<MapSummary>) {
         self.overdue.extend(self.notes_due.take());
+        std::mem::take(&mut self.forgotten).leave_out(&mut s);
         if !self.config.memory.enabled || s.players.is_empty() {
             return;
         }
@@ -981,16 +1001,11 @@ impl Worker {
         aliases
     }
 
-    /// Leaves a forgotten player out of the notes requests waiting, as a map's winner too; a map left without players
-    /// goes.
-    fn forget_in_notes(&mut self, key: &str) {
+    /// Leaves players forgotten out of the notes requests waiting ([`Forgotten::leave_out`]), as a map's winner too;
+    /// a map left without players goes.
+    fn forget_in_notes(&mut self, gone: &Forgotten) {
         for s in self.notes_due.iter_mut().chain(self.overdue.iter_mut()) {
-            if let Some(name) = s.players.iter().find(|p| p.key == key).map(|p| p.name.clone()) {
-                s.players.retain(|p| p.key != key);
-                if s.winner.as_deref() == Some(name.as_str()) {
-                    s.winner = None;
-                }
-            }
+            gone.leave_out(s);
         }
         self.notes_due = self.notes_due.take().filter(|s| !s.players.is_empty());
         self.overdue.retain(|s| !s.players.is_empty());
@@ -998,14 +1013,17 @@ impl Worker {
 
     fn memory_command(&mut self, query: &str, forget: bool) {
         let out = if forget {
-            match self.memory.forget(query) {
-                Some(key) => {
-                    self.forget_in_notes(&key);
-                    self.memory_dirty = true;
-                    self.save();
-                    format!("chat: forgot {key}")
-                }
-                None => format!("chat: nobody called `{query}` is remembered"),
+            let gone = self.memory.forget(query);
+            if gone.is_empty() {
+                format!("chat: nobody called `{query}` is remembered")
+            } else {
+                self.forget_in_notes(&gone);
+                let keys: Vec<&str> = gone.keys().collect();
+                let out = format!("chat: forgot {}", keys.join(", "));
+                self.forgotten.add(gone);
+                self.memory_dirty = true;
+                self.save();
+                out
             }
         } else {
             match self.memory.find(query) {
@@ -1225,6 +1243,32 @@ mod tests {
 
     fn ask(req: ChatRequest) -> Job {
         Job::Ask(Box::new(req))
+    }
+
+    fn forget(query: &str) -> Job {
+        Job::Memory {
+            query: query.into(),
+            forget: true,
+        }
+    }
+
+    /// A player the memory keeps, who used `names` (the latest first) and was seen last at `last_seen`.
+    fn memory_of(names: &[&str], last_seen: u64, notes: &str) -> PlayerMemory {
+        PlayerMemory {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            last_seen,
+            notes: notes.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A human on the scoreboard of [`request`].
+    fn card(name: &str, key: &str) -> PlayerCard {
+        PlayerCard {
+            name: name.into(),
+            key: Some(key.into()),
+            ..request(0).scene.players[0].clone()
+        }
     }
 
     fn answer(text: &str) -> Canned {
@@ -1817,18 +1861,15 @@ mod tests {
         w.memory.players.insert("STEAM_0:1:42".into(), PlayerMemory::default());
         assert_eq!(wake(&mut w, vec![ask(joined(2))])[0].outcome, model, "by the key");
         w.memory.players.clear();
-        let used = |last_seen: u64, notes: &str| PlayerMemory {
-            names: vec!["Gordon".into()],
-            last_seen,
-            notes: notes.into(),
-            ..Default::default()
-        };
-        w.memory
-            .players
-            .insert("STEAM_0:0:7".into(), used(100, "Camps by the rails."));
-        w.memory
-            .players
-            .insert("name:gordon".into(), used(200, "Loves the gauss."));
+        for (key, last_seen, notes) in [
+            ("STEAM_0:0:3", 100, "Camps by the rails."),
+            ("STEAM_0:0:7", 300, "Loves the gauss."),
+            ("name:gordon", 200, "Jumps off the crates."),
+        ] {
+            w.memory
+                .players
+                .insert(key.into(), memory_of(&["Gordon"], last_seen, notes));
+        }
         assert_eq!(
             wake(&mut w, vec![ask(joined(3))])[0].outcome,
             model,
@@ -1836,8 +1877,10 @@ mod tests {
         );
         let asked = &server.requests()[1].body;
         assert!(
-            asked.contains("Loves the gauss") && !asked.contains("Camps by the rails"),
-            "the prompt holds the memory of the one seen last by that name: {asked}"
+            asked.contains("Loves the gauss")
+                && !asked.contains("Camps by the rails")
+                && !asked.contains("Jumps off the crates"),
+            "the memory of the one seen last by that name, neither the first key nor the last: {asked}"
         );
         w.memory.players.clear();
         std::fs::create_dir_all(root.join("config/chat")).unwrap();
@@ -2142,10 +2185,6 @@ mod tests {
         let server = MockServer::start(vec![answer("{\"STEAM_0:0:9\": \"looks for his helmet\"}")]);
         let root = dir("notes-forget");
         let mut w = worker(&root, config(&server.url()));
-        let forget = |query: &str| Job::Memory {
-            query: query.into(),
-            forget: true,
-        };
         wake(
             &mut w,
             vec![
@@ -2165,10 +2204,192 @@ mod tests {
             }
         }
         let mut alone = played("bounce");
-        alone.players.truncate(1);
-        wake(&mut w, vec![Job::MapEnd(alone), forget("STEAM_0:1:42")]);
+        alone.players.remove(0);
+        wake(&mut w, vec![Job::MapEnd(alone)]);
+        assert!(w.notes_due.is_some());
+        wake(&mut w, vec![forget("STEAM_0:0:9")]);
         assert!(w.notes_due.is_none(), "a map left without players goes");
         assert_eq!(server.requests().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_player_forgotten_is_not_remembered_again_when_the_map_ends() {
+        let server = MockServer::start(vec![answer("{\"STEAM_0:0:9\": \"looks for his helmet\"}")]);
+        let root = dir("forget-map-end");
+        let mut w = worker(&root, config(&server.url()));
+        let mut crossfire = played("crossfire");
+        crossfire.top = vec![("Gordon".into(), 3), ("Barney".into(), 3)];
+        wake(&mut w, vec![Job::MapEnd(crossfire), forget("gordon")]);
+        assert_eq!(w.memory.maps[0].winner, None, "the last maps keep no win of theirs");
+        assert_eq!(w.memory.maps[0].top, [("Barney".to_string(), 3)]);
+        let mut stalkyard = played("stalkyard");
+        stalkyard.players[0].lines = vec![(30.0, "my exam is on monday".into())];
+        stalkyard.top = vec![("Gordon".into(), 5), ("Barney".into(), 3)];
+        wake(&mut w, vec![Job::MapEnd(stalkyard)]);
+        let quiet = w.notes_due.take().unwrap();
+        w.ask_notes(&quiet);
+        let kept = store::load_memory(&root.join("data/chat/memory.json"));
+        assert_eq!(
+            kept.players.keys().collect::<Vec<_>>(),
+            ["STEAM_0:0:9"],
+            "not back with the map under way"
+        );
+        assert!(
+            kept.maps
+                .iter()
+                .all(|m| m.winner.is_none() && m.top == [("Barney".to_string(), 3)]),
+            "{:?}",
+            kept.maps
+        );
+        let asked = server.requests();
+        assert_eq!(asked.len(), 2, "the notes on both maps, on Barney");
+        for body in asked.iter().map(|r| &r.body) {
+            assert!(body.contains("anyone seen my helmet"), "{body}");
+            for gone in [
+                "Gordon",
+                "STEAM_0:1:42",
+                "my exam is on monday",
+                "the rails are mine tonight",
+            ] {
+                assert!(!body.contains(gone), "{gone}: {body}");
+            }
+        }
+        let user = w.render(&request(1)).user;
+        assert!(
+            user.contains("Previous maps: stalkyard (today); crossfire (today).") && !user.contains("Gordon won"),
+            "{user}"
+        );
+        wake(&mut w, vec![Job::MapEnd(played("bounce"))]);
+        assert!(
+            w.memory.players.contains_key("STEAM_0:1:42"),
+            "remembered again from the next map on"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nickname_forgotten_holds_for_one_who_reconnects() {
+        let server = MockServer::start(vec![answer("{\"STEAM_0:0:9\": \"looks for his helmet\"}")]);
+        let root = dir("forget-reconnect");
+        let mut w = worker(&root, config(&server.url()));
+        w.memory.players.insert(
+            "STEAM_0:1:42".into(),
+            memory_of(&["Gordon"], 100, "Camps by the rails."),
+        );
+        wake(&mut w, vec![forget("gordon")]);
+        let mut stalkyard = played("stalkyard");
+        stalkyard.players.push(PlayerMap {
+            key: "STEAM_0:1:777".into(),
+            name: "(1)Gordon".into(),
+            lines: vec![(5.0, "back after the crash".into())],
+            ..Default::default()
+        });
+        wake(&mut w, vec![Job::MapEnd(stalkyard)]);
+        assert_eq!(
+            w.memory.players.keys().collect::<Vec<_>>(),
+            ["STEAM_0:0:9"],
+            "nor as (1)Gordon under a new SteamID"
+        );
+        let quiet = w.notes_due.take().unwrap();
+        w.ask_notes(&quiet);
+        let asked = server.requests();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].body.contains("anyone seen my helmet"), "{}", asked[0].body);
+        for gone in ["(1)Gordon", "STEAM_0:1:777", "back after the crash"] {
+            assert!(!asked[0].body.contains(gone), "{gone}: {}", asked[0].body);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forgetting_a_nickname_forgets_every_player_who_used_it() {
+        let server = MockServer::start(vec![answer("welcome back")]);
+        let root = dir("forget-nickname");
+        let mut c = config(&server.url());
+        c.phrases.ai_share = 0.0;
+        let mut w = worker(&root, c);
+        w.memory
+            .players
+            .insert("STEAM_0:0:7".into(), memory_of(&["Gordon"], 100, "Camps by the rails."));
+        w.memory
+            .players
+            .insert("STEAM_0:1:42".into(), memory_of(&["Gordon"], 200, "Loves the gauss."));
+        w.memory.players.insert(
+            "STEAM_0:0:9".into(),
+            memory_of(&["Barney"], 300, "Looks for his helmet."),
+        );
+        wake(&mut w, vec![forget("gordon")]);
+        let kept = store::load_memory(&root.join("data/chat/memory.json"));
+        assert_eq!(kept.players.keys().collect::<Vec<_>>(), ["STEAM_0:0:9"]);
+        let joined = event(1, Trigger::Joined { who: who(1, "Gordon") });
+        assert!(w.partner_memory(&joined).is_none());
+        let got = wake(&mut w, vec![ask(joined)]);
+        assert!(phrase(of(&got, 1)), "a stranger now: {got:?}");
+        assert!(server.requests().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_name_is_never_taken_for_another_player_on_the_server() {
+        let server = MockServer::start(vec![answer("welcome back")]);
+        let root = dir("by-name");
+        let mut c = config(&server.url());
+        c.phrases.ai_share = 0.0;
+        let mut w = worker(&root, c);
+        w.memory.players.insert(
+            "STEAM_0:0:9".into(),
+            memory_of(&["Barney", "Gordon"], 200, "Looks for his helmet."),
+        );
+        w.memory
+            .players
+            .insert("STEAM_0:0:7".into(), memory_of(&["Gordon"], 100, "Camps by the rails."));
+        let mut req = event(1, Trigger::Joined { who: who(1, "Gordon") });
+        req.scene.players.push(card("Barney", "STEAM_0:0:9"));
+        assert_eq!(
+            w.partner_memory(&req).map(|(key, _)| key),
+            Some("STEAM_0:0:7"),
+            "Barney is on the server"
+        );
+        let user = w.render(&req).user;
+        assert!(user.contains("Gordon: Camps by the rails"), "{user}");
+        assert_eq!(
+            user.matches("Looks for his helmet").count(),
+            1,
+            "Barney's notes for Barney alone: {user}"
+        );
+
+        w.memory.players.clear();
+        w.memory.players.insert(
+            "STEAM_0:0:5".into(),
+            memory_of(&["Eli", "(1)Eli"], 300, "Back after every crash."),
+        );
+        let mut back = event(2, Trigger::Joined { who: who(3, "(1)Eli") });
+        back.scene.players = vec![card("Eli", "STEAM_0:0:5"), card("(1)Eli", "STEAM_0:0:6")];
+        assert_eq!(
+            w.partner_memory(&back).map(|(key, _)| key),
+            Some("STEAM_0:0:5"),
+            "the ghost of their own earlier connection"
+        );
+        assert_eq!(
+            wake(&mut w, vec![ask(back)])[0].outcome,
+            Outcome::Line("welcome back".into())
+        );
+
+        w.memory.players.insert(
+            "STEAM_0:0:4".into(),
+            memory_of(&["Alyx", "Player"], 400, "Snipes from the tower."),
+        );
+        for (id, name) in [(3, "Player"), (4, "(1)player")] {
+            let mut new = event(id, Trigger::Joined { who: who(4, name) });
+            new.scene.players = vec![card(name, "STEAM_0:1:77")];
+            assert!(w.partner_memory(&new).is_none(), "{name}");
+            assert!(
+                phrase(&wake(&mut w, vec![ask(new)])[0].outcome),
+                "{name} is greeted as a stranger"
+            );
+        }
+        assert_eq!(server.requests().len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

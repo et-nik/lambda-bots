@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::addressing;
 use crate::journal::Who;
+use crate::lang::{self, Verdict};
 use crate::request::Said;
 
 /// Seconds without a line after which a talk is over.
@@ -29,7 +30,7 @@ const THREADS: usize = 32;
 const THREAD_LINES: usize = 12;
 const OWN_LINES: usize = 6;
 const PLAYERS: usize = 64;
-const GISTS: usize = 16;
+const GISTS: usize = 64;
 /// Lines nobody asked for that may come one right after the other.
 const REMARKS: f64 = 2.0;
 
@@ -155,6 +156,9 @@ pub struct Thread {
     /// A greeting opened it, and the player has not answered yet.
     pub greeting: bool,
     pub last: SimTime,
+    /// When the talk going on began: the first line that came while the thread was not [`Thread::active`], or the
+    /// player's line that the bot's line opening the talk answers ([`Social::answering`]).
+    pub since: SimTime,
     /// Oldest first.
     pub lines: VecDeque<Line>,
 }
@@ -266,6 +270,7 @@ impl Talks {
                     direct: false,
                     greeting: false,
                     last: now,
+                    since: now,
                     lines: VecDeque::new(),
                 });
                 self.threads.len() - 1
@@ -280,6 +285,9 @@ impl Talks {
             return;
         }
         let t = self.open(now, bot, who.userid, &who.name);
+        if !t.active(now) {
+            t.since = now;
+        }
         t.name.clone_from(&who.name);
         t.direct |= direct;
         t.greeting = false;
@@ -326,6 +334,13 @@ impl Talks {
             let t = self.open(now, bot, player, name);
             if !t.active(now) {
                 t.greeting = greeting;
+                // The talk begins with the player's line the bot's line answers, which `answering` put last in the
+                // thread; else with the bot's line.
+                t.since = t
+                    .lines
+                    .back()
+                    .filter(|l| !l.mine && now.since(l.at) <= THREAD_IDLE)
+                    .map_or(now, |l| l.at);
             }
             t.push(now, true, text);
         }
@@ -356,6 +371,7 @@ impl Talks {
             .retain(|t| present.contains(&t.player) && end.since(t.last) <= THREAD_IDLE);
         for t in &mut self.threads {
             t.last = back(t.last, end);
+            t.since = back(t.since, end);
             for line in &mut t.lines {
                 line.at = back(line.at, end);
             }
@@ -478,15 +494,36 @@ impl Players {
         }
     }
 
-    /// The language the player writes in: `detected` in their line when it shows, else the last one that did.
-    pub(crate) fn language(&mut self, name: &str, detected: Option<&str>) -> Option<String> {
+    /// The language the player writes in: `heard` in their line when it shows, else the last one a word or the script
+    /// told in theirs. A language only a letter tells ([`Verdict::by_letters`]) is not kept. When it is the one kept,
+    /// the line counts as told by a word; otherwise, when it is no other language on the `server` (`chat.language`,
+    /// [`lang::foreign`]), the one kept is forgotten.
+    pub(crate) fn language<'a>(
+        &'a mut self,
+        name: &str,
+        heard: Option<Verdict<'a>>,
+        server: &str,
+    ) -> Option<Verdict<'a>> {
         let Some(p) = self.entry(name) else {
-            return detected.map(String::from);
+            return heard;
         };
-        if let Some(code) = detected {
-            p.language = Some(code.to_string());
+        if let Some(heard) = heard {
+            if !heard.by_letters {
+                p.language = Some(heard.code.to_string());
+            } else if p.language.as_deref() == Some(heard.code) {
+                return Some(Verdict {
+                    code: heard.code,
+                    by_letters: false,
+                });
+            } else if !lang::foreign(heard, server) {
+                p.language = None;
+            }
+            return Some(heard);
         }
-        p.language.clone()
+        p.language.as_deref().map(|code| Verdict {
+            code,
+            by_letters: false,
+        })
     }
 
     /// A line the player wrote, by its [`addressing::gist`].
@@ -806,6 +843,34 @@ mod tests {
     }
 
     #[test]
+    fn a_talk_begins_after_a_quiet_spell() {
+        let mut s = Social::default();
+        let gordon = who(11, "Gordon");
+        let since = |s: &Social| s.talks.threads().iter().find(|t| t.player == 11).map(|t| t.since);
+        s.talks
+            .heard(t(10.0), "Plutonium", &gordon, "плутон, ты на складе?", true);
+        s.said(t(14.0), "Plutonium", Some((11, "Gordon")), false, "уже бегу туда");
+        s.talks.heard(t(100.0), "Plutonium", &gordon, "жду у ящиков", false);
+        assert_eq!(since(&s), Some(t(10.0)), "the talk goes on");
+        s.talks
+            .heard(t(251.0), "Plutonium", &gordon, "плутон, ты где пропал?", true);
+        assert_eq!(since(&s), Some(t(251.0)), "a new talk after 150 s without a line");
+        s.answering(t(500.0), "Plutonium", &gordon, "кто со мной на склад?");
+        assert_eq!(since(&s), Some(t(251.0)), "nothing changes before the answer is out");
+        s.said(t(506.0), "Plutonium", Some((11, "Gordon")), false, "я с тобой");
+        assert_eq!(
+            since(&s),
+            Some(t(500.0)),
+            "an answer opening a talk opens it with the line it answers"
+        );
+        s.said(t(700.0), "Plutonium", Some((11, "Gordon")), false, "ну что, идём?");
+        assert_eq!(since(&s), Some(t(700.0)), "a bot's line opening a talk opens it");
+        s.present(&["Gordon".into()], t(750.0));
+        s.map_end(t(750.0), &[11]);
+        assert_eq!(since(&s), Some(t(-50.0)), "moved back by the map's length");
+    }
+
+    #[test]
     fn own_lines_are_few_and_recent() {
         let mut s = Social::default();
         for i in 0..10 {
@@ -834,9 +899,40 @@ mod tests {
         assert_eq!(s.players.here().collect::<Vec<_>>(), ["barney", "gordon"]);
 
         let p = &mut s.players;
-        assert_eq!(p.language("Gordon", Some("en")).as_deref(), Some("en"));
-        assert_eq!(p.language("Gordon", None).as_deref(), Some("en"), "the last plain one");
-        assert_eq!(p.language("Nobody", None), None);
+        let en = Verdict {
+            code: "en",
+            by_letters: false,
+        };
+        let de = Verdict {
+            code: "de",
+            by_letters: true,
+        };
+        assert_eq!(p.language("Gordon", Some(en), "ru"), Some(en));
+        assert_eq!(p.language("Gordon", None, "ru"), Some(en), "the last plain one");
+        assert_eq!(p.language("Gordon", Some(de), "ru"), Some(de), "the line's own");
+        assert_eq!(p.language("Gordon", None, "ru"), Some(en), "a letter alone is not kept");
+        assert_eq!(p.language("Gordon", Some(de), "de"), Some(de));
+        assert_eq!(
+            p.language("Gordon", None, "de"),
+            None,
+            "a letter of no other language on the server forgets the one kept"
+        );
+        let tr = Verdict {
+            code: "tr",
+            by_letters: false,
+        };
+        let tr_letters = Verdict {
+            code: "tr",
+            by_letters: true,
+        };
+        assert_eq!(p.language("Barney", Some(tr), "de"), Some(tr));
+        assert_eq!(
+            p.language("Barney", Some(tr_letters), "de"),
+            Some(tr),
+            "a letter of the one kept tells it as a word does"
+        );
+        assert_eq!(p.language("Barney", None, "de"), Some(tr), "and keeps it");
+        assert_eq!(p.language("Nobody", None, "ru"), None);
 
         let gist = addressing::gist("где рельсы?", &[]);
         p.wrote("Gordon", t(10.0), gist.clone());
@@ -863,8 +959,8 @@ mod tests {
         assert_eq!(p.times_wrote("Gordon", &gist, t(0.0), t(20.0)), 2);
         assert_eq!(p.last_wrote("Gordon", &gist), Some(t(12.0)));
         assert_eq!(p.last_wrote("Gordon", &addressing::gist("да", &[])), None);
-        for i in 0..30 {
-            p.wrote("Gordon", t(20.0 + f64::from(i)), vec![format!("w{i}")]);
+        for i in 0..GISTS + 10 {
+            p.wrote("Gordon", t(20.0 + i as f64), vec![format!("w{i}")]);
         }
         assert_eq!(p.get("gordon").unwrap().gists.len(), GISTS);
 
