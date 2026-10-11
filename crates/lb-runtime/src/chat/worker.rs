@@ -232,8 +232,9 @@ struct Worker {
     /// them, and as written; and the languages asked.
     names_due: Vec<(String, String)>,
     names_languages: Vec<String>,
-    /// Nicknames asked for names since the start, as [`memory::nickname`] writes them: one the model left without an
-    /// answer is not asked again.
+    /// Nicknames not asked for names again until a restart, as [`memory::nickname`] writes them: those the model's
+    /// answer left out or refused, and those whose names were forgotten. One it answered goes by the names the memory
+    /// keeps for it by language ([`Memory::names_of`]).
     names_asked: BTreeSet<String>,
     /// When the requests for names of the last hour went ([`NAMES_PER_HOUR`]).
     names_sent: VecDeque<Instant>,
@@ -1092,9 +1093,10 @@ impl Worker {
     }
 
     /// Queues the humans on a request's scoreboard whose names the model is to give ([`Worker::ask_names`]): those
-    /// without an alias in `players.yaml` whose names the memory lacks in a language asked, and who were not asked yet;
-    /// the player the request is for first, [`lb_chat::aliases::ASKED_MAX`] at most. Only while the provider can be
-    /// asked, chat and `memory.ai_aliases` are on, and fewer than [`NAMES_PER_HOUR`] went in the last hour.
+    /// without an alias in `players.yaml` whose names the memory lacks in a language asked, and not held back
+    /// ([`Worker::names_asked`]); the player the request is for first, [`lb_chat::aliases::ASKED_MAX`] at most. Only
+    /// while the provider can be asked, chat and `memory.ai_aliases` are on, and fewer than [`NAMES_PER_HOUR`] went in
+    /// the last hour.
     fn want_names(&mut self, req: &ChatRequest) {
         if !self.config.enabled || !self.config.memory.ai_aliases || self.blocked().is_some() {
             return;
@@ -1152,8 +1154,9 @@ impl Worker {
 
     /// Asks the model for the names of the nicknames queued ([`Worker::want_names`]) and keeps them; the queue is
     /// emptied whatever comes of it. Nothing goes while the worker stops, the provider cannot be asked, or chat or
-    /// `memory.ai_aliases` is off. A nickname is not asked again once the model answered, with names for it or
-    /// without, or its answer was refused; one whose request failed on the way may be.
+    /// `memory.ai_aliases` is off. A nickname the model answered, with names for it or without, is asked again, with
+    /// English, only once `chat.language` is a language the memory lacks for it; one its answer left out or refused is
+    /// not asked again until a restart; one whose request failed on the way may be.
     fn ask_names(&mut self, stopping: bool) {
         let due = std::mem::take(&mut self.names_due);
         let codes = std::mem::take(&mut self.names_languages);
@@ -1188,11 +1191,12 @@ impl Worker {
         let now = unix_now();
         let mut told: Vec<String> = Vec::new();
         for ((key, nick), names) in due.into_iter().zip(found) {
-            self.names_asked.insert(key);
-            if let Some(names) = names {
-                told.push(format!("{nick} → {}", shown_names(&names, &codes)));
-                self.memory.learn_names(&nick, names, now);
-            }
+            let Some(names) = names else {
+                self.names_asked.insert(key);
+                continue;
+            };
+            told.push(format!("{nick} → {}", shown_names(&names, &codes)));
+            self.memory.learn_names(&nick, names, now);
         }
         tracing::info!(
             "chat: names for {} of {} nicknames ({} + {} tokens): {}",
@@ -2832,6 +2836,21 @@ mod tests {
         req
     }
 
+    /// [`naming`] and [`owl_joins`] on a German server.
+    fn naming_de(url: &str) -> ChatConfig {
+        ChatConfig {
+            language: "de".into(),
+            ..naming(url)
+        }
+    }
+
+    fn owl_joins_de(id: u64) -> ChatRequest {
+        ChatRequest {
+            language: "de".into(),
+            ..owl_joins(id)
+        }
+    }
+
     /// A phrase's or a line's text, in lower case.
     fn typed(outcome: &Outcome) -> String {
         match outcome {
@@ -3075,6 +3094,42 @@ mod tests {
         assert_eq!(w.memory.names_of(OWL, "ru"), None);
         wake(&mut w, vec![ask(owl_joins(3))]);
         assert_eq!(server.requests().len(), 2, "not again");
+        let german = Job::Configure(Box::new(naming_de(&server.url())));
+        wake(&mut w, vec![german, ask(owl_joins_de(4))]);
+        assert_eq!(server.requests().len(), 2, "nor in another language");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nickname_named_is_asked_again_once_in_a_new_language() {
+        let server = MockServer::start(vec![
+            answer(OWL_NAMES),
+            answer(r#"{"1": {"de": ["Eule"], "en": ["Owl"]}}"#),
+        ]);
+        let root = greeting_root("names-language");
+        let mut w = worker(&root, naming(&server.url()));
+        let german = Job::Configure(Box::new(naming_de(&server.url())));
+        wake(&mut w, vec![ask(owl_joins(1)), german]);
+        wake(&mut w, vec![ask(owl_joins_de(2))]);
+        let asked = server.requests();
+        assert_eq!(asked.len(), 2, "the names queued in Russian went, then the German ones");
+        assert!(asked[1].body.contains("names in German"), "{}", asked[1].body);
+        assert_eq!(w.aliases(&owl_joins_de(3)).all(OWL), ["Eule"]);
+        assert!(w.memory.names_of(OWL, "ru").is_some(), "the Russian names stay");
+        wake(&mut w, vec![ask(owl_joins_de(3))]);
+        assert_eq!(server.requests().len(), 2, "once a language");
+        let english = ChatConfig {
+            language: "en".into(),
+            ..naming(&server.url())
+        };
+        let to_owl = ChatRequest {
+            language: "en".into(),
+            ..owl_joins(4)
+        };
+        wake(&mut w, vec![Job::Configure(Box::new(english)), ask(to_owl)]);
+        let russian = Job::Configure(Box::new(naming(&server.url())));
+        wake(&mut w, vec![russian, ask(owl_joins(5))]);
+        assert_eq!(server.requests().len(), 2, "nor in English or a language asked before");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3092,6 +3147,9 @@ mod tests {
         let got = wake(&mut w, vec![ask(owl_joins(2))]);
         assert!(typed(of(&got, 2)).contains("c o b a"), "{got:?}");
         assert_eq!(server.requests().len(), 1, "not asked again until a restart");
+        let german = Job::Configure(Box::new(naming_de(&server.url())));
+        wake(&mut w, vec![german, ask(owl_joins_de(3))]);
+        assert_eq!(server.requests().len(), 1, "nor in another language");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

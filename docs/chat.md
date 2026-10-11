@@ -212,10 +212,11 @@ model (no key, out of API credit, the day's tokens spent, a wait after failures)
 without clan tags. A name a bot may not say is dropped (longer than 24 characters, without letters, with quotes,
 brackets, `%`, `;` or swearing), and so is one another player on the server goes by. A nickname is asked once: the
 memory keeps its names, none too when the model finds none, for as long as it keeps players (`memory.forget_after_days`
-since the nickname was last seen); one whose answer was of no use is not asked again until a restart, one whose
-request failed is asked again. The names go by the nickname, so a player who changes it gets new ones. To keep the
-bots from naming a player, give them their nickname as the alias. `lb chat memory <nickname>` shows the names and
-`forget` forgets them.
+since the nickname was last seen); once `chat.language` changes to a language it was not asked in, it is asked again
+in that language and English. One whose answer was of no use is not asked again until a restart, one whose request
+failed is asked again. The names go by the nickname, so a player who changes it gets new ones. To keep the bots from
+naming a player, give them their nickname as the alias. `lb chat memory <nickname>` shows the names and `forget`
+forgets them.
 
 ### `server.yaml`
 
