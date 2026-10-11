@@ -26,9 +26,11 @@ chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
   answer is out. In a talk a question is answered nearly always, another line most of the time, a short reply
   (`да`, `ок`, one word) now and then; after the bot asked something (its line ends with `?`, a smiley after it too:
   `?)`), a short reply, the bot's name in it too (`да, плутон`), `+` or `-` gets an answer more often than not. The
-  chances hold for the whole 150 s. A bot named or asked while it types or waits for its line answers once it is free,
-  within 30 s; a newer line of the same player replaces the waiting one. What they said goes to the memory, and a talk
-  picked up days later comes with it.
+  chances hold for the whole 150 s. A bot named or asked while it types or waits for its line answers once it is free:
+  the line it has on its way goes out at once then, on the run if need be, and the answer waits up to 30 s after it, a
+  minute at most; a question to everybody or a line to the bots that falls to a busy bot waits the same way. A newer
+  line of the same player replaces the waiting one. What they said goes to the memory, and a talk picked up days later
+  comes with it.
 - **Left alone.** `бот` in the third person (`ты с ботом что ли болтаешь`) is players talking among themselves: a
   bot rarely joins in. A line that names another player on the server, and no bot, is left to them; in a talk with a
   bot only a name at the start or the end of the line counts. While a player talks with another human (one called
@@ -53,8 +55,8 @@ chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
   `limits.remark_gap` seconds apart, a comment on a line to everybody counting as one there, and one bot's at least
   `limits.bot_remark_gap`; greetings and gg keep no gap. A player's lines to everybody get one comment in 4 minutes
   at most, their questions to everybody one answer in 2 minutes. A line left unsaid (the model wrote `-`, the filter
-  dropped it, the request failed, it came too late) gives back its place in the hour, and one the model, the filter
-  or a failure left unsaid its place in the minute too; the gaps it started keep running.
+  dropped it, the request failed, its bot left for good) gives back its place in the hour, and one the model, the
+  filter or a failure left unsaid its place in the minute too; the gaps it started keep running.
 - **Greetings.** A player who joins may get a word, at most once in 45 minutes for one nickname: a player back after a
   map change or a short break is not greeted again, but one still connecting when the map changed is new on the
   next. A player's own hi to everybody (`прив`, `hi all`) may get one back from one bot, under the same rule; a
@@ -64,12 +66,23 @@ chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
   time and a question nearly always, a one-word thanks now and then (more often when its greeting asked something).
 - **Typing.** A line takes as long as a player's would: noticing and reading what it answers, thinking (short lines
   come at once), typing at the personality's speed (200–380 characters a minute for personalities without their own,
-  `typing.cpm`). An alive bot types only in a calm moment (no enemy seen or heard for `typing.calm` seconds, not
-  fighting, on the ground) and stands still while it types, as a player whose keyboard is in the chat input. An enemy
-  in sight or close, or damage, makes it drop the chat and fight; it types the line again later, once. A dead bot
-  types at once and holds its respawn until the line is out, at most 5 s (about when the game respawns it anyway); a
-  bot respawned mid-line finishes it standing, unless a fight comes first. At the end of a match (the intermission, or
-  GunGame's frozen players) everyone types freely.
+  `typing.cpm`). An alive bot types in a calm moment (no enemy seen or heard for `typing.calm` seconds, not fighting,
+  on the ground) and stands still while it types, as a player whose keyboard is in the chat input. An enemy in sight
+  or close, or damage, makes it stop standing and fight, finishing the line on the run; a line that finds no calm
+  moment in 8 s is typed on the run too. A dead bot types at once and holds its respawn until the line is out, at
+  most 5 s (about when the game respawns it anyway); a bot respawned mid-line finishes it standing, unless a fight
+  comes first. At the end of a match (the intermission, or GunGame's frozen players) everyone types freely.
+- **Every line written is said.** A line the model wrote and the filter let through, or a phrase, goes into the chat
+  however late its reply comes: it never goes stale, and no other line takes its place (a bot with a line on its way
+  is asked for nothing else; an answer to it waits, as above). A model's line asked for or on its way when the map
+  changes, or when its bot leaves, is said by the same personality's bot once it is back: that personality joins
+  first, and the line waits for the player it answers (or, for a line to everybody, all who were in the game) to be in
+  the game again, 30 s into the map at most. It counts in the new map's lines a minute; a team line goes to everybody
+  on a map without teams. One whose bot is not back within a minute (of the map's start, for a line carried over) is
+  dropped, and a ready phrase is never carried over: it costs nothing, and its moment is gone. When the quota drops,
+  a bot with a line on its way is the last to leave. A model's line dropped after it came (that, chat switched off,
+  the server stopping, safe mode) is in the log as `chat <bot>: not said (<why>): <line>`, or `chat: not said (<why>):
+  <line>` for a reply that came after its line was given up; `lb chat status` counts them.
 - **Language.** Lines are in `chat.language` (Russian by default). A player who writes in English gets English: the
   model is told so, and phrases come from the `en` section. A line in another language the bots can tell gets no
   answer: Turkish words; Cyrillic, or Russian in Latin letters, on a server whose language is not written in Cyrillic;
@@ -359,12 +372,13 @@ swearing and slurs left out; the map's nicknames and the players' aliases count 
 as their other lines are, the bots' kept as said), moments worth remembering, and notes; and, by nickname, the names
 the model gave (see `players.yaml`). After every map one request
 asks the model to update the notes on the players the bots met (1–2 sentences each: how they play, what stood out, how
-they talk) unless `memory.ai_notes` is off, whoever is on the server then; swearing and slurs, letters spelt apart
-(`С У К А`) too, are cut out of the notes and the remembered talks a prompt shows. A map that ends while chat is off
-is not remembered, and notes still waiting when chat is switched off, or whose turn comes while the model is out of
-reach, are never asked for (see Inside). Players unseen for `memory.forget_after_days` are forgotten when a map is
-remembered; `lb chat memory <player> forget` forgets a player at once, talks included: by SteamID that one alone, by
-nickname every player who used it (see Commands and cvar).
+they talk) unless `memory.ai_notes` is off, whoever is on the server then; a note is kept whether the model names the
+player by the key the request lists or by a name it lists (one two players share is left out); swearing and slurs,
+letters spelt apart (`С У К А`) too, are cut out of the notes and the remembered talks a prompt shows. A map that ends
+while chat is off is not remembered, and notes still waiting when chat is switched off, or whose turn comes while the
+model is out of reach, are never asked for (see Inside). Players unseen for `memory.forget_after_days` are forgotten
+when a map is remembered; `lb chat memory <player> forget` forgets a player at once, talks included: by SteamID that one
+alone, by nickname every player who used it (see Commands and cvar).
 
 A talk comes back when the player talks with that bot again, days later too: the prompt shows its last lines with
 when they were said (`вчера`, `3 дня назад`). While the memory has no entry under a player's key (a SteamID new to
@@ -595,11 +609,14 @@ server; what one server wants the bot to know goes in that server's `config/chat
 
 `lb chat status` tells whether the worker is ready or why requests wait (refused settings, failures, out of API
 credit, the day's tokens), what it read from `config/chat/`, the session's requests (model lines, phrases, silences,
-failures), today's chat log and what every bot is typing. `lb chat event` takes the keys of `phrases.yaml` and, like
+failures) and lines (said, not said), today's chat log and what every bot is typing, or will type once back in the
+game. `lb chat event` takes the keys of `phrases.yaml` and, like
 `test`, needs chat on: the bot says a phrase, or the model's line when its share comes up (with
 `chat.phrases.ai_share: 0`, always a phrase, except `greet` for a player the bots know).
 
-`lb chat off`, `lb_chat 0` and `lb config reload` with `chat.enabled: false` drop every line on its way, the answers
+`lb chat say`, `test` and `event` turn down a bot with a line on its way and say so: nothing replaces that line.
+`lb chat off`, `lb_chat 0` and `lb config reload` with `chat.enabled: false` drop every line on its way, those waiting
+for their bot too, the answers
 waiting for their bot and the notes requests still waiting, and no request queued for the model goes out any more;
 the memory stays.
 

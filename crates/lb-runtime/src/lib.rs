@@ -1756,6 +1756,10 @@ impl Runtime {
             self.chat_tick(replies);
             self.drive_bots(host);
             self.tend_orders(host);
+        } else {
+            for reply in &replies {
+                self.chat.lost_reply(reply, "safe mode");
+            }
         }
         if let Some(x) = self.experience.as_mut() {
             x.decay(self.now.secs());
@@ -2398,6 +2402,15 @@ impl Runtime {
                 None => tracing::warn!("no personality named {name}"),
             }
         }
+        // A personality whose line waits for its bot comes back first, to say it.
+        for name in self.chat.carried_personas() {
+            if let Some(p) = self.roster.get(name)
+                && self.filter.admits(&p)
+                && !busy(&p.name)
+            {
+                return Some(p);
+            }
+        }
         while let Some(name) = self.carry_over.pop() {
             if let Some(p) = self.roster.get(&name)
                 && self.filter.admits(&p)
@@ -2964,7 +2977,7 @@ fn watch_stalls(
         || bot.test.is_some()
         || bot.selftest.is_some()
         || bot.order.is_some()
-        || bot.chat.typing()
+        || bot.chat.typing_in_the_open()
     {
         return;
     }

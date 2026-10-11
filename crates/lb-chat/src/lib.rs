@@ -21,7 +21,7 @@ pub mod sanitize;
 pub mod talk;
 
 pub use aliases::Aliases;
-pub use botchat::{BotChat, Can, Priority};
+pub use botchat::{BotChat, Can, Pending, Priority};
 pub use director::{Cause, Director, Limits, Speak, Speaker};
 pub use journal::{Event, Journal, Notable, Who};
 pub use phrases::{Offer, Ring};

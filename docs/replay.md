@@ -68,7 +68,8 @@ source differs, only when the core version number does.
   - the master seed and the random state;
   - the chat's state: the players in the game when the last map ended, the talks under way, the bots' recent lines,
     when each nickname was last on the server (for greetings), the gist of players' recent lines and the bots asked
-    to answer them (for repeats) and the hourly cap of lines nobody asked for;
+    to answer them (for repeats), the hourly cap of lines nobody asked for, and the bots' lines asked for or on their
+    way when the last map ended, which their bots say on this one (a reply to one comes in as any other);
 - the files the runtime reads:
   - `config/lambdabots.yaml`, `config/difficulty.yaml`, `config/styles/`;
   - `profiles/`, `names/`, `data/profiles.yaml`;
@@ -102,11 +103,11 @@ as the runtime does not use it either. Everything else stays as the server had i
 server's config to. The players' chat, login and registration lines with their passwords as typed, and the bots'
 lines are in it too.
 
-The file starts with `LBREC\0\r\n` and a format version, 4 since the chat's phrases and talks came in. Then come
-blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored as their bytes,
-so a recording is tied to the ABI version, which the replay checks. A recording of another format is refused
-(`recording format 3, this build reads 4`): replay it with the `lb-cli` of its own release, and build `lb-cli`
-together with the plugin.
+The file starts with `LBREC\0\r\n` and a format version, 5 since the bots' lines on their way carry over a map
+change. Then come blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored
+as their bytes, so a recording is tied to the ABI version, which the replay checks. A recording of another format is
+refused (`recording format 4, this build reads 5`): replay it with the `lb-cli` of its own release, and build
+`lb-cli` together with the plugin.
 
 ## What a replay checks
 

@@ -2,14 +2,21 @@
 //! bot could know; the worker adds the memory of players and the clock. Replies are recorded, so they carry the
 //! final text.
 
+use lb_core::time::SimTime;
 use serde::{Deserialize, Serialize};
 
+use crate::botchat::Pending;
 use crate::journal::{Notable, Who};
 use crate::talk::Social;
 
 /// Request ids: the map's epoch above, a counter below, so a replay makes the same ones.
 pub fn request_id(epoch: u32, seq: u32) -> u64 {
     (u64::from(epoch) << 32) | u64::from(seq)
+}
+
+/// The epoch of the map a request was made on.
+pub fn request_epoch(id: u64) -> u32 {
+    (id >> 32) as u32
 }
 
 /// Why a bot speaks.
@@ -293,12 +300,16 @@ pub struct Reply {
     pub outcome: Outcome,
 }
 
-/// What chat carries across a map change: who was in the game, so they are not greeted again, and what the chat keeps
-/// from map to map, its times already moved back by the old map's length ([`Social::map_end`]).
+/// What chat carries across a map change: who was in the game, so they are not greeted again, what the chat keeps
+/// from map to map and the lines whose bot is gone, their times already moved back by the old map's length
+/// ([`Social::map_end`]).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Carry {
     pub humans: Vec<i32>,
     pub social: Social,
+    /// Lines asked for or on their way when their bot went, with since when it is gone: each waits for its
+    /// personality's bot to be back and say it.
+    pub lines: Vec<(SimTime, Pending)>,
 }
 
 /// A human's map, for the memory of players.
@@ -433,6 +444,7 @@ mod tests {
     #[test]
     fn ids_and_recorded_types_round_trip() {
         assert_eq!(request_id(3, 7), (3 << 32) | 7);
+        assert_eq!(request_epoch(request_id(3, 7)), 3);
         let replies = vec![
             Reply {
                 id: 1,
@@ -465,12 +477,16 @@ mod tests {
         );
         assert_eq!(number(Outcome::Failed(Failure::Billing)), [2, 4]);
         assert_eq!(number(Outcome::Phrase(String::new())), [3, 0]);
+        let priority = |p: crate::Priority| postcard::to_allocvec(&p).unwrap();
+        assert_eq!(
+            [crate::Priority::Remark, crate::Priority::Answer].map(priority),
+            [[0], [3]],
+            "a carried line's priority keeps its number"
+        );
     }
 
     #[test]
     fn a_carry_round_trips_with_the_talks() {
-        use lb_core::time::SimTime;
-
         let mut social = Social::default();
         let gordon = Who {
             userid: 4,
@@ -502,9 +518,33 @@ mod tests {
         let thread = &social.talks.threads()[0];
         assert_eq!((thread.last, thread.lines[0].at), (SimTime(-5.0), SimTime(-10.0)));
         assert_eq!(social.players.get("barney").and_then(|p| p.seen), Some(SimTime(-300.0)));
+        let mut line = Pending {
+            id: request_id(3, 7),
+            slot: 2,
+            generation: 5,
+            persona: "Plutonium".into(),
+            priority: crate::Priority::Answer,
+            team: false,
+            asked: SimTime(591.0),
+            text: Some("на втором этаже".into()),
+            phrase: false,
+            to: Some(gordon),
+            line_at: Some(SimTime(590.0)),
+            unheard: None,
+            greeting: false,
+            greeted: Some(Some(SimTime(10.0))),
+            unasked: false,
+            remark: false,
+        };
+        line.map_end(SimTime(600.0));
+        assert_eq!(
+            (line.asked, line.line_at, line.greeted),
+            (SimTime(-9.0), Some(SimTime(-10.0)), Some(Some(SimTime(-590.0))))
+        );
         let carry = Carry {
             humans: vec![4, 9],
             social,
+            lines: vec![(SimTime(-2.0), line)],
         };
         let bytes = postcard::to_allocvec(&carry).unwrap();
         let back = postcard::from_bytes::<Carry>(&bytes).unwrap();

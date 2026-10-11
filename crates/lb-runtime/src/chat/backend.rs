@@ -65,6 +65,8 @@ pub struct Sent {
     pub reloads: usize,
     /// Whether each of the [`Job::Configure`]s had chat on.
     pub enabled: Vec<bool>,
+    /// Replies are held back while this is on, as from a slow model.
+    pub hold: bool,
 }
 
 /// Tests: answers each request on the next poll with the next canned outcome, the last one over and over.
@@ -109,6 +111,9 @@ impl ChatBackend for FakeBackend {
     }
 
     fn poll(&mut self) -> Vec<Reply> {
+        if self.sent.lock().unwrap().hold {
+            return Vec::new();
+        }
         std::mem::take(&mut self.ready)
     }
 

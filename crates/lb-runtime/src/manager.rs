@@ -306,16 +306,18 @@ impl Creation {
     }
 }
 
-/// Chooses which bot to remove: dead ones first, then the lowest score.
+/// Chooses which bot to remove: one with no chat line on its way first (that line is paid for), then dead ones, then
+/// the lowest score.
 pub fn pick_bot_to_kick(bots: &[Bot]) -> Option<usize> {
     let active = |b: &&Bot| !matches!(b.state, BotState::Leaving | BotState::Faulted);
+    let key = |b: &Bot| {
+        let alive = !matches!(b.state, BotState::Dead | BotState::Respawning);
+        (b.chat.busy().is_some(), alive, b.self_state.body.frags as i32)
+    };
     bots.iter()
         .enumerate()
         .filter(|(_, b)| active(b))
-        .min_by(|(_, a), (_, b)| {
-            let dead = |x: &Bot| !matches!(x.state, BotState::Dead | BotState::Respawning);
-            (dead(a), a.self_state.body.frags as i32).cmp(&(dead(b), b.self_state.body.frags as i32))
-        })
+        .min_by(|(_, a), (_, b)| key(a).cmp(&key(b)))
         .map(|(i, _)| i)
 }
 
@@ -342,6 +344,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bot_with_a_chat_line_on_its_way_is_kicked_last() {
+        let mut bots = vec![bot(), bot(), bot()];
+        for b in &mut bots {
+            b.state = BotState::Alive;
+        }
+        for b in &mut bots[1..] {
+            b.state = BotState::Dead;
+        }
+        let line = |b: &mut Bot| {
+            b.chat
+                .set_line("ну и ладно".into(), lb_chat::Priority::Answer, false, SimTime(1.0))
+        };
+        line(&mut bots[1]);
+        assert_eq!(pick_bot_to_kick(&bots), Some(2), "dead, with nothing to say");
+        line(&mut bots[2]);
+        assert_eq!(pick_bot_to_kick(&bots), Some(0), "alive, with nothing to say");
+        line(&mut bots[0]);
+        assert_eq!(pick_bot_to_kick(&bots), Some(1), "all have a line: a dead one");
+    }
+
+    #[test]
     fn typing_holds_the_respawn_for_a_while() {
         let mut typing = bot();
         let mut quiet = bot();
@@ -355,8 +378,10 @@ mod tests {
             b.update_lifecycle(SimTime(1.0), true, [0.3, 1.2]);
             assert_eq!(b.state, BotState::Dead);
         }
-        typing.chat.set_line("ну и ладно".into(), SimTime(1.0), 25.0);
-        typing.chat.tick(SimTime(1.0), lb_chat::Can::Free, |_| 10.0);
+        typing
+            .chat
+            .set_line("ну и ладно".into(), lb_chat::Priority::Answer, false, SimTime(1.0));
+        typing.chat.tick(SimTime(1.0), lb_chat::Can::Free, 0.0, |_| 10.0);
         assert!(typing.chat.typing());
         for b in [&mut typing, &mut quiet] {
             b.update_lifecycle(SimTime(3.0), true, [0.3, 1.2]);

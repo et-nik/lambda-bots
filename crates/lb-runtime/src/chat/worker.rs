@@ -1251,16 +1251,17 @@ impl Worker {
                     .map(|m| (p.key.clone(), m.notes.clone()))
             })
             .collect();
-        let Some(rendered) = prompt::render_notes(s, &previous, &self.summary_aliases(s)) else {
+        let aliases = self.summary_aliases(s);
+        let Some(rendered) = prompt::render_notes(s, &previous, &aliases) else {
             return;
         };
+        let notes = |done: &Completion| prompt::notes_by_key(s, prompt::parse_notes(&done.text), &aliases);
         let Ok(done) = self.complete(rendered, &format!("notes after {}", s.map), |done| {
-            format!("notes on {} players", prompt::parse_notes(&done.text).len())
+            format!("notes on {} players", notes(done).len())
         }) else {
             return;
         };
-        let mut notes = prompt::parse_notes(&done.text);
-        notes.retain(|key, _| s.players.iter().any(|p| &p.key == key));
+        let notes = notes(&done);
         tracing::info!(
             "chat: notes on {} players after {} ({} + {} tokens)",
             notes.len(),
@@ -2587,6 +2588,22 @@ mod tests {
             server.requests().is_empty(),
             "neither the overdue notes nor those after a quiet moment"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn notes_keyed_by_a_nickname_are_kept() {
+        let server = MockServer::start(vec![answer(
+            "{\"Gordon\": \"takes the rails\", \"STEAM_0:0:9 | Barney\": \"looks for his helmet\"}",
+        )]);
+        let root = dir("notes-names");
+        let mut w = worker(&root, config(&server.url()));
+        wake(&mut w, vec![Job::MapEnd(played("crossfire"))]);
+        let quiet = w.notes_due.take().unwrap();
+        w.ask_notes(&quiet);
+        let kept = store::load_memory(&root.join("data/chat/memory.json"));
+        assert_eq!(kept.players["STEAM_0:1:42"].notes, "takes the rails");
+        assert_eq!(kept.players["STEAM_0:0:9"].notes, "looks for his helmet");
         let _ = std::fs::remove_dir_all(&root);
     }
 
