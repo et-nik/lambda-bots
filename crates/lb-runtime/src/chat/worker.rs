@@ -641,7 +641,7 @@ impl Worker {
     fn take(&mut self, job: Job, queued: Instant, stopping: bool, send: &mut impl FnMut(Reply)) {
         match job {
             Job::Ask(req) => {
-                self.read_levels(&req.scene, Some((req.id >> 32) as u32));
+                self.read_levels(&req);
                 self.want_names(&req);
                 if self.holds(&req, queued, stopping) {
                     self.held.push_back((req, queued));
@@ -655,7 +655,7 @@ impl Worker {
             Job::MapEnd(summary) => self.map_end(summary),
             Job::Configure(config) => self.configure(*config),
             Job::Preview(req) => {
-                self.read_levels(&req.scene, None);
+                self.read_levels(&req);
                 self.preview(&req);
             }
             Job::Memory { query, forget } => self.memory_command(&query, forget),
@@ -718,11 +718,14 @@ impl Worker {
         self.out_of_credit = None;
     }
 
-    /// `lb chat reload` and `lb config reload`: `config/chat/` read again (and the GunGame plugin's levels at the next
-    /// request), the provider tried at the next request.
+    /// `lb chat reload` and `lb config reload`: `config/chat/` and the GunGame plugin's levels of the map read last
+    /// read again, the provider tried at the next request.
     fn reload(&mut self) {
         self.library.reload(&self.paths.chat);
-        self.levels = None;
+        if let Some((map, epoch, _)) = self.levels.take() {
+            let levels = self.load_levels(&map);
+            self.levels = Some((map, epoch, levels));
+        }
         self.start_over();
         let summary = self.library.summary();
         tracing::info!("chat: config/chat/ read again: {}", summary.join(" · "));
@@ -734,33 +737,36 @@ impl Worker {
         }
     }
 
-    /// GunGame: the levels of the request's map, read when the map or its `epoch` (a restart of the same map) is not
-    /// the one read last; a preview (no epoch) takes what was read for the map.
-    fn read_levels(&mut self, scene: &Scene, epoch: Option<u32>) {
+    /// GunGame: the levels of the request's map, read when the map or its epoch (a restart of the same map) is not the
+    /// one read last.
+    fn read_levels(&mut self, req: &ChatRequest) {
+        let (scene, epoch) = (&req.scene, (req.id >> 32) as u32);
         let read = self
             .levels
             .as_ref()
-            .is_some_and(|(map, at, _)| *map == scene.map && epoch.is_none_or(|e| e == *at));
-        if !scene.gungame || read {
-            return;
+            .is_some_and(|(map, at, _)| *map == scene.map && *at == epoch);
+        if scene.gungame && !read {
+            self.levels = Some((scene.map.clone(), epoch, self.load_levels(&scene.map)));
         }
-        let levels = match levels::load(&self.paths.gungame, &scene.map) {
+    }
+
+    /// The GunGame plugin's levels of `map`, from its files.
+    fn load_levels(&self, map: &str) -> Vec<String> {
+        match levels::load(&self.paths.gungame, map) {
             Some((levels, file)) => {
                 tracing::info!(
-                    "chat: GunGame levels of {} from {}: {}",
-                    scene.map,
+                    "chat: GunGame levels of {map} from {}: {}",
                     file.display(),
                     levels.join(", ")
                 );
                 levels
             }
             None => {
-                let (map, dir) = (&scene.map, self.paths.gungame.display());
+                let dir = self.paths.gungame.display();
                 tracing::info!("chat: no GunGame levels for {map}: neither {map}.ini nor gungame.ini in {dir}");
                 Vec::new()
             }
-        };
-        self.levels = Some((scene.map.clone(), epoch.unwrap_or(0), levels));
+        }
     }
 
     /// The weapons of the GunGame levels of the request's map; none for another map or mode.
@@ -2442,6 +2448,15 @@ mod tests {
             "the same map started again"
         );
         std::fs::write(gungame.join("gg_frost.ini"), levels(&["9mmAR", "shotgun", "crowbar"])).unwrap();
+        let preview = ChatRequest {
+            id: lb_chat::request::request_id(3, 0),
+            ..frost.clone()
+        };
+        take(&mut w, Job::Preview(Box::new(preview.clone())));
+        assert!(
+            w.render(&preview).user.contains("GunGame, 3 levels."),
+            "`lb chat prompt` on the map started again"
+        );
 
         take(&mut w, Job::Preview(Box::new(other.clone())));
         let user = w.render(&other).user;
@@ -2457,11 +2472,16 @@ mod tests {
         dm.scene.gungame = false;
         take(&mut w, Job::Preview(Box::new(dm)));
         assert_eq!(w.levels.as_ref().map(|(map, ..)| map.as_str()), Some("gg_other"));
-        take(&mut w, Job::Reload);
         take(&mut w, Job::Preview(Box::new(frost.clone())));
+        std::fs::write(
+            gungame.join("gg_frost.ini"),
+            levels(&["9mmAR", "gauss", "crowbar", "crowbar"]),
+        )
+        .unwrap();
+        take(&mut w, Job::Reload);
         assert!(
-            w.render(&frost).user.contains("GunGame, 3 levels."),
-            "read again after a reload"
+            w.render(&frost).user.contains("GunGame, 4 levels."),
+            "read again at a reload, for the requests waiting too"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

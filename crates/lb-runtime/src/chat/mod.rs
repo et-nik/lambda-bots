@@ -29,10 +29,11 @@ use lb_chat::{
 };
 use lb_core::time::SimTime;
 use lb_game::dll::DllKind;
-use lb_game::gungame::{GunGame, Kit, SLOTS};
+use lb_game::gungame::{self, GunGame, Kit, SLOTS};
 use lb_game::mode::GameModeKind;
 use lb_game::self_state::{FL_FROZEN, FL_ONGROUND, MOVETYPE_FLY};
-use lb_raw::{ClientEvent, ClientEventKind, CommandEvent};
+use lb_game::weapons::WeaponId;
+use lb_raw::{ClientEvent, ClientEventKind, ClientState, CommandEvent};
 
 #[cfg(test)]
 pub use backend::FakeBackend;
@@ -124,6 +125,13 @@ pub struct ChatRuntime {
     board_at: SimTime,
     /// GunGame: the last level's kill that may have won the match.
     gg_kill: Option<(SimTime, Who)>,
+    /// GunGame: the plugin's warmup, as the players alive last showed it ([`gungame::warmup_seen`]).
+    warmup: bool,
+    /// GunGame: the last level (from 0), known once the match is won: the plugin puts the winner one past it.
+    gg_last: Option<i32>,
+    /// Bots seen with a level's kit on this map ([`Kit::armed`]): the crowbar alone of one never armed is no last level
+    /// (the warmup's, which `gg_warmup 0` leaves until the bot's next spawn; a team's newcomer).
+    armed: Vec<u8>,
     /// Bots that reached the last level on this map.
     last_level: Vec<u8>,
     pub match_over: bool,
@@ -160,6 +168,9 @@ impl ChatRuntime {
             leader: None,
             board_at: SimTime::ZERO,
             gg_kill: None,
+            warmup: false,
+            gg_last: None,
+            armed: Vec::new(),
             last_level: Vec::new(),
             match_over: false,
             late_load: false,
@@ -346,6 +357,9 @@ impl Runtime {
         c.leader = None;
         c.board_at = SimTime::ZERO;
         c.gg_kill = None;
+        c.warmup = false;
+        c.gg_last = None;
+        c.armed.clear();
         c.last_level.clear();
         c.match_over = false;
         c.late_load = late_load;
@@ -567,8 +581,8 @@ impl Runtime {
         self.chat.causes.push(Cause::MatchEnd { winner });
     }
 
-    /// GunGame levels and leader once a second; a bot on the last level; a match won (the players frozen after the
-    /// leader's last kill).
+    /// GunGame levels and leader once a second (none in the warmup, whose frags are kills); a bot on the last level; a
+    /// match won (the players frozen after the leader's last kill).
     fn chat_watch_gungame(&mut self) {
         if self.now.since(self.chat.board_at) < 1.0 && self.now >= self.chat.board_at {
             return;
@@ -578,10 +592,50 @@ impl Runtime {
             self.chat.levels = [None; SLOTS];
             return;
         };
+        let kits: Vec<(u8, i32, Kit)> = self
+            .bots
+            .iter()
+            .filter(|b| b.state == BotState::Alive)
+            .map(|b| {
+                let gg = GunGame::new(&board, b.id.slot, b.self_state.body.weapons_mask);
+                (b.id.slot, gg.level, gg.kit)
+            })
+            .collect();
+        // The plugin's end of the match freezes every player, the dead too: the winning kill may leave no bot alive.
+        let frozen = board.top() >= 2
+            && self.bots.iter().any(|b| {
+                matches!(b.state, BotState::Alive | BotState::Dead | BotState::Respawning)
+                    && b.self_state.body.flags & FL_FROZEN != 0
+            });
+        let held = self
+            .clients_now
+            .iter()
+            .filter(|c| c.state == ClientState::Spawned && c.deadflag == 0)
+            .map(|c| WeaponId::from_player_model(&self.strings.string_lossy(c.weaponmodel)));
+        // The warmup starts with everyone's frags at nought: a bot with the crowbar alone on the first level next to
+        // players levels up is a team's newcomer, its frags unset until the team's next level.
+        if let Some(seen) = gungame::warmup_seen(kits.iter().map(|&(_, level, kit)| (level, kit)), held)
+            && !(seen && board.top() >= 2)
+        {
+            self.chat.warmup = seen;
+        }
+        let warmup = self.chat.warmup;
+        // The warmup ends with everyone frozen for a moment too.
+        let won = self
+            .chat
+            .gg_kill
+            .clone()
+            .filter(|(at, _)| !warmup && self.now.since(*at) <= GG_WIN_WINDOW && frozen && !self.chat.match_over)
+            .map(|(_, winner)| winner);
+        if let Some(winner) = &won {
+            self.chat.gg_last = board.level(winner.slot).map(|l| l - 1);
+        }
         for slot in 1..SLOTS {
             let (now, before) = (board.levels[slot], self.chat.levels[slot]);
             if let (Some(level), Some(was)) = (now, before)
                 && level > was
+                && !warmup
+                && won.as_ref().is_none_or(|w| usize::from(w.slot) != slot)
                 && let Some(who) = self.clients.get(slot as u8).map(|c| who_of(slot as u8, c))
             {
                 self.chat_push(Event::Level {
@@ -595,29 +649,27 @@ impl Runtime {
             self.chat.leader = board.leader;
             if let Some(slot) = board.leader
                 && board.top() >= 2
+                && !warmup
                 && let Some(who) = self.clients.get(slot).map(|c| who_of(slot, c))
             {
                 self.chat_push(Event::Leader { who });
             }
         }
-        let mut reached = Vec::new();
-        let mut frozen = false;
-        for bot in self.bots.iter().filter(|b| b.state == BotState::Alive) {
-            let gg = GunGame::new(&board, bot.id.slot, bot.self_state.body.weapons_mask);
-            if gg.kit == Kit::Crowbar && !gg.warmup && gg.level >= 2 && !self.chat.last_level.contains(&bot.id.slot) {
-                reached.push(bot.id.slot);
+        for (slot, level, kit) in kits {
+            if kit.armed() && !self.chat.armed.contains(&slot) {
+                self.chat.armed.push(slot);
             }
-            frozen |= bot.self_state.body.flags & FL_FROZEN != 0 && board.top() >= 2;
+            if kit == Kit::Crowbar
+                && !warmup
+                && level >= 2
+                && self.chat.armed.contains(&slot)
+                && !self.chat.last_level.contains(&slot)
+            {
+                self.chat.last_level.push(slot);
+                self.chat.causes.push(Cause::LastLevel { bot: slot });
+            }
         }
-        for slot in reached {
-            self.chat.last_level.push(slot);
-            self.chat.causes.push(Cause::LastLevel { bot: slot });
-        }
-        if let Some((at, winner)) = self.chat.gg_kill.clone()
-            && self.now.since(at) <= GG_WIN_WINDOW
-            && frozen
-            && !self.chat.match_over
-        {
+        if let Some(winner) = won {
             self.chat.gg_kill = None;
             self.chat_match_end(Some(winner));
         }
@@ -717,7 +769,10 @@ impl Runtime {
                 .get(s as usize)
                 .map_or((0, 0), |e| (e.frags, e.deaths))
         };
-        let level_of = |s: u8| board.as_ref().and_then(|b| b.level(s));
+        let level_of = |s: u8| {
+            let level = board.as_ref().and_then(|b| b.level(s))?;
+            Some(self.chat.gg_last.map_or(level, |last| level.min(last)))
+        };
         let mood = &bot.brain.mind.mood;
         let (base_a, base_f) = mood.base();
         let (frags, deaths) = score(slot);
@@ -765,14 +820,6 @@ impl Runtime {
                 }
             })
             .collect();
-        // Any bot alive tells: the warmup kit is everyone's.
-        let warmup = board.as_ref().is_some_and(|b| {
-            self.bots.iter().any(|o| {
-                o.is_active()
-                    && o.state == BotState::Alive
-                    && GunGame::new(b, o.id.slot, o.self_state.body.weapons_mask).warmup
-            })
-        });
         let leader = match &board {
             Some(b) => b.leader,
             None => self
@@ -826,7 +873,7 @@ impl Runtime {
             scene: Scene {
                 map: journal.map.clone(),
                 gungame: board.is_some(),
-                warmup,
+                warmup: board.is_some() && self.chat.warmup,
                 teamplay: matches!(self.game.mode, Some(GameModeKind::Teamplay)),
                 elapsed: now.since(journal.started),
                 players,
@@ -1108,7 +1155,8 @@ impl Runtime {
         let Some(bot) = self.bots.iter().find(|b| b.id.slot == slot && b.is_active()) else {
             return false;
         };
-        let request = self.chat_request(bot, 0, Trigger::Addressed { from, text }, false);
+        let id = request_id(self.chat.epoch, 0);
+        let request = self.chat_request(bot, id, Trigger::Addressed { from, text }, false);
         self.chat.backend.send(Job::Preview(Box::new(request)));
         true
     }

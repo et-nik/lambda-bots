@@ -131,9 +131,14 @@ A line shows once, in the block that fits it best. The prompt is in Russian for 
 other language. `lb chat prompt <bot>` prints it as it would go.
 
 **GunGame levels** count from 1, as the plugin's informer shows them, each with the level's weapon:
-`- Kettle — уровень 3 (арбалет)`, and the map line says how many there are: `Карта dm_snow, GunGame, 13 уровней.` In
-the warmup, while everyone has the crowbar alone, the map line says so and the levels go without weapons. The winner,
-whom the plugin puts one past the last level once the match is won, stays on the last.
+`- Kettle — уровень 3 (арбалет)`, and the map line says how many there are: `Карта dm_snow, GunGame, 13 уровней.`
+- The first level goes without its weapon for players: the scoreboard also puts there a player the plugin restored
+  (`gg_autosave`) or placed (`gg_handicap_on`) until their level changes. The bot's own goes by what it carries.
+- The winner, whom the plugin puts one past the last level once the match is won, stays on the last, and the winning
+  kill is no level-up.
+- In the warmup (everyone with the crowbar alone, kills not counted) the map line says so, and the players show their
+  score as in DM: the frags are kills then. The bots tell it: one alive on the first level with the crowbar alone
+  starts it, anyone with a level's weapon in hand ends it.
 
 The weapons come from the GunGame plugin's own list, read the way it reads it when a map starts:
 `addons/amxmodx/configs/gungame/<map>.ini`, else the `<sets>` of `gungame.ini` there. A level's weapon is the first

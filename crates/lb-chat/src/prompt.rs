@@ -442,6 +442,11 @@ impl Names<'_> {
         self.level_on_list(level) + 1
     }
 
+    /// The plugin's level (from 0) is past its list's last.
+    fn past_last(&self, level: i32) -> bool {
+        !self.levels.is_empty() && usize::try_from(level).is_ok_and(|l| l >= self.levels.len())
+    }
+
     /// The weapon of the plugin's level (from 0) by its list.
     fn level_weapon(&self, level: i32) -> Option<String> {
         let weapon = self
@@ -767,6 +772,8 @@ fn game_lines(names: &Names<'_>, events: &[Recent]) -> Vec<String> {
     for r in events.iter().filter(|r| r.age <= GAME_WINDOW) {
         match &r.event {
             Event::Chat { .. } => continue,
+            // Past the last level: the win, which the match's end tells.
+            Event::Level { level, .. } if names.past_last(*level) => continue,
             Event::Level { who, level } => {
                 let kill = lines
                     .iter_mut()
@@ -1088,17 +1095,21 @@ fn scene(user: &mut String, names: &Names<'_>, req: &ChatRequest, map: &str) {
             Lang::En => ", warm-up with crowbars",
         });
     }
-    // The level's weapon rather than the one in hand: the glock left when the tripmines are out is no level's.
-    let level = b.level.as_ref().map_or(String::new(), |(l, w)| {
-        let weapon = if s.warmup {
-            String::new()
-        } else {
-            names
-                .level_weapon(*l)
-                .unwrap_or_else(|| lang::weapon_name(lang, w.trim()))
-        };
-        format!(", {}", level_text(lang, names.level_number(*l), &weapon))
-    });
+    // GunGame writes levels into the frags, but for the warmup's kills.
+    let levels = s.gungame && !s.warmup;
+    // The level's weapon rather than the one in hand (the glock left when the tripmines are out is no level's), but on
+    // the first level, where the scoreboard also puts a player the plugin placed on another (a team's newcomer).
+    let level = match &b.level {
+        Some((l, w)) if levels => {
+            let held = || lang::weapon_name(lang, w.trim());
+            let weapon = match *l {
+                0 => held(),
+                l => names.level_weapon(l).unwrap_or_else(held),
+            };
+            format!(", {}", level_text(lang, names.level_number(*l), &weapon))
+        }
+        _ => String::new(),
+    };
     let leader = s.leader.as_deref().map(|l| {
         if l == b.name {
             names.you().to_string()
@@ -1119,7 +1130,7 @@ fn scene(user: &mut String, names: &Names<'_>, req: &ChatRequest, map: &str) {
             } else {
                 "убит, ждёшь респауна"
             };
-            let score = if s.gungame {
+            let score = if levels {
                 String::new()
             } else {
                 format!(", счёт {}/{}", b.frags, b.deaths)
@@ -1136,7 +1147,7 @@ fn scene(user: &mut String, names: &Names<'_>, req: &ChatRequest, map: &str) {
                 let _ = writeln!(user, "About the map: {map_note}");
             }
             let state = if b.alive { "alive" } else { "dead, waiting to respawn" };
-            let score = if s.gungame {
+            let score = if levels {
                 String::new()
             } else {
                 format!(", score {}/{}", b.frags, b.deaths)
@@ -1157,10 +1168,12 @@ fn players(names: &Names<'_>, req: &ChatRequest) -> Vec<String> {
         .iter()
         .filter(|p| !p.me)
         .map(|p| {
-            // GunGame writes levels into the frags: the level says it all.
+            // GunGame writes levels into the frags (but for the warmup's kills): the level says it all. No weapon on
+            // the first level, where the scoreboard also puts a player the plugin placed on another (`gg_autosave`,
+            // `gg_handicap_on`) until their level changes.
             let mut line = match p.level {
-                Some(level) if s.gungame => {
-                    let weapon = if s.warmup { None } else { names.level_weapon(level) };
+                Some(level) if s.gungame && !s.warmup => {
+                    let weapon = if level > 0 { names.level_weapon(level) } else { None };
                     let level = level_text(lang, names.level_number(level), weapon.as_deref().unwrap_or(""));
                     format!("- {} — {level}", names.listed(&p.name))
                 }
@@ -1189,11 +1202,11 @@ fn level_text(lang: Lang, number: i32, weapon: &str) -> String {
     }
 }
 
-/// The plugin's `levels`, unless someone on the scoreboard is past them (only the winner may be, by one): a list
-/// that does not fit is not the one the plugin plays, and is left out.
+/// The plugin's `levels`, unless someone on the scoreboard is past them (only the winner may be, by one; the warmup's
+/// frags are kills, no levels): a list that does not fit is not the one the plugin plays, and is left out.
 fn fitting<'a>(req: &ChatRequest, levels: &'a [String]) -> &'a [String] {
     let past = |level: i32| usize::try_from(level).is_ok_and(|l| l > levels.len());
-    if req.scene.players.iter().filter_map(|p| p.level).any(past) {
+    if !req.scene.warmup && req.scene.players.iter().filter_map(|p| p.level).any(past) {
         &[]
     } else {
         levels
@@ -2078,16 +2091,29 @@ mod tests {
         let r = render(&won, &[], &Aliases::default(), &[], &ctx, NOW);
         assert!(
             r.user.contains("- Mopper — уровень 6 (лом);")
-                && r.user.contains("Mopper убил Kettle ломом и вышел на уровень 6\n")
+                && r.user.contains("Mopper убил Kettle ломом\n")
+                && !r.user.contains("вышел на уровень")
                 && !r.user.contains("уровень 7"),
             "the plugin puts the winner one past the last level: {}",
             r.user
         );
 
+        let mut first = req.clone();
+        first.bot.level = Some((0, "9mmAR".into()));
+        first.scene.players[1].level = Some(0);
+        let r = render(&first, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(
+            r.user.contains("Ты убит, ждёшь респауна, уровень 1 (MP5), лидер")
+                && r.user.contains("- Kettle — уровень 1\n"),
+            "the first level, where the plugin's restored players stand too, goes by what is in hand: {}",
+            r.user
+        );
+
         let mut warmup = req.clone();
         warmup.scene.warmup = true;
-        warmup.bot.level = Some((0, "crowbar".into()));
-        warmup.scene.players[1].level = Some(0);
+        warmup.bot.level = Some((2, "crowbar".into()));
+        warmup.scene.players[1].level = Some(9);
+        warmup.events.clear();
         let r = render(&warmup, &[], &Aliases::default(), &[], &ctx, NOW);
         assert!(
             r.user
@@ -2096,8 +2122,10 @@ mod tests {
             r.user
         );
         assert!(
-            r.user.contains("Ты убит, ждёшь респауна, уровень 1, лидер") && r.user.contains("- Kettle — уровень 1\n"),
-            "no first level's weapon while everyone has the crowbar: {}",
+            r.user.contains("Ты убит, ждёшь респауна, счёт 12/7, лидер")
+                && r.user.contains("- Kettle — 20/3\n")
+                && !r.user.contains("уровень "),
+            "the warmup's frags are kills, no levels: {}",
             r.user
         );
 
