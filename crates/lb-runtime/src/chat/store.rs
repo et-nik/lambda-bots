@@ -23,16 +23,19 @@ pub struct Paths {
     pub usage: PathBuf,
     /// `config/chat/`: what the admin wrote.
     pub chat: PathBuf,
+    /// The GunGame plugin's configs, with the levels of the maps ([`super::levels`]).
+    pub gungame: PathBuf,
 }
 
 impl Paths {
-    pub fn new(install: &Path) -> Paths {
+    pub fn new(install: &Path, game: &Path) -> Paths {
         let data = install.join("data").join("chat");
         Paths {
             install: install.to_path_buf(),
             memory: data.join("memory.json"),
             usage: data.join("usage.json"),
             chat: install.join("config").join("chat"),
+            gungame: game.join("addons").join("amxmodx").join("configs").join("gungame"),
         }
     }
 

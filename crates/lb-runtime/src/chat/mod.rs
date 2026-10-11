@@ -8,6 +8,7 @@
 mod backend;
 mod chatlog;
 mod command;
+mod levels;
 mod store;
 mod transcript;
 mod worker;
@@ -292,7 +293,7 @@ impl Runtime {
         if !c.enabled || self.init.sandbox {
             return;
         }
-        match worker::WorkerBackend::start(c.clone(), &self.init.install_dir) {
+        match worker::WorkerBackend::start(c.clone(), &self.init.install_dir, &self.init.game_dir) {
             Ok(w) => self.chat.backend = Box::new(w),
             Err(e) => tracing::error!("chat worker could not start: {e}"),
         }
@@ -764,6 +765,14 @@ impl Runtime {
                 }
             })
             .collect();
+        // Any bot alive tells: the warmup kit is everyone's.
+        let warmup = board.as_ref().is_some_and(|b| {
+            self.bots.iter().any(|o| {
+                o.is_active()
+                    && o.state == BotState::Alive
+                    && GunGame::new(b, o.id.slot, o.self_state.body.weapons_mask).warmup
+            })
+        });
         let leader = match &board {
             Some(b) => b.leader,
             None => self
@@ -817,6 +826,7 @@ impl Runtime {
             scene: Scene {
                 map: journal.map.clone(),
                 gungame: board.is_some(),
+                warmup,
                 teamplay: matches!(self.game.mode, Some(GameModeKind::Teamplay)),
                 elapsed: now.since(journal.started),
                 players,

@@ -382,6 +382,7 @@ mod tests {
             scene: Scene {
                 map: "crossfire".into(),
                 gungame: false,
+                warmup: false,
                 teamplay: false,
                 elapsed: 300.0,
                 players: Vec::new(),

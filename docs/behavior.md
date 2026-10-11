@@ -677,7 +677,8 @@ The bots know a GunGame match the way a player does: from the scoreboard and fro
   - the crowbar alone: the last level, or on the first level the warmup, when kills do not count (the plugin stays in
     the warmup while only bots are on the server).
 
-  The order of the levels is not known and not needed: a player on the last level shows the crowbar in its hands.
+  The order of the levels is not needed to play: a player on the last level shows the crowbar in its hands. (The
+  chat reads it from the plugin's config for the prompt: see [chat.md](chat.md#what-the-model-sees).)
 - **Weapons.** Only the level's weapons hurt other players (the plugin blocks the rest), so a bot fights with nothing
   else: no crowbar on a gun's level. Where its gun does nothing at the distance (a rocket too close, a crossbow bolt
   or the egon beam's end bursting on the bot itself) it keeps the gun in hand and backs off. On their levels

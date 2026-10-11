@@ -113,10 +113,10 @@ For every line one request. First what is the same for every bot: the rules, the
 language, your `config/chat/server.yaml`). Then the bot: name, skill, style, favourite weapons, its manner of writing,
 its own words (the profile's `chat.about`, then your `config/chat/bots.yaml`), swearing or not. Then the scene:
 
-- the map and mode, with your notes on it from `config/chat/maps.yaml`;
-- the minute, the bot's score and GunGame level, the leader, its mood;
-- the players on the server and the bot's score against each on this map; what the bots know of them, in full only
-  for the player it answers; the last two maps;
+- the map and mode (in GunGame with the number of levels), with your notes on it from `config/chat/maps.yaml`;
+- the minute, the bot's score or GunGame level, the leader, its mood;
+- the players on the server, each with their score or GunGame level, and the bot's score against each on this map;
+  what the bots know of them, in full only for the player it answers; the last two maps;
 - what happened in the game: up to 10 kills and other events of the last 2 minutes;
 - its own recent lines (up to 5), so that it neither repeats nor contradicts itself;
 - its talk with the player: lines older than the chat below, from the last map, or from days before (the memory),
@@ -129,6 +129,19 @@ its own words (the profile's `chat.about`, then your `config/chat/bots.yaml`), s
 
 A line shows once, in the block that fits it best. The prompt is in Russian for `language: ru` and in English for any
 other language. `lb chat prompt <bot>` prints it as it would go.
+
+**GunGame levels** count from 1, as the plugin's informer shows them, each with the level's weapon:
+`- Kettle — уровень 3 (арбалет)`, and the map line says how many there are: `Карта dm_snow, GunGame, 13 уровней.` In
+the warmup, while everyone has the crowbar alone, the map line says so and the levels go without weapons. The winner,
+whom the plugin puts one past the last level once the match is won, stays on the last.
+
+The weapons come from the GunGame plugin's own list, read the way it reads it when a map starts:
+`addons/amxmodx/configs/gungame/<map>.ini`, else the `<sets>` of `gungame.ini` there. A level's weapon is the first
+`weapon_` it hands out. The list is read at the first request after each map start (a restart of the same map too) and
+again after `lb chat reload`. Without the files the levels show as numbers, the bot's own with the weapon it carries;
+so does a list someone on the scoreboard is past: it is not the one the plugin plays. LambdaBots does not see the
+plugin's `gg_cfg_file`: a server that names another main file there gets `gungame.ini`'s levels on maps without their
+own file.
 
 Kill feed, chat, joins and the scoreboard are what every player sees; the request holds nothing a player could not
 know, besides your own words. Which players are bots is not said.

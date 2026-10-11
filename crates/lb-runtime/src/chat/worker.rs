@@ -13,13 +13,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use lb_chat::memory::{self, Forgotten, Memory, PlayerMemory};
 use lb_chat::phrases::{self, Offer, Ring};
 use lb_chat::prompt::{self, Context, Known, Rendered};
-use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, profanity, sanitize};
+use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, Scene, profanity, sanitize};
 use lb_config::chat_phrases::Moment;
 use lb_config::main_config::{ChatConfig, ProviderKind};
 use lb_core::rng::{Pcg32, splitmix64};
 use lb_llm::{Client, Completion, ErrorClass, LlmError, Stop};
 
 use super::backend::{ChatBackend, Job};
+use super::levels;
 use super::store::{self, Library, Paths, Usage};
 use super::transcript::Transcript;
 use crate::logging;
@@ -61,18 +62,17 @@ pub struct WorkerBackend {
 }
 
 impl WorkerBackend {
-    pub fn start(config: ChatConfig, install: &Path) -> std::io::Result<WorkerBackend> {
-        WorkerBackend::spawn(config, install, |_| {})
+    pub fn start(config: ChatConfig, install: &Path, game: &Path) -> std::io::Result<WorkerBackend> {
+        WorkerBackend::spawn(config, Paths::new(install, game), |_| {})
     }
 
     /// Starts the worker thread; `tune` sets the worker up before its first job (tests shorten its waits).
-    fn spawn(config: ChatConfig, install: &Path, tune: fn(&mut Worker)) -> std::io::Result<WorkerBackend> {
+    fn spawn(config: ChatConfig, paths: Paths, tune: fn(&mut Worker)) -> std::io::Result<WorkerBackend> {
         let (jobs, rx) = mpsc::sync_channel(QUEUE);
         let (tx, replies) = mpsc::channel();
         let (done_tx, done) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new("starting".to_string()));
-        let paths = Paths::new(install);
         {
             let (stop, status) = (stop.clone(), status.clone());
             std::thread::Builder::new().name("lb-chat".into()).spawn(move || {
@@ -204,6 +204,9 @@ struct Worker {
     memory_dirty: bool,
     /// What the admin wrote in `config/chat/`.
     library: Library,
+    /// GunGame: the map the last request came from, its epoch ([`lb_chat::request::request_id`]), and the weapons of
+    /// its levels ([`levels::load`]): read once each time a map starts, as the plugin reads them.
+    levels: Option<(String, u32, Vec<String>)>,
     usage: Usage,
     usage_dirty: u64,
     status: Arc<Mutex<String>>,
@@ -232,6 +235,7 @@ impl Worker {
         let mut w = Worker {
             memory: store::load_memory(&paths.memory),
             library: Library::load(&paths.chat),
+            levels: None,
             usage: store::load_usage(&paths.usage),
             config,
             paths,
@@ -608,13 +612,19 @@ impl Worker {
     /// settings, a map's end, a command); a request for the model waits for its turn.
     fn take(&mut self, job: Job, queued: Instant, stopping: bool, send: &mut impl FnMut(Reply)) {
         match job {
-            Job::Ask(req) => match self.ask(&req, queued, stopping, false) {
-                Some(outcome) => send(Reply { id: req.id, outcome }),
-                None => self.waiting.push_back((req, queued)),
-            },
+            Job::Ask(req) => {
+                self.read_levels(&req.scene, Some((req.id >> 32) as u32));
+                match self.ask(&req, queued, stopping, false) {
+                    Some(outcome) => send(Reply { id: req.id, outcome }),
+                    None => self.waiting.push_back((req, queued)),
+                }
+            }
             Job::MapEnd(summary) => self.map_end(summary),
             Job::Configure(config) => self.configure(*config),
-            Job::Preview(req) => self.preview(&req),
+            Job::Preview(req) => {
+                self.read_levels(&req.scene, None);
+                self.preview(&req);
+            }
             Job::Memory { query, forget } => self.memory_command(&query, forget),
             Job::Reload => self.reload(),
         }
@@ -662,9 +672,11 @@ impl Worker {
         self.out_of_credit = None;
     }
 
-    /// `lb chat reload` and `lb config reload`: `config/chat/` read again, the provider tried at the next request.
+    /// `lb chat reload` and `lb config reload`: `config/chat/` read again (and the GunGame plugin's levels at the next
+    /// request), the provider tried at the next request.
     fn reload(&mut self) {
         self.library.reload(&self.paths.chat);
+        self.levels = None;
         self.start_over();
         let summary = self.library.summary();
         tracing::info!("chat: config/chat/ read again: {}", summary.join(" · "));
@@ -673,6 +685,43 @@ impl Worker {
         );
         for line in summary {
             logging::console_line(format!("  {line}"));
+        }
+    }
+
+    /// GunGame: the levels of the request's map, read when the map or its `epoch` (a restart of the same map) is not
+    /// the one read last; a preview (no epoch) takes what was read for the map.
+    fn read_levels(&mut self, scene: &Scene, epoch: Option<u32>) {
+        let read = self
+            .levels
+            .as_ref()
+            .is_some_and(|(map, at, _)| *map == scene.map && epoch.is_none_or(|e| e == *at));
+        if !scene.gungame || read {
+            return;
+        }
+        let levels = match levels::load(&self.paths.gungame, &scene.map) {
+            Some((levels, file)) => {
+                tracing::info!(
+                    "chat: GunGame levels of {} from {}: {}",
+                    scene.map,
+                    file.display(),
+                    levels.join(", ")
+                );
+                levels
+            }
+            None => {
+                let (map, dir) = (&scene.map, self.paths.gungame.display());
+                tracing::info!("chat: no GunGame levels for {map}: neither {map}.ini nor gungame.ini in {dir}");
+                Vec::new()
+            }
+        };
+        self.levels = Some((scene.map.clone(), epoch.unwrap_or(0), levels));
+    }
+
+    /// The weapons of the GunGame levels of the request's map; none for another map or mode.
+    fn levels(&self, scene: &Scene) -> &[String] {
+        match &self.levels {
+            Some((map, _, levels)) if scene.gungame && *map == scene.map => levels,
+            _ => &[],
         }
     }
 
@@ -824,6 +873,7 @@ impl Worker {
             bot: self.library.bot(&req.bot.persona, &req.bot.name),
             map: &map,
             talks,
+            levels: self.levels(&req.scene),
         };
         prompt::render(req, &known, &aliases, &self.memory.maps, &ctx, unix_now())
     }
@@ -1203,6 +1253,7 @@ mod tests {
             scene: Scene {
                 map: "crossfire".into(),
                 gungame: false,
+                warmup: false,
                 teamplay: false,
                 elapsed: 30.0,
                 players: vec![PlayerCard {
@@ -1290,7 +1341,7 @@ mod tests {
 
     /// A worker run by hand, its chances the same each time.
     fn worker(root: &Path, config: ChatConfig) -> Worker {
-        let mut w = Worker::new(config, Paths::new(root), Arc::default());
+        let mut w = Worker::new(config, Paths::new(root, root), Arc::default());
         w.seed = 7;
         w
     }
@@ -1346,7 +1397,7 @@ mod tests {
             "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:1:42\n    name: Gordon\n    note: the boss\n",
         )
         .unwrap();
-        let mut w = WorkerBackend::spawn(config(&server.url()), &root, |w| {
+        let mut w = WorkerBackend::spawn(config(&server.url()), Paths::new(&root, &root), |w| {
             w.notes_idle = Duration::from_millis(50)
         })
         .unwrap();
@@ -1418,7 +1469,7 @@ mod tests {
             "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:1:42\n    name: Gordon Freeman\n    alias: [Гордон, Фримен]\n",
         )
         .unwrap();
-        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         let got = replies(&mut w, 1);
         assert_eq!(got[0].outcome, Outcome::Line("Гордон, hi! where is Гордон?".into()));
@@ -1475,7 +1526,7 @@ mod tests {
         let mut c = config(&server.url());
         c.provider.api_key = lb_config::main_config::Secret("sk-hunter2".into());
         c.transcript = true;
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         w.send(Job::Ask(Box::new(request(2))));
         assert_eq!(replies(&mut w, 2).len(), 2);
@@ -1509,7 +1560,7 @@ mod tests {
             Canned::json(401, r#"{"error":{"message":"bad key"}}"#),
         ]);
         let root = dir("failures");
-        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         w.send(Job::Ask(Box::new(request(2))));
         let got = replies(&mut w, 2);
@@ -1538,7 +1589,7 @@ mod tests {
         let root = dir("budget");
         let mut c = config(&server.url());
         c.limits.tokens_per_day = 100;
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         for id in 1..=3 {
             w.send(Job::Ask(Box::new(request(id))));
         }
@@ -1570,7 +1621,7 @@ mod tests {
             ..ChatConfig::default()
         };
         c.provider.api_key_env = "LB_TEST_SURELY_UNSET_KEY".into();
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         assert_eq!(replies(&mut w, 1)[0].outcome, Outcome::Failed(Failure::Disabled));
         assert!(w.status().contains("no API key"), "{}", w.status());
@@ -1582,7 +1633,7 @@ mod tests {
     fn shutdown_waits_for_a_slow_request_at_most_as_asked() {
         let server = MockServer::start(vec![answer("late").delay(Duration::from_millis(1500))]);
         let root = dir("slow");
-        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         std::thread::sleep(Duration::from_millis(200));
         let started = Instant::now();
@@ -1593,7 +1644,7 @@ mod tests {
             started.elapsed()
         );
         let other = MockServer::start(vec![answer("late").delay(Duration::from_millis(1500))]);
-        let mut again = WorkerBackend::start(config(&other.url()), &root).unwrap();
+        let mut again = WorkerBackend::start(config(&other.url()), &root, &root).unwrap();
         again.send(Job::Ask(Box::new(request(2))));
         std::thread::sleep(Duration::from_millis(200));
         let started = Instant::now();
@@ -1823,7 +1874,7 @@ mod tests {
         let root = dir("between");
         let mut c = config(&server.url());
         c.phrases.ai_share = 0.0;
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         let on_the_wire = |n: usize| {
             let until = Instant::now() + Duration::from_secs(10);
             while server.requests().len() < n && Instant::now() < until {
@@ -2077,6 +2128,74 @@ mod tests {
         let r = w.render(&other);
         assert!(r.system.contains("the other one"), "else by nickname: {}", r.system);
         assert!(!r.user.contains("where are the rails?"), "talks go by the persona");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gungame_levels_come_from_the_plugin_s_config_once_a_map() {
+        let root = dir("levels");
+        let gungame = root.join("addons/amxmodx/configs/gungame");
+        std::fs::create_dir_all(&gungame).unwrap();
+        let levels = |weapons: &[&str]| -> String {
+            weapons
+                .iter()
+                .map(|w| format!("<level>\n\t<equip>\n\t\tweapon_{w}\n\t</equip>\n</level>\n"))
+                .collect()
+        };
+        std::fs::write(gungame.join("gg_frost.ini"), levels(&["9mmAR", "shotgun", "crowbar"])).unwrap();
+        let main = format!("<sets>\n{}</sets>\n", levels(&["gauss", "crowbar"]));
+        std::fs::write(gungame.join("gungame.ini"), main).unwrap();
+        let mut w = worker(&root, config("http://127.0.0.1:9"));
+        let mut frost = request(1);
+        frost.scene.map = "gg_frost".into();
+        frost.scene.gungame = true;
+        frost.scene.players[0].level = Some(1);
+        let mut other = frost.clone();
+        other.scene.map = "gg_other".into();
+        let take = |w: &mut Worker, job: Job| w.take(job, Instant::now(), false, &mut |_| {});
+
+        take(&mut w, Job::Preview(Box::new(frost.clone())));
+        let user = w.render(&frost).user;
+        assert!(user.starts_with("Map gg_frost, GunGame, 3 levels.\n"), "{user}");
+        assert!(user.contains("- Gordon — level 2 (shotgun);"), "{user}");
+        let four = levels(&["9mmAR", "shotgun", "egon", "crowbar"]);
+        std::fs::write(gungame.join("gg_frost.ini"), four).unwrap();
+        take(&mut w, Job::Preview(Box::new(frost.clone())));
+        assert!(
+            w.render(&frost).user.contains("GunGame, 3 levels."),
+            "read once a map, as the plugin reads it"
+        );
+        let restarted = ChatRequest {
+            id: lb_chat::request::request_id(2, 1),
+            ..frost.clone()
+        };
+        take(&mut w, ask(restarted.clone()));
+        assert!(
+            w.render(&restarted).user.contains("GunGame, 4 levels."),
+            "the same map started again"
+        );
+        std::fs::write(gungame.join("gg_frost.ini"), levels(&["9mmAR", "shotgun", "crowbar"])).unwrap();
+
+        take(&mut w, Job::Preview(Box::new(other.clone())));
+        let user = w.render(&other).user;
+        assert!(user.contains("GunGame, 2 levels."), "the plugin's main file: {user}");
+        assert!(user.contains("- Gordon — level 2 (crowbar);"), "{user}");
+        let user = w.render(&frost).user;
+        assert!(
+            user.starts_with("Map gg_frost, GunGame.\n") && user.contains("- Gordon — level 2;"),
+            "no other map's levels: {user}"
+        );
+
+        let mut dm = frost.clone();
+        dm.scene.gungame = false;
+        take(&mut w, Job::Preview(Box::new(dm)));
+        assert_eq!(w.levels.as_ref().map(|(map, ..)| map.as_str()), Some("gg_other"));
+        take(&mut w, Job::Reload);
+        take(&mut w, Job::Preview(Box::new(frost.clone())));
+        assert!(
+            w.render(&frost).user.contains("GunGame, 3 levels."),
+            "read again after a reload"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
