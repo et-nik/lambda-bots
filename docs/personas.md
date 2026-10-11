@@ -22,20 +22,24 @@ the same way: on any map, after a kick and a rejoin, after a server restart.
 
 Only `name` is required. Missing fields are derived from the nickname once and never change afterwards.
 
-| Field       | Meaning                                                                                                  |
-|-------------|----------------------------------------------------------------------------------------------------------|
-| `name`      | nickname, up to 31 bytes, without quotes, `;`, `%`, `\`                                                  |
-| `style`     | `balanced`, `rusher`, `sniper`, `controller`, `trapper`; default `balanced`                              |
-| `skill`     | 0–100 or `noob`/`easy`/`normal`/`hard`/`expert` (= 0/25/50/75/100); default 50                           |
-| `model`     | player model; default: one of `bots.models`                                                              |
-| `colors`    | `[top, bottom]`, 0–255                                                                                   |
-| `traits`    | `{ aggression: 0–1, fear: 0–1 }`; default: drawn within the style's range                                |
-| `weapons`   | favourite weapons, best first: `[crossbow, "357", shotgun]`                                              |
-| `weight`    | how often it joins relative to others; default 1; 0 = only on `lb add <name>`                            |
-| `tags`      | free labels                                                                                              |
-| `seed`      | seed of its own random habits; default: derived from the nickname                                        |
-| `overrides` | single skill parameters from `config/difficulty.yaml`: `{ turn_speed: 1200 }`                            |
-| `chat`      | how it talks in the chat: `{ chattiness: 0–1, profanity, typing_cpm, style, about }`; see `docs/chat.md` |
+| Field       | Meaning                                                                                                        |
+|-------------|----------------------------------------------------------------------------------------------------------------|
+| `name`      | nickname, up to 31 bytes, without quotes, `;`, `%`, `\`                                                        |
+| `style`     | `balanced`, `rusher`, `sniper`, `controller`, `trapper`; default `balanced`                                    |
+| `skill`     | 0–100 or `noob`/`easy`/`normal`/`hard`/`expert` (= 0/25/50/75/100); default 50                                 |
+| `model`     | player model; default: one of `bots.models`                                                                    |
+| `colors`    | `[top, bottom]`, 0–255                                                                                         |
+| `traits`    | `{ aggression: 0–1, fear: 0–1 }`; default: drawn within the style's range                                      |
+| `weapons`   | favourite weapons, best first: `[crossbow, "357", shotgun]`                                                    |
+| `weight`    | how often it joins relative to others; default 1; 0 = only on `lb add <name>`                                  |
+| `tags`      | free labels                                                                                                    |
+| `seed`      | seed of its own random habits; default: derived from the nickname                                              |
+| `overrides` | single skill parameters from `config/difficulty.yaml`: `{ turn_speed: 1200 }`                                  |
+| `chat`      | how it talks in the chat: `{ chattiness: 0–1, profanity, typing_cpm, style, about, call }`; see `docs/chat.md` |
+
+`chat.call` lists names players call the bot by besides its nickname (`call: [Плутон, Плутоныч]`): a line with one of
+them names the bot, as its nickname does. The profile goes with the personality to every server; what one server
+wants a bot to know on top of it (who the bot is there, whom it knows) goes in that server's `config/chat/bots.yaml`.
 
 Example `profiles/roster.yaml`:
 
@@ -162,7 +166,8 @@ When the quota needs a bot, the choice goes in this order:
 A new personality gets a free nickname from `names/<language>.yaml`. Its style is drawn by the weights in
 `roster.generate.styles` (only styles allowed by `lb_style`), its skill inside the `lb_difficulty` band, more often
 near the middle. Model, colors and traits come from the nickname. All of it is written to `data/profiles.yaml`
-right away.
+right away, and the bot plays as written there from its first map (aggression and fear rounded to two decimals), the
+same as after a restart and in a replay.
 
 `pool` sets the size of the regular cast: with a quota of 8 and `pool: 16` the server first creates 16
 personalities and then rotates among them. `pool: 8` gives exactly eight regulars; `generate.enabled: false`

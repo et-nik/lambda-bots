@@ -3,11 +3,16 @@ schema: lambdabots/chat-players@1
 # id: a SteamID, or the nickname of a player without one (bots too); name: the nickname, for you to read (what is
 # written for a SteamID goes to that SteamID only); alias: what the bots call the player instead of a hard nickname,
 # one name or a list (the main one first; a SteamID keeps them when the nickname changes); note: anything worth
-# knowing. alias and note are both optional.
+# knowing; by_name: true makes a nickname entry serve anyone with that nickname whatever the SteamID, for players
+# whose SteamID changes every visit (whoever takes the nickname gets the alias and the note). alias, note and by_name
+# are optional.
 players: []
 #  - id: STEAM_0:0:219579426
 #    name: ATLAS Gamer
 #    alias: [Атлас, Атласыч]
-#    note: Хороший игрок, один из лучших. Многие называют его читером.
-#  - id: ET^NiK
-#    alias: Ник
+#    note: Хороший игрок, один из лучших. Любит арбалет, после каждой карты пишет gg.
+#  - id: xX_Bobr_Xx
+#    alias: Бобр
+#  - id: "[KZ] Lynx :>"
+#    by_name: true
+#    alias: Рысь

@@ -80,10 +80,22 @@ pub struct ChatSpec {
     /// Who it is, for the model ("plays here every evening, loves the crossbow").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// More names players call it by: one (`Плутон`) or several (`[Плутон, Плутоныч]`). A line with one of them
+    /// speaks to the bot as one with its nickname does.
+    #[serde(
+        default,
+        deserialize_with = "yaml::one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub call: Vec<String>,
 }
 
 /// Longest `chat.style` / `chat.about` in characters.
 pub const CHAT_TEXT_MAX: usize = 300;
+/// Most names in `chat.call`.
+pub const CALLS_MAX: usize = 8;
+/// Longest name in `chat.call`, in characters.
+pub const CALL_MAX: usize = 32;
 /// Typing speeds a personality may have, characters a minute.
 pub const TYPING_CPM_RANGE: [f32; 2] = [30.0, 1500.0];
 
@@ -181,6 +193,21 @@ impl PersonaSpec {
                         format!("must be at most {CHAT_TEXT_MAX} characters"),
                     ));
                 }
+            }
+            if chat.call.len() > CALLS_MAX {
+                return Err(bad("chat.call", format!("at most {CALLS_MAX} names")));
+            }
+            let plain = |name: &String| {
+                let name = name.trim();
+                !name.is_empty()
+                    && name.chars().count() <= CALL_MAX
+                    && !name.chars().any(|c| c.is_control() || "\"%;".contains(c))
+            };
+            if !chat.call.iter().all(plain) {
+                return Err(bad(
+                    "chat.call",
+                    format!("names of 1..={CALL_MAX} characters without quotes, `%`, `;` or control characters"),
+                ));
             }
         }
         Ok(())
@@ -295,17 +322,28 @@ bots:
             bad("  - name: \"a\"\n    chat: { mood: angry }\n"),
             "unknown chat fields"
         );
+        assert!(bad("  - name: \"a\"\n    chat: { call: [x, \"\"] }\n"), "an empty name");
+        assert!(bad("  - name: \"a\"\n    chat: { call: \"x;y\" }\n"));
+        assert!(bad(&format!(
+            "  - name: \"a\"\n    chat: {{ call: {} }}\n",
+            "я".repeat(CALL_MAX + 1)
+        )));
+        let nine = (0..=CALLS_MAX).map(|i| format!("n{i}")).collect::<Vec<_>>().join(", ");
+        assert!(bad(&format!("  - name: \"a\"\n    chat: {{ call: [{nine}] }}\n")));
     }
 
     #[test]
     fn chat_block() {
-        let text = "schema: lambdabots/profiles@1\nbots:\n  - name: \"DUT9 ATLASA\"\n    chat:\n      chattiness: 0.7\n      profanity: true\n      style: \"коротко, строчными, ставит ))\"\n      about: \"довольно хороший игрок, иногда его зовут читером\"\n";
+        let text = "schema: lambdabots/profiles@1\nbots:\n  - name: \"DUT9 ATLASA\"\n    chat:\n      chattiness: 0.7\n      profanity: true\n      style: \"коротко, строчными, ставит ))\"\n      about: \"довольно хороший игрок, любит арбалет\"\n      call: [Атлас, Атласыч]\n  - name: Kleiner\n    chat: { call: Кляйнер }\n  - name: Gina\n    chat: { chattiness: 0.2 }\n";
         let f = ProfilesFile::parse(text, "roster.yaml").unwrap();
         let chat = f.entries()[0].chat.as_ref().unwrap();
         assert_eq!(chat.chattiness, Some(0.7));
         assert_eq!(chat.profanity, Some(true));
         assert_eq!(chat.typing_cpm, None);
         assert_eq!(chat.style.as_deref(), Some("коротко, строчными, ставит ))"));
+        assert_eq!(chat.call, ["Атлас", "Атласыч"]);
+        assert_eq!(f.entries()[1].chat.as_ref().unwrap().call, ["Кляйнер"], "one name");
+        assert!(f.entries()[2].chat.as_ref().unwrap().call.is_empty());
     }
 
     #[test]

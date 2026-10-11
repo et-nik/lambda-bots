@@ -36,7 +36,7 @@ use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
 pub const MAGIC: &[u8; 8] = b"LBREC\0\r\n";
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 /// Uncompressed bytes gathered before a block goes to the writer thread.
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
@@ -1085,8 +1085,12 @@ mod tests {
         hide_human: bool,
         /// The human joins the server (events) at this frame.
         human_joins: Option<u64>,
+        /// Another human's client events, by frame: `LB_CLIENT_EV_*`, slot, `userid`, name.
+        client_events: Vec<(u64, u8, u8, i32, &'static str)>,
         /// The human's chat lines, by frame.
         says: Vec<(u64, String)>,
+        /// The human's team chat lines, by frame.
+        team_says: Vec<(u64, String)>,
         /// Client commands the bots sent.
         sent: Vec<Vec<String>>,
     }
@@ -1221,8 +1225,14 @@ mod tests {
                 arena.client(LB_CLIENT_EV_CONNECT, 7, 3, false, b"Gordon");
                 arena.client(LB_CLIENT_EV_PUT_IN_SERVER, 7, 3, false, b"Gordon");
             }
+            for (_, what, slot, userid, name) in self.client_events.iter().filter(|e| e.0 == n) {
+                arena.client(*what, *slot, *userid, false, name.as_bytes());
+            }
             for (_, text) in self.says.iter().filter(|(at, _)| *at == n) {
                 arena.command(7, 3, &[b"say", text.as_bytes()], text.as_bytes());
+            }
+            for (_, text) in self.team_says.iter().filter(|(at, _)| *at == n) {
+                arena.command(7, 3, &[b"say_team", text.as_bytes()], text.as_bytes());
             }
             let mut clients = Vec::new();
             let mut selves = Vec::new();
@@ -1502,11 +1512,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn chat_lines_replay_to_the_same_commands() {
-        use lb_chat::{Outcome, Reply};
+    /// A step of the adapter, kept while the recorder is on.
+    fn step(rt: &mut Runtime, rec: &mut Recorder, server: &mut SimServer, entry: Entry) {
+        let mut host = RecordingHost::new(server, rec.begin(|| entry.clone()));
+        run_step(rt, &mut host, &entry);
+        rec.end(rt);
+    }
 
-        let root = dir("record-chat");
+    /// `lb ...` from the server console.
+    fn command(rt: &mut Runtime, rec: &mut Recorder, server: &mut SimServer, argv: &[&str]) {
+        step(
+            rt,
+            rec,
+            server,
+            Entry::Command(argv.iter().map(|a| a.to_string()).collect()),
+        );
+    }
+
+    /// Frames `range` of the map; `after` sees each one done.
+    fn frames(
+        rt: &mut Runtime,
+        rec: &mut Recorder,
+        server: &mut SimServer,
+        range: std::ops::Range<u64>,
+        mut after: impl FnMut(&mut Runtime, &mut Recorder, &mut SimServer, u64),
+    ) {
+        for n in range {
+            let frame = server.frame(n);
+            step(rt, rec, server, frame);
+            step(
+                rt,
+                rec,
+                server,
+                Entry::FramePost {
+                    mono_ns: n * 10_000_000,
+                },
+            );
+            after(rt, rec, server, n);
+        }
+    }
+
+    /// A server where one bot joins 5 s into each map and Gordon (slot 7, `userid` 3) at frame 20; chat on, the
+    /// worker `fake`.
+    fn chat_server(root: &Path, fake: crate::chat::FakeBackend) -> (Runtime, Recorder, SimServer) {
+        std::fs::create_dir_all(root.join("install/config")).unwrap();
+        std::fs::write(
+            root.join("install/config/lambdabots.yaml"),
+            "schema: lambdabots/main@1\nquota:\n  count: 1\n  mode: normal\nengine:\n  master_seed: 7\nchat:\n  enabled: \
+             true\n  provider:\n    api_key: sk-hunter2-chat\n",
+        )
+        .unwrap();
         let init = InitData {
             adapter_version: "test".into(),
             plugin_path: root.join("plugin"),
@@ -1516,129 +1571,93 @@ mod tests {
             late_load: false,
             sandbox: true,
         };
-        std::fs::create_dir_all(root.join("install/config")).unwrap();
-        std::fs::write(
-            root.join("install/config/lambdabots.yaml"),
-            "schema: lambdabots/main@1\nquota:\n  count: 1\n  mode: normal\nengine:\n  master_seed: 7\nchat:\n  enabled: \
-             true\n  provider:\n    api_key: sk-hunter2-chat\n",
-        )
-        .unwrap();
         let mut server = SimServer {
             ground: true,
             hide_human: true,
             human_joins: Some(20),
-            says: vec![(850, "привет всем".into())],
             ..SimServer::default()
         };
         let mut init_calls = Vec::new();
         let mut rt = Runtime::new(&mut RecordingHost::new(&mut server, Some(&mut init_calls)), init);
-        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line("ну привет".into())]);
-        let sent = fake.sent.clone();
         rt.chat.backend = Box::new(fake);
-        let mut rec = Recorder::new(init_calls);
-        let step = |rt: &mut Runtime, rec: &mut Recorder, server: &mut SimServer, entry: Entry| {
-            let mut host = RecordingHost::new(server, rec.begin(|| entry.clone()));
-            run_step(rt, &mut host, &entry);
-            rec.end(rt);
-        };
-        step(
-            &mut rt,
-            &mut rec,
-            &mut server,
-            Entry::Command(vec!["lb".into(), "record".into(), "start".into()]),
-        );
-        rec.map_starting(&mut rt, "flatland");
+        (rt, Recorder::new(init_calls), server)
+    }
+
+    /// The map `flatland` starts as `epoch` on an empty server; with `record`, the recording starts with it.
+    fn new_map(rt: &mut Runtime, rec: &mut Recorder, server: &mut SimServer, epoch: u32, record: bool) {
+        if record {
+            command(rt, rec, server, &["lb", "record", "start"]);
+            rec.map_starting(rt, "flatland");
+            assert!(rec.on());
+        }
+        server.joined.clear();
+        server.announced = 0;
+        server.says.clear();
+        server.team_says.clear();
         let map = Entry::MapStart {
             map: "flatland".into(),
             max_clients: 8,
-            epoch: 1,
+            epoch,
             late_load: false,
         };
-        step(&mut rt, &mut rec, &mut server, map);
-        let mut stood = 0;
-        for n in 0..1800 {
-            if n == 900 {
-                let name = rt.bots[0].persona.name.clone();
-                step(
-                    &mut rt,
-                    &mut rec,
-                    &mut server,
-                    Entry::Command(vec!["lb".into(), "chat".into(), "test".into(), name, "привет".into()]),
-                );
-            }
-            let frame = server.frame(n);
-            step(&mut rt, &mut rec, &mut server, frame);
-            step(
-                &mut rt,
-                &mut rec,
-                &mut server,
-                Entry::FramePost {
-                    mono_ns: n * 10_000_000,
-                },
-            );
-            stood += usize::from(rt.bots.first().is_some_and(|b| b.chat.typing_in_the_open()));
-        }
-        assert_eq!(rt.clients.humans(false), 1, "Gordon is on the server");
-        let said: Vec<&Vec<String>> = server.sent.iter().filter(|a| a[0] == "say").collect();
-        assert!(said.iter().any(|a| a[1] == "ну привет"), "{:?}", server.sent);
-        assert!(stood > 100, "the bot stood still while typing ({stood} frames)");
-        assert!(sent.lock().unwrap().asked.iter().any(|r| r.trigger.is_answer()));
-        assert!(
-            rt.chat
-                .journal
-                .entries()
-                .any(|e| matches!(&e.event, lb_chat::Event::Chat { from, .. } if from.bot)),
-            "the bot's line is in the journal"
-        );
-        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
-        assert_eq!(
-            sent.lock().unwrap().summaries.len(),
-            1,
-            "the map's summary went to the memory"
-        );
-        assert_eq!(sent.lock().unwrap().summaries[0].players[0].key, "name:gordon");
-        rec.finish(&mut rt, "test over");
-        let file = std::fs::read_dir(root.join("install/records"))
+        step(rt, rec, server, map);
+    }
+
+    /// The name the bot plays under.
+    fn netname(rt: &Runtime) -> String {
+        rt.clients
+            .get(rt.bots[0].id.slot)
+            .map(|c| c.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether a bot said `text`.
+    fn said(server: &SimServer, text: &str) -> bool {
+        server.sent.iter().any(|a| a[0] == "say" && a[1] == text)
+    }
+
+    /// The recording made under `root`.
+    fn recording(root: &Path) -> PathBuf {
+        std::fs::read_dir(root.join("install/records"))
             .unwrap()
             .next()
             .unwrap()
             .unwrap()
-            .path();
-        let mut replies = 0;
-        let mut reader = Reader::open(&file).unwrap();
-        while let Some(record) = reader.next_record().unwrap() {
-            let bytes = postcard::to_allocvec(&record).unwrap();
-            assert!(
-                !bytes.windows(8).any(|w| w == b"hunter2-"),
-                "the chat key is in the recording"
-            );
-            if let Record::Step(step) = &record {
-                replies += step.outside.iter().filter(|o| matches!(o, Outside::Chat(_))).count();
-            }
-        }
-        assert!(replies >= 1);
+            .path()
+    }
 
+    /// The recording made under `root` replays to the same commands, and writes no chat log; with the worker's
+    /// replies saying another line, the replay tells.
+    fn replays_and_tells_another_line(root: &Path) {
+        let file = recording(root);
         let opts = ReplayOptions {
             dir: Some(root.join("replay")),
+            keep_dir: true,
             max_diffs: 5,
-            ..ReplayOptions::default()
         };
         let report = replay(&file, &opts, &mut |_| {}).unwrap();
         assert!(report.matches(), "{}", report.lines().join("\n"));
-
-        // Another line in the recording: the bot says it, and the replay tells.
+        assert!(report.warnings.is_empty(), "{}", report.lines().join("\n"));
+        let mut files = Vec::new();
+        walk(&report.dir, &mut files);
+        assert!(!files.is_empty());
+        assert!(
+            files.iter().all(|f| !f
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("chatlog"))),
+            "a replay writes no chat log: {files:?}"
+        );
         let tampered = root.join("tampered-chat.lbrec");
         let mut reader = Reader::open(&file).unwrap();
         let mut writer = Writer::create(&tampered).unwrap();
+        let mut replies = 0;
         while let Some(mut record) = reader.next_record().unwrap() {
             if let Record::Step(step) = &mut record {
                 for o in &mut step.outside {
-                    if let Outside::Chat(replies) = o {
-                        for r in replies.iter_mut() {
-                            *r = Reply {
-                                id: r.id,
-                                outcome: Outcome::Line("ну и ладно".into()),
-                            };
+                    if let Outside::Chat(chat) = o {
+                        for r in chat.iter_mut() {
+                            replies += 1;
+                            r.outcome = lb_chat::Outcome::Line("ну и ладно".into());
                         }
                     }
                 }
@@ -1646,8 +1665,504 @@ mod tests {
             writer.write(&record).unwrap();
         }
         writer.close().unwrap();
+        assert!(replies >= 1);
         let report = replay(&tampered, &opts, &mut |_| {}).unwrap();
         assert!(!report.matches(), "{}", report.lines().join("\n"));
+    }
+
+    #[test]
+    fn chat_lines_replay_to_the_same_commands() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-chat");
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line("ну привет".into())]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        rt.chat.chatlog = Some(crate::chat::ChatLog::new(root.join("chatlog")));
+        new_map(&mut rt, &mut rec, &mut server, 1, true);
+        let (mut named, mut stood) = (String::new(), 0);
+        frames(&mut rt, &mut rec, &mut server, 0..1800, |rt, _, server, n| {
+            if n == 800 {
+                named = format!("{}, привет", netname(rt));
+                server.says.push((850, named.clone()));
+                server.team_says.push((860, "го на рельсы".into()));
+                server.says.push((870, "/login secret".into()));
+            }
+            stood += usize::from(rt.bots.first().is_some_and(|b| b.chat.typing_in_the_open()));
+        });
+        let (bot, persona) = (netname(&rt), rt.bots[0].persona.name.clone());
+        assert_eq!(rt.clients.humans(false), 1, "Gordon is on the server");
+        assert!(said(&server, "ну привет"), "{:?}", server.sent);
+        assert!(stood > 100, "the bot stood still while typing ({stood} frames)");
+        assert!(
+            sent.lock()
+                .unwrap()
+                .asked
+                .iter()
+                .any(|r| matches!(&r.trigger, Trigger::Addressed { text, .. } if *text == named)),
+            "Gordon named the bot"
+        );
+        let chat: Vec<(bool, &str)> = rt
+            .chat
+            .journal
+            .entries()
+            .filter_map(|e| match &e.event {
+                lb_chat::Event::Chat { from, text, .. } => Some((from.bot, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chat,
+            [(false, named.as_str()), (true, "ну привет")],
+            "the bot's line is in the journal; a plugin's command and a team line nobody else sees are not"
+        );
+        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.summaries.len(), 1, "the map's summary went to the memory");
+            let gordon = &sent.summaries[0].players[0];
+            assert_eq!(gordon.key, "name:gordon");
+            let talk: Vec<(&str, bool, &str)> = gordon
+                .talk
+                .iter()
+                .map(|(_, bot, mine, text)| (bot.as_str(), *mine, text.as_str()))
+                .collect();
+            assert_eq!(
+                talk,
+                [
+                    (persona.as_str(), false, named.as_str()),
+                    (persona.as_str(), true, "ну привет")
+                ],
+                "the talk went to the memory"
+            );
+        }
+        assert!(
+            rt.chat.social.unsaved(3, lb_core::time::SimTime::ZERO).is_empty(),
+            "and is not sent again"
+        );
+        rec.finish(&mut rt, "test over");
+
+        let mut logs: Vec<PathBuf> = std::fs::read_dir(root.join("chatlog"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        logs.sort();
+        let text: String = logs.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+        let headers = text.lines().filter(|l| *l == "---- flatland ----").count();
+        assert!(
+            text.starts_with("---- flatland ----\n") && headers == logs.len(),
+            "{text}"
+        );
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.starts_with("----"))
+            .map(|l| l.get(9..).unwrap_or_default())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "+ Gordon".to_string(),
+                format!("  Gordon: {named}"),
+                "  Gordon (team): го на рельсы".to_string(),
+                "  Gordon: /login ***".to_string(),
+                format!("» {bot}: ну привет")
+            ],
+            "{text}"
+        );
+
+        let mut reader = Reader::open(&recording(&root)).unwrap();
+        while let Some(record) = reader.next_record().unwrap() {
+            let bytes = postcard::to_allocvec(&record).unwrap();
+            assert!(
+                !bytes.windows(8).any(|w| w == b"hunter2-"),
+                "the chat key is in the recording"
+            );
+        }
+        replays_and_tells_another_line(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn phrases_replay_to_the_same_commands() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-phrase");
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Phrase("гг, все молодцы".into())]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, true);
+        frames(&mut rt, &mut rec, &mut server, 0..1500, |rt, rec, server, n| {
+            if n == 900 {
+                let name = rt.bots[0].persona.name.clone();
+                command(rt, rec, server, &["lb", "chat", "event", &name, "win"]);
+            }
+        });
+        assert!(said(&server, "гг, все молодцы"), "{:?}", server.sent);
+        let asked = &sent.lock().unwrap().asked;
+        assert!(
+            matches!(asked[..], [ref r] if matches!(r.trigger, Trigger::MatchEnd { won: true, .. })),
+            "{asked:?}"
+        );
+        let n = rt.chat.counts;
+        assert_eq!((n.asked, n.phrases, n.lines, n.said), (1, 1, 0, 1));
+        rec.finish(&mut rt, "test over");
+        replays_and_tells_another_line(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_talk_carries_over_the_map_change_and_replays() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-talk");
+        let fake = crate::chat::FakeBackend::answering(&[
+            Outcome::Line("привет, Гордон".into()),
+            Outcome::Line("а то".into()),
+        ]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        let mut named = String::new();
+        frames(&mut rt, &mut rec, &mut server, 0..1500, |rt, _, server, n| {
+            if n == 800 {
+                named = format!("{}, привет", netname(rt));
+                server.says.push((850, named.clone()));
+            }
+        });
+        assert!(said(&server, "привет, Гордон"), "{:?}", server.sent);
+        let persona = rt.bots[0].persona.name.clone();
+        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+
+        new_map(&mut rt, &mut rec, &mut server, 2, true);
+        frames(&mut rt, &mut rec, &mut server, 0..1500, |_, _, server, n| {
+            if n == 800 {
+                server.says.push((850, "ты свою уже приготовил?".into()));
+            }
+        });
+        assert_eq!(rt.bots[0].persona.name, persona, "the bot is back on the next map");
+        {
+            let sent = sent.lock().unwrap();
+            let asked = sent
+                .asked
+                .iter()
+                .find(|r| matches!(&r.trigger, Trigger::Continued { text, .. } if text == "ты свою уже приготовил?"))
+                .unwrap_or_else(|| panic!("no Continued: {:#?}", sent.asked));
+            assert_eq!(asked.bot.persona, persona);
+            let joined =
+                |r: &lb_chat::ChatRequest| r.events.iter().any(|e| matches!(e.event, lb_chat::Event::Join { .. }));
+            assert!(joined(&sent.asked[0]), "Gordon joined on the first map");
+            assert!(!joined(asked), "and is only back on the second: {:?}", asked.events);
+            let before: Vec<(bool, &str)> = asked
+                .talk
+                .iter()
+                .filter(|s| s.age > asked.scene.elapsed)
+                .map(|s| (s.mine, s.text.as_str()))
+                .collect();
+            assert_eq!(
+                before,
+                [(false, named.as_str()), (true, "привет, Гордон")],
+                "the talk of the map before"
+            );
+        }
+        assert!(said(&server, "а то"), "{:?}", server.sent);
+        rec.finish(&mut rt, "test over");
+        replays_and_tells_another_line(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_busy_bot_answers_once_its_line_is_out() {
+        use lb_chat::Outcome;
+
+        let root = dir("record-busy");
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line("ну привет".into())]);
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, true);
+        let typed = "ну всё, пошёл я на рельсы, кто со мной";
+        frames(&mut rt, &mut rec, &mut server, 0..3500, |rt, rec, server, n| {
+            if n == 700 {
+                let name = rt.bots[0].persona.name.clone();
+                command(rt, rec, server, &["lb", "chat", "say", &name, typed]);
+                server.says.push((800, format!("{}, привет", netname(rt))));
+            }
+        });
+        let said: Vec<&str> = server
+            .sent
+            .iter()
+            .filter(|a| a[0] == "say")
+            .map(|a| a[1].as_str())
+            .collect();
+        assert_eq!(said, [typed, "ну привет"], "the answer waited for the line being typed");
+        rec.finish(&mut rt, "test over");
+        replays_and_tells_another_line(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_config_reload_has_the_worker_read_its_files_again() {
+        let root = dir("record-reload");
+        let fake = crate::chat::FakeBackend::answering(&[]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        rt.chat.chatlog = Some(crate::chat::ChatLog::new(root.join("chatlog")));
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        frames(&mut rt, &mut rec, &mut server, 0..100, |_, _, _, _| {});
+        command(&mut rt, &mut rec, &mut server, &["lb", "config", "reload"]);
+        assert_eq!(sent.lock().unwrap().reloads, 1);
+        server.says.push((150, "кто тут".into()));
+        frames(&mut rt, &mut rec, &mut server, 100..200, |_, _, _, _| {});
+        let mut logs: Vec<PathBuf> = std::fs::read_dir(root.join("chatlog"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        logs.sort();
+        let text: String = logs.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| {
+                if l.starts_with("----") {
+                    l
+                } else {
+                    l.get(9..).unwrap_or(l)
+                }
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "---- flatland ----",
+                "+ Gordon",
+                "---- flatland ----",
+                "  Gordon: кто тут"
+            ],
+            "the file let go, the next line opens it under the map's header"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_line_whose_answer_was_not_said_is_asked_again() {
+        use lb_chat::{ChatRequest, Outcome, Trigger};
+
+        let addressed = |asked: &[ChatRequest], line: &str| {
+            asked
+                .iter()
+                .filter(|r| matches!(&r.trigger, Trigger::Addressed { text, .. } if text == line))
+                .count()
+        };
+        let root = dir("record-unsaid");
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Skip]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        let mut named = String::new();
+        frames(&mut rt, &mut rec, &mut server, 0..2000, |rt, _, server, n| {
+            if n == 800 {
+                named = format!("{}, где рельсы?", netname(rt));
+                server.says.push((850, named.clone()));
+                server.says.push((1850, named.clone()));
+            }
+        });
+        assert_eq!(
+            addressed(&sent.lock().unwrap().asked, &named),
+            2,
+            "the bot kept quiet: the line again 10 s later is no repeat"
+        );
+
+        let answer = "на втором этаже";
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line(answer.into())]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        frames(&mut rt, &mut rec, &mut server, 0..1500, |rt, _, server, n| {
+            if n == 1400 {
+                named = format!("{}, где рельсы?", netname(rt));
+                server.says.push((1450, named.clone()));
+            }
+        });
+        assert_eq!(addressed(&sent.lock().unwrap().asked, &named), 1);
+        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+        assert!(!said(&server, answer), "the map ended before the line was typed");
+        new_map(&mut rt, &mut rec, &mut server, 2, false);
+        frames(&mut rt, &mut rec, &mut server, 0..1500, |rt, _, server, n| {
+            if n == 800 {
+                assert_eq!(format!("{}, где рельсы?", netname(rt)), named, "the same bot");
+                server.says.push((850, named.clone()));
+            }
+        });
+        assert_eq!(
+            addressed(&sent.lock().unwrap().asked, &named),
+            2,
+            "asked again on the next map"
+        );
+        assert!(said(&server, answer), "{:?}", server.sent);
+
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line(answer.into())]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        frames(&mut rt, &mut rec, &mut server, 0..3500, |rt, _, server, n| {
+            if n == 800 {
+                named = format!("{}, где рельсы?", netname(rt));
+                for i in 0..8 {
+                    server.says.push((850 + 300 * i, named.clone()));
+                }
+            }
+        });
+        assert!(said(&server, answer), "{:?}", server.sent);
+        assert_eq!(
+            addressed(&sent.lock().unwrap().asked, &named),
+            1,
+            "a line sent 8 times, its answer said"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_greeting_that_was_not_said_leaves_the_player_to_be_greeted() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-greeting");
+        let mut lost = 0;
+        for epoch in 1..=200 {
+            let fake = crate::chat::FakeBackend::answering(&[Outcome::Skip]);
+            let sent = fake.sent.clone();
+            let asked = |pick: fn(&Trigger) -> bool| sent.lock().unwrap().asked.iter().any(|r| pick(&r.trigger));
+            let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+            server.human_joins = Some(700);
+            new_map(&mut rt, &mut rec, &mut server, epoch, false);
+            frames(&mut rt, &mut rec, &mut server, 0..760, |_, _, _, _| {});
+            if !asked(|t| matches!(t, Trigger::Joined { .. })) {
+                continue;
+            }
+            lost += 1;
+            assert_eq!(
+                rt.chat.social.players.get("Gordon").and_then(|p| p.greeted),
+                None,
+                "epoch {epoch}: the bot kept quiet"
+            );
+            server.says.push((800, "прив всем".into()));
+            frames(&mut rt, &mut rec, &mut server, 760..900, |_, _, _, _| {});
+            if asked(|t| matches!(t, Trigger::Greeted { .. })) {
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+        }
+        panic!("the player's hello was never answered, {lost} greetings on joining not said");
+    }
+
+    #[test]
+    fn an_answer_to_a_line_to_everybody_keeps_the_line_in_the_talk() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-overheard");
+        let (line, answer) = ("сегодня на карте тихо", "и не говори");
+        for epoch in 1..=100 {
+            let fake = crate::chat::FakeBackend::answering(&[Outcome::Line(answer.into())]);
+            let sent = fake.sent.clone();
+            let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+            new_map(&mut rt, &mut rec, &mut server, epoch, false);
+            server.says.push((850, line.into()));
+            frames(&mut rt, &mut rec, &mut server, 0..1500, |_, _, _, _| {});
+            let overheard = sent
+                .lock()
+                .unwrap()
+                .asked
+                .iter()
+                .any(|r| matches!(r.trigger, Trigger::Overheard { .. }));
+            if !overheard {
+                continue;
+            }
+            assert!(said(&server, answer), "{:?}", server.sent);
+            let persona = rt.bots[0].persona.name.clone();
+            let talk: Vec<(bool, String)> = rt
+                .chat
+                .social
+                .talks
+                .talk(rt.now, &persona, 3)
+                .into_iter()
+                .map(|s| (s.mine, s.text))
+                .collect();
+            assert_eq!(talk, [(false, line.to_string()), (true, answer.to_string())]);
+            step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+            let sent = sent.lock().unwrap();
+            let talk: Vec<(&str, bool, &str)> = sent.summaries[0].players[0]
+                .talk
+                .iter()
+                .map(|(_, bot, mine, text)| (bot.as_str(), *mine, text.as_str()))
+                .collect();
+            assert_eq!(
+                talk,
+                [(persona.as_str(), false, line), (persona.as_str(), true, answer)],
+                "the memory has both"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        panic!("no bot answered the line to everybody");
+    }
+
+    #[test]
+    fn a_player_still_connecting_when_the_map_ends_comes_in_on_the_next() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-connecting");
+        for epoch in (1..=200).step_by(2) {
+            let _ = std::fs::remove_dir_all(root.join("chatlog"));
+            let fake = crate::chat::FakeBackend::answering(&[Outcome::Skip]);
+            let sent = fake.sent.clone();
+            let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+            rt.chat.chatlog = Some(crate::chat::ChatLog::new(root.join("chatlog")));
+            new_map(&mut rt, &mut rec, &mut server, epoch, false);
+            server.client_events = vec![(200, LB_CLIENT_EV_CONNECT, 6, 4, "Alyx")];
+            frames(&mut rt, &mut rec, &mut server, 0..300, |_, _, _, _| {});
+            step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+            assert!(
+                rt.chat.social.players.get("Alyx").is_none(),
+                "never in the game, so not seen"
+            );
+            new_map(&mut rt, &mut rec, &mut server, epoch + 1, false);
+            server.client_events = vec![
+                (600, LB_CLIENT_EV_CONNECT, 6, 4, "Alyx"),
+                (610, LB_CLIENT_EV_PUT_IN_SERVER, 6, 4, "Alyx"),
+            ];
+            frames(&mut rt, &mut rec, &mut server, 0..700, |_, _, _, _| {});
+            let mut logs: Vec<PathBuf> = std::fs::read_dir(root.join("chatlog"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            logs.sort();
+            let text: String = logs.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+            let joins: Vec<&str> = text
+                .lines()
+                .filter_map(|l| l.get(9..).filter(|l| l.starts_with("+ ")))
+                .collect();
+            assert_eq!(joins, ["+ Gordon", "+ Alyx"], "{text}");
+            let greeted = sent
+                .lock()
+                .unwrap()
+                .asked
+                .iter()
+                .any(|r| matches!(&r.trigger, Trigger::Joined { who } if who.name == "Alyx"));
+            if greeted {
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+        }
+        panic!("Alyx was never greeted");
+    }
+
+    #[test]
+    fn a_recording_of_another_format_is_refused() {
+        let root = dir("record-format");
+        let path = root.join("old.lbrec");
+        std::fs::write(&path, [MAGIC.as_slice(), &3u32.to_le_bytes()].concat()).unwrap();
+        let Err(err) = Reader::open(&path) else {
+            panic!("a recording of format 3 opens");
+        };
+        assert!(err.contains("recording format 3, this build reads 4"), "{err}");
+        let err = replay(&path, &ReplayOptions::default(), &mut |_| {}).unwrap_err();
+        assert!(err.contains("recording format 3"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1698,5 +2213,137 @@ mod tests {
         back.telemetry.secret = original.telemetry.secret.clone();
         assert_eq!(back, original);
         assert!(scrub_config(b"schema: lambdabots/main@1\nquota: [").is_none());
+    }
+
+    #[test]
+    fn login_lines_go_to_the_chat_log_alone() {
+        use lb_chat::{Event, Outcome, Trigger};
+
+        /// The players' lines among `events`.
+        fn written<'a>(events: impl Iterator<Item = &'a Event>) -> Vec<&'a str> {
+            events
+                .filter_map(|e| match e {
+                    Event::Chat { from, text, .. } if !from.bot => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let root = dir("record-login");
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line("ну привет".into())]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        rt.chat.chatlog = Some(crate::chat::ChatLog::new(root.join("chatlog")));
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        let mut named = String::new();
+        frames(&mut rt, &mut rec, &mut server, 0..1000, |rt, _, server, n| {
+            if n == 800 {
+                named = format!("{}, привет", netname(rt));
+                server.says.push((850, ".login hunter2".into()));
+                server.says.push((855, "login hunter3".into()));
+                server.says.push((860, "pass the gauss".into()));
+                server.says.push((870, named.clone()));
+            }
+        });
+        assert_eq!(
+            written(rt.chat.journal.entries().map(|e| &e.event)),
+            ["pass the gauss", named.as_str()],
+            "the login lines are not in the journal"
+        );
+        let gists: Vec<Vec<String>> = rt
+            .chat
+            .social
+            .players
+            .get("Gordon")
+            .map_or_else(Vec::new, |p| p.gists.iter().map(|g| g.words.clone()).collect());
+        assert!(
+            gists.contains(&lb_chat::addressing::gist("pass the gauss", &[])),
+            "«pass the gauss» is chat: {gists:?}"
+        );
+        assert!(!format!("{gists:?}").contains("hunter"), "nor causes: {gists:?}");
+        {
+            let sent = sent.lock().unwrap();
+            let asked = sent
+                .asked
+                .iter()
+                .find(|r| matches!(&r.trigger, Trigger::Addressed { text, .. } if *text == named))
+                .unwrap_or_else(|| panic!("Gordon named the bot: {:#?}", sent.asked));
+            assert_eq!(
+                written(asked.chat.iter().map(|r| &r.event)),
+                ["pass the gauss", named.as_str()]
+            );
+            let asked = format!("{:?}", sent.asked);
+            assert!(!asked.contains("hunter"), "nor requests: {asked}");
+        }
+        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+        let summaries = format!("{:?}", sent.lock().unwrap().summaries);
+        assert!(
+            summaries.contains("pass the gauss") && !summaries.contains("hunter"),
+            "nor the memory: {summaries}"
+        );
+
+        let mut logs: Vec<PathBuf> = std::fs::read_dir(root.join("chatlog"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        logs.sort();
+        let text: String = logs.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.starts_with("----"))
+            .map(|l| l.get(9..).unwrap_or_default())
+            .filter(|l| !l.starts_with('»'))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "+ Gordon".to_string(),
+                "  Gordon: .login ***".to_string(),
+                "  Gordon: login ***".to_string(),
+                "  Gordon: pass the gauss".to_string(),
+                format!("  Gordon: {named}"),
+            ],
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chat_switched_off_tells_the_worker() {
+        let root = dir("record-chat-off");
+        let fake = crate::chat::FakeBackend::answering(&[]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        let enabled = || sent.lock().unwrap().enabled.clone();
+        let before = enabled().len();
+        command(&mut rt, &mut rec, &mut server, &["lb", "chat", "off"]);
+        assert_eq!(enabled()[before..], [false], "`lb chat off`");
+        command(&mut rt, &mut rec, &mut server, &["lb", "chat", "on"]);
+        assert_eq!(enabled()[before..], [false, true], "`lb chat on`");
+        let cvar = rt.cvars.handle_of(Cv::Chat).unwrap();
+        server.cvars[usize::from(cvar.0)] = "0".into();
+        frames(&mut rt, &mut rec, &mut server, 0..150, |_, _, _, _| {});
+        assert!(!rt.config.chat.enabled);
+        assert_eq!(enabled()[before..], [false, true, false], "`lb_chat 0`");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_map_start_removes_old_chat_logs_with_the_log_off() {
+        let root = dir("record-chatlog-off");
+        let (mut rt, mut rec, mut server) = chat_server(&root, crate::chat::FakeBackend::answering(&[]));
+        rt.config.chat.chatlog = false;
+        let logs = root.join("chatlog");
+        let log = crate::chat::ChatLog::new(logs.clone());
+        let (old, today) = (logs.join("chatlog.2000-01-01.log"), log.today());
+        std::fs::create_dir_all(&logs).unwrap();
+        for file in [&old, &today] {
+            std::fs::write(file, "a line\n").unwrap();
+        }
+        rt.chat.chatlog = Some(log);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        assert!(!old.exists() && today.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

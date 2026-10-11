@@ -1,7 +1,7 @@
 use core::ops::{Add, AddAssign, Sub};
 
 /// Simulation time in seconds since map start, in double precision.
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct SimTime(pub f64);
 
 impl SimTime {
