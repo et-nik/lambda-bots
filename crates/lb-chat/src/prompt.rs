@@ -161,7 +161,7 @@ fn style_text(lang: Lang, style: &str) -> &'static str {
     }
 }
 
-fn language_name(code: &str) -> String {
+pub(crate) fn language_name(code: &str) -> String {
     match lang::primary(code).to_ascii_lowercase().as_str() {
         "ru" => "русский".into(),
         "en" => "English".into(),
@@ -500,6 +500,15 @@ pub fn partner_language(req: &ChatRequest, remembered: &[&str]) -> Option<&'stat
         }
     }
     lang::writes(line, lines, &words(req, &[], &Aliases::default()))
+}
+
+/// The language the bot answers in, by its primary subtag: the partner's ([`partner_language`]) when the prompt asks
+/// the model to answer in it ([`lang::spoken`]), else the server's.
+pub fn answer_language(req: &ChatRequest, remembered: &[&str]) -> String {
+    match partner_language(req, remembered) {
+        Some(code) if lang::spoken(Lang::of(&req.language), code, &req.language).is_some() => code.to_string(),
+        _ => lang::primary(&req.language).to_ascii_lowercase(),
+    }
 }
 
 fn trigger_text(names: &Names<'_>, t: &Trigger, team: bool) -> String {
@@ -1372,7 +1381,7 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases
         return None;
     }
     let mut user = String::new();
-    let winner = s.winner.as_deref().unwrap_or("-");
+    let winner = s.winner.as_deref().map_or("-", |w| aliases.call(w));
     match lang {
         Lang::Ru => {
             let _ = writeln!(user, "Карта {}, {} мин, победил {winner}.\n\nИгроки:", s.map, s.minutes);
@@ -1469,15 +1478,18 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases
     })
 }
 
+/// The JSON object of a model's answer, perhaps in a code fence.
+pub(crate) fn json_object(text: &str) -> Option<BTreeMap<String, serde_json::Value>> {
+    let (start, end) = (text.find('{')?, text.rfind('}')?);
+    if end < start {
+        return None;
+    }
+    serde_json::from_str(&text[start..=end]).ok()
+}
+
 /// The notes from the model's answer: a JSON object, perhaps in a code fence.
 pub fn parse_notes(text: &str) -> BTreeMap<String, String> {
-    let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) else {
-        return BTreeMap::new();
-    };
-    if end < start {
-        return BTreeMap::new();
-    }
-    serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&text[start..=end])
+    json_object(text)
         .map(|m| {
             m.into_iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k, s.trim().chars().take(NOTES_MAX).collect())))

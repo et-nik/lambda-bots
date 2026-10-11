@@ -1,6 +1,7 @@
 //! What the bots remember of players between maps and restarts, kept by the chat worker in `data/chat/memory.json`:
 //! the names a player used, the score against each bot, favourite weapons, wins, a few lines they wrote, their talks
-//! with the bots, moments worth remembering, the model's notes, and the last maps.
+//! with the bots, moments worth remembering, the model's notes, and the last maps; and the names the model gave
+//! nicknames.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,7 +62,7 @@ pub fn same_nickname(a: &str, b: &str) -> bool {
 }
 
 /// A nickname as [`same_nickname`] compares it: trimmed, without the engine's `(1)`, in lower case.
-fn nickname(name: &str) -> String {
+pub fn nickname(name: &str) -> String {
     unnumbered(name).to_lowercase()
 }
 
@@ -116,6 +117,16 @@ pub struct MapRecap {
     pub top: Vec<(String, i32)>,
 }
 
+/// The names the model gave a nickname ([`crate::aliases::request`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NickNames {
+    /// By language code (`ru`, `en`): the names, the main one first; none where none fits.
+    pub by_lang: BTreeMap<String, Vec<String>>,
+    /// Unix seconds the nickname was seen last: named, or on a map the memory took in.
+    pub seen: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Memory {
@@ -123,6 +134,8 @@ pub struct Memory {
     pub players: BTreeMap<String, PlayerMemory>,
     /// The last maps, the latest last.
     pub maps: Vec<MapRecap>,
+    /// The names the model gave nicknames, by the nickname as [`nickname`] writes it.
+    pub aliases: BTreeMap<String, NickNames>,
 }
 
 impl Default for Memory {
@@ -131,6 +144,7 @@ impl Default for Memory {
             schema: SCHEMA.into(),
             players: BTreeMap::new(),
             maps: Vec::new(),
+            aliases: BTreeMap::new(),
         }
     }
 }
@@ -189,15 +203,18 @@ fn unname(names: &BTreeSet<String>, winner: &mut Option<String>, top: &mut Vec<(
 }
 
 /// Players [`Memory::forget`] forgot, for the maps that end after: their keys, the nicknames forgotten by name
-/// (without the engine's `(1)`), and every name they used, the last two in lower case.
+/// (without the engine's `(1)`), and every name they used, the last two in lower case; and the nicknames whose names
+/// from the model went, as [`nickname`] writes them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Forgotten {
     keys: BTreeSet<String>,
     nicknames: BTreeSet<String>,
     names: BTreeSet<String>,
+    named: BTreeSet<String>,
 }
 
 impl Forgotten {
+    /// No player was forgotten (names from the model may have been).
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
@@ -207,11 +224,17 @@ impl Forgotten {
         self.keys.iter().map(String::as_str)
     }
 
+    /// The nicknames whose names from the model went, as [`nickname`] writes them.
+    pub fn named(&self) -> impl Iterator<Item = &str> {
+        self.named.iter().map(String::as_str)
+    }
+
     /// Takes in players forgotten since.
     pub fn add(&mut self, more: Forgotten) {
         self.keys.extend(more.keys);
         self.nicknames.extend(more.nicknames);
         self.names.extend(more.names);
+        self.named.extend(more.named);
     }
 
     /// Leaves them out of a map's summary: the players under their keys or under a nickname forgotten by name, with
@@ -254,6 +277,9 @@ impl Memory {
                 m.first_seen = now;
             }
             m.last_seen = now;
+            if let Some(named) = self.aliases.get_mut(&nickname(&p.name)) {
+                named.seen = now;
+            }
             m.maps += 1;
             m.names.retain(|n| n != &p.name);
             m.names.insert(0, p.name.clone());
@@ -302,10 +328,11 @@ impl Memory {
         push_capped(&mut self.maps, recap, MAPS);
     }
 
-    /// Forgets players not seen for `days`, and the oldest beyond [`MAX_PLAYERS`].
+    /// Forgets players and the names of nicknames not seen for `days`, and the oldest of each beyond [`MAX_PLAYERS`].
     pub fn prune(&mut self, now: u64, days: u32) {
         let horizon = now.saturating_sub(u64::from(days) * 86_400);
         self.players.retain(|_, p| p.last_seen >= horizon);
+        self.aliases.retain(|_, n| n.seen >= horizon);
         if self.players.len() > MAX_PLAYERS {
             let mut seen: Vec<(u64, String)> = self.players.iter().map(|(k, p)| (p.last_seen, k.clone())).collect();
             seen.sort();
@@ -313,6 +340,36 @@ impl Memory {
                 self.players.remove(&key);
             }
         }
+        if self.aliases.len() > MAX_PLAYERS {
+            let mut seen: Vec<(u64, String)> = self.aliases.iter().map(|(k, n)| (n.seen, k.clone())).collect();
+            seen.sort();
+            for (_, key) in seen.into_iter().take(self.aliases.len() - MAX_PLAYERS) {
+                self.aliases.remove(&key);
+            }
+        }
+    }
+
+    /// The names the model gave `nick` (as [`nickname`] finds it) in the language `code`: `Some` empty when none fits,
+    /// nothing when it was not asked in that language.
+    pub fn names_of(&self, nick: &str, code: &str) -> Option<&[String]> {
+        self.aliases
+            .get(&nickname(nick))?
+            .by_lang
+            .get(&code.trim().to_ascii_lowercase())
+            .map(Vec::as_slice)
+    }
+
+    /// Keeps the names the model gave `nick` at `now`, by language: a language given again replaces its names.
+    pub fn learn_names(&mut self, nick: &str, by_lang: BTreeMap<String, Vec<String>>, now: u64) {
+        let key = nickname(nick);
+        if key.is_empty() {
+            return;
+        }
+        let named = self.aliases.entry(key).or_default();
+        for (code, names) in by_lang {
+            named.by_lang.insert(code.trim().to_ascii_lowercase(), names);
+        }
+        named.seen = now;
     }
 
     /// The model's notes, for players it already knows.
@@ -344,8 +401,9 @@ impl Memory {
     }
 
     /// Forgets the player under the key `query`, else every player who used the nickname `query` (case-insensitive,
-    /// with the engine's `(1)` before it or without, [`same_nickname`]), and their names in the last maps' winners
-    /// and best scores: who was forgotten, nobody when the memory has no such player.
+    /// with the engine's `(1)` before it or without, [`same_nickname`]), their names in the last maps' winners and best
+    /// scores, and the names the model gave the nickname `query` and every nickname they used: who was forgotten,
+    /// nobody when the memory has no such player.
     pub fn forget(&mut self, query: &str) -> Forgotten {
         let query = query.trim();
         let mut gone = Forgotten::default();
@@ -372,6 +430,17 @@ impl Memory {
         }
         for m in &mut self.maps {
             unname(&gone.names, &mut m.winner, &mut m.top);
+        }
+        let nicknames: BTreeSet<String> = gone
+            .names
+            .iter()
+            .map(|n| nickname(n))
+            .chain(std::iter::once(nickname(query)))
+            .collect();
+        for nick in nicknames {
+            if self.aliases.remove(&nick).is_some() {
+                gone.named.insert(nick);
+            }
         }
         gone
     }
@@ -791,5 +860,87 @@ mod tests {
             "back as (1)Gordon under a new SteamID"
         );
         assert_eq!((s.winner, s.top), (None, vec![("Barney".to_string(), 20)]));
+    }
+
+    fn named(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(code, names)| (code.to_string(), names.iter().map(|n| n.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn names_the_model_gave_go_by_the_nickname() {
+        let mut m = Memory::default();
+        m.learn_names("Moss", named(&[("ru", &["Мосс"]), ("en", &[])]), 1000);
+        assert_eq!(m.names_of("moss", "ru"), Some(&["Мосс".to_string()][..]));
+        assert_eq!(
+            m.names_of("(1)MOSS ", "RU"),
+            Some(&["Мосс".to_string()][..]),
+            "a reconnect, any case"
+        );
+        assert_eq!(m.names_of("Moss", "en"), Some(&[][..]), "asked, none fits");
+        assert_eq!(m.names_of("Moss", "de"), None, "not asked");
+        assert_eq!(m.names_of("Mossy", "ru"), None);
+        m.learn_names("moss", named(&[("en", &["Moss"])]), 2000);
+        assert_eq!(m.names_of("Moss", "en"), Some(&["Moss".to_string()][..]));
+        assert_eq!(
+            m.names_of("Moss", "ru"),
+            Some(&["Мосс".to_string()][..]),
+            "the other language stays"
+        );
+        assert_eq!(m.aliases["moss"].seen, 2000);
+        m.learn_names("  ", named(&[("en", &["x"])]), 2000);
+        assert_eq!(m.aliases.len(), 1);
+        let back = Memory::parse(&m.to_json()).unwrap();
+        assert_eq!(back, m);
+        let old = Memory::parse("{\"schema\": \"lambdabots/chat-memory@1\", \"players\": {}}").unwrap();
+        assert!(old.aliases.is_empty(), "a file from before has none");
+    }
+
+    #[test]
+    fn names_are_kept_while_the_nickname_is_seen() {
+        let mut m = Memory::default();
+        m.learn_names("ATLAS Gamer", named(&[("ru", &["Атлас"])]), 1000);
+        m.learn_names("Moss", named(&[("ru", &["Мосс"])]), 1000);
+        m.merge(&summary(false), &Aliases::default(), 50 * 86_400);
+        assert_eq!(m.aliases["atlas gamer"].seen, 50 * 86_400, "seen on the map");
+        m.prune(50 * 86_400, 30);
+        assert!(m.aliases.contains_key("atlas gamer"));
+        assert!(!m.aliases.contains_key("moss"), "unseen for 30 days");
+        for i in 0..MAX_PLAYERS as u64 + 5 {
+            m.learn_names(&format!("p{i}"), named(&[("ru", &["x"])]), 60 * 86_400 + i);
+        }
+        m.prune(60 * 86_400, 30);
+        assert_eq!(m.aliases.len(), MAX_PLAYERS);
+        assert!(
+            !m.aliases.contains_key("atlas gamer") && !m.aliases.contains_key("p0"),
+            "the oldest go"
+        );
+    }
+
+    #[test]
+    fn forgetting_forgets_the_names_too() {
+        let mut m = Memory::default();
+        m.merge(&summary(false), &Aliases::default(), 1000);
+        m.players
+            .get_mut("STEAM_0:0:219579426")
+            .unwrap()
+            .names
+            .push("Atlas2".into());
+        m.learn_names("ATLAS Gamer", named(&[("ru", &["Атлас"])]), 1000);
+        m.learn_names("Atlas2", named(&[("ru", &["Атлас"])]), 1000);
+        m.learn_names("Moss", named(&[("ru", &["Мосс"])]), 1000);
+        let gone = m.forget("STEAM_0:0:219579426");
+        assert_eq!(gone.named().collect::<Vec<_>>(), ["atlas gamer", "atlas2"]);
+        let gone = m.forget("(1)moss");
+        assert!(gone.is_empty(), "no player");
+        assert_eq!(
+            gone.named().collect::<Vec<_>>(),
+            ["moss"],
+            "a nickname named before its first map ended"
+        );
+        assert!(m.aliases.is_empty());
+        assert_eq!(m.forget("Moss").named().count(), 0);
     }
 }
