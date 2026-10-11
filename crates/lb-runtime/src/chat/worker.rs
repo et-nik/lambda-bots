@@ -3,23 +3,25 @@
 //! filter. It reads the key and `config/chat/`, keeps the memory of players and the day's token count, and answers
 //! every request, with a line or with why there is none.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use lb_chat::lang;
 use lb_chat::memory::{self, Forgotten, Memory, PlayerMemory};
 use lb_chat::phrases::{self, Offer, Ring};
 use lb_chat::prompt::{self, Context, Known, Rendered};
-use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, profanity, sanitize};
+use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, Scene, profanity, sanitize};
 use lb_config::chat_phrases::Moment;
 use lb_config::main_config::{ChatConfig, ProviderKind};
 use lb_core::rng::{Pcg32, splitmix64};
 use lb_llm::{Client, Completion, ErrorClass, LlmError, Stop};
 
 use super::backend::{ChatBackend, Job};
+use super::levels;
 use super::store::{self, Library, Paths, Usage};
 use super::transcript::Transcript;
 use crate::logging;
@@ -43,6 +45,8 @@ const NOTES_IDLE: Duration = Duration::from_secs(15);
 const USAGE_SAVE_EVERY: u64 = 10;
 /// The random stream of the phrases: the model's share, the pick, the manner.
 const PHRASE_STREAM: u64 = 0x7068_7261_7365;
+/// Requests for names of nicknames an hour at most: nicknames changed over and over get none beyond.
+const NAMES_PER_HOUR: usize = 20;
 
 enum Msg {
     Job(Job, Instant),
@@ -61,18 +65,17 @@ pub struct WorkerBackend {
 }
 
 impl WorkerBackend {
-    pub fn start(config: ChatConfig, install: &Path) -> std::io::Result<WorkerBackend> {
-        WorkerBackend::spawn(config, install, |_| {})
+    pub fn start(config: ChatConfig, install: &Path, game: &Path) -> std::io::Result<WorkerBackend> {
+        WorkerBackend::spawn(config, Paths::new(install, game), |_| {})
     }
 
     /// Starts the worker thread; `tune` sets the worker up before its first job (tests shorten its waits).
-    fn spawn(config: ChatConfig, install: &Path, tune: fn(&mut Worker)) -> std::io::Result<WorkerBackend> {
+    fn spawn(config: ChatConfig, paths: Paths, tune: fn(&mut Worker)) -> std::io::Result<WorkerBackend> {
         let (jobs, rx) = mpsc::sync_channel(QUEUE);
         let (tx, replies) = mpsc::channel();
         let (done_tx, done) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new("starting".to_string()));
-        let paths = Paths::new(install);
         {
             let (stop, status) = (stop.clone(), status.clone());
             std::thread::Builder::new().name("lb-chat".into()).spawn(move || {
@@ -204,6 +207,9 @@ struct Worker {
     memory_dirty: bool,
     /// What the admin wrote in `config/chat/`.
     library: Library,
+    /// GunGame: the map the last request came from, its epoch ([`lb_chat::request::request_id`]), and the weapons of
+    /// its levels ([`levels::load`]): read once each time a map starts, as the plugin reads them.
+    levels: Option<(String, u32, Vec<String>)>,
     usage: Usage,
     usage_dirty: u64,
     status: Arc<Mutex<String>>,
@@ -222,6 +228,20 @@ struct Worker {
     /// Players forgotten since the last map the memory took in: the next one it takes in leaves them out
     /// ([`Worker::map_end`]).
     forgotten: Forgotten,
+    /// Nicknames waiting for the request for their names ([`Worker::ask_names`]): as [`memory::nickname`] writes
+    /// them, and as written; and the languages asked.
+    names_due: Vec<(String, String)>,
+    names_languages: Vec<String>,
+    /// Nicknames not asked for names again until a restart, as [`memory::nickname`] writes them: those the model's
+    /// answer left out or refused, and those whose names were forgotten. One it answered goes by the names the memory
+    /// keeps for it by language ([`Memory::names_of`]).
+    names_asked: BTreeSet<String>,
+    /// When the requests for names of the last hour went ([`NAMES_PER_HOUR`]).
+    names_sent: VecDeque<Instant>,
+    /// Requests that wait for the names of the player they are for: they go once the names come.
+    held: VecDeque<(Box<ChatRequest>, Instant)>,
+    /// When the last request to the provider ended: a request that came before has waited for one already.
+    net_done: Option<Instant>,
     /// [`NOTES_IDLE`] and [`UNPAID_WAIT`]; shorter in tests.
     notes_idle: Duration,
     unpaid_wait: Duration,
@@ -232,6 +252,7 @@ impl Worker {
         let mut w = Worker {
             memory: store::load_memory(&paths.memory),
             library: Library::load(&paths.chat),
+            levels: None,
             usage: store::load_usage(&paths.usage),
             config,
             paths,
@@ -250,6 +271,12 @@ impl Worker {
             notes_due: None,
             overdue: VecDeque::new(),
             forgotten: Forgotten::default(),
+            names_due: Vec::new(),
+            names_languages: Vec::new(),
+            names_asked: BTreeSet::new(),
+            names_sent: VecDeque::new(),
+            held: VecDeque::new(),
+            net_done: None,
             notes_idle: NOTES_IDLE,
             unpaid_wait: UNPAID_WAIT,
         };
@@ -287,7 +314,8 @@ impl Worker {
             n => library.push_str(&format!(" · {n} problems, see the log")),
         }
         self.set_status(format!(
-            "{}; {} at {}; {today}{limit} tokens today; {} players remembered\nconfig/chat: {library}",
+            "{}; {} at {}; {today}{limit} tokens today; {} players remembered, {} nicknames named\nconfig/chat: \
+             {library}",
             self.state(),
             p.model,
             if at.is_empty() {
@@ -295,7 +323,8 @@ impl Worker {
             } else {
                 at
             },
-            self.memory.players.len()
+            self.memory.players.len(),
+            self.memory.aliases.len()
         ));
     }
 
@@ -453,6 +482,7 @@ impl Worker {
             max_tokens: rendered.max_tokens,
         };
         let (result, wire) = client.exchange(&prompt);
+        self.net_done = Some(Instant::now());
         if let Some(t) = self.transcript.as_mut() {
             let what = match &result {
                 Ok(done) => outcome(done),
@@ -549,8 +579,9 @@ impl Worker {
     }
 
     /// Takes the jobs as they come until the backend shuts down. Every job that came is taken in before the next
-    /// request goes to the network ([`Worker::take`], [`Worker::next`]), so a phrase waits for one request at most. A
-    /// map's notes request goes once no job came for [`NOTES_IDLE`]; none while the backend stops.
+    /// request goes to the network ([`Worker::take`], [`Worker::next`]), so a phrase waits for one request at most:
+    /// the model's, or the one for the names of the player it is for. A map's notes request goes once no job came for
+    /// [`NOTES_IDLE`]; none while the backend stops.
     fn run(&mut self, rx: &Receiver<Msg>, tx: &Sender<Reply>, stop: &AtomicBool) {
         let mut send = |reply| {
             let _ = tx.send(reply);
@@ -585,7 +616,8 @@ impl Worker {
                 match msg {
                     Msg::Job(job, queued) => self.take(job, queued, stop.load(Ordering::SeqCst), &mut send),
                     Msg::Shutdown => {
-                        for (req, _) in std::mem::take(&mut self.waiting) {
+                        let held = std::mem::take(&mut self.held);
+                        for (req, _) in std::mem::take(&mut self.waiting).into_iter().chain(held) {
                             send(Reply {
                                 id: req.id,
                                 outcome: Outcome::Failed(Failure::Backoff),
@@ -599,32 +631,53 @@ impl Worker {
         }
     }
 
-    /// Requests or notes wait for the network.
+    /// Requests, names or notes wait for the network.
     fn busy(&self) -> bool {
-        !self.waiting.is_empty() || !self.overdue.is_empty()
+        !self.waiting.is_empty() || !self.overdue.is_empty() || !self.names_due.is_empty() || !self.held.is_empty()
     }
 
     /// A job that came: done at once when it needs no network (a phrase, no line while the provider cannot be asked,
-    /// settings, a map's end, a command); a request for the model waits for its turn.
+    /// settings, a map's end, a command); a request for the model waits for its turn, and one for a player whose
+    /// names are to be asked waits for them ([`Worker::holds`]).
     fn take(&mut self, job: Job, queued: Instant, stopping: bool, send: &mut impl FnMut(Reply)) {
         match job {
-            Job::Ask(req) => match self.ask(&req, queued, stopping, false) {
-                Some(outcome) => send(Reply { id: req.id, outcome }),
-                None => self.waiting.push_back((req, queued)),
-            },
+            Job::Ask(req) => {
+                self.read_levels(&req);
+                self.want_names(&req);
+                if self.holds(&req, queued, stopping) {
+                    self.held.push_back((req, queued));
+                } else {
+                    match self.ask(&req, queued, stopping, false) {
+                        Some(outcome) => send(Reply { id: req.id, outcome }),
+                        None => self.waiting.push_back((req, queued)),
+                    }
+                }
+            }
             Job::MapEnd(summary) => self.map_end(summary),
             Job::Configure(config) => self.configure(*config),
-            Job::Preview(req) => self.preview(&req),
+            Job::Preview(req) => {
+                self.read_levels(&req);
+                self.preview(&req);
+            }
             Job::Memory { query, forget } => self.memory_command(&query, forget),
             Job::Reload => self.reload(),
         }
         self.refresh_status();
     }
 
-    /// The next job for the network: the oldest request for the model, else an overdue notes request (none while the
-    /// worker stops). False when nothing waits.
+    /// The next job for the network: the request for names, then the requests that waited for them are answered or
+    /// wait for the model; else the oldest request for the model; else an overdue notes request (none while the worker
+    /// stops). False when nothing waits.
     fn next(&mut self, stopping: bool, send: &mut impl FnMut(Reply)) -> bool {
-        if let Some((req, queued)) = self.waiting.pop_front() {
+        if !self.names_due.is_empty() || !self.held.is_empty() {
+            self.ask_names(stopping);
+            for (req, queued) in std::mem::take(&mut self.held) {
+                match self.ask(&req, queued, stopping, false) {
+                    Some(outcome) => send(Reply { id: req.id, outcome }),
+                    None => self.waiting.push_back((req, queued)),
+                }
+            }
+        } else if let Some((req, queued)) = self.waiting.pop_front() {
             let outcome = self
                 .ask(&req, queued, stopping, true)
                 .unwrap_or(Outcome::Failed(Failure::Error));
@@ -640,7 +693,8 @@ impl Worker {
         true
     }
 
-    /// New settings; another provider starts afresh, and chat switched off drops the notes requests waiting.
+    /// New settings; another provider starts afresh, and chat switched off drops the notes requests waiting, and the
+    /// names too, as does `memory.ai_aliases` switched off.
     fn configure(&mut self, config: ChatConfig) {
         if self.config.provider != config.provider {
             self.start_over();
@@ -648,6 +702,9 @@ impl Worker {
         if !config.enabled {
             self.notes_due = None;
             self.overdue.clear();
+        }
+        if !config.enabled || !config.memory.ai_aliases {
+            self.names_due.clear();
         }
         self.config = config;
         self.sync_transcript();
@@ -662,9 +719,14 @@ impl Worker {
         self.out_of_credit = None;
     }
 
-    /// `lb chat reload` and `lb config reload`: `config/chat/` read again, the provider tried at the next request.
+    /// `lb chat reload` and `lb config reload`: `config/chat/` and the GunGame plugin's levels of the map read last
+    /// read again, the provider tried at the next request.
     fn reload(&mut self) {
         self.library.reload(&self.paths.chat);
+        if let Some((map, epoch, _)) = self.levels.take() {
+            let levels = self.load_levels(&map);
+            self.levels = Some((map, epoch, levels));
+        }
         self.start_over();
         let summary = self.library.summary();
         tracing::info!("chat: config/chat/ read again: {}", summary.join(" · "));
@@ -673,6 +735,46 @@ impl Worker {
         );
         for line in summary {
             logging::console_line(format!("  {line}"));
+        }
+    }
+
+    /// GunGame: the levels of the request's map, read when the map or its epoch (a restart of the same map) is not the
+    /// one read last.
+    fn read_levels(&mut self, req: &ChatRequest) {
+        let (scene, epoch) = (&req.scene, (req.id >> 32) as u32);
+        let read = self
+            .levels
+            .as_ref()
+            .is_some_and(|(map, at, _)| *map == scene.map && *at == epoch);
+        if scene.gungame && !read {
+            self.levels = Some((scene.map.clone(), epoch, self.load_levels(&scene.map)));
+        }
+    }
+
+    /// The GunGame plugin's levels of `map`, from its files.
+    fn load_levels(&self, map: &str) -> Vec<String> {
+        match levels::load(&self.paths.gungame, map) {
+            Some((levels, file)) => {
+                tracing::info!(
+                    "chat: GunGame levels of {map} from {}: {}",
+                    file.display(),
+                    levels.join(", ")
+                );
+                levels
+            }
+            None => {
+                let dir = self.paths.gungame.display();
+                tracing::info!("chat: no GunGame levels for {map}: neither {map}.ini nor gungame.ini in {dir}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The weapons of the GunGame levels of the request's map; none for another map or mode.
+    fn levels(&self, scene: &Scene) -> &[String] {
+        match &self.levels {
+            Some((map, _, levels)) if scene.gungame && *map == scene.map => levels,
+            _ => &[],
         }
     }
 
@@ -695,8 +797,7 @@ impl Worker {
         if stopping {
             return Some(Outcome::Failed(Failure::Backoff));
         }
-        let aliases = self.aliases(req);
-        let offer = self.offer(req, &aliases);
+        let offer = self.offer(req);
         let mut rng = Pcg32::new(self.seed ^ req.id, PHRASE_STREAM);
         let blocked = self.blocked();
         if let Some(offer) = &offer
@@ -720,19 +821,27 @@ impl Worker {
             let language = phrases::language(&self.library.phrases, req, &self.remembered(req));
             tracing::debug!("chat {}: no phrase for {} ({language})", req.bot.name, moment.key());
         }
-        Some(match (self.ask_model(req, &aliases), &offer) {
+        Some(match (self.ask_model(req), &offer) {
             (Ok(outcome), _) => outcome,
             (Err(why), Some(offer)) if queued.elapsed() < PHRASE_FRESH => self.phrase(req, offer, &mut rng, Some(why)),
             (Err(why), _) => Outcome::Failed(why),
         })
     }
 
-    /// What `phrases.yaml` offers a request's moment; nothing with `chat.phrases.enabled` off.
-    fn offer(&self, req: &ChatRequest, aliases: &Aliases) -> Option<Offer> {
+    /// What `phrases.yaml` offers a request's moment, the players called as in the phrases' language; nothing with
+    /// `chat.phrases.enabled` off.
+    fn offer(&self, req: &ChatRequest) -> Option<Offer> {
         if !self.config.phrases.enabled {
             return None;
         }
-        Offer::of(&self.library.phrases, req, aliases, &self.remembered(req))
+        let remembered = self.remembered(req);
+        let language = phrases::language(&self.library.phrases, req, &remembered);
+        Offer::of(
+            &self.library.phrases,
+            req,
+            &self.aliases_in(req, &language),
+            &remembered,
+        )
     }
 
     /// Whether the model meets a moment a phrase could: a greeting of a player the bots know, any other moment one
@@ -777,22 +886,23 @@ impl Worker {
     }
 
     /// The model's line for a request, through the filter ([`verdict`]); silence when it has none.
-    fn ask_model(&mut self, req: &ChatRequest, aliases: &Aliases) -> Result<Outcome, Failure> {
+    fn ask_model(&mut self, req: &ChatRequest) -> Result<Outcome, Failure> {
         let started = Instant::now();
         let rendered = self.render(req);
+        let aliases = self.aliases(req);
         tracing::debug!(
             "chat prompt for {}:\n{}\n{}",
             req.bot.name,
             rendered.system,
             rendered.user
         );
-        let names = prompt::words(req, &self.known(req), aliases);
+        let names = prompt::words(req, &self.known(req), &aliases);
         let title = format!("{} · {}", req.bot.name, req.trigger.summary());
-        let done = self.complete(rendered, &title, |done| match verdict(req, aliases, &names, done) {
+        let done = self.complete(rendered, &title, |done| match verdict(req, &aliases, &names, done) {
             Ok(line) => format!("line: {line}"),
             Err(why) => format!("no line: {why}"),
         })?;
-        let line = verdict(req, aliases, &names, &done);
+        let line = verdict(req, &aliases, &names, &done);
         tracing::info!(
             "chat {}: {} -> {} ({} ms, {} + {} tokens)",
             req.bot.name,
@@ -824,6 +934,7 @@ impl Worker {
             bot: self.library.bot(&req.bot.persona, &req.bot.name),
             map: &map,
             talks,
+            levels: self.levels(&req.scene),
         };
         prompt::render(req, &known, &aliases, &self.memory.maps, &ctx, unix_now())
     }
@@ -912,24 +1023,193 @@ impl Worker {
         m.lines.iter().map(|(_, line)| line.as_str()).chain(talked).collect()
     }
 
-    /// The aliases of the players a request shows or speaks of.
+    /// The aliases of the players a request shows or speaks of, as in the language the bot answers in
+    /// ([`prompt::answer_language`]).
     fn aliases(&self, req: &ChatRequest) -> Aliases {
+        self.aliases_in(req, &prompt::answer_language(req, &self.remembered(req)))
+    }
+
+    /// The aliases of the players a request shows or speaks of, the winners of the last maps too, for a line in the
+    /// language `code`: the admin's (`players.yaml`), else for a human the names the model gave the nickname
+    /// ([`Worker::model_names`]).
+    fn aliases_in(&self, req: &ChatRequest, code: &str) -> Aliases {
         let notes = &self.library.players;
         let mut aliases = Aliases::default();
+        let mut humans: Vec<&str> = Vec::new();
         for p in &req.scene.players {
-            aliases.insert(&p.name, notes.aliases(p.key.as_deref().unwrap_or_default(), &p.name));
+            let admin = notes.aliases(p.key.as_deref().unwrap_or_default(), &p.name);
+            aliases.insert(&p.name, admin);
+            if admin.is_empty() && p.key.is_some() {
+                humans.push(&p.name);
+            }
         }
+        let on_board = |name: &str| req.scene.players.iter().any(|p| p.name == name);
         let people = req
             .events
             .iter()
             .chain(&req.chat)
             .flat_map(|r| r.event.people())
             .chain(req.trigger.people())
-            .filter(|w| !req.scene.players.iter().any(|p| p.name == w.name));
-        for who in people {
-            aliases.insert(&who.name, notes.aliases("", &who.name));
+            .filter(|w| !on_board(&w.name))
+            .map(|w| (w.name.as_str(), !w.bot));
+        let winners = self
+            .memory
+            .maps
+            .iter()
+            .filter_map(|m| m.winner.as_deref())
+            .filter(|w| !on_board(w));
+        for (name, human) in people.chain(winners.map(|w| (w, true))) {
+            let admin = notes.aliases("", name);
+            aliases.insert(name, admin);
+            if admin.is_empty() && human {
+                humans.push(name);
+            }
         }
+        let players: Vec<&str> = req.scene.players.iter().map(|p| p.name.as_str()).collect();
+        self.model_names(&mut aliases, &humans, &players, &[code, &req.language]);
         aliases
+    }
+
+    /// Gives the nicknames `humans`, in this order, the names the model gave them in the first of the languages
+    /// `codes` (by the primary subtag), then English, it was asked in; but for a name another of the `players`, or an
+    /// earlier nickname, goes by.
+    fn model_names(&self, aliases: &mut Aliases, humans: &[&str], players: &[&str], codes: &[&str]) {
+        let mut chain: Vec<String> = codes.iter().map(|c| lang::primary(c).to_ascii_lowercase()).collect();
+        chain.push("en".into());
+        let same = |a: &str, b: &str| a.trim().to_lowercase() == b.trim().to_lowercase();
+        for &nick in humans {
+            let Some(names) = chain.iter().find_map(|code| self.memory.names_of(nick, code)) else {
+                continue;
+            };
+            let free: Vec<&String> = names
+                .iter()
+                .filter(|name| {
+                    !aliases.taken(name, nick)
+                        && !players.iter().any(|p| !memory::same_nickname(p, nick) && same(p, name))
+                })
+                .collect();
+            aliases.insert(nick, &free);
+        }
+    }
+
+    /// Queues the humans on a request's scoreboard whose names the model is to give ([`Worker::ask_names`]): those
+    /// without an alias in `players.yaml` whose names the memory lacks in a language asked, and not held back
+    /// ([`Worker::names_asked`]); the player the request is for first, [`lb_chat::aliases::ASKED_MAX`] at most. Only
+    /// while the provider can be asked, chat and `memory.ai_aliases` are on, and fewer than [`NAMES_PER_HOUR`] went in
+    /// the last hour.
+    fn want_names(&mut self, req: &ChatRequest) {
+        if !self.config.enabled || !self.config.memory.ai_aliases || self.blocked().is_some() {
+            return;
+        }
+        while self
+            .names_sent
+            .front()
+            .is_some_and(|t| t.elapsed() > Duration::from_secs(3600))
+        {
+            self.names_sent.pop_front();
+        }
+        if self.names_sent.len() >= NAMES_PER_HOUR {
+            return;
+        }
+        let codes = lb_chat::aliases::languages(&req.language);
+        let partner = prompt::partner(req).map(|w| w.name.as_str());
+        let mut humans: Vec<_> = req.scene.players.iter().filter(|p| p.key.is_some() && !p.me).collect();
+        humans.sort_by_key(|p| Some(p.name.as_str()) != partner);
+        for p in humans {
+            let nick = memory::nickname(&p.name);
+            let named = codes.iter().all(|code| self.memory.names_of(&p.name, code).is_some());
+            let admin = !self
+                .library
+                .players
+                .aliases(p.key.as_deref().unwrap_or_default(), &p.name)
+                .is_empty();
+            if nick.is_empty()
+                || memory::default_nickname(&p.name)
+                || named
+                || admin
+                || self.names_asked.contains(&nick)
+                || self.names_due.iter().any(|(due, _)| *due == nick)
+            {
+                continue;
+            }
+            if self.names_due.len() >= lb_chat::aliases::ASKED_MAX {
+                break;
+            }
+            self.names_due.push((nick, p.name.clone()));
+            self.names_languages.clone_from(&codes);
+        }
+    }
+
+    /// Whether a request waits for the names of the player it is for: they are to be asked, and it has waited for no
+    /// request yet (it came after the last one ended), so a phrase still waits for one at most.
+    fn holds(&self, req: &ChatRequest, queued: Instant, stopping: bool) -> bool {
+        let Some(who) = prompt::partner(req) else {
+            return false;
+        };
+        let nick = memory::nickname(&who.name);
+        !stopping
+            && self.net_done.is_none_or(|done| queued >= done)
+            && self.names_due.iter().any(|(due, _)| *due == nick)
+    }
+
+    /// Asks the model for the names of the nicknames queued ([`Worker::want_names`]) and keeps them; the queue is
+    /// emptied whatever comes of it. Nothing goes while the worker stops, the provider cannot be asked, or chat or
+    /// `memory.ai_aliases` is off. A nickname the model answered, with names for it or without, is asked again, with
+    /// English, only once `chat.language` is a language the memory lacks for it; one its answer left out or refused is
+    /// not asked again until a restart; one whose request failed on the way may be.
+    fn ask_names(&mut self, stopping: bool) {
+        let due = std::mem::take(&mut self.names_due);
+        let codes = std::mem::take(&mut self.names_languages);
+        if due.is_empty()
+            || stopping
+            || !self.config.enabled
+            || !self.config.memory.ai_aliases
+            || self.blocked().is_some()
+        {
+            return;
+        }
+        self.names_sent.push_back(Instant::now());
+        let nicks: Vec<String> = due.iter().map(|(_, nick)| nick.clone()).collect();
+        let rendered = lb_chat::aliases::request(&nicks, &codes);
+        let title = format!("names for {}", nicks.join(", "));
+        let done = match self.complete(rendered, &title, |done| {
+            let found = lb_chat::aliases::parse_answer(&done.text, nicks.len(), &codes);
+            format!(
+                "names for {} of {} nicknames",
+                found.iter().flatten().count(),
+                nicks.len()
+            )
+        }) {
+            Ok(done) => done,
+            Err(Failure::Error) => {
+                self.names_asked.extend(due.into_iter().map(|(nick, _)| nick));
+                return;
+            }
+            Err(_) => return,
+        };
+        let found = lb_chat::aliases::parse_answer(&done.text, nicks.len(), &codes);
+        let now = unix_now();
+        let mut told: Vec<String> = Vec::new();
+        for ((key, nick), names) in due.into_iter().zip(found) {
+            let Some(names) = names else {
+                self.names_asked.insert(key);
+                continue;
+            };
+            told.push(format!("{nick} → {}", shown_names(&names, &codes)));
+            self.memory.learn_names(&nick, names, now);
+        }
+        tracing::info!(
+            "chat: names for {} of {} nicknames ({} + {} tokens): {}",
+            told.len(),
+            nicks.len(),
+            done.input_tokens,
+            done.output_tokens,
+            if told.is_empty() { "-".into() } else { told.join("; ") }
+        );
+        if self.config.memory.enabled && !told.is_empty() {
+            self.memory_dirty = true;
+            self.save();
+        }
     }
 
     /// A map ended: the memory takes it in, without the players forgotten since the last map it took in
@@ -993,11 +1273,18 @@ impl Worker {
         self.save();
     }
 
+    /// The aliases of a map's players: the admin's, else the names the model gave them in the server's language.
     fn summary_aliases(&self, s: &MapSummary) -> Aliases {
         let mut aliases = Aliases::default();
+        let mut humans: Vec<&str> = Vec::new();
         for p in &s.players {
-            aliases.insert(&p.name, self.library.players.aliases(&p.key, &p.name));
+            let admin = self.library.players.aliases(&p.key, &p.name);
+            aliases.insert(&p.name, admin);
+            if admin.is_empty() {
+                humans.push(&p.name);
+            }
         }
+        self.model_names(&mut aliases, &humans, &humans, &[&s.language]);
         aliases
     }
 
@@ -1014,8 +1301,15 @@ impl Worker {
     fn memory_command(&mut self, query: &str, forget: bool) {
         let out = if forget {
             let gone = self.memory.forget(query);
-            if gone.is_empty() {
+            let named: Vec<String> = gone.named().map(String::from).collect();
+            self.names_due.retain(|(nick, _)| !named.contains(nick));
+            self.names_asked.extend(named.iter().cloned());
+            if gone.is_empty() && named.is_empty() {
                 format!("chat: nobody called `{query}` is remembered")
+            } else if gone.is_empty() {
+                self.memory_dirty = true;
+                self.save();
+                format!("chat: forgot the names of `{query}`")
             } else {
                 self.forget_in_notes(&gone);
                 let keys: Vec<&str> = gone.keys().collect();
@@ -1038,7 +1332,7 @@ impl Worker {
                     let name = m.names.first().map_or("", String::as_str);
                     format!(
                         "chat: {key} ({}): {} maps, {}/{} kills/deaths, {} wins, weapons {:?}; vs bots: {}; notes: {}; \
-                         lines: {:?}; talks (lines): {}; admin note: {}; alias: {}",
+                         lines: {:?}; talks (lines): {}; admin note: {}; alias: {}; names (model): {}",
                         m.names.join(", "),
                         m.maps,
                         m.kills,
@@ -1057,13 +1351,28 @@ impl Worker {
                         match self.library.players.aliases(key, name) {
                             [] => "-".to_string(),
                             all => all.join(", "),
-                        }
+                        },
+                        self.names_shown(name)
                     )
                 }
-                None => format!("chat: nobody called `{query}` is remembered"),
+                None => match self.memory.aliases.get(&memory::nickname(query)) {
+                    Some(_) => format!(
+                        "chat: `{query}` is not remembered yet; names (model): {}",
+                        self.names_shown(query)
+                    ),
+                    None => format!("chat: nobody called `{query}` is remembered"),
+                },
             }
         };
         logging::console_line(format!("[lambdabots] {out}"));
+    }
+
+    /// The names the model gave a nickname, for `lb chat memory`; `-` when none.
+    fn names_shown(&self, nick: &str) -> String {
+        match self.memory.aliases.get(&memory::nickname(nick)) {
+            Some(named) => shown_names(&named.by_lang, &lb_chat::aliases::languages(&self.config.language)),
+            None => "-".into(),
+        }
     }
 
     fn save_usage(&mut self) {
@@ -1086,6 +1395,20 @@ impl Worker {
             self.memory_dirty = false;
         }
     }
+}
+
+/// The names the model gave a nickname, for the log and `lb chat memory`: `ru сова, совушка / en Sova`, `-` for a
+/// language with none.
+fn shown_names(names: &BTreeMap<String, Vec<String>>, codes: &[String]) -> String {
+    let order = codes.iter().chain(names.keys().filter(|code| !codes.contains(code)));
+    order
+        .filter_map(|code| names.get(code).map(|all| (code, all)))
+        .map(|(code, all)| match all.as_slice() {
+            [] => format!("{code} -"),
+            all => format!("{code} {}", all.join(", ")),
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 /// Whether the player a request is for ([`prompt::partner`]) spoke of cheats: in the line it answers, or in their
@@ -1156,6 +1479,7 @@ mod tests {
         c.provider.base_url = format!("{url}/v1");
         c.provider.api_key_env = String::new();
         c.provider.timeout = 2.0;
+        c.memory.ai_aliases = false;
         c
     }
 
@@ -1203,6 +1527,7 @@ mod tests {
             scene: Scene {
                 map: "crossfire".into(),
                 gungame: false,
+                warmup: false,
                 teamplay: false,
                 elapsed: 30.0,
                 players: vec![PlayerCard {
@@ -1290,7 +1615,7 @@ mod tests {
 
     /// A worker run by hand, its chances the same each time.
     fn worker(root: &Path, config: ChatConfig) -> Worker {
-        let mut w = Worker::new(config, Paths::new(root), Arc::default());
+        let mut w = Worker::new(config, Paths::new(root, root), Arc::default());
         w.seed = 7;
         w
     }
@@ -1346,7 +1671,7 @@ mod tests {
             "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:1:42\n    name: Gordon\n    note: the boss\n",
         )
         .unwrap();
-        let mut w = WorkerBackend::spawn(config(&server.url()), &root, |w| {
+        let mut w = WorkerBackend::spawn(config(&server.url()), Paths::new(&root, &root), |w| {
             w.notes_idle = Duration::from_millis(50)
         })
         .unwrap();
@@ -1418,7 +1743,7 @@ mod tests {
             "schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:1:42\n    name: Gordon Freeman\n    alias: [Гордон, Фримен]\n",
         )
         .unwrap();
-        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         let got = replies(&mut w, 1);
         assert_eq!(got[0].outcome, Outcome::Line("Гордон, hi! where is Гордон?".into()));
@@ -1475,7 +1800,7 @@ mod tests {
         let mut c = config(&server.url());
         c.provider.api_key = lb_config::main_config::Secret("sk-hunter2".into());
         c.transcript = true;
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         w.send(Job::Ask(Box::new(request(2))));
         assert_eq!(replies(&mut w, 2).len(), 2);
@@ -1509,7 +1834,7 @@ mod tests {
             Canned::json(401, r#"{"error":{"message":"bad key"}}"#),
         ]);
         let root = dir("failures");
-        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         w.send(Job::Ask(Box::new(request(2))));
         let got = replies(&mut w, 2);
@@ -1538,7 +1863,7 @@ mod tests {
         let root = dir("budget");
         let mut c = config(&server.url());
         c.limits.tokens_per_day = 100;
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         for id in 1..=3 {
             w.send(Job::Ask(Box::new(request(id))));
         }
@@ -1569,8 +1894,9 @@ mod tests {
             enabled: true,
             ..ChatConfig::default()
         };
+        c.memory.ai_aliases = false;
         c.provider.api_key_env = "LB_TEST_SURELY_UNSET_KEY".into();
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         assert_eq!(replies(&mut w, 1)[0].outcome, Outcome::Failed(Failure::Disabled));
         assert!(w.status().contains("no API key"), "{}", w.status());
@@ -1582,7 +1908,7 @@ mod tests {
     fn shutdown_waits_for_a_slow_request_at_most_as_asked() {
         let server = MockServer::start(vec![answer("late").delay(Duration::from_millis(1500))]);
         let root = dir("slow");
-        let mut w = WorkerBackend::start(config(&server.url()), &root).unwrap();
+        let mut w = WorkerBackend::start(config(&server.url()), &root, &root).unwrap();
         w.send(Job::Ask(Box::new(request(1))));
         std::thread::sleep(Duration::from_millis(200));
         let started = Instant::now();
@@ -1593,7 +1919,7 @@ mod tests {
             started.elapsed()
         );
         let other = MockServer::start(vec![answer("late").delay(Duration::from_millis(1500))]);
-        let mut again = WorkerBackend::start(config(&other.url()), &root).unwrap();
+        let mut again = WorkerBackend::start(config(&other.url()), &root, &root).unwrap();
         again.send(Job::Ask(Box::new(request(2))));
         std::thread::sleep(Duration::from_millis(200));
         let started = Instant::now();
@@ -1679,6 +2005,7 @@ mod tests {
             enabled: true,
             ..ChatConfig::default()
         };
+        c.memory.ai_aliases = false;
         c.provider.base_url = server.url();
         c.provider.api_key_env = String::new();
         c.provider.timeout = 2.0;
@@ -1724,6 +2051,7 @@ mod tests {
             enabled: true,
             ..ChatConfig::default()
         };
+        c.memory.ai_aliases = false;
         c.provider.api_key_env = "LB_TEST_SURELY_UNSET_KEY".into();
         c.phrases.ai_share = 1.0;
         let mut w = worker(&root, c);
@@ -1823,7 +2151,7 @@ mod tests {
         let root = dir("between");
         let mut c = config(&server.url());
         c.phrases.ai_share = 0.0;
-        let mut w = WorkerBackend::start(c, &root).unwrap();
+        let mut w = WorkerBackend::start(c, &root, &root).unwrap();
         let on_the_wire = |n: usize| {
             let until = Instant::now() + Duration::from_secs(10);
             while server.requests().len() < n && Instant::now() < until {
@@ -2077,6 +2405,88 @@ mod tests {
         let r = w.render(&other);
         assert!(r.system.contains("the other one"), "else by nickname: {}", r.system);
         assert!(!r.user.contains("where are the rails?"), "talks go by the persona");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gungame_levels_come_from_the_plugin_s_config_once_a_map() {
+        let root = dir("levels");
+        let gungame = root.join("addons/amxmodx/configs/gungame");
+        std::fs::create_dir_all(&gungame).unwrap();
+        let levels = |weapons: &[&str]| -> String {
+            weapons
+                .iter()
+                .map(|w| format!("<level>\n\t<equip>\n\t\tweapon_{w}\n\t</equip>\n</level>\n"))
+                .collect()
+        };
+        std::fs::write(gungame.join("gg_frost.ini"), levels(&["9mmAR", "shotgun", "crowbar"])).unwrap();
+        let main = format!("<sets>\n{}</sets>\n", levels(&["gauss", "crowbar"]));
+        std::fs::write(gungame.join("gungame.ini"), main).unwrap();
+        let mut w = worker(&root, config("http://127.0.0.1:9"));
+        let mut frost = request(1);
+        frost.scene.map = "gg_frost".into();
+        frost.scene.gungame = true;
+        frost.scene.players[0].level = Some(1);
+        let mut other = frost.clone();
+        other.scene.map = "gg_other".into();
+        let take = |w: &mut Worker, job: Job| w.take(job, Instant::now(), false, &mut |_| {});
+
+        take(&mut w, Job::Preview(Box::new(frost.clone())));
+        let user = w.render(&frost).user;
+        assert!(user.starts_with("Map gg_frost, GunGame, 3 levels.\n"), "{user}");
+        assert!(user.contains("- Gordon — level 2 (shotgun);"), "{user}");
+        let four = levels(&["9mmAR", "shotgun", "egon", "crowbar"]);
+        std::fs::write(gungame.join("gg_frost.ini"), four).unwrap();
+        take(&mut w, Job::Preview(Box::new(frost.clone())));
+        assert!(
+            w.render(&frost).user.contains("GunGame, 3 levels."),
+            "read once a map, as the plugin reads it"
+        );
+        let restarted = ChatRequest {
+            id: lb_chat::request::request_id(2, 1),
+            ..frost.clone()
+        };
+        take(&mut w, ask(restarted.clone()));
+        assert!(
+            w.render(&restarted).user.contains("GunGame, 4 levels."),
+            "the same map started again"
+        );
+        std::fs::write(gungame.join("gg_frost.ini"), levels(&["9mmAR", "shotgun", "crowbar"])).unwrap();
+        let preview = ChatRequest {
+            id: lb_chat::request::request_id(3, 0),
+            ..frost.clone()
+        };
+        take(&mut w, Job::Preview(Box::new(preview.clone())));
+        assert!(
+            w.render(&preview).user.contains("GunGame, 3 levels."),
+            "`lb chat prompt` on the map started again"
+        );
+
+        take(&mut w, Job::Preview(Box::new(other.clone())));
+        let user = w.render(&other).user;
+        assert!(user.contains("GunGame, 2 levels."), "the plugin's main file: {user}");
+        assert!(user.contains("- Gordon — level 2 (crowbar);"), "{user}");
+        let user = w.render(&frost).user;
+        assert!(
+            user.starts_with("Map gg_frost, GunGame.\n") && user.contains("- Gordon — level 2;"),
+            "no other map's levels: {user}"
+        );
+
+        let mut dm = frost.clone();
+        dm.scene.gungame = false;
+        take(&mut w, Job::Preview(Box::new(dm)));
+        assert_eq!(w.levels.as_ref().map(|(map, ..)| map.as_str()), Some("gg_other"));
+        take(&mut w, Job::Preview(Box::new(frost.clone())));
+        std::fs::write(
+            gungame.join("gg_frost.ini"),
+            levels(&["9mmAR", "gauss", "crowbar", "crowbar"]),
+        )
+        .unwrap();
+        take(&mut w, Job::Reload);
+        assert!(
+            w.render(&frost).user.contains("GunGame, 4 levels."),
+            "read again at a reload, for the requests waiting too"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2390,6 +2800,356 @@ mod tests {
             );
         }
         assert_eq!(server.requests().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const OWL: &str = "[N] C o B A";
+    const OWL_NAMES: &str = r#"{"1": {"ru": ["Сова", "совушка"], "en": ["Sova"]}}"#;
+
+    /// A root whose `phrases.yaml` greets with the name alone.
+    fn greeting_root(name: &str) -> std::path::PathBuf {
+        let root = dir(name);
+        std::fs::create_dir_all(root.join("config/chat")).unwrap();
+        std::fs::write(
+            root.join("config/chat/phrases.yaml"),
+            "schema: lambdabots/chat-phrases@1\nphrases:\n  ru:\n    greet: [\"йо, {name}, как оно?\"]\n  en:\n    \
+             greet: [\"yo {name}\"]\n",
+        )
+        .unwrap();
+        root
+    }
+
+    /// Chat on a Russian server, with names from the model and a phrase for every moment.
+    fn naming(url: &str) -> ChatConfig {
+        let mut c = config(url);
+        c.language = "ru".into();
+        c.memory.ai_aliases = true;
+        c.phrases.ai_share = 0.0;
+        c
+    }
+
+    /// [`OWL`] joins, on the scoreboard in Gordon's stead.
+    fn owl_joins(id: u64) -> ChatRequest {
+        let mut req = event(id, Trigger::Joined { who: who(1, OWL) });
+        req.scene.players[0].name = OWL.into();
+        req.language = "ru".into();
+        req
+    }
+
+    /// [`naming`] and [`owl_joins`] on a German server.
+    fn naming_de(url: &str) -> ChatConfig {
+        ChatConfig {
+            language: "de".into(),
+            ..naming(url)
+        }
+    }
+
+    fn owl_joins_de(id: u64) -> ChatRequest {
+        ChatRequest {
+            language: "de".into(),
+            ..owl_joins(id)
+        }
+    }
+
+    /// A phrase's or a line's text, in lower case.
+    fn typed(outcome: &Outcome) -> String {
+        match outcome {
+            Outcome::Phrase(text) | Outcome::Line(text) => text.to_lowercase(),
+            other => panic!("no text: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_newcomer_is_greeted_by_the_name_the_model_gave() {
+        let server = MockServer::start(vec![answer(OWL_NAMES)]);
+        let root = greeting_root("names");
+        let mut w = worker(&root, naming(&server.url()));
+        let got = wake(&mut w, vec![ask(owl_joins(1))]);
+        assert!(typed(of(&got, 1)).starts_with("йо, сова, как оно"), "{got:?}");
+        let asked = server.requests();
+        assert_eq!(asked.len(), 1, "the names alone");
+        assert!(asked[0].body.contains("Ники:\\n1. [N] C o B A\\n"), "{}", asked[0].body);
+        assert_eq!(
+            w.memory.names_of(OWL, "ru"),
+            Some(&["Сова".to_string(), "совушка".into()][..])
+        );
+        assert_eq!(w.memory.names_of(OWL, "en"), Some(&["Sova".to_string()][..]));
+        let kept = std::fs::read_to_string(root.join("data/chat/memory.json")).unwrap();
+        assert!(kept.contains("совушка"), "{kept}");
+        assert!(status(&w).contains("1 nicknames named"), "{}", status(&w));
+        let got = wake(&mut w, vec![ask(owl_joins(2))]);
+        assert!(typed(of(&got, 2)).contains("сова"), "{got:?}");
+        let mut w = worker(&root, naming(&server.url()));
+        let got = wake(&mut w, vec![ask(owl_joins(3))]);
+        assert!(typed(of(&got, 3)).contains("сова"), "after a restart: {got:?}");
+        assert_eq!(server.requests().len(), 1, "asked once");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_model_and_an_english_writer_get_the_names_too() {
+        let server = MockServer::start(vec![
+            answer(OWL_NAMES),
+            answer("рад видеть, [N] C o B A"),
+            answer("hi [N] C o B A"),
+        ]);
+        let root = greeting_root("names-model");
+        let mut w = worker(&root, naming(&server.url()));
+        let mut ru = owl_joins(1);
+        ru.trigger = Trigger::Addressed {
+            from: who(1, OWL),
+            text: "клейнер, привет, как дела?".into(),
+        };
+        let got = wake(&mut w, vec![ask(ru.clone())]);
+        assert_eq!(*of(&got, 1), Outcome::Line("рад видеть, Сова".into()));
+        let asked = server.requests();
+        assert!(
+            asked[1].body.contains("Сова или совушка (ник [N] C o B A)"),
+            "{}",
+            asked[1].body
+        );
+        let en = ChatRequest {
+            id: 2,
+            trigger: Trigger::Addressed {
+                from: who(1, OWL),
+                text: "kleiner, hello there, how are you doing today?".into(),
+            },
+            ..ru
+        };
+        let got = wake(&mut w, vec![ask(en)]);
+        assert_eq!(*of(&got, 2), Outcome::Line("hi Sova".into()));
+        let asked = server.requests();
+        assert!(asked[2].body.contains("Sova (ник [N] C o B A)"), "{}", asked[2].body);
+        let mut hello = owl_joins(3);
+        hello.trigger = Trigger::Greeted {
+            from: who(1, OWL),
+            text: "hello everyone, good evening".into(),
+        };
+        let got = wake(&mut w, vec![ask(hello)]);
+        assert!(typed(of(&got, 3)).starts_with("yo sova"), "the en phrases: {got:?}");
+        assert_eq!(server.requests().len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_alias_of_the_admin_s_comes_first() {
+        let root = greeting_root("names-admin");
+        let players = |entry: &str| {
+            std::fs::write(
+                root.join("config/chat/players.yaml"),
+                format!("schema: lambdabots/chat-players@1\nplayers:\n  - id: STEAM_0:1:42\n    {entry}\n"),
+            )
+            .unwrap();
+        };
+        players("alias: Совёнок");
+        let mut w = worker(&root, naming("http://127.0.0.1:9"));
+        w.memory
+            .learn_names(OWL, BTreeMap::from([("ru".to_string(), vec!["Сова".to_string()])]), 1);
+        let req = owl_joins(1);
+        w.want_names(&req);
+        assert!(w.names_due.is_empty(), "the admin's alias: no names asked");
+        assert_eq!(w.aliases(&req).all(OWL), ["Совёнок"], "nor the model's said");
+        players("note: plays the crossbow");
+        w.reload();
+        assert_eq!(w.aliases(&req).all(OWL), ["Сова"], "a note alone");
+        w.memory.aliases.clear();
+        w.want_names(&req);
+        assert_eq!(w.names_due, [("[n] c o b a".to_string(), OWL.to_string())]);
+        w.names_due.clear();
+        players("alias: \"[N] C o B A\"");
+        w.reload();
+        w.want_names(&req);
+        assert!(
+            w.names_due.is_empty(),
+            "the nickname as the alias keeps the bots from naming"
+        );
+        assert_eq!(w.aliases(&req).of(OWL), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_humans_new_to_the_names_are_asked_for_and_not_too_often() {
+        let root = dir("names-who");
+        let mut w = worker(&root, naming("http://127.0.0.1:9"));
+        let mut req = owl_joins(1);
+        req.scene.players.extend([
+            PlayerCard {
+                name: "Barney".into(),
+                key: None,
+                ..card("x", "x")
+            },
+            card("(1)Player", "STEAM_0:0:3"),
+            card("Kleiner", "STEAM_0:0:4"),
+            card("Moss", "STEAM_0:0:5"),
+        ]);
+        req.scene.players[3].me = true;
+        w.memory
+            .learn_names("Moss", BTreeMap::from([("ru".to_string(), Vec::new())]), 1);
+        w.want_names(&req);
+        assert_eq!(
+            w.names_due,
+            [
+                ("[n] c o b a".to_string(), OWL.to_string()),
+                ("moss".to_string(), "Moss".to_string())
+            ],
+            "no bot, no `Player`, not the bot itself; Moss was not asked in English"
+        );
+        assert_eq!(w.names_languages, ["ru", "en"]);
+        w.names_due.clear();
+        let now = Instant::now();
+        w.names_sent.extend(std::iter::repeat_n(now, NAMES_PER_HOUR));
+        w.want_names(&req);
+        assert!(w.names_due.is_empty(), "the hour's requests went");
+        let hour_ago = now.checked_sub(Duration::from_secs(3601)).unwrap();
+        w.names_sent = std::iter::repeat_n(hour_ago, NAMES_PER_HOUR).collect();
+        w.want_names(&req);
+        assert_eq!(w.names_due.len(), 2);
+        w.names_due.clear();
+        w.config.memory.ai_aliases = false;
+        w.want_names(&req);
+        assert!(w.names_due.is_empty(), "switched off");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_phrase_waits_for_the_names_but_never_for_two_requests() {
+        let server = MockServer::start(vec![
+            answer(r#"{"1": {"ru": ["Гордон"], "en": ["Gordon"]}, "2": {"ru": ["Сова"], "en": ["Sova"]}}"#),
+            answer("привет"),
+            answer(OWL_NAMES),
+        ]);
+        let root = greeting_root("names-wait");
+        let mut w = worker(&root, naming(&server.url()));
+        let players = vec![card("Gordon", "STEAM_0:1:42"), card(OWL, "STEAM_0:0:7")];
+        let mut gordon = request(1);
+        gordon.language = "ru".into();
+        gordon.scene.players.clone_from(&players);
+        let mut owl = event(2, Trigger::Joined { who: who(3, OWL) });
+        owl.language = "ru".into();
+        owl.scene.players = players;
+        let got = wake(&mut w, vec![ask(gordon), ask(owl)]);
+        assert_eq!(
+            got.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [2, 1],
+            "the greeting once the names came, then the model's line"
+        );
+        assert!(typed(of(&got, 2)).contains("сова"), "{got:?}");
+        let asked = server.requests();
+        assert!(
+            asked[0].body.contains("1. Gordon\\n2. [N] C o B A\\n"),
+            "one request for both, the player the first request is for first: {}",
+            asked[0].body
+        );
+        assert!(asked[1].body.contains("Гордон"), "{}", asked[1].body);
+        let root = greeting_root("names-waited");
+        let mut w = worker(&root, naming(&server.url()));
+        let now = Instant::now();
+        w.net_done = Some(now);
+        let before = now.checked_sub(Duration::from_millis(100)).unwrap();
+        let got = wake_at(&mut w, vec![(ask(owl_joins(3)), before)], false);
+        assert!(
+            typed(of(&got, 3)).contains("c o b a"),
+            "it waited for a request already: at once, by the nickname without tags: {got:?}"
+        );
+        assert_eq!(server.requests().len(), 3, "the names are asked all the same");
+        assert!(w.memory.names_of(OWL, "ru").is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn without_the_model_a_newcomer_goes_by_the_nickname_without_tags() {
+        let server = MockServer::start(vec![answer(OWL_NAMES)]);
+        let root = greeting_root("names-budget");
+        let mut c = naming(&server.url());
+        c.limits.tokens_per_day = 100;
+        let mut w = worker(&root, c.clone());
+        w.usage.add(unix_now() / 86_400, 100);
+        let got = wake(&mut w, vec![ask(owl_joins(1))]);
+        assert!(typed(of(&got, 1)).contains("c o b a"), "{got:?}");
+        assert_eq!(server.requests().len(), 0);
+        let mut w = worker(&root, naming(&server.url()));
+        let off = ChatConfig { enabled: false, ..c };
+        let got = wake(&mut w, vec![ask(owl_joins(2)), Job::Configure(Box::new(off))]);
+        assert!(typed(of(&got, 2)).contains("c o b a"), "chat off lets it go: {got:?}");
+        assert!(w.held.is_empty() && w.names_due.is_empty());
+        assert_eq!(server.requests().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nickname_is_asked_once_whatever_the_model_answers() {
+        let server = MockServer::start(vec![
+            Canned::json(500, r#"{"error":{"message":"overloaded"}}"#),
+            answer("не знаю"),
+        ]);
+        let root = greeting_root("names-again");
+        let mut w = worker(&root, naming(&server.url()));
+        let got = wake(&mut w, vec![ask(owl_joins(1))]);
+        assert!(typed(of(&got, 1)).contains("c o b a"), "{got:?}");
+        assert!(w.names_asked.is_empty(), "failed on the way: asked again");
+        w.backoff_until = None;
+        wake(&mut w, vec![ask(owl_joins(2))]);
+        assert_eq!(server.requests().len(), 2);
+        assert!(w.names_asked.contains("[n] c o b a"));
+        assert_eq!(w.memory.names_of(OWL, "ru"), None);
+        wake(&mut w, vec![ask(owl_joins(3))]);
+        assert_eq!(server.requests().len(), 2, "not again");
+        let german = Job::Configure(Box::new(naming_de(&server.url())));
+        wake(&mut w, vec![german, ask(owl_joins_de(4))]);
+        assert_eq!(server.requests().len(), 2, "nor in another language");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nickname_named_is_asked_again_once_in_a_new_language() {
+        let server = MockServer::start(vec![
+            answer(OWL_NAMES),
+            answer(r#"{"1": {"de": ["Eule"], "en": ["Owl"]}}"#),
+        ]);
+        let root = greeting_root("names-language");
+        let mut w = worker(&root, naming(&server.url()));
+        let german = Job::Configure(Box::new(naming_de(&server.url())));
+        wake(&mut w, vec![ask(owl_joins(1)), german]);
+        wake(&mut w, vec![ask(owl_joins_de(2))]);
+        let asked = server.requests();
+        assert_eq!(asked.len(), 2, "the names queued in Russian went, then the German ones");
+        assert!(asked[1].body.contains("names in German"), "{}", asked[1].body);
+        assert_eq!(w.aliases(&owl_joins_de(3)).all(OWL), ["Eule"]);
+        assert!(w.memory.names_of(OWL, "ru").is_some(), "the Russian names stay");
+        wake(&mut w, vec![ask(owl_joins_de(3))]);
+        assert_eq!(server.requests().len(), 2, "once a language");
+        let english = ChatConfig {
+            language: "en".into(),
+            ..naming(&server.url())
+        };
+        let to_owl = ChatRequest {
+            language: "en".into(),
+            ..owl_joins(4)
+        };
+        wake(&mut w, vec![Job::Configure(Box::new(english)), ask(to_owl)]);
+        let russian = Job::Configure(Box::new(naming(&server.url())));
+        wake(&mut w, vec![russian, ask(owl_joins(5))]);
+        assert_eq!(server.requests().len(), 2, "nor in English or a language asked before");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forgetting_a_nickname_forgets_its_names() {
+        let server = MockServer::start(vec![answer(OWL_NAMES)]);
+        let root = greeting_root("names-forget");
+        let mut w = worker(&root, naming(&server.url()));
+        wake(&mut w, vec![ask(owl_joins(1))]);
+        assert_eq!(w.memory.aliases.len(), 1);
+        wake(&mut w, vec![forget("(1)[n] c o b a")]);
+        assert!(w.memory.aliases.is_empty());
+        let kept = std::fs::read_to_string(root.join("data/chat/memory.json")).unwrap();
+        assert!(!kept.contains("совушка"), "{kept}");
+        let got = wake(&mut w, vec![ask(owl_joins(2))]);
+        assert!(typed(of(&got, 2)).contains("c o b a"), "{got:?}");
+        assert_eq!(server.requests().len(), 1, "not asked again until a restart");
+        let german = Job::Configure(Box::new(naming_de(&server.url())));
+        wake(&mut w, vec![german, ask(owl_joins_de(3))]);
+        assert_eq!(server.requests().len(), 1, "nor in another language");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -64,7 +64,7 @@ pub enum Event {
         who: Who,
         old: String,
     },
-    /// GunGame: a player went up to `level`.
+    /// GunGame: a player went up to `level` (from 0, as the plugin counts).
     Level {
         who: Who,
         level: i32,

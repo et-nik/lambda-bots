@@ -189,7 +189,7 @@ pub struct BotCard {
     pub alive: bool,
     pub frags: i32,
     pub deaths: i32,
-    /// GunGame: level and the weapon it gave.
+    /// GunGame: the level, from 0 as the plugin counts (its informer shows one up), and the weapon the bot carries.
     pub level: Option<(i32, String)>,
 }
 
@@ -201,6 +201,7 @@ pub struct PlayerCard {
     pub key: Option<String>,
     pub frags: i32,
     pub deaths: i32,
+    /// GunGame: the level, from 0 as the plugin counts.
     pub level: Option<i32>,
     /// The bot itself.
     pub me: bool,
@@ -213,6 +214,8 @@ pub struct PlayerCard {
 pub struct Scene {
     pub map: String,
     pub gungame: bool,
+    /// GunGame's warmup: everyone on the first level with the crowbar alone, kills not counted.
+    pub warmup: bool,
     pub teamplay: bool,
     /// Seconds since the map started.
     pub elapsed: f64,

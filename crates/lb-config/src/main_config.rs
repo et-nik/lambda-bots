@@ -654,6 +654,9 @@ pub struct ChatMemory {
     pub enabled: bool,
     /// After each map, one request updates short notes about the players the bots met.
     pub ai_notes: bool,
+    /// Players without an alias in `config/chat/players.yaml` get simple names from the model: one request for the
+    /// nicknames new to the memory, kept in it.
+    pub ai_aliases: bool,
     /// Players not seen for this many days are forgotten.
     pub forget_after_days: u32,
 }
@@ -663,6 +666,7 @@ impl Default for ChatMemory {
         ChatMemory {
             enabled: true,
             ai_notes: true,
+            ai_aliases: true,
             forget_after_days: 120,
         }
     }

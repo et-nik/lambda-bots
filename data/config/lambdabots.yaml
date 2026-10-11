@@ -149,6 +149,7 @@ chat:
   memory:
     enabled: true           # remember players between maps and restarts (data/chat/memory.json)
     ai_notes: true          # one request after each map updates notes about the players met
+    ai_aliases: true        # players without an alias in chat/players.yaml get simple names from the model
     forget_after_days: 120
   # Plugin chat commands, one word each: a player's line starting with one is not chat, and no bot says one.
   blocked: [rtv, rockthevote, nominate, nominations, timeleft, nextmap, thetime, currentmap, listmaps, recentmaps,

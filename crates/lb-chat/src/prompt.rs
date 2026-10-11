@@ -54,8 +54,8 @@ pub struct Known<'a> {
     pub memory: Option<&'a PlayerMemory>,
 }
 
-/// What the admin says of the server, the bot and the map, and what the memory keeps of the bot's talk with the player
-/// it answers ([`partner`]); empty where there is nothing.
+/// What the admin says of the server, the bot and the map, what the memory keeps of the bot's talk with the player it
+/// answers ([`partner`]), and the GunGame plugin's levels; empty where there is nothing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Context<'a> {
     /// `chat.server`: what the server is, in a few words.
@@ -69,6 +69,9 @@ pub struct Context<'a> {
     /// The bot's talks with the player the memory keeps ([`PlayerMemory::talks`] under the bot's persona): unix
     /// seconds, the bot's own line, the text; oldest first.
     pub talks: &'a [(u64, bool, String)],
+    /// GunGame: the weapon of each level of the map, first to last (`9mmAR`, `crowbar`), as the plugin's config gives
+    /// them.
+    pub levels: &'a [String],
 }
 
 const RULES_RU: &str = "\
@@ -158,7 +161,7 @@ fn style_text(lang: Lang, style: &str) -> &'static str {
     }
 }
 
-fn language_name(code: &str) -> String {
+pub(crate) fn language_name(code: &str) -> String {
     match lang::primary(code).to_ascii_lowercase().as_str() {
         "ru" => "русский".into(),
         "en" => "English".into(),
@@ -204,11 +207,13 @@ fn ordinal(n: u32) -> String {
     format!("{n}{suffix}")
 }
 
-/// Players by the names the bots call them, the bot itself as "you".
+/// Players by the names the bots call them, the bot itself as "you"; GunGame levels as the plugin counts them.
 struct Names<'a> {
     lang: Lang,
     me: i32,
     aliases: &'a Aliases,
+    /// GunGame: the weapon of each level, when the plugin's list fits the match ([`fitting`]).
+    levels: &'a [String],
 }
 
 impl Names<'_> {
@@ -298,8 +303,12 @@ impl Names<'_> {
             (Lang::En, Event::Leave { who }) => format!("{} left", self.call(who)),
             (Lang::Ru, Event::Rename { who, old }) => format!("{old} сменил ник на {}", self.call(who)),
             (Lang::En, Event::Rename { who, old }) => format!("{old} is now {}", self.call(who)),
-            (Lang::Ru, Event::Level { who, level }) => format!("{} — уровень {level}", self.subj(who)),
-            (Lang::En, Event::Level { who, level }) => format!("{} reached level {level}", self.subj(who)),
+            (Lang::Ru, Event::Level { who, level }) => {
+                format!("{} — уровень {}", self.subj(who), self.level_number(*level))
+            }
+            (Lang::En, Event::Level { who, level }) => {
+                format!("{} reached level {}", self.subj(who), self.level_number(*level))
+            }
             (Lang::Ru, Event::Leader { who }) => format!("{} теперь лидер", self.subj(who)),
             (Lang::En, Event::Leader { who }) => format!("{} took the lead", self.subj(who)),
             (Lang::Ru, Event::MatchEnd { winner: Some(w) }) => format!("матч окончен, победил {}", self.subj(w)),
@@ -414,9 +423,37 @@ impl Names<'_> {
     /// A kill that took its killer up a GunGame level.
     fn leveled(&self, kill: &str, level: i32) -> String {
         match self.lang {
-            Lang::Ru => format!("{kill} и вышел на уровень {level}"),
-            Lang::En => format!("{kill} and reached level {level}"),
+            Lang::Ru => format!("{kill} и вышел на уровень {}", self.level_number(level)),
+            Lang::En => format!("{kill} and reached level {}", self.level_number(level)),
         }
+    }
+
+    /// The plugin's level (from 0) on its list: the winner, whom the plugin puts one past the last level when the
+    /// match ends, stays on the last.
+    fn level_on_list(&self, level: i32) -> i32 {
+        match i32::try_from(self.levels.len()) {
+            Ok(count) if count > 0 => level.min(count - 1),
+            _ => level,
+        }
+    }
+
+    /// The plugin's level (from 0) as its informer counts, from 1.
+    fn level_number(&self, level: i32) -> i32 {
+        self.level_on_list(level) + 1
+    }
+
+    /// The plugin's level (from 0) is past its list's last.
+    fn past_last(&self, level: i32) -> bool {
+        !self.levels.is_empty() && usize::try_from(level).is_ok_and(|l| l >= self.levels.len())
+    }
+
+    /// The weapon of the plugin's level (from 0) by its list.
+    fn level_weapon(&self, level: i32) -> Option<String> {
+        let weapon = self
+            .levels
+            .get(usize::try_from(self.level_on_list(level)).ok()?)?
+            .trim();
+        (!weapon.is_empty()).then(|| lang::weapon_name(self.lang, weapon))
     }
 }
 
@@ -436,6 +473,7 @@ pub fn moment(lang: Lang, n: &Notable) -> String {
         lang,
         me: i32::MIN,
         aliases: &aliases,
+        levels: &[],
     };
     names.notable(n).trim_end_matches('.').to_string()
 }
@@ -467,6 +505,15 @@ pub fn partner_language(req: &ChatRequest, remembered: &[&str]) -> Option<&'stat
         }
     }
     lang::writes(line, lines, &words(req, &[], &Aliases::default()))
+}
+
+/// The language the bot answers in, by its primary subtag: the partner's ([`partner_language`]) when the prompt asks
+/// the model to answer in it ([`lang::spoken`]), else the server's.
+pub fn answer_language(req: &ChatRequest, remembered: &[&str]) -> String {
+    match partner_language(req, remembered) {
+        Some(code) if lang::spoken(Lang::of(&req.language), code, &req.language).is_some() => code.to_string(),
+        _ => lang::primary(&req.language).to_ascii_lowercase(),
+    }
 }
 
 fn trigger_text(names: &Names<'_>, t: &Trigger, team: bool) -> String {
@@ -725,6 +772,8 @@ fn game_lines(names: &Names<'_>, events: &[Recent]) -> Vec<String> {
     for r in events.iter().filter(|r| r.age <= GAME_WINDOW) {
         match &r.event {
             Event::Chat { .. } => continue,
+            // Past the last level: the win, which the match's end tells.
+            Event::Level { level, .. } if names.past_last(*level) => continue,
             Event::Level { who, level } => {
                 let kill = lines
                     .iter_mut()
@@ -1015,27 +1064,52 @@ fn card(lang: Lang, b: &BotCard, more: &str) -> String {
     out
 }
 
-/// The map and the admin's words on it, the minute, the bot's state, the leader, the bot's mood.
+/// The map (in GunGame with the number of levels, and the warmup) and the admin's words on it, the minute, the bot's
+/// state, the leader, the bot's mood.
 fn scene(user: &mut String, names: &Names<'_>, req: &ChatRequest, map: &str) {
     let (lang, s, b) = (names.lang, &req.scene, &req.bot);
     let minute = (s.elapsed / 60.0).floor() as u32 + 1;
-    let mode = match (lang, s.gungame, s.teamplay) {
+    let mut mode = match (lang, s.gungame, s.teamplay) {
         (Lang::Ru, true, _) => "GunGame",
         (Lang::Ru, false, true) => "командный DM",
         (Lang::Ru, false, false) => "DM",
         (Lang::En, true, _) => "GunGame",
         (Lang::En, false, true) => "team DM",
         (Lang::En, false, false) => "DM",
-    };
-    let level = b.level.as_ref().map_or(String::new(), |(l, w)| {
-        let weapon = lang::weapon_name(lang, w.trim());
-        match (lang, weapon.is_empty()) {
-            (Lang::Ru, true) => format!(", уровень {l}"),
-            (Lang::Ru, false) => format!(", уровень {l} ({weapon})"),
-            (Lang::En, true) => format!(", level {l}"),
-            (Lang::En, false) => format!(", level {l} ({weapon})"),
+    }
+    .to_string();
+    let count = names.levels.len() as u64;
+    if s.gungame && count > 0 {
+        let _ = match lang {
+            Lang::Ru => write!(
+                mode,
+                ", {count} {}",
+                lang::plural_ru(count, "уровень", "уровня", "уровней")
+            ),
+            Lang::En => write!(mode, ", {count} level{}", if count == 1 { "" } else { "s" }),
+        };
+    }
+    if s.gungame && s.warmup {
+        mode.push_str(match lang {
+            Lang::Ru => ", разминка на ломах",
+            Lang::En => ", warm-up with crowbars",
+        });
+    }
+    // GunGame writes levels into the frags, but for the warmup's kills.
+    let levels = s.gungame && !s.warmup;
+    // The level's weapon rather than the one in hand (the glock left when the tripmines are out is no level's), but on
+    // the first level, where the scoreboard also puts a player the plugin placed on another (a team's newcomer).
+    let level = match &b.level {
+        Some((l, w)) if levels => {
+            let held = || lang::weapon_name(lang, w.trim());
+            let weapon = match *l {
+                0 => held(),
+                l => names.level_weapon(l).unwrap_or_else(held),
+            };
+            format!(", {}", level_text(lang, names.level_number(*l), &weapon))
         }
-    });
+        _ => String::new(),
+    };
     let leader = s.leader.as_deref().map(|l| {
         if l == b.name {
             names.you().to_string()
@@ -1056,7 +1130,7 @@ fn scene(user: &mut String, names: &Names<'_>, req: &ChatRequest, map: &str) {
             } else {
                 "убит, ждёшь респауна"
             };
-            let score = if s.gungame {
+            let score = if levels {
                 String::new()
             } else {
                 format!(", счёт {}/{}", b.frags, b.deaths)
@@ -1073,7 +1147,7 @@ fn scene(user: &mut String, names: &Names<'_>, req: &ChatRequest, map: &str) {
                 let _ = writeln!(user, "About the map: {map_note}");
             }
             let state = if b.alive { "alive" } else { "dead, waiting to respawn" };
-            let score = if s.gungame {
+            let score = if levels {
                 String::new()
             } else {
                 format!(", score {}/{}", b.frags, b.deaths)
@@ -1094,10 +1168,15 @@ fn players(names: &Names<'_>, req: &ChatRequest) -> Vec<String> {
         .iter()
         .filter(|p| !p.me)
         .map(|p| {
-            // GunGame writes levels into the frags: the level says it all.
-            let mut line = match (lang, p.level) {
-                (Lang::Ru, Some(level)) if s.gungame => format!("- {} — уровень {level}", names.listed(&p.name)),
-                (Lang::En, Some(level)) if s.gungame => format!("- {} — level {level}", names.listed(&p.name)),
+            // GunGame writes levels into the frags (but for the warmup's kills): the level says it all. No weapon on
+            // the first level, where the scoreboard also puts a player the plugin placed on another (`gg_autosave`,
+            // `gg_handicap_on`) until their level changes.
+            let mut line = match p.level {
+                Some(level) if s.gungame && !s.warmup => {
+                    let weapon = if level > 0 { names.level_weapon(level) } else { None };
+                    let level = level_text(lang, names.level_number(level), weapon.as_deref().unwrap_or(""));
+                    format!("- {} — {level}", names.listed(&p.name))
+                }
                 _ => format!("- {} — {}/{}", names.listed(&p.name), p.frags, p.deaths),
             };
             let (mine, theirs) = p.duel;
@@ -1110,6 +1189,28 @@ fn players(names: &Names<'_>, req: &ChatRequest) -> Vec<String> {
             line
         })
         .collect()
+}
+
+/// `уровень 4 (гаусс)`: a GunGame level as the plugin's informer counts (see [`Names::level_number`]), with its
+/// weapon when known.
+fn level_text(lang: Lang, number: i32, weapon: &str) -> String {
+    match (lang, weapon.is_empty()) {
+        (Lang::Ru, true) => format!("уровень {number}"),
+        (Lang::Ru, false) => format!("уровень {number} ({weapon})"),
+        (Lang::En, true) => format!("level {number}"),
+        (Lang::En, false) => format!("level {number} ({weapon})"),
+    }
+}
+
+/// The plugin's `levels`, unless someone on the scoreboard is past them (only the winner may be, by one; the warmup's
+/// frags are kills, no levels): a list that does not fit is not the one the plugin plays, and is left out.
+fn fitting<'a>(req: &ChatRequest, levels: &'a [String]) -> &'a [String] {
+    let past = |level: i32| usize::try_from(level).is_ok_and(|l| l > levels.len());
+    if !req.scene.warmup && req.scene.players.iter().filter_map(|p| p.level).any(past) {
+        &[]
+    } else {
+        levels
+    }
 }
 
 /// The last two maps and who won them.
@@ -1228,6 +1329,7 @@ pub fn render(
         lang,
         me: req.bot.userid,
         aliases,
+        levels: fitting(req, ctx.levels),
     };
     let partner = partner(req);
     let words = words(req, known, aliases);
@@ -1292,7 +1394,7 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases
         return None;
     }
     let mut user = String::new();
-    let winner = s.winner.as_deref().unwrap_or("-");
+    let winner = s.winner.as_deref().map_or("-", |w| aliases.call(w));
     match lang {
         Lang::Ru => {
             let _ = writeln!(user, "Карта {}, {} мин, победил {winner}.\n\nИгроки:", s.map, s.minutes);
@@ -1389,15 +1491,18 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases
     })
 }
 
+/// The JSON object of a model's answer, perhaps in a code fence.
+pub(crate) fn json_object(text: &str) -> Option<BTreeMap<String, serde_json::Value>> {
+    let (start, end) = (text.find('{')?, text.rfind('}')?);
+    if end < start {
+        return None;
+    }
+    serde_json::from_str(&text[start..=end]).ok()
+}
+
 /// The notes from the model's answer: a JSON object, perhaps in a code fence.
 pub fn parse_notes(text: &str) -> BTreeMap<String, String> {
-    let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) else {
-        return BTreeMap::new();
-    };
-    if end < start {
-        return BTreeMap::new();
-    }
-    serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&text[start..=end])
+    json_object(text)
         .map(|m| {
             m.into_iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k, s.trim().chars().take(NOTES_MAX).collect())))
@@ -1502,6 +1607,7 @@ mod tests {
             scene: Scene {
                 map: "crossfire".into(),
                 gungame: false,
+                warmup: false,
                 teamplay: false,
                 elapsed: 610.0,
                 players: vec![
@@ -1631,6 +1737,7 @@ mod tests {
                 bot: "Играет здесь с первых дней сервера, всех завсегдатаев знает по никам.",
                 map: "Кнопка в бункере запускает авиаудар по открытой площадке.",
                 talks,
+                levels: &[],
             }
         } else {
             Context {
@@ -1639,6 +1746,7 @@ mod tests {
                 bot: "Has played here since the server opened and knows the regulars by name.",
                 map: "A button in the bunker calls an air strike on the open yard.",
                 talks,
+                levels: &[],
             }
         }
     }
@@ -1861,32 +1969,33 @@ mod tests {
             ),
         ];
         let r = render(&req, &[], &Aliases::default(), &[], &Context::default(), NOW);
+        assert!(r.user.starts_with("Карта crossfire, GunGame.\n"), "{}", r.user);
         assert!(
-            r.user.contains("Ты убит, ждёшь респауна, уровень 12 (арбалет), лидер"),
-            "{}",
+            r.user.contains("Ты убит, ждёшь респауна, уровень 13 (арбалет), лидер"),
+            "the plugin counts from 0, its informer from 1: {}",
             r.user
         );
         assert!(
-            r.user.contains("- ATLAS Gamer — уровень 17; на этой карте"),
+            r.user.contains("- ATLAS Gamer — уровень 18; на этой карте"),
             "{}",
             r.user
         );
         assert!(!r.user.contains("1203") && !r.user.contains("1704"), "{}", r.user);
         assert!(
             r.user
-                .contains("[60 с назад] ATLAS Gamer убил 112S из арбалета и вышел на уровень 18\n"),
+                .contains("[60 с назад] ATLAS Gamer убил 112S из арбалета и вышел на уровень 19\n"),
             "a level goes with its kill: {}",
             r.user
         );
-        assert!(!r.user.contains("ATLAS Gamer — уровень 18"), "{}", r.user);
+        assert!(!r.user.contains("ATLAS Gamer — уровень 19"), "{}", r.user);
         assert!(
             r.user
-                .contains("112S убил eLdaYs из гаусса\n[26 с назад] 112S — уровень 5\n"),
+                .contains("112S убил eLdaYs из гаусса\n[26 с назад] 112S — уровень 6\n"),
             "too late for the kill: {}",
             r.user
         );
-        assert!(r.user.contains("[10 с назад] eLdaYs — уровень 3\n"), "{}", r.user);
-        req.bot.level = Some((1, String::new()));
+        assert!(r.user.contains("[10 с назад] eLdaYs — уровень 4\n"), "{}", r.user);
+        req.bot.level = Some((0, String::new()));
         let r = render(&req, &[], &Aliases::default(), &[], &Context::default(), NOW);
         assert!(
             r.user.contains("Ты убит, ждёшь респауна, уровень 1, лидер"),
@@ -1894,6 +2003,146 @@ mod tests {
             r.user
         );
         assert!(!r.user.contains("()"), "{}", r.user);
+    }
+
+    #[test]
+    fn gungame_levels_show_their_weapons() {
+        let levels = ["9mmAR", "shotgun", "crossbow", "gauss", "tripmine", "crowbar"].map(String::from);
+        let ctx = Context {
+            levels: &levels,
+            ..Context::default()
+        };
+        let (kettle, mopper) = (who(5, "Kettle", false), who(6, "Mopper", false));
+        let mut req = request("ru");
+        req.scene.gungame = true;
+        req.scene.map = "gg_frost".into();
+        req.bot.level = Some((4, "9mmhandgun".into()));
+        req.scene.players[1] = PlayerCard {
+            name: kettle.name.clone(),
+            level: Some(2),
+            duel: (0, 0),
+            ..req.scene.players[1].clone()
+        };
+        req.scene.players[2] = PlayerCard {
+            name: mopper.name.clone(),
+            level: Some(5),
+            duel: (1, 1),
+            ..req.scene.players[2].clone()
+        };
+        req.scene.leader = Some(mopper.name.clone());
+        req.events = vec![recent(
+            10.0,
+            Event::Level {
+                who: kettle.clone(),
+                level: 2,
+            },
+        )];
+        let r = render(&req, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(
+            r.user.starts_with("Карта gg_frost, GunGame, 6 уровней.\n"),
+            "{}",
+            r.user
+        );
+        assert!(
+            r.user
+                .contains("Ты убит, ждёшь респауна, уровень 5 (мины), лидер — Mopper."),
+            "the level's weapon, not the glock left in hand: {}",
+            r.user
+        );
+        assert!(r.user.contains("- Kettle — уровень 3 (арбалет)\n"), "{}", r.user);
+        assert!(
+            r.user.contains("- Mopper — уровень 6 (лом); на этой карте ничья 1:1\n"),
+            "{}",
+            r.user
+        );
+        assert!(r.user.contains("[10 с назад] Kettle — уровень 3\n"), "{}", r.user);
+
+        let mut en = req.clone();
+        en.language = "en".into();
+        let r = render(&en, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(r.user.starts_with("Map gg_frost, GunGame, 6 levels.\n"), "{}", r.user);
+        assert!(
+            r.user
+                .contains("You are dead, waiting to respawn, level 5 (tripmines), the leader is Mopper."),
+            "{}",
+            r.user
+        );
+        assert!(r.user.contains("- Kettle — level 3 (crossbow)\n"), "{}", r.user);
+        assert!(r.user.contains("[10s ago] Kettle reached level 3\n"), "{}", r.user);
+
+        let mut won = req.clone();
+        won.scene.players[2].level = Some(6);
+        won.events = vec![
+            recent(3.0, kill(&mopper, &kettle, "crowbar")),
+            recent(
+                2.5,
+                Event::Level {
+                    who: mopper.clone(),
+                    level: 6,
+                },
+            ),
+            recent(
+                2.5,
+                Event::MatchEnd {
+                    winner: Some(mopper.clone()),
+                },
+            ),
+        ];
+        let r = render(&won, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(
+            r.user.contains("- Mopper — уровень 6 (лом);")
+                && r.user.contains("Mopper убил Kettle ломом\n")
+                && !r.user.contains("вышел на уровень")
+                && !r.user.contains("уровень 7"),
+            "the plugin puts the winner one past the last level: {}",
+            r.user
+        );
+
+        let mut first = req.clone();
+        first.bot.level = Some((0, "9mmAR".into()));
+        first.scene.players[1].level = Some(0);
+        let r = render(&first, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(
+            r.user.contains("Ты убит, ждёшь респауна, уровень 1 (MP5), лидер")
+                && r.user.contains("- Kettle — уровень 1\n"),
+            "the first level, where the plugin's restored players stand too, goes by what is in hand: {}",
+            r.user
+        );
+
+        let mut warmup = req.clone();
+        warmup.scene.warmup = true;
+        warmup.bot.level = Some((2, "crowbar".into()));
+        warmup.scene.players[1].level = Some(9);
+        warmup.events.clear();
+        let r = render(&warmup, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(
+            r.user
+                .starts_with("Карта gg_frost, GunGame, 6 уровней, разминка на ломах.\n"),
+            "{}",
+            r.user
+        );
+        assert!(
+            r.user.contains("Ты убит, ждёшь респауна, счёт 12/7, лидер")
+                && r.user.contains("- Kettle — 20/3\n")
+                && !r.user.contains("уровень "),
+            "the warmup's frags are kills, no levels: {}",
+            r.user
+        );
+
+        req.scene.players[1].level = Some(9);
+        let r = render(&req, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(
+            r.user.starts_with("Карта gg_frost, GunGame.\n")
+                && r.user.contains("Ты убит, ждёшь респауна, уровень 5 (глок), лидер")
+                && r.user.contains("- Kettle — уровень 10\n")
+                && r.user.contains("- Mopper — уровень 6;"),
+            "a player past the list: it is not the plugin's: {}",
+            r.user
+        );
+        req.scene.gungame = false;
+        let r = render(&req, &[], &Aliases::default(), &[], &ctx, NOW);
+        assert!(r.user.starts_with("Карта gg_frost, DM.\n"), "{}", r.user);
+        assert!(r.user.contains("- Kettle — 20/3\n"), "{}", r.user);
     }
 
     #[test]

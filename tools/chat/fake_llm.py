@@ -2,11 +2,13 @@
 """An OpenAI-compatible chat completions server for stand tests: answers every request with a short line and prints
 what it was asked, so the chat can be tried without a model or a key.
 
-With --fail STATUS it refuses every request instead, notes included, answering {"error": {"message", "type"}} with
-that status; the message and type default to Moonshot's for an account out of money, which it sends with a 429.
---fail-for limits the refusals to the first seconds after the start, to see the chat come back: after a refusal for
-lack of money (402, or 400, 403 or 429 with the default message or type) the worker tries again 10 minutes after the
-last one, or at once on `lb chat reload`; after 401, 404 or another 403 only on `lb chat reload` or
+A request for names of nicknames gets `ник1`, `ник2` … in Russian and each nickname's letters in English.
+
+With --fail STATUS it refuses every request instead, notes and names included, answering {"error": {"message",
+"type"}} with that status; the message and type default to Moonshot's for an account out of money, which it sends with
+a 429. --fail-for limits the refusals to the first seconds after the start, to see the chat come back: after a refusal
+for lack of money (402, or 400, 403 or 429 with the default message or type) the worker tries again 10 minutes after
+the last one, or at once on `lb chat reload`; after 401, 404 or another 403 only on `lb chat reload` or
 `lb config reload`; after 408, 409, another 429 or 5xx within a minute; after another 4xx at once.
 
 Point the stand's config at it:
@@ -28,6 +30,18 @@ LINES = ["привет", "гг", "лол", "ну ты и кемпер", "-", "и
 # Moonshot's refusal once the money ran out, the account and key ids replaced.
 UNPAID = ("Your account org-test <ak-test> is suspended due to insufficient balance, please recharge your account or "
           "check your plan and billing details")
+
+
+def names(user):
+    """The answer to a request for names of nicknames: the letters of each, in lower case, as its English name, and
+    `ник` with its number as the Russian one."""
+    found = {}
+    for line in user.splitlines():
+        number, dot, nick = line.partition(". ")
+        if dot and number.isdigit():
+            letters = "".join(c for c in nick if c.isalpha()).lower() or f"name{number}"
+            found[number] = {"ru": [f"ник{number}"], "en": [letters]}
+    return json.dumps(found, ensure_ascii=False)
 
 
 def main():
@@ -70,7 +84,12 @@ def main():
             else:
                 user = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
                 status = 200
-                answer = "{}" if "JSON" in user else next(lines)
+                if user.startswith(("Ники:", "Nicknames:")):
+                    answer = names(user)
+                elif "JSON" in user:
+                    answer = "{}"
+                else:
+                    answer = next(lines)
                 choice = {"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}
                 usage = {"prompt_tokens": len(json.dumps(messages)) // 4, "completion_tokens": len(answer)}
                 reply = {"choices": [choice], "usage": usage}

@@ -27,11 +27,12 @@ schema: lambdabots/chat-phrases@1
 #   win              the bot wins the map
 #   gg               a human player wins the map                                      {name}
 # A map another bot or nobody won gets the model's word, or none while the model is out of reach.
-# {name} is the other player: their alias from players.yaml, else the nickname without clan tags; none when a word of
-# it swears or is a slur, so keep some phrases without it. Put it where it needs no case ending: "{name}, привет",
-# "{name} в ударе". {count} is a number; put it where it needs no agreement: "{count} подряд", "уже {count}",
-# "{count}-й раз". {weapon} reads "сачелем", "из ракетницы", "with a rocket", as in "сам себя {weapon}". A phrase is
-# skipped when a placeholder has no value or the filled-in line is too long.
+# {name} is the other player: their alias from players.yaml, else the name the model gave them (chat.memory.ai_aliases),
+# else the nickname without clan tags; none when a word of it swears or is a slur, so keep some phrases without it.
+# Put it where it needs no case ending: "{name}, привет", "{name} в ударе". {count} is a number; put it where it needs
+# no agreement: "{count} подряд", "уже {count}", "{count}-й раз". {weapon} reads "сачелем", "из ракетницы", "with a
+# rocket", as in "сам себя {weapon}". A phrase is skipped when a placeholder has no value or the filled-in line is too
+# long.
 #
 # Quote every phrase: unquoted, - {name}, hi is read as a YAML mapping and breaks the file. A phrase is 1 to 60
 # characters (keep it under 45: bots with long nicknames get shorter chat lines), without " or %, and does not start

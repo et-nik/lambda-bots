@@ -113,10 +113,10 @@ For every line one request. First what is the same for every bot: the rules, the
 language, your `config/chat/server.yaml`). Then the bot: name, skill, style, favourite weapons, its manner of writing,
 its own words (the profile's `chat.about`, then your `config/chat/bots.yaml`), swearing or not. Then the scene:
 
-- the map and mode, with your notes on it from `config/chat/maps.yaml`;
-- the minute, the bot's score and GunGame level, the leader, its mood;
-- the players on the server and the bot's score against each on this map; what the bots know of them, in full only
-  for the player it answers; the last two maps;
+- the map and mode (in GunGame with the number of levels), with your notes on it from `config/chat/maps.yaml`;
+- the minute, the bot's score or GunGame level, the leader, its mood;
+- the players on the server, each with their score or GunGame level, and the bot's score against each on this map;
+  what the bots know of them, in full only for the player it answers; the last two maps;
 - what happened in the game: up to 10 kills and other events of the last 2 minutes;
 - its own recent lines (up to 5), so that it neither repeats nor contradicts itself;
 - its talk with the player: lines older than the chat below, from the last map, or from days before (the memory),
@@ -129,6 +129,24 @@ its own words (the profile's `chat.about`, then your `config/chat/bots.yaml`), s
 
 A line shows once, in the block that fits it best. The prompt is in Russian for `language: ru` and in English for any
 other language. `lb chat prompt <bot>` prints it as it would go.
+
+**GunGame levels** count from 1, as the plugin's informer shows them, each with the level's weapon:
+`- Kettle — уровень 3 (арбалет)`, and the map line says how many there are: `Карта dm_snow, GunGame, 13 уровней.`
+- The first level goes without its weapon for players: the scoreboard also puts there a player the plugin restored
+  (`gg_autosave`) or placed (`gg_handicap_on`) until their level changes. The bot's own goes by what it carries.
+- The winner, whom the plugin puts one past the last level once the match is won, stays on the last, and the winning
+  kill is no level-up.
+- In the warmup (everyone with the crowbar alone, kills not counted) the map line says so, and the players show their
+  score as in DM: the frags are kills then. The bots tell it: one alive on the first level with the crowbar alone
+  starts it, anyone with a level's weapon in hand ends it.
+
+The weapons come from the GunGame plugin's own list, read the way it reads it when a map starts:
+`addons/amxmodx/configs/gungame/<map>.ini`, else the `<sets>` of `gungame.ini` there. A level's weapon is the first
+`weapon_` it hands out. The list is read at the first request after each map start (a restart of the same map too) and
+again after `lb chat reload`. Without the files the levels show as numbers, the bot's own with the weapon it carries;
+so does a list someone on the scoreboard is past: it is not the one the plugin plays. LambdaBots does not see the
+plugin's `gg_cfg_file`: a server that names another main file there gets `gungame.ini`'s levels on maps without their
+own file.
 
 Kill feed, chat, joins and the scoreboard are what every player sees; the request holds nothing a player could not
 know, besides your own words. Which players are bots is not said.
@@ -173,14 +191,32 @@ players:
 An alias is what the bots call a player instead of a hard nickname, one name or several (the first is the main one).
 The prompt names the player by them everywhere: `Атлас или Атласыч (ник ATLAS Gamer)` in the list of players, where
 the bots may mix the names, and the main one, `Атлас`, in the kill feed and the chat. Should the model still write the
-whole nickname, the line says the main alias instead. Players without an alias are called briefly too: the rules ask
-for nicknames without clan tags and symbols.
+whole nickname, the line says the main alias instead. A human without an alias of yours gets names from the model
+(below); one without any goes by the nickname without clan tags and symbols.
 
 With a SteamID as `id` the note and the aliases go to that SteamID only (`name` is for you to read) and stay when the
 player changes nickname. A nickname as `id` serves bots and players without a SteamID only; with `by_name: true` it
 serves anyone with that nickname, whatever the SteamID: that is for players whose SteamID changes every visit, and
 whoever takes the nickname gets the alias and the note. The bots look by SteamID first, then `by_name`, then the plain
 nickname. A note is up to 500 characters; up to 8 aliases of up to 32 characters, without quotes, `%` or `;`.
+
+**Names from the model.** With `memory.ai_aliases` on (the default), a human with no alias here (an entry with a note
+alone has none) gets names from the model, as players would call them: short and easy to type, up to 3 in the
+server's language and up to 3 in English, the main one first: `[N] C o B A` → `сова` / `Sova`, `Lazy Pharaoh` →
+`фараон` / `Pharaoh`, `Monitor7` → `Монитор, мон` / `Monitor, mon`. The first request that shows a nickname new to
+them asks for every such nickname on the scoreboard in one request (up to 12; at most 20 requests an hour), before the
+requests waiting for the model. The bots then say the names as yours: the main one in phrases and in the model's
+lines, all of them in the prompt; to a player who writes English, the English ones. A greeting for a newcomer waits
+for the names, a second or two, unless it has waited for another request already. Until they come, and without the
+model (no key, out of API credit, the day's tokens spent, a wait after failures), the player goes by the nickname
+without clan tags. A name a bot may not say is dropped (longer than 24 characters, without letters, with quotes,
+brackets, `%`, `;` or swearing), and so is one another player on the server goes by. A nickname is asked once: the
+memory keeps its names, none too when the model finds none, for as long as it keeps players (`memory.forget_after_days`
+since the nickname was last seen); once `chat.language` changes to a language it was not asked in, it is asked again
+in that language and English. One whose answer was of no use is not asked again until a restart, one whose request
+failed is asked again. The names go by the nickname, so a player who changes it gets new ones. To keep the bots from
+naming a player, give them their nickname as the alias. `lb chat memory <nickname>` shows the names and `forget`
+forgets them.
 
 ### `server.yaml`
 
@@ -249,8 +285,8 @@ it like any line.
 - **Manner.** A bot without its own `chat.style` says the common phrases its way: in lower case without a final full
   stop if it writes so, now and then with `))` (` :)` in English) if it likes them. A bot's own phrases are said as
   written.
-- **Names.** `{name}` is the other player: the main alias from `players.yaml`, else the nickname without clan tags
-  and colour codes (`[KZ] Lynx` → `Lynx`, `^1Shephard` → `Shephard`). It has no value when a word of that name, or a
+- **Names.** `{name}` is the other player: the main alias from `players.yaml`, else the main name the model gave them
+  in the phrases' language (see `players.yaml`), else the nickname without clan tags and colour codes (`[KZ] Lynx` → `Lynx`, `^1Shephard` → `Shephard`). It has no value when a word of that name, or a
   part of a word that a capital starts (`MegaXyz`: `Mega` and `Xyz`; `1337Xyz`: `1337` and `Xyz`), swears or is a
   slur: as written, without its digits, or with digits read as letters (`0` as `o`, `1` as `i`, `3` as `e`, `4` as
   `a`); or when it starts with `pider` or `pedik`, as written or with digits read as letters, but not without its
@@ -320,7 +356,8 @@ The worker keeps `data/chat/memory.json`. A player is remembered by SteamID, or 
 played, kills and deaths, the score against each bot, favourite weapons, GunGame wins, their last ten lines (noise,
 swearing and slurs left out; the map's nicknames and the players' aliases count as neither), their talks with the bots
 (the last 12 lines with each of the 3 bots they talked to last, by the bot's personality; the player's lines left out
-as their other lines are, the bots' kept as said), moments worth remembering, and notes. After every map one request
+as their other lines are, the bots' kept as said), moments worth remembering, and notes; and, by nickname, the names
+the model gave (see `players.yaml`). After every map one request
 asks the model to update the notes on the players the bots met (1–2 sentences each: how they play, what stood out, how
 they talk) unless `memory.ai_notes` is off, whoever is on the server then; swearing and slurs, letters spelt apart
 (`С У К А`) too, are cut out of the notes and the remembered talks a prompt shows. A map that ends while chat is off
@@ -371,6 +408,7 @@ new entry each time; for aliases and notes of yours that follow them, give them 
 | `typing.calm`                | `3`                               | seconds without an enemy before an alive bot types                   |
 | `memory.enabled`             | `true`                            | remember players and their talks with the bots                       |
 | `memory.ai_notes`            | `true`                            | one request after each map for notes on players                      |
+| `memory.ai_aliases`          | `true`                            | names from the model for players without an alias in `players.yaml`  |
 | `memory.forget_after_days`   | `120`                             | forget players unseen this long                                      |
 | `blocked`                    | `[rtv, rockthevote, nominate, …]` | plugin chat commands: never said, and not chat when players say them |
 | `transcript`                 | `false`                           | every request to the model and its answer in `logs/chat.<date>.log`  |
@@ -510,7 +548,7 @@ next day's first line, or on `lb config reload`.
 | File                         | Holds                                                                 | Kept                                                  |
 |------------------------------|-----------------------------------------------------------------------|-------------------------------------------------------|
 | `logs/chatlog.<date>.log`    | every chat line with its nickname, joins and leaves                   | `chat.chatlog_days` days (30), the log on or off      |
-| `data/chat/memory.json`      | per player: names, scores, last lines, talks with bots, notes         | `memory.forget_after_days` after the last visit (120) |
+| `data/chat/memory.json`      | per player: names, scores, lines, talks, notes; the model's names     | `memory.forget_after_days` after the last visit (120) |
 | `logs/chat.<date>.log`       | requests and answers, the chat in them (`chat.transcript`)            | the 7 newest day files, pruned as it writes           |
 | `logs/lambdabots.<date>.log` | the bots' lines with what they answer                                 | `logging.max_files` files (7)                         |
 | `records/*.lbrec`            | a recorded map, its chat too, login lines as typed (`docs/replay.md`) | until you delete them                                 |
@@ -568,7 +606,9 @@ the memory stays.
 `<player>` in `lb chat memory` is a SteamID or a nickname the player used; of several players who used the nickname,
 the one seen last is shown. `forget` with a SteamID forgets that player alone, with a nickname every remembered player
 who used it, the engine's `(1)` before it or not (`(1)Gordon` for `Gordon`), and prints the keys it forgot. It also
-takes them out of the notes requests still waiting and out of the last maps' winners and best scores, and the memory
+takes them out of the notes requests still waiting and out of the last maps' winners and best scores, forgets the
+names the model gave the nickname and every one they used (a nickname whose player is not remembered yet too, which
+then prints that it forgot its names; it is not asked for again until a restart), and the memory
 leaves them out of the next map it takes in, what they wrote before the forget too (after a nickname, whoever plays
 under it then, `(1)` before it or not): the map under way, or, if that one ends while chat or `memory.enabled` is off
 or with no human on it, the first map after. A player who keeps playing is remembered again from the map after that.
@@ -590,7 +630,9 @@ tokens, every phrase with its moment; prompts at `debug`).
   chat log (`chatlog.rs`), written on the main thread as lines come; the worker thread `lb-chat`, which holds the key,
   the memory, `config/chat/` and the day's token count, and answers every request: with a phrase or the model's line
   passed through the filter. It answers phrases before any request still waiting for the model, so a phrase waits at
-  most for the one request in flight (a line's or a map's notes, up to `provider.timeout`).
+  most for the one request in flight (a line's, the names', or a map's notes, up to `provider.timeout`). The request
+  for names goes before the requests waiting for the model; a request for a player whose names it asks waits for it,
+  unless it came while another request was in flight, and then goes as it would have.
 - Replies are an outside input of a recording (`Outside::Chat`), taken once at the start of every `frame_post`: the
   model's lines, the phrases, silences (dropped lines among them) and failures. A replay types the same lines at the
   same frames and never asks the model, reads `config/chat/` or writes the chat log. See `docs/replay.md`.

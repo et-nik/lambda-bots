@@ -70,6 +70,12 @@ impl Kit {
         }
     }
 
+    /// A level's own kit, which neither the warmup gives (the crowbar alone) nor the game's spawn (the glock): the
+    /// glock alone, which the tripmine level leaves with every mine out, tells nothing either.
+    pub fn armed(self) -> bool {
+        matches!(self, Kit::Throwable(_) | Kit::Mines) || matches!(self, Kit::Gun(w) if w != WeaponId::Glock)
+    }
+
     /// Whether `w` hurts other players: the plugin blocks damage by anything but the level's weapons, and the glock
     /// of the tripmine level is not one of them.
     pub fn hurts_with(self, w: WeaponId) -> bool {
@@ -200,6 +206,32 @@ impl GunGame {
     }
 }
 
+/// The plugin's warmup as the players alive show it: over (`Some(false)`) once a bot carries a level's kit or anyone
+/// has a level's weapon in hand (`held`), on (`Some(true)`) while a bot is on the first level with the crowbar alone,
+/// else nothing told (`None`): a bot's `(level, kit)` alone cannot tell the warmup from the last level once the kills
+/// of a long warmup put its frags past a level. The glock tells nothing: the game's own spawn kit, held a moment
+/// before the plugin equips a player.
+pub fn warmup_seen(
+    bots: impl IntoIterator<Item = (i32, Kit)>,
+    held: impl IntoIterator<Item = Option<WeaponId>>,
+) -> Option<bool> {
+    let mut crowbar = false;
+    for (level, kit) in bots {
+        if kit.armed() {
+            return Some(false);
+        }
+        crowbar |= kit == Kit::Crowbar && level == 0;
+    }
+    if held
+        .into_iter()
+        .flatten()
+        .any(|w| !matches!(w, WeaponId::Crowbar | WeaponId::Glock))
+    {
+        return Some(false);
+    }
+    crowbar.then_some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +341,31 @@ mod tests {
             !last.warmup && last.leads(),
             "the crowbar past the first level is the last level"
         );
+    }
+
+    #[test]
+    fn the_warmup_is_told_by_the_crowbar_on_the_first_level_until_someone_has_a_level_s_weapon() {
+        use WeaponId::*;
+        assert_eq!(warmup_seen([(0, Kit::Crowbar)], [Some(Crowbar)]), Some(true));
+        assert_eq!(
+            warmup_seen([(0, Kit::Crowbar), (2, Kit::Crowbar)], [None, Some(Glock)]),
+            Some(true),
+            "frags of the warmup's kills, a player just in with the game's spawn kit"
+        );
+        assert_eq!(
+            warmup_seen([(3, Kit::Crowbar)], [Some(Crowbar)]),
+            None,
+            "the last level or a long warmup"
+        );
+        assert_eq!(
+            warmup_seen([(0, Kit::Crowbar)], [Some(Mp5)]),
+            Some(false),
+            "a human armed"
+        );
+        assert_eq!(warmup_seen([(0, Kit::Crowbar), (0, Kit::Mines)], []), Some(false));
+        assert_eq!(warmup_seen([(4, Kit::Gun(Glock)), (0, Kit::Other)], [None]), None);
+        assert_eq!(warmup_seen([], []), None, "nobody alive");
+        assert!(Kit::Gun(Rpg).armed() && Kit::Throwable(Satchel).armed() && Kit::Mines.armed());
+        assert!(!Kit::Crowbar.armed() && !Kit::Gun(Glock).armed() && !Kit::Other.armed());
     }
 }
