@@ -324,22 +324,77 @@ pub fn cheating(text: &str, names: &[String]) -> bool {
         || words.windows(2).any(|p| p[0] == "aim" && p[1].starts_with("bot"))
 }
 
-/// `text` with every swear word and slur written as `…`; the `names` in it (nicknames and aliases) stay whole.
+/// `text` with every swear word and slur written as `…`, letters spelt apart (`С У К А`) as one word too, as [`has`]
+/// and [`slur`] read them, and so again while that brings letters together (`с у бля к а`); the `names` in it
+/// (nicknames and aliases) stay whole.
 pub fn scrub(text: &str, names: &[String]) -> String {
+    let mut out = scrub_once(text, names);
+    loop {
+        let again = scrub_once(&out, names);
+        if again == out {
+            return out;
+        }
+        out = again;
+    }
+}
+
+/// One pass of [`scrub`]; each pass that changes `text` writes a word of it as `…`, so passes come to an end.
+fn scrub_once(text: &str, names: &[String]) -> String {
     let kept = name_spans(text, names);
+    let bad = |word: &str| {
+        let word = normal(word);
+        either(&word, swearing) || either(&word, slurring)
+    };
+    let mut gone: Vec<(usize, usize)> = Vec::new();
+    let mut spelt: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans(text) {
+        if kept.iter().any(|&(s, e)| s < end && start < e) {
+            continue;
+        }
+        if text[start..end].chars().count() == 1 {
+            spelt.push((start, end));
+            continue;
+        }
+        unspell_spans(text, &kept, &mut spelt, &mut gone, bad);
+        if bad(&text[start..end]) {
+            gone.push((start, end));
+        }
+    }
+    unspell_spans(text, &kept, &mut spelt, &mut gone, bad);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    for (start, end) in spans(text) {
-        let named = kept.iter().any(|&(s, e)| s < end && start < e);
-        let word = normal(&text[start..end]);
-        if !named && (either(&word, swearing) || either(&word, slurring)) {
-            out.push_str(&text[at..start]);
-            out.push('…');
-            at = end;
-        }
+    for (start, end) in gone {
+        out.push_str(&text[at..start]);
+        out.push('…');
+        at = end;
     }
     out.push_str(&text[at..]);
     out
+}
+
+/// [`unspell`] for [`scrub_once`]: letters of `text` spelt apart (byte ranges, the `kept` names between them left out) into
+/// `gone`. Three or more that are `bad` as one word go as one range from the first to the last, split at the names;
+/// else each letter that is `bad` goes.
+fn unspell_spans(
+    text: &str,
+    kept: &[(usize, usize)],
+    spelt: &mut Vec<(usize, usize)>,
+    gone: &mut Vec<(usize, usize)>,
+    bad: impl Fn(&str) -> bool,
+) {
+    let joined: String = spelt.iter().map(|&(s, e)| &text[s..e]).collect();
+    if spelt.len() < 3 || !bad(&joined) {
+        gone.extend(spelt.drain(..).filter(|&(s, e)| bad(&text[s..e])));
+        return;
+    }
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in spelt.drain(..) {
+        match runs.last_mut() {
+            Some(run) if !kept.iter().any(|&(k, _)| run.1 <= k && k < s) => run.1 = e,
+            _ => runs.push((s, e)),
+        }
+    }
+    gone.extend(runs);
 }
 
 #[cfg(test)]
@@ -619,5 +674,42 @@ mod tests {
             "FUCK_THIS_GAME_noob …"
         );
         assert_eq!(scrub("gg wp", &none()), "gg wp");
+    }
+
+    #[test]
+    fn letters_spelt_apart_are_scrubbed_as_one_word() {
+        assert_eq!(scrub("он х о х о л, ага", &none()), "он …, ага");
+        assert_eq!(scrub(": С У К А !", &none()), ": … !");
+        assert_eq!(scrub("ну с.у.у.к.а же", &none()), "ну … же");
+        assert_eq!(
+            scrub("бля привет с у к а", &none()),
+            "… привет …",
+            "a clean word between stays"
+        );
+        assert_eq!(
+            scrub("с у бля к а", &none()),
+            "…",
+            "letters a word scrubbed brings together"
+        );
+        let gordon = vec!["Gordon".to_string()];
+        assert_eq!(scrub("Gordon, с у к а", &gordon), "Gordon, …");
+        assert_eq!(
+            scrub("с у Gordon к а", &gordon),
+            "… Gordon …",
+            "a name in the letters stays"
+        );
+        for line in ["a b c d", "я и в шоке", "и т д", "K o T i K"] {
+            assert_eq!(scrub(line, &none()), line);
+        }
+        for (line, names) in [
+            ("он х о х о л, ага", none()),
+            (": С У К А !", none()),
+            ("с у бля к а", none()),
+            ("с у Gordon к а", gordon),
+        ] {
+            assert!(has(line, &names) || slur(line, &names), "{line}");
+            let scrubbed = scrub(line, &names);
+            assert!(!has(&scrubbed, &names) && !slur(&scrubbed, &names), "{scrubbed}");
+        }
     }
 }

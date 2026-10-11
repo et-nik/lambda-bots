@@ -319,14 +319,15 @@ The worker keeps `data/chat/memory.json`. A player is remembered by SteamID, or 
 (`STEAM_ID_LAN`, `STEAM_ID_PENDING`). For each one: the names they used, when they were first and last seen, maps
 played, kills and deaths, the score against each bot, favourite weapons, GunGame wins, their last ten lines (noise,
 swearing and slurs left out; the map's nicknames and the players' aliases count as neither), their talks with the bots
-(the last 12 lines with each of the 3 bots they talked to last, by the bot's personality), moments worth remembering,
-and notes. After every map one request asks the model to update the notes on the players the bots met (1–2 sentences
-each: how they play, what stood out, how they talk) unless `memory.ai_notes` is off, whoever is on the server then;
-swearing and slurs are cut out of the notes a prompt shows. A map that ends while chat is off is not remembered, and
-notes still waiting when chat is switched off, or whose turn comes while the model is out of reach, are never asked
-for (see Inside). Players unseen for `memory.forget_after_days` are forgotten when a map is remembered;
-`lb chat memory <player> forget` forgets a player at once, talks included: by SteamID that one alone, by nickname
-every player who used it (see Commands and cvar).
+(the last 12 lines with each of the 3 bots they talked to last, by the bot's personality; the player's lines left out
+as their other lines are, the bots' kept as said), moments worth remembering, and notes. After every map one request
+asks the model to update the notes on the players the bots met (1–2 sentences each: how they play, what stood out, how
+they talk) unless `memory.ai_notes` is off, whoever is on the server then; swearing and slurs, letters spelt apart
+(`С У К А`) too, are cut out of the notes and the remembered talks a prompt shows. A map that ends while chat is off
+is not remembered, and notes still waiting when chat is switched off, or whose turn comes while the model is out of
+reach, are never asked for (see Inside). Players unseen for `memory.forget_after_days` are forgotten when a map is
+remembered; `lb chat memory <player> forget` forgets a player at once, talks included: by SteamID that one alone, by
+nickname every player who used it (see Commands and cvar).
 
 A talk comes back when the player talks with that bot again, days later too: the prompt shows its last lines with
 when they were said (`вчера`, `3 дня назад`). While the memory has no entry under a player's key (a SteamID new to

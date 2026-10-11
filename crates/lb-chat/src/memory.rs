@@ -279,7 +279,11 @@ impl Memory {
             for (age, line) in p.lines.iter().filter(|(_, line)| memorable(line, &names)) {
                 push_capped(&mut m.lines, (now.saturating_sub(*age as u64), line.clone()), LINES);
             }
-            for (age, bot, mine, text) in &p.talk {
+            for (age, bot, mine, text) in p
+                .talk
+                .iter()
+                .filter(|(_, _, mine, text)| *mine || memorable(text, &names))
+            {
                 let talk = m.talks.entry(bot.clone()).or_default();
                 push_capped(talk, (now.saturating_sub(*age as u64), *mine, text.clone()), TALK_LINES);
             }
@@ -553,18 +557,36 @@ mod tests {
         .into_iter()
         .map(|l| (10.0, l.to_string()))
         .collect();
+        s.players[0].talk = vec![
+            line(40.0, "Plutonium", false, "плутон, бля, опять ты"),
+            line(38.0, "Plutonium", true, "сам такой, бля"),
+            line(36.0, "Plutonium", false, "плутон, ты хохол?"),
+            line(34.0, "Plutonium", false, "ахахахах"),
+            line(32.0, "Plutonium", false, "плутон, _FUCK_ опять тут"),
+            line(30.0, "Plutonium", false, "плутон, где рельсы?"),
+        ];
         s.chat.push((5.0, "_FUCK_".into(), "всем привет".into(), false));
         let mut m = Memory::default();
         m.merge(&s, &Aliases::default(), 1000);
-        let kept: Vec<&str> = m.players["STEAM_0:1:42"]
-            .lines
-            .iter()
-            .map(|(_, l)| l.as_str())
-            .collect();
+        let p = &m.players["STEAM_0:1:42"];
+        let kept: Vec<&str> = p.lines.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(
             kept,
             ["ок", "где рельсы?", "_FUCK_ опять тут"],
             "a nickname is no swearing"
+        );
+        let talk: Vec<(bool, &str)> = p.talks["Plutonium"]
+            .iter()
+            .map(|(_, mine, text)| (*mine, text.as_str()))
+            .collect();
+        assert_eq!(
+            talk,
+            [
+                (true, "сам такой, бля"),
+                (false, "плутон, _FUCK_ опять тут"),
+                (false, "плутон, где рельсы?")
+            ],
+            "the player's lines in a talk as their other lines; the bot's as it said them"
         );
     }
 
