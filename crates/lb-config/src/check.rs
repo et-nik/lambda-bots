@@ -2,7 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::chat_bots::ChatBotsFile;
+use crate::chat_maps::ChatMapsFile;
+use crate::chat_phrases::ChatPhrasesFile;
 use crate::chat_players::ChatPlayersFile;
+use crate::chat_server::ChatServerFile;
 use crate::names::NamesFile;
 use crate::overlay::OverlayFile;
 use crate::profiles::ProfilesFile;
@@ -35,6 +39,10 @@ pub fn check_text(text: &str, path: &str) -> Result<String, ConfigError> {
         "style" => StyleFile::parse(text, path).map(|_| ()),
         "overlay" => OverlayFile::parse(text, path).map(|_| ()),
         "chat-players" => ChatPlayersFile::parse(text, path).map(|_| ()),
+        "chat-server" => ChatServerFile::parse(text, path).map(|_| ()),
+        "chat-bots" => ChatBotsFile::parse(text, path).map(|_| ()),
+        "chat-maps" => ChatMapsFile::parse(text, path).map(|_| ()),
+        "chat-phrases" => ChatPhrasesFile::parse(text, path).map(|_| ()),
         other => Err(ConfigError::Invalid {
             path: path.to_string(),
             field: "schema".into(),
@@ -99,5 +107,22 @@ mod tests {
     #[test]
     fn unknown_kind_is_rejected() {
         assert!(check_text("schema: lambdabots/nope@1\n", "x.yaml").is_err());
+    }
+
+    #[test]
+    fn chat_files_are_checked() {
+        for kind in ["chat-players", "chat-server", "chat-bots", "chat-maps", "chat-phrases"] {
+            assert_eq!(
+                check_text(&format!("schema: lambdabots/{kind}@1\n"), "x.yaml").unwrap(),
+                kind
+            );
+        }
+        let bad = "schema: lambdabots/chat-maps@1\nmaps:\n  - map: \"gg *\"\n    note: x\n";
+        assert!(
+            check_text(bad, "maps.yaml")
+                .unwrap_err()
+                .to_string()
+                .contains("maps[0].map")
+        );
     }
 }

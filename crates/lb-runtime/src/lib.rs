@@ -462,6 +462,9 @@ impl Runtime {
         rt.register_cvars(host);
         rt.open_telemetry();
         rt.chat_sync_backend();
+        if !rt.init.sandbox {
+            rt.chat.chatlog = Some(chat::ChatLog::new(rt.init.install_dir.join("logs")));
+        }
         let summary = rt.startup_summary();
         tracing::info!("{summary}");
         host.server_print(&format!("[lambdabots] {summary}\n"));
@@ -516,8 +519,9 @@ impl Runtime {
         }
     }
 
-    /// `lb config reload`: re-reads the main config, the skill table, the names and the profiles. File values win
-    /// over earlier console changes of the same cvars; bots in the game take their updated personality at once.
+    /// `lb config reload`: re-reads the main config, the skill table, the names and the profiles, and has the chat
+    /// worker read `config/chat/` again. File values win over earlier console changes of the same cvars; bots in the
+    /// game take their updated personality at once.
     pub fn reload(&mut self, host: &mut dyn Host) -> Vec<String> {
         let path = self.init.install_dir.join("config").join("lambdabots.yaml");
         let mut out = Vec::new();
@@ -556,10 +560,7 @@ impl Runtime {
         for (cv, value) in values {
             self.cvars.set(host, cv, &value);
         }
-        if !self.config.chat.enabled {
-            self.chat_switched_off();
-        }
-        self.chat_sync_backend();
+        self.chat_reload();
         self.editor_allowed = self.config.access.editor_enabled;
         if !self.editor_allowed {
             self.editor = None;
@@ -2182,11 +2183,10 @@ impl Runtime {
                     let on = value.trim() != "0";
                     if on != self.config.chat.enabled {
                         self.config.chat.enabled = on;
-                        if on {
-                            self.chat_sync_backend();
-                        } else {
+                        if !on {
                             self.chat_switched_off();
                         }
+                        self.chat_sync_backend();
                         tracing::info!("chat {}", if on { "on" } else { "off" });
                     }
                 }
@@ -2563,15 +2563,19 @@ impl Runtime {
         ))
     }
 
+    /// Whether the mode has teams: teamplay, team GunGame.
+    fn team_mode(&self) -> bool {
+        matches!(
+            self.game.mode,
+            Some(lb_game::mode::GameModeKind::Teamplay | lb_game::mode::GameModeKind::GunGame { team: true })
+        )
+    }
+
     /// Team index of every slot from the public scoreboard; all 0 unless the mode has teams.
     fn teams(&self) -> Vec<u8> {
         let slots = self.clients_now.len().max(self.game.scoreboard.entries.len());
         let mut teams = vec![0u8; slots + 1];
-        let team_mode = matches!(
-            self.game.mode,
-            Some(lb_game::mode::GameModeKind::Teamplay | lb_game::mode::GameModeKind::GunGame { team: true })
-        );
-        if !team_mode {
+        if !self.team_mode() {
             return teams;
         }
         let mut names: Vec<String> = self

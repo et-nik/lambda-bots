@@ -1,7 +1,7 @@
 //! Facade over the YAML crate so it can be swapped without touching schemas.
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ConfigError;
 
@@ -32,6 +32,21 @@ pub fn quote(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// One string or a list of them (`alias: Ник`, `map: [gg_*, ag_*]`), for `deserialize_with`.
+pub fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
 }
 
 /// Checks the mandatory `schema: lambdabots/<kind>@<major>` header.

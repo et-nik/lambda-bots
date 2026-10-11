@@ -114,8 +114,13 @@ const HELP: &[(&str, &str)] = &[
         "a line typed by hand; a player's line to a bot, answered by the model; the prompt it would get",
     ),
     (
+        "chat event <bot> <moment>",
+        "the bot speaks of a moment (win, gg, nemesis, ...) as if it came, you the other one: a ready phrase or the \
+         model's line",
+    ),
+    (
         "chat memory <player> [forget] | chat reload",
-        "what the bots remember of a player; read the notes on players and the provider settings again",
+        "what the bots remember of a player; read config/chat/ again and try the provider at once",
     ),
     (
         "chat transcript [on|off]",

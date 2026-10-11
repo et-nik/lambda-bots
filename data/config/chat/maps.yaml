@@ -1,0 +1,9 @@
+schema: lambdabots/chat-maps@1
+# What the bots know of maps, in your words. map: a map name, a pattern where * stands for any text (gg_*; quote one
+# that starts with *), or a list of them; note: at most 1000 characters. A map gets the notes naming it first, then
+# those whose pattern fits it, each in file order, at most 1500 characters in all.
+maps: []
+#  - map: crossfire
+#    note: Кнопка в бункере запускает авиаудар по открытой площадке; кто снаружи, тот погибает.
+#  - map: [gg_*, ag_*]
+#    note: Маленькие арены для GunGame и дуэлей, всё простреливается.

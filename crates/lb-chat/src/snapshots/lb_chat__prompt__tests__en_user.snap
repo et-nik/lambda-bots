@@ -1,0 +1,40 @@
+---
+source: crates/lb-chat/src/prompt.rs
+expression: r.user
+---
+Map crossfire, DM.
+About the map: A button in the bunker calls an air strike on the open yard.
+Minute 11. You are dead, waiting to respawn, score 12/7, the leader is ATLAS Gamer. Right now you are fired up.
+
+Players on the server:
+- ATLAS Gamer — 20/3; this map they lead 2:0
+- 112S — 4/9; this map you lead 3:1
+
+Players you know:
+- 112S: Gets angry when losing and writes "…". Plays the shotgun; against you so far: you lead 7:5; favours shotgun; last seen 2 days ago; wrote: "gg", "where are the rails?"
+- ATLAS Gamer: A strong player, one of the best. Comes in the evenings; Mostly plays the shotgun; against you so far: they lead 23:9
+
+Previous maps: stalkyard (today), ATLAS Gamer won.
+
+What happened in the game:
+[2 min ago] ATLAS Gamer killed 112S with the shotgun
+[2 min ago] 112S killed you with the shotgun
+[40s ago] you killed 112S with the crossbow
+
+You wrote lately (do not repeat or contradict yourself):
+[25 min ago, last map] hi all
+
+Your talk with 112S before:
+[2 days ago] 112S: hi bot
+[2 days ago] you: hey :)
+[12 min ago, last map] 112S: where are you hiding?
+[12 min ago, last map] you: on the rails, come over
+
+Chat:
+[5 min ago] ATLAS Gamer: rails anyone?
+[95s ago] you: someone is camping here
+[20s ago] 112S: Camper (×3)
+[just now] 112S: can't you read?
+
+Why now: 112S writes to you: "can't you read?"
+What do you write in the chat? One line up to 56 characters, or -.

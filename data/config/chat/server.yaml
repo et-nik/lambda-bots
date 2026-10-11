@@ -1,0 +1,7 @@
+schema: lambdabots/chat-server@1
+# What every bot should know of the server, in your words: its rules, its regulars, what goes on here. It goes with
+# every request to the model (100 characters cost about 50 tokens each time); at most 2000 characters, empty for none.
+context: ""
+# context: |
+#   GunGame-сервер: на каждом уровне своё оружие, на последнем — лом. Вечером людно, днём почти пусто.
+#   Карту меняют голосованием (rtv), правила и админы описаны на сайте сервера.

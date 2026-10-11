@@ -1,6 +1,6 @@
 //! `config/chat/players.yaml`: what the bots know of regular players, in the admin's words.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 use crate::yaml;
@@ -25,31 +25,27 @@ pub struct ChatPlayersFile {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KnownPlayer {
-    /// A SteamID (`STEAM_0:1:123`), or the nickname of a player without one.
+    /// A SteamID (`STEAM_0:1:123`), or the nickname of a player without one, or any player's with `by_name`.
     pub id: String,
     /// The player's nickname when `id` is a SteamID, for the reader: the note and the aliases go to that SteamID only.
     #[serde(default)]
     pub name: String,
     /// What the bots call the player instead of the nickname: one name (`Атлас`) or several (`[Атлас, Атласыч]`),
     /// the main one first.
-    #[serde(default, deserialize_with = "one_or_many")]
+    #[serde(default, deserialize_with = "yaml::one_or_many")]
     pub alias: Vec<String>,
     #[serde(default)]
     pub note: String,
+    /// The entry applies to any player with this nickname whatever the SteamID, alias and note alike; `id` is then
+    /// the nickname.
+    #[serde(default)]
+    pub by_name: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-    Ok(match OneOrMany::deserialize(d)? {
-        OneOrMany::One(one) => vec![one],
-        OneOrMany::Many(many) => many,
-    })
+/// `id` names a SteamID rather than a nickname.
+pub fn is_steam_id(id: &str) -> bool {
+    let id = id.trim();
+    id.starts_with("STEAM_") || id.starts_with("VALVE_")
 }
 
 impl ChatPlayersFile {
@@ -66,6 +62,9 @@ impl ChatPlayersFile {
             };
             if p.id.trim().is_empty() {
                 return bad("id", "must not be empty");
+            }
+            if p.by_name && is_steam_id(&p.id) {
+                return bad("by_name", "`id` must then be a nickname, not a SteamID");
             }
             if p.note.chars().count() > NOTE_MAX {
                 return bad("note", &format!("must be at most {NOTE_MAX} characters"));
@@ -143,5 +142,18 @@ mod tests {
                 .players
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn by_name_takes_a_nickname() {
+        let text = "schema: lambdabots/chat-players@1\nplayers:\n  - id: \"[KZ] Lynx :>\"\n    by_name: true\n    alias: Рысь\n  - id: STEAM_0:0:1\n    note: x\n";
+        let f = ChatPlayersFile::parse(text, "p").unwrap();
+        assert!(f.players[0].by_name && !f.players[1].by_name);
+        assert_eq!(f.players[0].id, "[KZ] Lynx :>");
+        for id in ["STEAM_0:0:1", " VALVE_0:1:2"] {
+            let text = format!("schema: lambdabots/chat-players@1\nplayers:\n  - id: \"{id}\"\n    by_name: true\n");
+            let e = ChatPlayersFile::parse(&text, "p").unwrap_err();
+            assert!(e.to_string().contains("players[0].by_name"), "{e}");
+        }
     }
 }

@@ -193,9 +193,15 @@ impl Roster {
         candidates.last().map(|p| (*p).clone())
     }
 
-    /// Adds a personality created by the server and appends it to `data/profiles.yaml`.
+    /// Adds a personality created by the server and appends it to `data/profiles.yaml`. Its traits are kept as saved,
+    /// rounded, so it plays as it will after a restart and as a replay loads it.
     pub fn add_generated(&mut self, mut persona: Persona, created: &str) -> Arc<Persona> {
         persona.source = PersonaSource::Unsaved;
+        let spec = persona.to_spec(Some(created.to_string()));
+        if let Some(traits) = spec.traits {
+            persona.aggression = traits.aggression.unwrap_or(persona.aggression);
+            persona.fear = traits.fear.unwrap_or(persona.fear);
+        }
         if self.generated_broken {
             tracing::warn!(
                 "{} is broken; {} lives only until the server stops",
@@ -203,7 +209,7 @@ impl Roster {
                 persona.name
             );
         } else {
-            let entry = persona.to_spec(Some(created.to_string())).to_yaml_entry();
+            let entry = spec.to_yaml_entry();
             match append_entry(&self.generated_path, &entry, &persona.name) {
                 Ok(()) => persona.source = PersonaSource::Generated(self.generated_path.clone()),
                 Err(e) => {
@@ -377,6 +383,34 @@ mod tests {
             (added.style, added.skill, added.colors, added.model.clone())
         );
         assert_eq!(again.get("old").unwrap().skill, 33);
+    }
+
+    #[test]
+    fn generated_personalities_play_as_a_restart_loads_them() {
+        let dir = temp_dir("as-saved");
+        let mut r = Roster::load(&dir, &models(), &StyleTable::default());
+        let mut rng = Pcg32::new(5, 6);
+        let added: Vec<Arc<Persona>> = (0..20)
+            .map(|i| {
+                let p = lb_styles::generate(
+                    &format!("Recruit {i}"),
+                    &[(StyleId::Rusher, 1.0), (StyleId::Sniper, 1.0), (StyleId::Balanced, 1.0)],
+                    SkillBand::ANY,
+                    &models(),
+                    &StyleTable::default(),
+                    &mut rng,
+                );
+                r.add_generated(p, "2026-10-10")
+            })
+            .collect();
+        let again = Roster::load(&dir, &models(), &StyleTable::default());
+        for p in &added {
+            assert_eq!(
+                again.get(&p.name).as_deref(),
+                Some(&**p),
+                "the traits as saved, rounded"
+            );
+        }
     }
 
     #[test]
