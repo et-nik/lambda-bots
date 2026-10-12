@@ -1524,40 +1524,48 @@ fn listed_name(lang: Lang, p: &PlayerMap, aliases: &Aliases) -> String {
 }
 
 /// The notes of [`parse_notes`] under the memory keys of the players the request listed. The model keys a note by what
-/// the list shows: the key, the whole `key | name` of a line (its start before a `|` is taken for the key, too), or a
-/// name (the nickname, without its clan tag too, a name the player goes by, all of them as listed), in any case. A
-/// label that fits no player, or players of more than one key, is left out.
+/// the list shows, in any case: the key itself, the whole `key | name` of a line or its start before a `|`, or a name
+/// (the nickname, without its clan tag too, a name the player goes by, all of them as listed). A label is first taken
+/// for a key, then for a line, then for a name; a name that fits players of more than one key, or a label that fits
+/// none, is left out. Of two notes for one player the one under the key wins, then the one under the line; of two
+/// under names, the first label.
 pub fn notes_by_key(s: &MapSummary, notes: BTreeMap<String, String>, aliases: &Aliases) -> BTreeMap<String, String> {
     let lang = Lang::of(&s.language);
     let listed = notes_players(s, &memory::names(s, aliases));
-    let owner = |label: &str, key_only: bool| {
-        let label = label.trim().to_lowercase();
-        let fits = |n: &str| n.trim().to_lowercase() == label;
-        let mut keys = listed
-            .iter()
-            .map(|(p, _)| p)
+    let players = || listed.iter().map(|(p, _)| *p);
+    let norm = |n: &str| n.trim().to_lowercase();
+    let by_key = |label: &str| players().find(|p| norm(&p.key) == label).map(|p| p.key.clone());
+    let owner = |label: &str| -> Option<(String, u8)> {
+        let label = norm(label);
+        if let Some(key) = by_key(&label) {
+            return Some((key, 0));
+        }
+        let line = players()
+            .find(|p| norm(&format!("{} | {}", p.key, listed_name(lang, p, aliases))) == label)
+            .map(|p| p.key.clone())
+            .or_else(|| label.match_indices('|').find_map(|(at, _)| by_key(label[..at].trim())));
+        if let Some(key) = line {
+            return Some((key, 1));
+        }
+        let mut keys = players()
             .filter(|p| {
-                let shown = listed_name(lang, p, aliases);
-                let names = [
-                    format!("{} | {shown}", p.key),
-                    p.name.clone(),
-                    aliases::short(&p.name),
-                    shown,
-                ];
-                fits(&p.key) || (!key_only && names.iter().chain(aliases.all(&p.name)).any(|n| fits(n)))
+                let names = [p.name.clone(), aliases::short(&p.name), listed_name(lang, p, aliases)];
+                names.iter().chain(aliases.all(&p.name)).any(|n| norm(n) == label)
             })
             .map(|p| p.key.as_str());
         let first = keys.next()?;
-        keys.all(|k| k == first).then(|| first.to_string())
+        keys.all(|k| k == first).then(|| (first.to_string(), 2))
     };
-    notes
-        .into_iter()
-        .filter_map(|(label, note)| {
-            owner(&label, false)
-                .or_else(|| label.match_indices('|').find_map(|(at, _)| owner(&label[..at], true)))
-                .map(|key| (key, note))
-        })
-        .collect()
+    let mut kept: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    for (label, note) in notes {
+        let Some((key, rank)) = owner(&label) else {
+            continue;
+        };
+        if kept.get(&key).is_none_or(|(had, _)| rank < *had) {
+            kept.insert(key, (rank, note));
+        }
+    }
+    kept.into_iter().map(|(key, (_, note))| (key, note)).collect()
 }
 
 #[cfg(test)]
@@ -2785,6 +2793,7 @@ mod tests {
                 },
                 player("STEAM_0:0:11", "KOZA|ru"),
                 player("STEAM_0:0:12", "KOZA"),
+                player("STEAM_0:0:14", "STEAM_0:0:12"),
             ],
             ..Default::default()
         };
@@ -2797,9 +2806,9 @@ mod tests {
             r.user
         );
         assert!(!r.user.contains("STEAM_0:0:6"), "met once, not listed: {}", r.user);
-        let answer = r#"{"gordon": "a", "Barney": "b", "Аликс или Аля (Alyx)": "c", "STEAM_0:0:1 | Player": "d",
-            "Player": "e", "Kleiner": "f", " STEAM_0:0:5 ": "g", "Eli": "h", "STEAM_0:0:11 | KOZA|ru": "i",
-            "KOZA | ru": "j"}"#;
+        let answer = r#"{"gordon": "a", "STEAM_0:1:42": "k", "Barney": "b", "Аликс или Аля (Alyx)": "c",
+            "STEAM_0:0:1 | Player": "d", "Player": "e", "Kleiner": "f", " STEAM_0:0:5 ": "g", "Eli": "h",
+            "STEAM_0:0:11 | KOZA|ru": "i", "KOZA | ru": "j", "STEAM_0:0:12": "m"}"#;
         let notes = notes_by_key(&summary, parse_notes(answer), &aliases);
         let notes: Vec<(&str, &str)> = notes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(
@@ -2807,13 +2816,15 @@ mod tests {
             [
                 ("STEAM_0:0:1", "d"),
                 ("STEAM_0:0:11", "i"),
-                ("STEAM_0:0:5", "h"),
+                ("STEAM_0:0:12", "m"),
+                ("STEAM_0:0:5", "g"),
                 ("STEAM_0:0:7", "c"),
                 ("STEAM_0:0:9", "b"),
-                ("STEAM_0:1:42", "a")
+                ("STEAM_0:1:42", "k")
             ],
-            "a player listed twice (back after a reconnect) is one; a name two players share, one no player has, and \
-             a name before a `|` are left out"
+            "the key wins over a name, the one it labels or another player's nickname, whichever label sorts first; \
+             a player listed twice (back after a reconnect) is one; a name two players share, one no player has, \
+             and a name before a `|` are left out"
         );
     }
 
