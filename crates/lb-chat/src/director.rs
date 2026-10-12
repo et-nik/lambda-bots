@@ -18,8 +18,12 @@ use crate::talk::{AWAY, GIST_KEEP, Social};
 const FOUGHT_WINDOW: f64 = 60.0;
 /// Bots besides the winner who say something at the end of a match.
 const MATCH_END_BOTS: usize = 1;
-/// Seconds an answer waits for its bot, or for the line bucket.
+/// Seconds an answer waits for the line bucket, or for its bot once that has said its line; [`WAIT_MAX`] at most.
 pub const WAIT_KEEP: f64 = 30.0;
+/// Seconds an answer waits for its bot at most, from the line it answers.
+pub const WAIT_MAX: f64 = 60.0;
+/// A bot with a line on its way is this much less likely to be the one an answer waits for.
+const BUSY_WEIGHT: f32 = 0.25;
 /// Seconds the same line again, once answered (by a bot it names, when it names any), is a repeat.
 const REPEAT: f64 = 300.0;
 /// Seconds from which the same line again, not naming a bot, is one the player keeps sending: a bind.
@@ -68,9 +72,10 @@ impl Speaker {
         addressing::mentions(text, &self.who.name) || self.calls.iter().any(|c| addressing::mentions(text, c))
     }
 
-    /// Whether a line of `priority` may be asked of it now: nothing as important on its way.
-    fn free(&self, priority: Priority) -> bool {
-        self.busy.is_none_or(|p| p < priority)
+    /// Whether a line may be asked of it now: none on its way. A line asked for is paid for and is said, so no other
+    /// takes its place.
+    fn free(&self) -> bool {
+        self.busy.is_none()
     }
 }
 
@@ -153,6 +158,12 @@ impl Bucket {
     fn give(&mut self, cap: f64) {
         self.tokens = (self.tokens + 1.0).min(cap);
     }
+
+    /// Takes one however few are left: the next ones come later.
+    fn spend(&mut self, now: SimTime, per_minute: f32, cap: f64) {
+        self.tokens = (self.tokens + now.since(self.at).max(0.0) * f64::from(per_minute) / 60.0).min(cap) - 1.0;
+        self.at = now;
+    }
 }
 
 /// An answer kept until its bot is free.
@@ -160,6 +171,8 @@ impl Bucket {
 struct Waiting {
     /// When the line it answers came.
     since: SimTime,
+    /// When its bot was last seen with a line on its way.
+    busy_seen: SimTime,
     /// The bot's persona: another bot may take the slot.
     persona: String,
     /// What the line said ([`addressing::gist`]).
@@ -354,6 +367,20 @@ impl Director {
         !self.waiting.is_empty()
     }
 
+    /// Whether an answer waits for the bot in `slot`: its line on its way had better go out soon.
+    pub fn waits_for(&self, slot: u8) -> bool {
+        self.waiting.iter().any(|w| w.speak.slot == slot)
+    }
+
+    /// A line this director did not ask for went out on its map (one asked for on the map before): it takes one of the
+    /// minute's lines, however few are left, and a `remark` starts the gap between remarks.
+    pub fn charge(&mut self, now: SimTime, remark: bool, limits: &Limits) {
+        self.lines.spend(now, limits.lines_per_minute, caps(limits).0);
+        if remark {
+            self.last_remark = Some(now);
+        }
+    }
+
     /// Chat was switched off: nothing waits any more.
     pub fn clear_waiting(&mut self) {
         self.waiting.clear();
@@ -421,7 +448,7 @@ impl Director {
             let Some(bot) = bots.iter().find(|b| b.who.slot == speak.slot) else {
                 continue;
             };
-            if bot.free(speak.priority) && self.admit(now, speak.priority, speak.unasked, social, limits) {
+            if bot.free() && self.admit(now, speak.priority, speak.unasked, social, limits) {
                 self.spoke(now, &mut speak, &bot.persona, social);
                 out.push(speak);
             } else if speak.priority == Priority::Answer && waits(&speak.trigger) {
@@ -432,8 +459,9 @@ impl Director {
         out
     }
 
-    /// Answers that waited and may go now, oldest first: one a bot free of answers, while the buckets last. Those
-    /// older than [`WAIT_KEEP`] and those of bots that left are dropped; with nobody to read them, all are.
+    /// Answers that waited and may go now, oldest first: one a bot with no line on its way, while the buckets last.
+    /// Those that waited [`WAIT_KEEP`] since the line or since their bot said its own ([`WAIT_MAX`] at most) and those
+    /// of bots that left are dropped; with nobody to read them, all are.
     pub fn ready(
         &mut self,
         now: SimTime,
@@ -446,13 +474,19 @@ impl Director {
             bots.iter()
                 .find(|b| b.who.slot == w.speak.slot && b.persona == w.persona)
         };
-        self.waiting
-            .retain(|w| humans && now.since(w.since) <= WAIT_KEEP && bot(w).is_some());
+        for w in &mut self.waiting {
+            if bot(w).is_some_and(|b| !b.free()) {
+                w.busy_seen = now;
+            }
+        }
+        self.waiting.retain(|w| {
+            humans && now.since(w.since) <= WAIT_MAX && now.since(w.busy_seen) <= WAIT_KEEP && bot(w).is_some()
+        });
         let mut out: Vec<Speak> = Vec::new();
         let mut i = 0;
         while i < self.waiting.len() {
             let w = &self.waiting[i];
-            let free = bot(w).is_some_and(|b| b.free(Priority::Answer)) && out.iter().all(|s| s.slot != w.speak.slot);
+            let free = bot(w).is_some_and(Speaker::free) && out.iter().all(|s| s.slot != w.speak.slot);
             if !free {
                 i += 1;
                 continue;
@@ -480,9 +514,14 @@ impl Director {
         gap(self.last_remark, now, limits.remark_gap) && gap(bot.last_remark, now, limits.bot_remark_gap)
     }
 
-    /// One bot of `bots`, weighted, among those free for a line of `priority`.
+    /// One bot of `bots`, weighted, among those with no line on its way; for an answer a busy one too, less likely,
+    /// which the answer then waits for.
     fn pick<'a>(&mut self, bots: impl Iterator<Item = (&'a Speaker, f32)>, priority: Priority) -> Option<&'a Speaker> {
-        let weighted: Vec<(&Speaker, f32)> = bots.filter(|(b, w)| *w > 0.0 && b.free(priority)).collect();
+        let weighted: Vec<(&Speaker, f32)> = bots
+            .filter(|(b, _)| b.free() || priority == Priority::Answer)
+            .map(|(b, w)| (b, if b.free() { w } else { w * BUSY_WEIGHT }))
+            .filter(|(_, w)| *w > 0.0)
+            .collect();
         let total: f32 = weighted.iter().map(|(_, w)| w).sum();
         let mut x = self.rng.next_f32() * total;
         for (bot, w) in &weighted {
@@ -554,6 +593,7 @@ impl Director {
         });
         self.waiting.push(Waiting {
             since: now,
+            busy_seen: now,
             persona: persona.to_string(),
             gist,
             speak,
@@ -763,7 +803,10 @@ impl Director {
             };
             return vec![line.answer(bot, trigger, Priority::Answer, false)];
         }
-        if social.players.asked_within(&from.name, now, QUESTION_GAP) {
+        let held = self.waiting.iter().any(
+            |w| matches!(&w.speak.trigger, Trigger::Question { from: f, to_me: false, .. } if f.userid == from.userid),
+        );
+        if held || social.players.asked_within(&from.name, now, QUESTION_GAP) {
             return Vec::new();
         }
         let bot = self.pick(
@@ -860,7 +903,7 @@ impl Director {
                     if others >= MATCH_END_BOTS {
                         break;
                     }
-                    if !bot.free(Priority::MatchEnd) || won_bot.is_some_and(|w| w.who.slot == bot.who.slot) {
+                    if !bot.free() || won_bot.is_some_and(|w| w.who.slot == bot.who.slot) {
                         continue;
                     }
                     if self.chance(Self::chatty(0.2, bot)) {
@@ -1659,7 +1702,12 @@ mod tests {
             .unwrap();
         assert!(r.ready(5.0, true).is_empty(), "still typing");
         r.bots[0].busy = Some(Priority::Remark);
-        let out = r.ready(6.0, true);
+        assert!(
+            r.ready(6.0, true).is_empty(),
+            "a line on its way, a remark too, is said first"
+        );
+        r.bots[0].busy = None;
+        let out = r.ready(7.0, true);
         assert!(matches!(&out[..], [s] if s.slot == 2 && s.trigger.line().is_some_and(|(_, t)| t == newer)));
         assert!(!r.d.has_waiting());
         assert!(
@@ -1692,6 +1740,81 @@ mod tests {
             r.say(300.0 * f64::from(i), &gordon, &format!("сегодня карта номер {i} опять"));
         }
         assert!(!r.d.has_waiting(), "only lines spoken to the bot wait");
+    }
+
+    #[test]
+    fn an_answer_waits_while_the_bot_finishes_its_line() {
+        let gordon = who(1, "Gordon", false);
+        let held = |seed: u64| {
+            let mut r = Room::new(seed, vec![speaker(2, "Kleiner")], limits());
+            r.bots[0].busy = Some(Priority::Remark);
+            assert!(
+                r.say(1.0, &gordon, "боты, вы где?").is_empty(),
+                "nothing replaces the remark"
+            );
+            r.d.has_waiting().then_some(r)
+        };
+        let held: Vec<Room> = (0..40).filter_map(held).collect();
+        assert!(
+            held.len() >= 25,
+            "lines to the bots wait for the only bot: {}",
+            held.len()
+        );
+        let mut r = (0..).find_map(|seed| {
+            let mut r = Room::new(seed, vec![speaker(2, "Kleiner")], roomy());
+            r.bots[0].busy = Some(Priority::Remark);
+            r.say(1.0, &gordon, "кто сейчас лидер?");
+            r.d.has_waiting().then_some(r)
+        });
+        let r = r.as_mut().unwrap();
+        assert!(r.d.waits_for(2) && !r.d.waits_for(3));
+        assert!(r.ready(20.0, true).is_empty() && r.ready(45.0, true).is_empty());
+        assert!(
+            r.d.has_waiting(),
+            "a question to everybody waits as long as the bot types"
+        );
+        r.bots[0].busy = None;
+        let out = r.ready(50.0, true);
+        assert!(matches!(&out[..], [s] if matches!(s.trigger, Trigger::Question { to_me: false, .. })));
+
+        let mut r = held.into_iter().next().unwrap();
+        assert!(r.ready(59.0, true).is_empty() && r.d.has_waiting());
+        assert!(r.ready(61.5, true).is_empty() && !r.d.has_waiting(), "a minute at most");
+    }
+
+    #[test]
+    fn a_question_to_everybody_waiting_for_its_bot_counts_as_answered() {
+        let gordon = who(1, "Gordon", false);
+        let mut held = 0;
+        for seed in 0..400 {
+            let mut r = Room::new(seed, vec![speaker(2, "Kleiner"), speaker(3, "Plutonium")], roomy());
+            r.bots[0].busy = Some(Priority::Remark);
+            if !r.say(1.0, &gordon, "кто сейчас лидер?").is_empty() || !r.d.has_waiting() {
+                continue;
+            }
+            held += 1;
+            assert!(
+                r.say(5.0, &gordon, "а сколько до конца?").is_empty(),
+                "seed {seed}: one answer to the player's questions to everybody in 2 minutes"
+            );
+        }
+        assert!(held >= 10, "{held}");
+    }
+
+    #[test]
+    fn a_line_from_the_map_before_takes_its_place_in_the_limits() {
+        let mut s = Social::default();
+        let mut d = Director::new(1, SimTime::ZERO, &limits());
+        d.charge(SimTime(5.0), true, &limits());
+        assert_eq!(d.last_remark, Some(SimTime(5.0)));
+        assert!(
+            !d.admit(SimTime(5.0), Priority::Greeting, false, &mut s, &limits()),
+            "one line of two left: kept for answers"
+        );
+        assert!(d.admit(SimTime(5.0), Priority::Answer, false, &mut s, &limits()));
+        d.charge(SimTime(6.0), false, &limits());
+        assert!(!d.admit(SimTime(6.0), Priority::Answer, false, &mut s, &limits()));
+        assert_eq!(d.last_remark, Some(SimTime(5.0)), "an answer starts no gap");
     }
 
     #[test]

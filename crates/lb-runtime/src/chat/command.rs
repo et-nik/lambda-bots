@@ -2,7 +2,7 @@
 
 use lb_chat::botchat::Phase;
 use lb_chat::journal::{MULTIKILL, NEMESIS, STREAK_SPOKEN};
-use lb_chat::{Notable, Trigger, Who, sanitize};
+use lb_chat::{Notable, Priority, Trigger, Who, sanitize};
 use lb_config::chat_phrases::Moment;
 use lb_host::Host;
 
@@ -41,6 +41,17 @@ fn words(args: &[&str]) -> String {
         out.push_str(w);
     }
     out
+}
+
+/// Why the bot `i` takes no line now: it has one on its way, which nothing replaces.
+fn busy(rt: &Runtime, i: usize) -> Option<Vec<String>> {
+    let bot = &rt.bots[i];
+    bot.chat.busy().map(|_| {
+        vec![format!(
+            "chat: {} has a line on its way; try again once it is out (`lb chat status`)",
+            bot.persona.name
+        )]
+    })
 }
 
 /// Who writes in `lb chat test`: the player giving the command, else "admin".
@@ -151,8 +162,8 @@ fn status(rt: &Runtime) -> Vec<String> {
         transcript_line(rt),
         ChatLog::status(rt.chat.chatlog.as_ref(), c.chatlog, c.chatlog_days),
         format!(
-            "this session: {} asked: {} model lines, {} phrases, {} kept quiet, {} failed; {} said",
-            n.asked, n.lines, n.phrases, n.silent, n.failed, n.said
+            "this session: {} asked: {} model lines, {} phrases, {} kept quiet, {} failed; {} said, {} not said",
+            n.asked, n.lines, n.phrases, n.silent, n.failed, n.said, n.lost
         ),
     ]);
     let talks: Vec<String> = rt
@@ -186,6 +197,13 @@ fn status(rt: &Runtime) -> Vec<String> {
             ),
         };
         out.push(format!("  {}: {state}", bot.persona.name));
+    }
+    for (_, p) in &rt.chat.carried {
+        let state = p.text.as_deref().map_or_else(
+            || "waiting for its line".to_string(),
+            |text| format!("about to type: {text}"),
+        );
+        out.push(format!("  {} (once back in the game): {state}", p.persona));
     }
     out
 }
@@ -237,10 +255,12 @@ pub(crate) fn command(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> V
             let Some(line) = sanitize::fit_say(&words(text), budget, &rt.config.chat.blocked, ascii) else {
                 return vec!["chat: nothing left to say after cleaning the line up".into()];
             };
+            if let Some(busy) = busy(rt, i) {
+                return busy;
+            }
             let now = rt.now;
-            rt.chat.unsay(|p| p.slot == slot);
             let bot = &mut rt.bots[i];
-            bot.chat.set_line(line.clone(), now, super::KEEP_ANSWER);
+            bot.chat.set_line(line.clone(), Priority::Answer, false, now);
             vec![format!("chat: {} will type `{line}`", bot.persona.name)]
         }
         ["test", bot, text @ ..] if !text.is_empty() => {
@@ -250,6 +270,9 @@ pub(crate) fn command(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> V
             let Some(i) = find(rt, bot) else {
                 return vec![format!("chat: no bot `{bot}`")];
             };
+            if let Some(busy) = busy(rt, i) {
+                return busy;
+            }
             let (slot, name) = (rt.bots[i].id.slot, rt.bots[i].persona.name.clone());
             let from = tester(rt);
             rt.chat_test(slot, from, words(text));
@@ -268,6 +291,9 @@ pub(crate) fn command(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> V
             let Some(i) = find(rt, bot) else {
                 return vec![format!("chat: no bot `{bot}`")];
             };
+            if let Some(busy) = busy(rt, i) {
+                return busy;
+            }
             let b = &rt.bots[i];
             let (slot, name) = (b.id.slot, b.persona.name.clone());
             let me = Who {

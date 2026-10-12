@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use lb_core::time::SimTime;
+use serde::{Deserialize, Serialize};
 
 use crate::lang::is_explosive;
 
@@ -23,7 +24,8 @@ const RAGE_WINDOW: f64 = 30.0;
 const RAGE_DEATHS: u32 = 3;
 
 /// A player as the chat sees them: slot, connection (`userid`, unique while the server runs) and name at the time.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Recorded in a [`crate::Carry`] (whom a carried line answers): a change to its fields is a new recording format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Who {
     pub slot: u8,
     pub userid: i32,

@@ -36,7 +36,7 @@ use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
 pub const MAGIC: &[u8; 8] = b"LBREC\0\r\n";
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 /// Uncompressed bytes gathered before a block goes to the writer thread.
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
@@ -1093,6 +1093,8 @@ mod tests {
         team_says: Vec<(u64, String)>,
         /// Client commands the bots sent.
         sent: Vec<Vec<String>>,
+        /// Bots take the slots from this one on (from 1 when 0).
+        first_bot_slot: u8,
     }
 
     impl Host for SimServer {
@@ -1155,7 +1157,7 @@ mod tests {
             if self.joined.len() >= 2 {
                 return CreateBotOutcome::ServerFull;
             }
-            let slot = self.joined.len() as u8 + 1;
+            let slot = self.first_bot_slot.max(1) + self.joined.len() as u8;
             let userid = 10 + i32::from(slot);
             self.joined.push((slot, userid, req.name.clone()));
             CreateBotOutcome::Created {
@@ -1871,6 +1873,116 @@ mod tests {
     }
 
     #[test]
+    fn a_line_on_its_way_when_the_map_ends_is_said_on_the_next_and_replays() {
+        use lb_chat::{Outcome, Trigger};
+
+        let root = dir("record-carried");
+        let answer = "привет, Гордон";
+        let fake = crate::chat::FakeBackend::answering(&[Outcome::Line(answer.into())]);
+        let sent = fake.sent.clone();
+        let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+        new_map(&mut rt, &mut rec, &mut server, 1, false);
+        let mut named = String::new();
+        frames(&mut rt, &mut rec, &mut server, 0..900, |rt, _, server, n| {
+            if n == 800 {
+                named = format!("{}, привет", netname(rt));
+                server.says.push((850, named.clone()));
+            }
+        });
+        assert!(
+            rt.bots[0].chat.busy().is_some(),
+            "the answer came and waits to be typed"
+        );
+        let first = rt.bots[0].id;
+        step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+        assert!(!said(&server, answer), "the map ended before the line was typed");
+
+        server.first_bot_slot = 3;
+        server.human_joins = Some(1200);
+        new_map(&mut rt, &mut rec, &mut server, 2, true);
+        frames(&mut rt, &mut rec, &mut server, 0..1200, |_, _, _, _| {});
+        assert_ne!(rt.bots[0].id, first, "the bot is back in another slot");
+        assert!(!said(&server, answer), "Gordon is not in the game yet");
+        frames(&mut rt, &mut rec, &mut server, 1200..2200, |_, _, _, _| {});
+        assert!(said(&server, answer), "said once Gordon is back: {:?}", server.sent);
+        let asked = sent
+            .lock()
+            .unwrap()
+            .asked
+            .iter()
+            .filter(|r| matches!(&r.trigger, Trigger::Addressed { text, .. } if *text == named))
+            .count();
+        assert_eq!(asked, 1, "asked once");
+        assert_eq!((rt.chat.counts.said, rt.chat.counts.lost), (1, 0));
+        rec.finish(&mut rt, "test over");
+        let opts = ReplayOptions {
+            dir: Some(root.join("replay")),
+            keep_dir: true,
+            max_diffs: 5,
+        };
+        let report = replay(&recording(&root), &opts, &mut |_| {}).unwrap();
+        assert!(report.matches(), "{}", report.lines().join("\n"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_answer_that_comes_after_the_map_change_is_said_on_the_next_map_and_replays() {
+        use lb_chat::Outcome;
+        use lb_chat::botchat::Phase;
+
+        let answer = "а вот и я";
+        for (release, phrase) in [(100, false), (900, false), (100, true), (900, true)] {
+            let root = dir(&format!("record-late-{release}-{phrase}"));
+            let outcome = if phrase {
+                Outcome::Phrase(answer.into())
+            } else {
+                Outcome::Line(answer.into())
+            };
+            let fake = crate::chat::FakeBackend::answering(&[outcome]);
+            let sent = fake.sent.clone();
+            let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+            new_map(&mut rt, &mut rec, &mut server, 1, false);
+            frames(&mut rt, &mut rec, &mut server, 0..1000, |rt, _, server, n| {
+                if n == 800 {
+                    sent.lock().unwrap().hold = true;
+                    server.says.push((850, format!("{}, ты где?", netname(rt))));
+                }
+            });
+            assert_eq!(sent.lock().unwrap().asked.len(), 1);
+            step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+
+            new_map(&mut rt, &mut rec, &mut server, 2, true);
+            frames(&mut rt, &mut rec, &mut server, 0..2000, |rt, _, _, n| {
+                if n + 1 == release {
+                    let back = rt.bots.first().map(|b| b.chat.phase().clone());
+                    if release > 500 {
+                        assert!(matches!(back, Some(Phase::Asked { .. })), "back, waiting: {back:?}");
+                    } else {
+                        assert!(back.is_none(), "the bot is not back yet: {back:?}");
+                    }
+                }
+                if n == release {
+                    sent.lock().unwrap().hold = false;
+                }
+            });
+            assert_eq!(sent.lock().unwrap().asked.len(), 1, "asked once");
+            if phrase {
+                assert!(
+                    !said(&server, answer),
+                    "a phrase's moment is gone with the map: {:?}",
+                    server.sent
+                );
+                let _ = std::fs::remove_dir_all(&root);
+                continue;
+            }
+            assert!(said(&server, answer), "release at {release}: {:?}", server.sent);
+            rec.finish(&mut rt, "test over");
+            replays_and_tells_another_line(&root);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
     fn a_busy_bot_answers_once_its_line_is_out() {
         use lb_chat::Outcome;
 
@@ -1990,12 +2102,12 @@ mod tests {
                 server.says.push((850, named.clone()));
             }
         });
+        assert!(said(&server, answer), "said on the next map: {:?}", server.sent);
         assert_eq!(
             addressed(&sent.lock().unwrap().asked, &named),
-            2,
-            "asked again on the next map"
+            1,
+            "its answer was said: the line again is a repeat"
         );
-        assert!(said(&server, answer), "{:?}", server.sent);
 
         let fake = crate::chat::FakeBackend::answering(&[Outcome::Line(answer.into())]);
         let sent = fake.sent.clone();
@@ -2156,13 +2268,13 @@ mod tests {
     fn a_recording_of_another_format_is_refused() {
         let root = dir("record-format");
         let path = root.join("old.lbrec");
-        std::fs::write(&path, [MAGIC.as_slice(), &3u32.to_le_bytes()].concat()).unwrap();
+        std::fs::write(&path, [MAGIC.as_slice(), &4u32.to_le_bytes()].concat()).unwrap();
         let Err(err) = Reader::open(&path) else {
-            panic!("a recording of format 3 opens");
+            panic!("a recording of format 4 opens");
         };
-        assert!(err.contains("recording format 3, this build reads 4"), "{err}");
+        assert!(err.contains("recording format 4, this build reads 5"), "{err}");
         let err = replay(&path, &ReplayOptions::default(), &mut |_| {}).unwrap_err();
-        assert!(err.contains("recording format 3"), "{err}");
+        assert!(err.contains("recording format 4"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

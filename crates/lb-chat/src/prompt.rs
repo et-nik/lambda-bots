@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::aliases::Aliases;
+use crate::aliases::{self, Aliases};
 use crate::journal::{Event, Notable, Who};
 use crate::lang::{self, Lang};
 use crate::memory::{self, MapRecap, NOTES_MAX, PlayerMemory};
@@ -1373,23 +1373,7 @@ pub fn render(
 pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases: &Aliases) -> Option<Rendered> {
     let lang = Lang::of(&s.language);
     let words = memory::names(s, aliases);
-    let lines = |p: &PlayerMap| -> Vec<String> {
-        p.lines
-            .iter()
-            .filter(|(_, l)| memory::memorable(l, &words))
-            .map(|(_, l)| format!("«{l}»"))
-            .collect()
-    };
-    let players: Vec<(&PlayerMap, Vec<String>)> = s
-        .players
-        .iter()
-        .map(|p| (p, lines(p)))
-        .filter(|(p, lines)| {
-            let fights: u32 = p.vs_bots.iter().map(|(_, a, b)| a + b).sum();
-            fights >= 3 || !lines.is_empty() || !p.moments.is_empty()
-        })
-        .take(NOTES_PLAYERS)
-        .collect();
+    let players = notes_players(s, &words);
     if players.is_empty() {
         return None;
     }
@@ -1419,14 +1403,7 @@ pub fn render_notes(s: &MapSummary, previous: &BTreeMap<String, String>, aliases
             .take(3)
             .map(|(w, n)| format!("{} {n}", lang::weapon_name(lang, w)))
             .collect();
-        let name = match aliases.all(&p.name) {
-            [] => p.name.clone(),
-            all => format!(
-                "{} ({})",
-                one_of(all, if lang == Lang::Ru { "или" } else { "or" }),
-                p.name
-            ),
-        };
+        let name = listed_name(lang, p, aliases);
         let _ = writeln!(user, "- {} | {name}: {}/{}", p.key, p.kills, p.deaths);
         let label = |ru: &'static str, en: &'static str| if lang == Lang::Ru { ru } else { en };
         if !duels.is_empty() {
@@ -1510,6 +1487,85 @@ pub fn parse_notes(text: &str) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The players a notes request lists, with their lines worth remembering: those who fought the bots three times or
+/// more, wrote such a line or had a moment; [`NOTES_PLAYERS`] at most. `words`: the names on the map
+/// ([`memory::names`]).
+fn notes_players<'a>(s: &'a MapSummary, words: &[String]) -> Vec<(&'a PlayerMap, Vec<String>)> {
+    let lines = |p: &PlayerMap| -> Vec<String> {
+        p.lines
+            .iter()
+            .filter(|(_, l)| memory::memorable(l, words))
+            .map(|(_, l)| format!("«{l}»"))
+            .collect()
+    };
+    s.players
+        .iter()
+        .map(|p| (p, lines(p)))
+        .filter(|(p, lines)| {
+            let fights: u32 = p.vs_bots.iter().map(|(_, a, b)| a + b).sum();
+            fights >= 3 || !lines.is_empty() || !p.moments.is_empty()
+        })
+        .take(NOTES_PLAYERS)
+        .collect()
+}
+
+/// A player as the notes request lists them: their names, then the nickname in brackets.
+fn listed_name(lang: Lang, p: &PlayerMap, aliases: &Aliases) -> String {
+    match aliases.all(&p.name) {
+        [] => p.name.clone(),
+        all => format!(
+            "{} ({})",
+            one_of(all, if lang == Lang::Ru { "или" } else { "or" }),
+            p.name
+        ),
+    }
+}
+
+/// The notes of [`parse_notes`] under the memory keys of the players the request listed. The model keys a note by what
+/// the list shows, in any case: the key itself, the whole `key | name` of a line or its start before a `|`, or a name
+/// (the nickname, without its clan tag too, a name the player goes by, all of them as listed). A label is first taken
+/// for a key, then for a line, then for a name; a name that fits players of more than one key, or a label that fits
+/// none, is left out. Of two notes for one player the one under the key wins, then the one under the line; of two
+/// under names, the first label.
+pub fn notes_by_key(s: &MapSummary, notes: BTreeMap<String, String>, aliases: &Aliases) -> BTreeMap<String, String> {
+    let lang = Lang::of(&s.language);
+    let listed = notes_players(s, &memory::names(s, aliases));
+    let players = || listed.iter().map(|(p, _)| *p);
+    let norm = |n: &str| n.trim().to_lowercase();
+    let by_key = |label: &str| players().find(|p| norm(&p.key) == label).map(|p| p.key.clone());
+    let owner = |label: &str| -> Option<(String, u8)> {
+        let label = norm(label);
+        if let Some(key) = by_key(&label) {
+            return Some((key, 0));
+        }
+        let line = players()
+            .find(|p| norm(&format!("{} | {}", p.key, listed_name(lang, p, aliases))) == label)
+            .map(|p| p.key.clone())
+            .or_else(|| label.match_indices('|').find_map(|(at, _)| by_key(label[..at].trim())));
+        if let Some(key) = line {
+            return Some((key, 1));
+        }
+        let mut keys = players()
+            .filter(|p| {
+                let names = [p.name.clone(), aliases::short(&p.name), listed_name(lang, p, aliases)];
+                names.iter().chain(aliases.all(&p.name)).any(|n| norm(n) == label)
+            })
+            .map(|p| p.key.as_str());
+        let first = keys.next()?;
+        keys.all(|k| k == first).then(|| (first.to_string(), 2))
+    };
+    let mut kept: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    for (label, note) in notes {
+        let Some((key, rank)) = owner(&label) else {
+            continue;
+        };
+        if kept.get(&key).is_none_or(|(had, _)| rank < *had) {
+            kept.insert(key, (rank, note));
+        }
+    }
+    kept.into_iter().map(|(key, (_, note))| (key, note)).collect()
 }
 
 #[cfg(test)]
@@ -2710,6 +2766,66 @@ mod tests {
         m.players.insert("STEAM_0:0:42".into(), PlayerMemory::default());
         m.apply_notes(&notes);
         assert_eq!(m.players["STEAM_0:0:42"].notes, "сильный, играет с дробовиком");
+    }
+
+    #[test]
+    fn notes_come_under_any_label_the_list_shows() {
+        let player = |key: &str, name: &str| PlayerMap {
+            key: key.into(),
+            name: name.into(),
+            vs_bots: vec![("Kleiner".into(), 2, 2)],
+            ..Default::default()
+        };
+        let summary = MapSummary {
+            map: "crossfire".into(),
+            language: "ru".into(),
+            players: vec![
+                player("STEAM_0:1:42", "Gordon"),
+                player("STEAM_0:0:9", "[B] Barney"),
+                player("STEAM_0:0:9", "[B] Barney"),
+                player("STEAM_0:0:7", "Alyx"),
+                player("STEAM_0:0:1", "Player"),
+                player("name:player", "Player"),
+                player("STEAM_0:0:5", "Eli"),
+                PlayerMap {
+                    vs_bots: Vec::new(),
+                    ..player("STEAM_0:0:6", "Eli")
+                },
+                player("STEAM_0:0:11", "KOZA|ru"),
+                player("STEAM_0:0:12", "KOZA"),
+                player("STEAM_0:0:14", "STEAM_0:0:12"),
+            ],
+            ..Default::default()
+        };
+        let mut aliases = Aliases::default();
+        aliases.insert("Alyx", &["Аликс", "Аля"]);
+        let r = render_notes(&summary, &BTreeMap::new(), &aliases).unwrap();
+        assert!(
+            r.user.contains("- STEAM_0:0:7 | Аликс или Аля (Alyx): 0/0"),
+            "{}",
+            r.user
+        );
+        assert!(!r.user.contains("STEAM_0:0:6"), "met once, not listed: {}", r.user);
+        let answer = r#"{"gordon": "a", "STEAM_0:1:42": "k", "Barney": "b", "Аликс или Аля (Alyx)": "c",
+            "STEAM_0:0:1 | Player": "d", "Player": "e", "Kleiner": "f", " STEAM_0:0:5 ": "g", "Eli": "h",
+            "STEAM_0:0:11 | KOZA|ru": "i", "KOZA | ru": "j", "STEAM_0:0:12": "m"}"#;
+        let notes = notes_by_key(&summary, parse_notes(answer), &aliases);
+        let notes: Vec<(&str, &str)> = notes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            notes,
+            [
+                ("STEAM_0:0:1", "d"),
+                ("STEAM_0:0:11", "i"),
+                ("STEAM_0:0:12", "m"),
+                ("STEAM_0:0:5", "g"),
+                ("STEAM_0:0:7", "c"),
+                ("STEAM_0:0:9", "b"),
+                ("STEAM_0:1:42", "k")
+            ],
+            "the key wins over a name, the one it labels or another player's nickname, whichever label sorts first; \
+             a player listed twice (back after a reconnect) is one; a name two players share, one no player has, \
+             and a name before a `|` are left out"
+        );
     }
 
     #[test]
