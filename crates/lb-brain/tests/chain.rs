@@ -149,10 +149,7 @@ fn a_recognized_enemy_is_aimed_at_on_the_same_frame() {
     // The scene sees the intents of the frame before.
     let (mut aimed, mut last) = (None, SimTime::ZERO);
     let r = run_scene(world, 1000, &setup, &|_| {}, &mut |sc| {
-        let aiming = matches!(
-            sc.brain.intents.look,
-            Some((Prio::Threat, LookIntent::Point { engaged: true, .. }))
-        );
+        let aiming = matches!(sc.brain.intents.look, Some((Prio::Threat, LookIntent::Track { .. })));
         if aiming && aimed.is_none() {
             aimed = Some(last);
         }

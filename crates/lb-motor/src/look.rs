@@ -1,21 +1,25 @@
-//! The look controller: turns the view toward the point the arbiter granted, the way yapb aims (`vision.cpp`), as
-//! hard as the bot's skill allows. Spring models use a damped spring per axis whose stiffness follows the bot's turn
-//! acceleration: the view is flicked at full acceleration at an enemy or at whatever calls for attention, turned more
-//! gently to look along the way and around, and capped by the bot's turn rate. Springs are integrated over each
-//! frame's own time in steps of at most a millisecond, so the view moves on every frame and the result does not
-//! depend on the server frame rate. The newbie model is yapb's mouse model for noob bots; its recurrence is written
-//! per step, so it keeps fixed 90 Hz steps.
+//! The look controller: turns the view toward the point the arbiter granted, as hard as the bot's skill allows. The
+//! hand model (`hand.rs`) moves the view as a player's hand moves a mouse: strokes along arcs that land a little short
+//! and are corrected, and a pursuit that lags behind a moving goal. Spring models, yapb's look (`vision.cpp`), use a
+//! damped spring per axis whose stiffness follows the bot's turn acceleration: the view is flicked at full
+//! acceleration at an enemy or at whatever calls for attention, turned more gently to look along the way and around,
+//! and capped by the bot's turn rate. Springs are integrated over each frame's own time in steps of at most a
+//! millisecond, so the view moves on every frame and the result does not depend on the server frame rate. The newbie
+//! model is yapb's mouse model for noob bots; its recurrence is written per step, so it keeps fixed 90 Hz steps.
 
 use lb_config::skill::AimModel;
 use lb_core::math::{angle_diff, normalize_angle};
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
+use lb_styles::HandTraits;
 
-const STEP_MAX: f32 = 0.001;
+use crate::hand::Hand;
+
+pub(crate) const STEP_MAX: f32 = 0.001;
 const NEWBIE_STEP: f32 = 1.0 / 90.0;
 const SNAP_DEGREES: f32 = 1.0;
-const MAX_PITCH: f32 = 89.0;
+pub(crate) const MAX_PITCH: f32 = 89.0;
 /// Spring stiffness per degree/s² of turn acceleration: yapb's 200 at 3000.
 const STIFFNESS_PER_ACCEL: f32 = 1.0 / 15.0;
 /// Damping ratio of the spring (yapb's damping 25 at stiffness 200), and of the combat spring aiming at an enemy.
@@ -35,6 +39,11 @@ pub struct LookParams {
     pub calm: f32,
     /// 0..100.
     pub skill: u8,
+    /// Spread of where the hand's strokes land, a share of their length.
+    pub scatter: f32,
+    /// Seconds the hand takes to answer what it sees.
+    pub lag: f32,
+    pub hand: HandTraits,
 }
 
 impl LookParams {
@@ -45,6 +54,9 @@ impl LookParams {
         turn_accel: 3000.0,
         calm: 1.0,
         skill: 100,
+        scatter: 0.055,
+        lag: 0.08,
+        hand: HandTraits::NEUTRAL,
     };
 }
 
@@ -57,6 +69,9 @@ pub enum Urgency {
     Alert,
     /// Aiming at an enemy: a skilled bot's combat spring is stiffer.
     Engaged,
+    /// A weapon protocol, a jump or a ladder that needs the view exactly: the hand corrects down to a fifth of a
+    /// degree. Springs turn as for an alert.
+    Precise,
 }
 
 /// What the look is asked to do this frame.
@@ -65,6 +80,21 @@ pub struct LookGoal {
     /// View angles to reach (pitch positive down).
     pub angles: Vec3,
     pub urgency: Urgency,
+    /// How fast the angles move (pitch, yaw), degrees per second, when the look knows it.
+    pub rate: Option<Vec2>,
+    /// Half the angle the target takes up, degrees; 0 for a point.
+    pub size: f32,
+}
+
+impl LookGoal {
+    pub fn new(angles: Vec3, urgency: Urgency) -> LookGoal {
+        LookGoal {
+            angles,
+            urgency,
+            rate: None,
+            size: 0.0,
+        }
+    }
 }
 
 /// The spring of one update: stiffness, damping and the acceleration and rate caps.
@@ -112,6 +142,7 @@ pub struct LookController {
     /// Time the newbie model has not stepped through yet.
     pending: f32,
     newbie: Newbie,
+    hand: Hand,
 }
 
 impl LookController {
@@ -139,6 +170,8 @@ impl LookController {
                 self.pending -= NEWBIE_STEP;
                 self.newbie_step(view, goal, NEWBIE_STEP, p, now, moving, fired_at, rng);
             }
+        } else if p.model == AimModel::Hand {
+            self.hand.update(view, goal, dt, p, rng);
         } else if dt > 0.0 {
             let spring = Spring::new(p, goal.urgency);
             let steps = (dt / STEP_MAX).ceil().max(1.0);
@@ -150,6 +183,13 @@ impl LookController {
         view.x = view.x.clamp(-MAX_PITCH, MAX_PITCH);
         view.y = normalize_angle(view.y);
         view.z = 0.0;
+    }
+
+    /// A frame without a look asked for: the hand finishes the strokes it has started; springs hold the view.
+    pub fn coast(&mut self, view: &mut Vec3, dt: f32, p: &LookParams) {
+        if p.model == AimModel::Hand {
+            self.hand.coast(view, dt.clamp(0.0, 0.25), p);
+        }
     }
 
     fn spring_step(&mut self, view: &mut Vec3, goal: &LookGoal, h: f32, s: &Spring) {
@@ -235,10 +275,7 @@ mod tests {
     fn turn(p: &LookParams, urgency: Urgency, yaw: f32, fps: u32, secs: f32) -> Vec<(f32, Vec3)> {
         let mut c = LookController::default();
         let mut view = Vec3::ZERO;
-        let goal = LookGoal {
-            angles: Vec3::new(10.0, yaw, 0.0),
-            urgency,
-        };
+        let goal = LookGoal::new(Vec3::new(10.0, yaw, 0.0), urgency);
         let mut rng = Pcg32::new(1, 1);
         let dt = 1.0 / fps as f32;
         let frames = (secs * fps as f32).round() as u32;
@@ -266,6 +303,7 @@ mod tests {
             turn_accel,
             calm: 1.0,
             skill: 50,
+            ..LookParams::NAV
         }
     }
 
@@ -360,8 +398,9 @@ mod tests {
         assert!(calm > alert && alert > engaged, "{calm} {alert} {engaged}");
     }
 
+    /// The springs at the presets' turn rates, as they turned before the hand: hard and expert with the combat spring.
     #[test]
-    fn presets_turn_as_fast_as_their_players() {
+    fn springs_turn_as_fast_as_the_presets_players_did() {
         let presets = lb_config::skill::Presets::default();
         // (preset, how the look turns, turn, seconds to within 2°: least and most)
         let cases = [
@@ -378,11 +417,13 @@ mod tests {
         ];
         for (k, urgency, yaw, [lo, hi]) in cases {
             let p = LookParams {
-                model: k.aim_model,
-                turn_speed: k.turn_speed,
-                turn_accel: k.turn_accel,
+                model: if k.turn_speed >= presets.hard.turn_speed {
+                    AimModel::SpringCombat
+                } else {
+                    AimModel::Spring
+                },
                 calm: 0.5,
-                skill: 50,
+                ..preset(AimModel::Spring, k.turn_speed, k.turn_accel)
             };
             let yaw = if yaw == 180.0 { 180.0 - 1e-3 } else { yaw };
             let t = reached(&turn(&p, urgency, yaw, 1000, 1.0), yaw);

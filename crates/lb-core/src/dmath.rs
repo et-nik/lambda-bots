@@ -42,3 +42,7 @@ pub fn exp(x: f32) -> f32 {
 pub fn ln(x: f32) -> f32 {
     libm::logf(x)
 }
+
+pub fn erf(x: f32) -> f32 {
+    libm::erff(x)
+}

@@ -59,7 +59,28 @@ pub struct PersonaSpec {
     pub overrides: SkillOverrides,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<ChatSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand: Option<HandSpec>,
 }
+
+/// How the personality's hand moves the mouse; whatever is left out comes from its seed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HandSpec {
+    /// How quick its strokes are, times its skill's (`HAND_SPEED_RANGE`); quicker strokes land wider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// Degrees a sweep across the screen turns from its start to its end: positive bulges up, negative down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bend: Option<f32>,
+    /// How much farther (+) or shorter (−) than usual its strokes land, a share of the stroke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<f32>,
+}
+
+pub const HAND_SPEED_RANGE: [f32; 2] = [0.8, 1.25];
+pub const HAND_BEND_MAX: f32 = 40.0;
+pub const HAND_REACH_MAX: f32 = 0.1;
 
 /// How the personality talks in the chat; whatever is left out comes from its seed and style.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -210,6 +231,26 @@ impl PersonaSpec {
                 ));
             }
         }
+        if let Some(hand) = self.hand {
+            if hand
+                .speed
+                .is_some_and(|v| !(HAND_SPEED_RANGE[0]..=HAND_SPEED_RANGE[1]).contains(&v))
+            {
+                return Err(bad("hand.speed", "must be in 0.8..=1.25".into()));
+            }
+            if hand
+                .bend
+                .is_some_and(|v| !(-HAND_BEND_MAX..=HAND_BEND_MAX).contains(&v))
+            {
+                return Err(bad("hand.bend", "must be in -40..=40 (degrees)".into()));
+            }
+            if hand
+                .reach
+                .is_some_and(|v| !(-HAND_REACH_MAX..=HAND_REACH_MAX).contains(&v))
+            {
+                return Err(bad("hand.reach", "must be in -0.1..=0.1".into()));
+            }
+        }
         Ok(())
     }
 
@@ -330,6 +371,13 @@ bots:
         )));
         let nine = (0..=CALLS_MAX).map(|i| format!("n{i}")).collect::<Vec<_>>().join(", ");
         assert!(bad(&format!("  - name: \"a\"\n    chat: {{ call: [{nine}] }}\n")));
+        assert!(bad("  - name: \"a\"\n    hand: { speed: 2 }\n"));
+        assert!(bad("  - name: \"a\"\n    hand: { bend: -60 }\n"));
+        assert!(bad("  - name: \"a\"\n    hand: { reach: 0.3 }\n"));
+        assert!(bad("  - name: \"a\"\n    hand: { sens: 2 }\n"), "unknown hand fields");
+        assert!(!bad(
+            "  - name: \"a\"\n    hand: { speed: 1.1, bend: -15, reach: 0.02 }\n"
+        ));
     }
 
     #[test]

@@ -36,10 +36,16 @@ Only `name` is required. Missing fields are derived from the nickname once and n
 | `seed`      | seed of its own random habits; default: derived from the nickname                                              |
 | `overrides` | single skill parameters from `config/difficulty.yaml`: `{ turn_speed: 1200 }`                                  |
 | `chat`      | how it talks in the chat: `{ chattiness: 0–1, profanity, typing_cpm, style, about, call }`; see `docs/chat.md` |
+| `hand`      | how its hand moves the mouse: `{ speed: 0.8–1.25, bend: −40–40, reach: −0.1–0.1 }`; see below                  |
 
 `chat.call` lists names players call the bot by besides its nickname (`call: [Плутон, Плутоныч]`): a line with one of
 them names the bot, as its nickname does. The profile goes with the personality to every server; what one server
 wants a bot to know on top of it (who the bot is there, whom it knows) goes in that server's `config/chat/bots.yaml`.
+
+`hand` gives the personality its own mouse (`docs/behavior.md`, *Aim*). `speed` makes its strokes that many times
+quicker, and they land that many times wider. `bend` is how many degrees a sweep across the screen turns: positive
+bulges up, negative down. `reach` is how much farther (+) or shorter (−) than usual its strokes land, a share of the
+stroke. Whatever is left out is drawn from the nickname: speed 0.88–1.12, bend 8–22° either way, reach ±0.03.
 
 Example `profiles/roster.yaml`:
 
@@ -58,12 +64,15 @@ bots:
     style: rusher
     skill: hard
     overrides: { turn_speed: 2000 }
+    hand: { speed: 1.1, bend: -12 }
 ```
 
 ## Skill
 
 Skill is a 0–100 scale with five presets at 0, 25, 50, 75 and 100. `config/difficulty.yaml` sets the parameters at
-these points: recognition time and its floor, aim latency and error, turn speed and acceleration, hearing, memory,
+these points: recognition time and its floor, aim latency and error, turn speed and acceleration, how wide the hand's
+strokes land and how soon it corrects them (`aim_scatter`, `hand_lag`), the climb from the body to the head
+(`head_climb`), hearing, memory,
 tricks, how readily long jumps
 are taken (`longjump`: 0.15, 0.35, 0.6, 0.9, 1.0) and whether they are bold and dodge (`longjump_bold`,
 `longjump_dodge`, hard and expert), throwing grenades one after another until none is left (`throw_series`, hard and
@@ -74,11 +83,11 @@ Between two presets numbers are mixed linearly, so skill 62 is about halfway bet
 model, tricks, bold long jumps, grenade series, dodge jumps, bunny hopping) keep the lower preset's value until the
 next point: a bot bunny hops from skill 75 on.
 `overrides` in a personality then change single parameters, and `bots.reflex` in `config/lambdabots.yaml` (cvar
-`lb_reflex`, 0.5–2) makes every bot that many times as quick: recognition, aim latency and the scope's settling take
-that share of the time, turns are that much faster.
+`lb_reflex`, 0.5–2) makes every bot that many times as quick: recognition, aim latency, the hand's lag, the climb to
+the head and the scope's settling take that share of the time, and turns are quicker.
 
 The presets are set for Half-Life's pace: an expert answers an enemy near its crosshair in some 0.13 s and flicks 90°
-in 0.1 s, a normal bot in 0.25–0.3 s and 0.2 s, a beginner in 0.5–1.5 s. A
+in 0.12 s, a normal bot in 0.25–0.3 s and 0.2 s, a beginner in 0.5–1.5 s. A
 `config/difficulty.yaml` kept from an older version keeps its older, slower table: the server warns about every
 parameter that differs from the built-in one; replace the file to take the new one.
 

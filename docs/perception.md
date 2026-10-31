@@ -143,7 +143,7 @@ The parameters live in `config/difficulty.yaml` and can be overridden per person
 | `track_forget`        | 4       | 6       | 8         | 10        | 12        |
 
 `bots.reflex` in `config/lambdabots.yaml` (cvar `lb_reflex`, 0.5–2) scales every bot's recognition and aim
-latencies and turns on top of its skill (`docs/behavior.md`, *Aim*).
+latencies, its hand's lag and its turns on top of its skill (`docs/behavior.md`, *Aim*).
 
 ## Inspecting
 

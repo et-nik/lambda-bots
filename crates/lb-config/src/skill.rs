@@ -110,6 +110,9 @@ pub enum AimModel {
     Spring,
     /// Stiffer spring in combat.
     SpringCombat,
+    /// A hand on a mouse: bell-shaped strokes along arcs that land a little short and are corrected, and a pursuit
+    /// that lags behind a moving target.
+    Hand,
 }
 
 /// Values mixed between two presets; switches keep the lower preset's value.
@@ -212,8 +215,16 @@ skill_params! {
     aim_error: [f32; 3],
     /// Maximum turn rate, degrees per second.
     turn_speed: f32,
-    /// Maximum turn acceleration, degrees per second squared: how hard the view is flicked.
+    /// Maximum turn acceleration, degrees per second squared: how hard the view is flicked. A hand's stroke of A
+    /// degrees takes about √(3.84·A / turn_accel) seconds.
     turn_accel: f32,
+    /// Spread of where a hand's stroke lands, a share of the stroke's length (along it; half of it across).
+    aim_scatter: f32,
+    /// Seconds a hand takes to answer what it sees: before it corrects a stroke, and the lag of its pursuit of a
+    /// moving target.
+    hand_lag: f32,
+    /// Seconds to bring the aim from the body up to the head once the view is on the target.
+    head_climb: f32,
     /// Extra pause between semi-automatic shots, seconds [min, max].
     semi_auto_delay: [f32; 2],
     /// Chance to stand still while fighting at 768–1024 units, 0..1.
@@ -262,7 +273,8 @@ skill_params! {
 
 impl SkillParams {
     /// The parameters of a bot `reflex` times as quick (clamped to [`REFLEX_RANGE`]): it recognizes enemies, follows
-    /// them with its aim and settles a scope in that share of the time, and turns that much faster.
+    /// them with its aim and hand, brings the aim to the head and settles a scope in that share of the time, and
+    /// turns that much faster.
     pub fn with_reflex(mut self, reflex: f32) -> SkillParams {
         let r = reflex.clamp(REFLEX_RANGE[0], REFLEX_RANGE[1]);
         if r == 1.0 {
@@ -272,6 +284,8 @@ impl SkillParams {
         self.recognition_floor /= r;
         self.reacquire_delay /= r;
         self.aim_latency /= r;
+        self.hand_lag /= r;
+        self.head_climb /= r;
         self.scope_settle = self.scope_settle.map(|v| v / r);
         self.turn_speed *= r;
         self.turn_accel *= r;
@@ -384,6 +398,9 @@ impl Default for Presets {
             aim_error,
             turn_speed,
             turn_accel: 0.0,
+            aim_scatter: 0.0,
+            hand_lag: 0.0,
+            head_climb: 0.0,
             semi_auto_delay,
             stay_mid: stay[0],
             stay_far: stay[1],
@@ -429,7 +446,7 @@ impl Default for Presets {
                 [0.4, 0.6],
                 [0.45, 0.15, 1.5],
                 0.15,
-                Spring,
+                Hand,
                 0.20,
                 [15.0, 15.0, 30.0],
                 600.0,
@@ -447,7 +464,7 @@ impl Default for Presets {
                 [0.22, 0.35],
                 [0.50, 0.10, 2.0],
                 0.10,
-                Spring,
+                Hand,
                 0.25,
                 [10.0, 10.0, 20.0],
                 1000.0,
@@ -465,7 +482,7 @@ impl Default for Presets {
                 [0.14, 0.22],
                 [0.55, 0.06, 2.5],
                 0.07,
-                SpringCombat,
+                Hand,
                 0.50,
                 [5.0, 5.0, 10.0],
                 1600.0,
@@ -483,7 +500,7 @@ impl Default for Presets {
                 [0.08, 0.14],
                 [0.60, 0.04, 3.0],
                 0.05,
-                SpringCombat,
+                Hand,
                 0.75,
                 [1.5, 1.5, 3.0],
                 2500.0,
@@ -516,6 +533,15 @@ impl Default for Presets {
             (0.13, 15000.0),
             (0.10, 24000.0),
         ];
+        // (aim_scatter, hand_lag, head_climb): where a stroke of the hand lands, how soon it answers what it sees, and
+        // how long the aim takes from the body up to the head.
+        let hands = [
+            (0.15, 0.22, 0.6),
+            (0.12, 0.17, 0.5),
+            (0.09, 0.13, 0.4),
+            (0.07, 0.10, 0.3),
+            (0.055, 0.08, 0.2),
+        ];
         let all = [
             &mut presets.noob,
             &mut presets.easy,
@@ -523,13 +549,18 @@ impl Default for Presets {
             &mut presets.hard,
             &mut presets.expert,
         ];
-        for ((params, (charge, settle, throws, longjump)), (floor, accel)) in all.into_iter().zip(extra).zip(reflexes) {
+        for (((params, (charge, settle, throws, longjump)), (floor, accel)), (scatter, lag, climb)) in
+            all.into_iter().zip(extra).zip(reflexes).zip(hands)
+        {
             params.gauss_charge = charge;
             params.scope_settle = settle;
             params.throw_rate = throws;
             params.longjump = longjump;
             params.recognition_floor = floor;
             params.turn_accel = accel;
+            params.aim_scatter = scatter;
+            params.hand_lag = lag;
+            params.head_climb = climb;
         }
         for p in [&mut presets.hard, &mut presets.expert] {
             p.gauss_walls = true;
@@ -598,6 +629,15 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
     if p.turn_accel <= 0.0 {
         return Err(bad("turn_accel", "must be positive"));
     }
+    if !(0.0..=0.5).contains(&p.aim_scatter) {
+        return Err(bad("aim_scatter", "must be in 0..=0.5"));
+    }
+    if !(0.0..=1.0).contains(&p.hand_lag) {
+        return Err(bad("hand_lag", "must be in 0..=1 (seconds)"));
+    }
+    if !(0.0..=3.0).contains(&p.head_climb) {
+        return Err(bad("head_climb", "must be in 0..=3 (seconds)"));
+    }
     if p.recognition_floor < 0.0 {
         return Err(bad("recognition_floor", "must not be negative"));
     }
@@ -662,7 +702,9 @@ mod tests {
         assert_eq!(p.at(0), p.noob);
         let mid = p.at(62);
         assert!(mid.turn_speed > p.normal.turn_speed && mid.turn_speed < p.hard.turn_speed);
-        assert_eq!(mid.aim_model, AimModel::Spring, "switches keep the lower preset");
+        assert_eq!(p.at(24).aim_model, AimModel::Newbie, "switches keep the lower preset");
+        assert_eq!(mid.aim_model, AimModel::Hand);
+        assert!(mid.hand_lag < p.normal.hand_lag && mid.hand_lag > p.hard.hand_lag);
         assert_eq!(p.at(10).dodge_hop_cooldown, None, "no dodge jumps until easy");
         assert!(!p.at(30).tricks);
         assert!(p.at(50).tricks);
@@ -715,8 +757,11 @@ mod tests {
         let quick = normal.clone().with_reflex(2.0);
         assert_eq!(quick.recognition_delay, normal.recognition_delay.map(|v| v / 2.0));
         assert_eq!(quick.aim_latency, normal.aim_latency / 2.0);
+        assert_eq!(quick.hand_lag, normal.hand_lag / 2.0);
+        assert_eq!(quick.head_climb, normal.head_climb / 2.0);
         assert_eq!(quick.turn_accel, normal.turn_accel * 2.0);
         assert_eq!(quick.aim_error, normal.aim_error, "no better aim");
+        assert_eq!(quick.aim_scatter, normal.aim_scatter);
         assert_eq!(normal.clone().with_reflex(9.0), quick, "clamped");
         let slow = normal.clone().with_reflex(0.5);
         assert_eq!(slow.turn_speed, normal.turn_speed / 2.0);

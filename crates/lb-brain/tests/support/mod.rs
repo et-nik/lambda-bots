@@ -178,6 +178,7 @@ pub fn character(skill: u8) -> Character {
         affinity: StyleId::Balanced.goal_affinity(),
         weapons: lb_brain::WeaponLike::default(),
         tricks: StyleId::Balanced.trick_likes(),
+        hand: lb_styles::HandTraits::NEUTRAL,
     }
 }
 

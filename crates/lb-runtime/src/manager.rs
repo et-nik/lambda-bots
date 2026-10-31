@@ -273,6 +273,7 @@ fn character(
         affinity,
         weapons,
         tricks,
+        hand: persona.hand,
     }
 }
 

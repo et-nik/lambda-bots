@@ -635,6 +635,7 @@ mod tests {
             affinity: lb_styles::StyleId::Balanced.goal_affinity(),
             weapons: WeaponLike::default(),
             tricks,
+            hand: lb_styles::HandTraits::NEUTRAL,
         }
     }
 
