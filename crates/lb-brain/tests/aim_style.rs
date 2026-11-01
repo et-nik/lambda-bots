@@ -83,7 +83,7 @@ const FL_DUCKING: u32 = 1 << 14;
 fn state(out: &mut String, t: f64, slot: u8, origin: Vec3, velocity: Vec3, view: Vec3, flags: u32) {
     let _ = writeln!(
         out,
-        "S\t{t:.4}\t{slot}\t0\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t28\t{:.3}\t{:.3}\t{flags}\t100\t0\tweapon_9mmhandgun\t0",
+        "S\t{t:.4}\t{slot}\t0\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t28\t{:.3}\t{:.3}\t{flags}\t100\t0\t9mmhandgun\t0",
         origin.x, origin.y, origin.z, velocity.x, velocity.y, velocity.z, view.x, view.y
     );
 }

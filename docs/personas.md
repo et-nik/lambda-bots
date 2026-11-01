@@ -88,7 +88,7 @@ next point: a bot bunny hops from skill 75 on.
 the head and the scope's settling take that share of the time, and turns are quicker.
 
 The presets are set for Half-Life's pace: an expert answers an enemy near its crosshair in some 0.13 s and flicks 90°
-in 0.12 s, a normal bot in 0.25–0.3 s and 0.2 s, a beginner in 0.5–1.5 s. A
+in 0.22 s, a normal bot in 0.25–0.3 s and 0.43 s, a beginner in 0.5–1.5 s. A
 `config/difficulty.yaml` kept from an older version keeps its older, slower table: the server warns about every
 parameter that differs from the built-in one; replace the file to take the new one.
 

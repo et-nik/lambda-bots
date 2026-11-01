@@ -246,7 +246,7 @@ the shot.
   - A stroke of A degrees takes about `hand_time`·(A/30)^0.22 seconds, give or take 15%, and stays under
     `turn_speed`. `hand_time`, the time of a 30° stroke, is 0.175 s for an expert, 0.265 s hard, 0.34 s normal and
     0.42 s easy. A hard bot flicks at an enemy as the recorded player did as a rule, an expert as they did at their
-    quickest tenth: a 90° flick takes some 0.34 s hard and 0.22 s expert.
+    quickest tenth: a 90° flick takes some 0.43 s normal, 0.34 s hard and 0.22 s expert.
   - A first stroke lands some 13% short on average (the recorded flicks landed some 15% short), scattered by
     `aim_scatter` of its length (40% of that across). When 70% of a stroke's time has gone by, the hand sees where it
     is going and, `hand_lag` seconds later, strokes again for the miss. A correction lands 3% short and joins a
