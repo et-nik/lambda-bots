@@ -17,8 +17,10 @@ schema: lambdabots/difficulty@1
 #   headshot              chance to aim at the head for a contact
 #   aim_error             aim error amplitude x, y, z (units)
 #   turn_speed            maximum turn rate, degrees per second
-#   turn_accel            maximum turn acceleration, degrees per second squared: how hard the view is flicked; a
-#                         hand's stroke of A degrees takes about sqrt(3.84 * A / turn_accel) seconds
+#   turn_accel            maximum turn acceleration of the springs (the aim models other than hand), degrees per
+#                         second squared: how hard the view is flicked
+#   hand_time             seconds a hand's stroke of 30 degrees takes; one of A degrees takes about
+#                         hand_time * (A / 30)^0.22
 #   aim_scatter           spread of where a hand's stroke lands, a share of its length (along it; half across)
 #   hand_lag              seconds the hand takes to answer what it sees: before it corrects a stroke, and the lag
 #                         of its pursuit of a moving target
@@ -63,7 +65,8 @@ presets:
     aim_error: [20, 20, 40]
     turn_speed: 300
     turn_accel: 3000
-    aim_scatter: 0.15
+    hand_time: 0.50
+    aim_scatter: 0.18
     hand_lag: 0.22
     head_climb: 0.6
     semi_auto_delay: [0.5, 0.6]
@@ -98,7 +101,8 @@ presets:
     aim_error: [15, 15, 30]
     turn_speed: 600
     turn_accel: 5000
-    aim_scatter: 0.12
+    hand_time: 0.42
+    aim_scatter: 0.15
     hand_lag: 0.17
     head_climb: 0.5
     semi_auto_delay: [0.3, 0.4]
@@ -133,7 +137,8 @@ presets:
     aim_error: [10, 10, 20]
     turn_speed: 1000
     turn_accel: 9000
-    aim_scatter: 0.09
+    hand_time: 0.34
+    aim_scatter: 0.11
     hand_lag: 0.13
     head_climb: 0.4
     semi_auto_delay: [0.15, 0.25]
@@ -168,7 +173,8 @@ presets:
     aim_error: [5, 5, 10]
     turn_speed: 1600
     turn_accel: 15000
-    aim_scatter: 0.07
+    hand_time: 0.265
+    aim_scatter: 0.09
     hand_lag: 0.10
     head_climb: 0.3
     semi_auto_delay: [0.08, 0.14]
@@ -203,7 +209,8 @@ presets:
     aim_error: [1.5, 1.5, 3.0]
     turn_speed: 2500
     turn_accel: 24000
-    aim_scatter: 0.055
+    hand_time: 0.175
+    aim_scatter: 0.07
     hand_lag: 0.08
     head_climb: 0.2
     semi_auto_delay: [0.0, 0.05]

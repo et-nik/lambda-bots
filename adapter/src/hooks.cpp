@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "aimlog.h"
 #include "arena.h"
 #include "capture.h"
 #include "fake_client.h"
@@ -238,6 +239,7 @@ void begin_map(bool late) {
     state().first_frame = true;
     reset_interned();
     registry_clear();
+    aimlog_map_start();
     if (!state().core_ok) return;
     const char *map = lb_string(gpGlobals->mapname);
     const std::string bsp = std::string("maps/") + map + ".bsp";
@@ -354,6 +356,7 @@ LB_ENTRY void h_ServerActivate_Post(edict_t *, int, int) {
 }
 
 LB_ENTRY void h_ServerDeactivate() {
+    aimlog_map_end();
     if (state().map_active && state().core_ok) {
         state().core_depth++;
         lb_core_map_end(state().epoch);
@@ -370,6 +373,7 @@ LB_ENTRY void h_ServerDeactivate() {
 
 LB_ENTRY void h_StartFrame() {
     if (state().map_active) registry_scan_new();
+    aimlog_frame();
     call_frame_pre();
     LB_RETURN_META(mm::MRES_IGNORED);
 }
@@ -380,6 +384,7 @@ LB_ENTRY void h_StartFrame_Post() {
 }
 
 LB_ENTRY void h_CmdStart(const edict_t *player, const struct usercmd_s *cmd, unsigned int random_seed) {
+    aimlog_cmd(player, cmd);
     uint32_t seed = 0;
     if (take_pending_seed(player, &seed) && state().gamedll && state().gamedll->dllapi_table->pfnCmdStart) {
         state().gamedll->dllapi_table->pfnCmdStart(player, cmd, seed);
@@ -467,6 +472,7 @@ LB_ENTRY int e_RegUserMsg_Post(const char *name, int) {
 LB_ENTRY unsigned short e_PrecacheEvent_Post(int, const char *name) {
     const unsigned short index = *static_cast<unsigned short *>(state().meta->orig_ret);
     record_precache_event(index, name);
+    aimlog_event_name(index, name);
     LB_RETURN_META_VALUE(mm::MRES_IGNORED, 0);
 }
 
@@ -475,6 +481,7 @@ LB_ENTRY void e_PlaybackEvent(int flags, const edict_t *invoker, unsigned short 
                               int iparam2, int bparam1, int bparam2) {
     record_playback(flags, invoker, event_index, delay, origin, angles, fparam1, fparam2, iparam1, iparam2, bparam1,
                     bparam2);
+    aimlog_playback(invoker, event_index);
     LB_RETURN_META(mm::MRES_IGNORED);
 }
 

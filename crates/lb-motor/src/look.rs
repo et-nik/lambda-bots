@@ -33,8 +33,10 @@ pub struct LookParams {
     pub model: AimModel,
     /// Turn rate cap, degrees per second.
     pub turn_speed: f32,
-    /// Turn acceleration cap, degrees per second squared.
+    /// Turn acceleration cap of the springs, degrees per second squared.
     pub turn_accel: f32,
+    /// Seconds the hand's stroke of 30° takes.
+    pub stroke_time: f32,
     /// Share of the turn acceleration a calm look uses (along the way, around), 0..1.
     pub calm: f32,
     /// 0..100.
@@ -52,6 +54,7 @@ impl LookParams {
         model: AimModel::Spring,
         turn_speed: 900.0,
         turn_accel: 3000.0,
+        stroke_time: 0.3,
         calm: 1.0,
         skill: 100,
         scatter: 0.055,

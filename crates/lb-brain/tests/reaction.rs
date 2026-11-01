@@ -200,7 +200,10 @@ struct Bands {
     shooter: [f64; 2],
 }
 
-/// Strong players answer an enemy near the crosshair in some 0.12–0.2 s; the scale steps down from there.
+/// Strong players answer an enemy near the crosshair in some 0.12–0.2 s; the scale steps down from there. Farther
+/// off, and behind, the turn takes as long as the flicks of the player recorded on the stand (2026-11): a hard bot's
+/// hand is as quick as theirs as a rule, an expert's as their quickest tenth. A runner close by crossing the view is
+/// chased for a while now and then, and the 90th percentile near the crosshair allows for it.
 fn bands(skill: u8) -> Option<Bands> {
     let b = |near, wide, still, shooter| {
         Some(Bands {
@@ -211,10 +214,10 @@ fn bands(skill: u8) -> Option<Bands> {
         })
     };
     match skill {
-        100 => b([0.10, 0.16, 0.20], 0.21, [0.30, 0.36], [0.24, 0.27]),
-        75 => b([0.15, 0.24, 0.30], 0.32, [0.45, 0.53], [0.30, 0.36]),
-        50 => b([0.18, 0.36, 0.45], 0.50, [0.70, 0.85], [0.37, 0.45]),
-        25 => b([0.25, 0.65, 0.80], 0.95, [1.2, 1.5], [0.50, 0.60]),
+        100 => b([0.10, 0.16, 0.25], 0.23, [0.30, 0.36], [0.28, 0.34]),
+        75 => b([0.15, 0.24, 0.36], 0.38, [0.45, 0.56], [0.40, 0.48]),
+        50 => b([0.18, 0.36, 0.86], 0.58, [0.70, 0.88], [0.50, 0.63]),
+        25 => b([0.25, 0.65, 1.20], 0.98, [1.2, 1.5], [0.64, 0.78]),
         _ => None,
     }
 }

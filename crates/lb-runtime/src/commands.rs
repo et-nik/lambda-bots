@@ -1649,8 +1649,9 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             k.turn_accel
         ),
         format!(
-            "  hand: landing spread {:.0}% of a stroke, corrections after {:.2} s; speed ×{:.2}, sweeps bend {:.0}° \
-             {}, reach {:+.2}",
+            "  hand: 30° strokes in {:.2} s, landing spread {:.0}% of a stroke, corrections after {:.2} s; speed ×{:.2}, \
+             sweeps bend {:.0}° {}, reach {:+.2}",
+            k.hand_time,
             k.aim_scatter * 100.0,
             k.hand_lag,
             p.hand.speed,
@@ -1772,6 +1773,9 @@ fn kick(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     let names: Vec<String> = indices.iter().map(|&i| rt.bots[i].persona.name.clone()).collect();
     for &i in indices.iter().rev() {
         rt.kick_bot_index(host, i, "kicked by admin");
+    }
+    for name in &names {
+        rt.mark_kicked(name);
     }
     let count = if target == Some("all") {
         0

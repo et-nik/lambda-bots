@@ -237,26 +237,32 @@ the shot.
 - Projectiles lead the target by their flight time. Rockets go for the feet of a target on the ground, where a near
   miss still catches it in the blast.
 - A slowly drifting error grows with distance and shrinks with skill.
-- The view moves like a hand on a mouse (aim model `hand`, easy to expert):
-  - Every move is a stroke that speeds up and slows down smoothly, with the lopsided bell of speed of a quick human
-    movement. It follows an arc: the wrist or the elbow turns the mouse about a point behind it, so a sweep across
-    the screen bulges up or down, the personality's own way.
-  - A stroke of A degrees takes about √(3.84·A / `turn_accel`) seconds and stays under `turn_speed`. A 90° flick takes
-    some 0.12 s for an expert, 0.15 s hard, 0.2 s normal and 0.3 s easy.
-  - A stroke lands some 6% short on average, scattered by `aim_scatter` of its length (half as much across). After
-    `hand_lag` seconds the hand sees the miss and strokes again, joining the stroke still under way without a stop.
-    Within its tolerance a miss is crept off.
+- The view moves like a hand on a mouse (aim model `hand`, easy to expert). Its numbers come from a player's aim
+  recorded on the stand with `lb_aimlog` (20 minutes of deathmatch against hard and expert bots):
+  - Every move is a stroke that speeds up and slows down smoothly, a symmetric bell of speed (the minimum-jerk
+    profile, the recorded player's mean one), its top a little before or after the middle by the stroke. It follows
+    an arc: the wrist or the elbow turns the mouse about a point behind it, so a sweep across the screen bulges up or
+    down, the personality's own way.
+  - A stroke of A degrees takes about `hand_time`·(A/30)^0.22 seconds, give or take 15%, and stays under
+    `turn_speed`. `hand_time`, the time of a 30° stroke, is 0.175 s for an expert, 0.265 s hard, 0.34 s normal and
+    0.42 s easy. A hard bot flicks at an enemy as the recorded player did as a rule, an expert as they did at their
+    quickest tenth: a 90° flick takes some 0.34 s hard and 0.22 s expert.
+  - A first stroke lands some 13% short on average (the recorded flicks landed some 15% short), scattered by
+    `aim_scatter` of its length (40% of that across). When 70% of a stroke's time has gone by, the hand sees where it
+    is going and, `hand_lag` seconds later, strokes again for the miss. A correction lands 3% short and joins a
+    stroke still under way without a stop. Within its tolerance a miss is crept off.
   - A moving target is followed with the lag of `hand_lag`. The view trails a strafing enemy, runs on past it for a
     moment when it turns back, and then catches up. It is never glued to it.
-  - Looks along the way and around use half the acceleration and are let be 2° off. A glimpse, a shot or a hit is
-    let be 1° off, an enemy about half its width, and whatever a weapon or a jump needs 0.2°.
+  - Looks along the way and around take 1.4 times as long and are let be 2° off. A glimpse, a shot or a hit is let be
+    1° off, an enemy about half its width, and whatever a weapon or a jump needs 0.2°; such a look lands its first
+    stroke as close as a correction.
   - Noob bots use yapb's wandering mouse model. The models `spring` and `spring_combat` keep yapb's damped spring,
     stiffer in a fight with `spring_combat`.
   - The view is worked out over each frame's own time, and strokes start at their own moments. It moves on every
     frame and the same way at any server rate.
 - `bots.reflex` in `config/lambdabots.yaml` (cvar `lb_reflex`, 0.5–2) makes every bot that many times as quick on top
   of its skill. Recognition, the aim's latency, the hand's lag, the climb to the head and the scope's settling take
-  that share of the time. The turn rate and acceleration are that many times higher.
+  that share of the time, and so do the hand's strokes. The turn rate and acceleration are that many times higher.
 
 **Trigger.**
 - The bot fires when the view is on the target closely enough (yapb's cones):

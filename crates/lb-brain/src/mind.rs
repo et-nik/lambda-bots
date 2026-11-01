@@ -535,6 +535,7 @@ impl BotBrain {
             model: ch.skill.aim_model,
             turn_speed: ch.skill.turn_speed,
             turn_accel: ch.skill.turn_accel,
+            stroke_time: ch.skill.hand_time,
             calm: CALM_LOOK,
             skill: ch.level,
             scatter: ch.skill.aim_scatter,

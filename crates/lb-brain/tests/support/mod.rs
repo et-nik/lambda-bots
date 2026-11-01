@@ -56,12 +56,13 @@ fn enter(a: Vec3, b: Vec3, bx: &Aabb) -> Option<f32> {
     Some(t0)
 }
 
-/// The world: walls, players (a flat floor at z = -36 under everything) and a navigation service that walks
-/// straight.
+/// The world: walls, players (a flat floor at z = -36 under everything, unless `no_floor`) and a navigation service
+/// that walks straight.
 #[derive(Clone, Default)]
 pub struct World {
     pub walls: Vec<Aabb>,
     pub players: Vec<RawClient>,
+    pub no_floor: bool,
 }
 
 impl Tracer for World {
@@ -71,7 +72,7 @@ impl Tracer for World {
             mins: Vec3::new(-10_000.0, -10_000.0, -1000.0),
             maxs: Vec3::new(10_000.0, 10_000.0, -36.0),
         };
-        for w in self.walls.iter().chain(std::iter::once(&floor)) {
+        for w in self.walls.iter().chain((!self.no_floor).then_some(&floor)) {
             if let Some(t) = enter(q.start, q.end, w)
                 && t < best.0
             {

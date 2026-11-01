@@ -70,8 +70,9 @@ bots:
 ## Skill
 
 Skill is a 0–100 scale with five presets at 0, 25, 50, 75 and 100. `config/difficulty.yaml` sets the parameters at
-these points: recognition time and its floor, aim latency and error, turn speed and acceleration, how wide the hand's
-strokes land and how soon it corrects them (`aim_scatter`, `hand_lag`), the climb from the body to the head
+these points: recognition time and its floor, aim latency and error, turn speed and acceleration, how long the hand's
+strokes take, how wide they land and how soon it corrects them (`hand_time`, `aim_scatter`, `hand_lag`), the climb
+from the body to the head
 (`head_climb`), hearing, memory,
 tricks, how readily long jumps
 are taken (`longjump`: 0.15, 0.35, 0.6, 0.9, 1.0) and whether they are bold and dodge (`longjump_bold`,
@@ -167,10 +168,11 @@ A personality's skill never changes. The server chooses **who may join**:
 
 When the quota needs a bot, the choice goes in this order:
 1. A personality requested with `lb add <name>`. It joins even outside the filters.
-2. Bots that played before the map change (with `bots.save_names`).
-3. A new personality, while fewer than `roster.generate.pool` personalities (16 by default) pass the filters.
-4. A random admitted personality that is not on the server yet, by `weight`.
-5. A new personality, when everyone admitted is already playing.
+2. A personality whose bot left with a chat line not yet said ([chat](chat.md)), unless an admin kicked it.
+3. Bots that played before the map change (with `bots.save_names`).
+4. A new personality, while fewer than `roster.generate.pool` personalities (16 by default) pass the filters.
+5. A random admitted personality that is not on the server yet, by `weight`.
+6. A new personality, when everyone admitted is already playing.
 
 A new personality gets a free nickname from `names/<language>.yaml`. Its style is drawn by the weights in
 `roster.generate.styles` (only styles allowed by `lb_style`), its skill inside the `lb_difficulty` band, more often

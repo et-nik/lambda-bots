@@ -46,3 +46,7 @@ pub fn ln(x: f32) -> f32 {
 pub fn erf(x: f32) -> f32 {
     libm::erff(x)
 }
+
+pub fn pow(x: f32, y: f32) -> f32 {
+    libm::powf(x, y)
+}

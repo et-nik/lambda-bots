@@ -40,6 +40,7 @@ fn a_silent_hidden_enemy_changes_no_command() {
     let base = World {
         walls: vec![wall(700.0, 500.0)],
         players: vec![visible],
+        ..World::default()
     };
     let mut with_hidden = base.clone();
     with_hidden

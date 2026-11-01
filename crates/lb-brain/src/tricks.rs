@@ -727,8 +727,13 @@ mod tests {
         out
     }
 
+    /// A long jump presses duck and jump afresh together; a jump with duck held is a hop out of a crouch.
     fn leapt(buttons: &[u16]) -> bool {
-        buttons.iter().any(|b| b & (IN_JUMP | IN_DUCK) == IN_JUMP | IN_DUCK)
+        let both = IN_JUMP | IN_DUCK;
+        std::iter::once(&0)
+            .chain(buttons)
+            .zip(buttons)
+            .any(|(was, b)| was & both == 0 && b & both == both)
     }
 
     #[test]

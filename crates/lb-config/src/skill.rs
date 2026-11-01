@@ -215,9 +215,11 @@ skill_params! {
     aim_error: [f32; 3],
     /// Maximum turn rate, degrees per second.
     turn_speed: f32,
-    /// Maximum turn acceleration, degrees per second squared: how hard the view is flicked. A hand's stroke of A
-    /// degrees takes about √(3.84·A / turn_accel) seconds.
+    /// Maximum turn acceleration of the springs (the aim models other than the hand), degrees per second squared:
+    /// how hard the view is flicked.
     turn_accel: f32,
+    /// Seconds a hand's stroke of 30° takes; one of A degrees takes about hand_time·(A/30)^0.22.
+    hand_time: f32,
     /// Spread of where a hand's stroke lands, a share of the stroke's length (along it; half of it across).
     aim_scatter: f32,
     /// Seconds a hand takes to answer what it sees: before it corrects a stroke, and the lag of its pursuit of a
@@ -289,6 +291,7 @@ impl SkillParams {
         self.scope_settle = self.scope_settle.map(|v| v / r);
         self.turn_speed *= r;
         self.turn_accel *= r;
+        self.hand_time /= r;
         self
     }
 }
@@ -398,6 +401,7 @@ impl Default for Presets {
             aim_error,
             turn_speed,
             turn_accel: 0.0,
+            hand_time: 0.0,
             aim_scatter: 0.0,
             hand_lag: 0.0,
             head_climb: 0.0,
@@ -533,14 +537,16 @@ impl Default for Presets {
             (0.13, 15000.0),
             (0.10, 24000.0),
         ];
-        // (aim_scatter, hand_lag, head_climb): where a stroke of the hand lands, how soon it answers what it sees, and
-        // how long the aim takes from the body up to the head.
+        // (hand_time, aim_scatter, hand_lag, head_climb): how long a stroke of the hand takes and where it lands, how
+        // soon it answers what it sees, and how long the aim takes from the body up to the head. A hard bot flicks at
+        // an enemy as the player recorded on the stand (2026-11) did as a rule, an expert as they did at their
+        // quickest tenth.
         let hands = [
-            (0.15, 0.22, 0.6),
-            (0.12, 0.17, 0.5),
-            (0.09, 0.13, 0.4),
-            (0.07, 0.10, 0.3),
-            (0.055, 0.08, 0.2),
+            (0.50, 0.18, 0.22, 0.6),
+            (0.42, 0.15, 0.17, 0.5),
+            (0.34, 0.11, 0.13, 0.4),
+            (0.265, 0.09, 0.10, 0.3),
+            (0.175, 0.07, 0.08, 0.2),
         ];
         let all = [
             &mut presets.noob,
@@ -549,7 +555,7 @@ impl Default for Presets {
             &mut presets.hard,
             &mut presets.expert,
         ];
-        for (((params, (charge, settle, throws, longjump)), (floor, accel)), (scatter, lag, climb)) in
+        for (((params, (charge, settle, throws, longjump)), (floor, accel)), (stroke, scatter, lag, climb)) in
             all.into_iter().zip(extra).zip(reflexes).zip(hands)
         {
             params.gauss_charge = charge;
@@ -558,6 +564,7 @@ impl Default for Presets {
             params.longjump = longjump;
             params.recognition_floor = floor;
             params.turn_accel = accel;
+            params.hand_time = stroke;
             params.aim_scatter = scatter;
             params.hand_lag = lag;
             params.head_climb = climb;
@@ -628,6 +635,9 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
     }
     if p.turn_accel <= 0.0 {
         return Err(bad("turn_accel", "must be positive"));
+    }
+    if !(0.02..=2.0).contains(&p.hand_time) {
+        return Err(bad("hand_time", "must be in 0.02..=2 (seconds)"));
     }
     if !(0.0..=0.5).contains(&p.aim_scatter) {
         return Err(bad("aim_scatter", "must be in 0..=0.5"));
@@ -760,6 +770,7 @@ mod tests {
         assert_eq!(quick.hand_lag, normal.hand_lag / 2.0);
         assert_eq!(quick.head_climb, normal.head_climb / 2.0);
         assert_eq!(quick.turn_accel, normal.turn_accel * 2.0);
+        assert_eq!(quick.hand_time, normal.hand_time / 2.0);
         assert_eq!(quick.aim_error, normal.aim_error, "no better aim");
         assert_eq!(quick.aim_scatter, normal.aim_scatter);
         assert_eq!(normal.clone().with_reflex(9.0), quick, "clamped");

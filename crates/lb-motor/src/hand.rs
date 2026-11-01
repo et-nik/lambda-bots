@@ -1,17 +1,18 @@
 //! The hand: the view moved as a player's hand moves a mouse. Mouse counts turn into view angles directly, so the hand
-//! works in the plane of pitch and yaw.
+//! works in the plane of pitch and yaw. Its numbers come from a player's aim recorded on the stand (`lb_aimlog`,
+//! 2026-11): every move, and every flick at an enemy, of twenty minutes of deathmatch.
 //!
-//! - **Strokes.** A move is a stroke with the lopsided bell of speed a quick human movement has (the sigma-lognormal
-//!   law of Plamondon's kinematic theory), along an arc: the wrist or the elbow turns the mouse about a point behind
-//!   it, so a sweep across the screen bulges up or down, the hand's own way, and one straight up or down hardly
-//!   bends. A stroke of A
-//!   degrees takes about √(3.84·A / turn_accel) seconds (the square-root law of Meyer's optimized submovements), and
-//!   never tops the turn rate. It lands some 6% short on average, scattered by `scatter` of its length along it and
-//!   half of that across.
-//! - **Corrections.** `lag` after a stroke started, and once it is past its top speed, the hand compares where the
-//!   strokes in flight will land with where the goal will be, and adds a stroke for the miss when the miss is more
-//!   than the look bears. A goal that jumps far is struck at once. Strokes add up, so a correction joins the stroke
-//!   it corrects without a stop.
+//! - **Strokes.** A move is a stroke with the symmetric bell of speed a quick hand movement has (the minimum-jerk
+//!   profile of Flash and Hogan, the recorded player's mean profile), its top a little before or after the middle
+//!   by the stroke, along an arc: the wrist or the elbow turns the mouse about a point behind it, so a sweep across
+//!   the screen bulges up or down, the hand's own way, and one straight up or down hardly bends. A stroke of A
+//!   degrees takes about `stroke_time`·(A/30)^0.22 seconds (the recorded flicks from 6° to 90° kept to that law),
+//!   give or take 15%, and never tops the turn rate. A first stroke lands some 13% short on average (one that must be
+//!   exact, and a correction, 3%), scattered by `scatter` of its length along it and 40% of that across.
+//! - **Corrections.** When most of a stroke has gone by (70% of its time), the hand sees where it is going and
+//!   answers `lag` later: it compares where the strokes in flight will land with where the goal will be, and adds a
+//!   stroke for the miss when the miss is more than the look bears. A goal that jumps far is struck at once. Strokes
+//!   add up, so a correction that comes before a stroke is over joins it without a stop.
 //! - **Pursuit.** The hand's own speed follows the goal's (a little less of it) with a lag of `lag`; a miss within the
 //!   look's tolerance is crept off. A target that turns back is followed the old way for a moment, then caught up with.
 //!
@@ -25,23 +26,27 @@ use smallvec::SmallVec;
 
 use crate::look::{LookGoal, LookParams, MAX_PITCH, STEP_MAX, Urgency};
 
-/// A stroke of A degrees takes √(K·A / turn_accel) seconds: an expert's 90° in 0.12 s.
-const K: f32 = 3.84;
+/// A stroke of A degrees takes `stroke_time`·(A/30)^TIME_POWER seconds, times a spread of TIME_SPREAD (σ of its
+/// logarithm).
+const TIME_POWER: f32 = 0.22;
+const TIME_SPREAD: f32 = 0.15;
 /// The shortest stroke, seconds.
 const T_MIN: f32 = 0.05;
-/// The spread of a stroke's speed curve (σ of the lognormal) and how much it varies.
-const SIGMA: f32 = 0.26;
-const SIGMA_SPREAD: f32 = 0.03;
-/// A stroke's time is its 1%–99% span.
-const Z99: f32 = 2.326;
-/// The lognormal's share at the onset (3σ early), taken off so that a stroke starts from naught.
-const S0: f32 = 0.001_35;
-/// Where a stroke lands on average, a share of the way: a first one, and a correction.
-const REACH: f32 = 0.94;
+/// A stroke's time is warped by an exponent (σ of its logarithm, and its range): above 1 the top speed comes after
+/// the middle. The recorded player's strokes peaked at 40% to 60% of their time.
+const SKEW_SPREAD: f32 = 0.2;
+const SKEW: [f32; 2] = [0.75, 1.35];
+/// Where a stroke lands on average, a share of the way: a first one (the recorded player's flicks at enemies landed
+/// some 15% short), and a correction.
+const REACH: f32 = 0.87;
 const REACH_CORRECTION: f32 = 0.97;
+/// The spread of where a stroke lands across it, a share of the spread along it.
+const ACROSS: f32 = 0.4;
 /// How much a first stroke's bend strays from the hand's own, and a correction's bend, degrees.
 const BEND_SPREAD: f32 = 6.0;
 const CORRECTION_BEND: f32 = 8.0;
+/// The share of a stroke's time gone when the hand sees where it is going.
+const SEEN: f32 = 0.7;
 /// A goal that jumps more than max(BIG, 4 tolerances) in a frame is a new one, struck at once when missed by as much;
 /// such strokes come this far apart at least.
 const BIG: f32 = 6.0;
@@ -56,10 +61,10 @@ const RATE_JUMP: f32 = 3.0;
 #[derive(Clone, Copy, Debug)]
 struct Stroke {
     onset: f64,
-    /// Seconds from the lognormal's origin to the onset.
-    lead: f32,
-    mu: f32,
-    sigma: f32,
+    /// Seconds from the onset to the end.
+    time: f32,
+    /// The exponent the stroke's time is warped by.
+    skew: f32,
     /// Where the stroke takes the view, degrees (pitch, yaw).
     chord: Vec2,
     /// Radians the stroke's direction turns from its start to its end.
@@ -70,13 +75,11 @@ struct Stroke {
 }
 
 impl Stroke {
-    fn new(onset: f64, chord: Vec2, time: f32, sigma: f32, bend: f32) -> Stroke {
-        let mu = dmath::ln(time / (2.0 * sinh(Z99 * sigma)));
+    fn new(onset: f64, chord: Vec2, time: f32, skew: f32, bend: f32) -> Stroke {
         Stroke {
             onset,
-            lead: dmath::exp(mu - 3.0 * sigma),
-            mu,
-            sigma,
+            time,
+            skew,
             chord,
             bend,
             done: 0.0,
@@ -86,25 +89,15 @@ impl Stroke {
 
     /// The share of the way covered at `t`.
     fn progress(&self, t: f64) -> f32 {
-        let x = (t - self.onset) as f32 + self.lead;
-        if x <= 0.0 {
+        let tau = (t - self.onset) as f32 / self.time;
+        if tau <= 0.0 {
             return 0.0;
         }
-        let s = phi((dmath::ln(x) - self.mu) / self.sigma);
-        if s >= DONE {
-            1.0
-        } else {
-            ((s - S0) / (1.0 - S0)).clamp(0.0, 1.0)
+        if tau >= 1.0 {
+            return 1.0;
         }
-    }
-
-    /// Seconds from the onset to the top speed, and to the end.
-    fn peak(&self) -> f32 {
-        (dmath::exp(self.mu - self.sigma * self.sigma) - self.lead).max(0.0)
-    }
-
-    fn end(&self) -> f32 {
-        dmath::exp(self.mu + Z99 * self.sigma) - self.lead
+        let s = min_jerk(dmath::pow(tau, self.skew));
+        if s >= DONE { 1.0 } else { s }
     }
 
     /// Where along its arc the stroke has taken the view at the share `s` of the way.
@@ -122,19 +115,25 @@ impl Stroke {
     }
 }
 
-fn sinh(x: f32) -> f32 {
-    0.5 * (dmath::exp(x) - dmath::exp(-x))
+/// The share of the way a minimum-jerk stroke has covered at the share `x` of its time.
+fn min_jerk(x: f32) -> f32 {
+    x * x * x * (10.0 + x * (6.0 * x - 15.0))
 }
 
-/// The standard normal distribution function.
-fn phi(z: f32) -> f32 {
-    0.5 * (1.0 + dmath::erf(z * std::f32::consts::FRAC_1_SQRT_2))
+/// Where in a stroke warped by `skew` its top speed comes, a share of its time: the warped time's x where
+/// d/dτ mj(τ^skew) peaks.
+fn peak_x(skew: f32) -> f32 {
+    (3.0 * skew - 1.0) / (5.0 * skew - 1.0)
 }
 
-/// Top speed of a stroke over its mean speed (length over time) for a spread `sigma`.
-fn peak_ratio(sigma: f32) -> f32 {
-    2.0 * sinh(Z99 * sigma) * dmath::exp(0.5 * sigma * sigma)
-        / (sigma * (2.0 * std::f32::consts::PI).sqrt() * (1.0 - S0))
+fn peak_share(skew: f32) -> f32 {
+    dmath::pow(peak_x(skew), 1.0 / skew)
+}
+
+/// Top speed of a stroke over its mean speed (length over time).
+fn peak_ratio(skew: f32) -> f32 {
+    let x = peak_x(skew);
+    30.0 * skew * x * x * x * (1.0 - x) * (1.0 - x) / peak_share(skew)
 }
 
 /// `to - from` with the yaw the short way round.
@@ -159,7 +158,7 @@ fn gain(p: &LookParams) -> f32 {
 }
 
 fn foresight(p: &LookParams) -> f32 {
-    0.5 + 0.4 * f32::from(p.skill.min(100)) / 100.0
+    0.3 + 0.3 * f32::from(p.skill.min(100)) / 100.0
 }
 
 /// What the hand looks at this frame.
@@ -304,7 +303,7 @@ impl Hand {
         let mut left = 0.0f32;
         for s in &self.strokes {
             land += s.chord - s.pos;
-            left = left.max(s.end() - (self.t - s.onset) as f32);
+            left = left.max(s.time - (self.t - s.onset) as f32);
         }
         gap(goal, land) + self.drift(left.max(0.0), p)
     }
@@ -320,14 +319,14 @@ impl Hand {
         (self.rate * time - followed) * foresight(p)
     }
 
-    /// Seconds a stroke of `len` degrees takes.
-    fn time(&self, len: f32, sigma: f32, urgency: Urgency, p: &LookParams) -> f32 {
-        let mut accel = p.turn_accel.max(1.0);
+    /// Seconds a stroke of `len` degrees takes at `pace` (1 for the hand's usual).
+    fn time(&self, len: f32, skew: f32, pace: f32, urgency: Urgency, p: &LookParams) -> f32 {
+        let mut time =
+            p.stroke_time.max(0.01) * dmath::pow(len.max(1e-3) / 30.0, TIME_POWER) * pace / p.hand.speed.max(0.1);
         if urgency == Urgency::Calm {
-            accel *= p.calm.clamp(0.05, 1.0);
+            time /= p.calm.clamp(0.05, 1.0).sqrt();
         }
-        let hand = (K * len / accel).sqrt() / p.hand.speed.max(0.1);
-        hand.max(T_MIN).max(peak_ratio(sigma) * len / p.turn_speed.max(1.0))
+        time.max(T_MIN).max(peak_ratio(skew) * len / p.turn_speed.max(1.0))
     }
 
     /// Starts a stroke at `at` from the view `v` toward `goal`: a first one at a new goal, or a correction.
@@ -338,12 +337,13 @@ impl Hand {
             land += s.chord - s.pos;
         }
         let base = gap(goal, land);
-        let sigma = (SIGMA + SIGMA_SPREAD * rng.normal()).clamp(0.18, 0.36);
+        let skew = dmath::exp(SKEW_SPREAD * rng.normal()).clamp(SKEW[0], SKEW[1]);
+        let pace = dmath::exp(TIME_SPREAD * rng.normal());
         let mut chord = base;
-        let mut time = self.time(chord.length(), sigma, urgency, p);
+        let mut time = self.time(chord.length(), skew, pace, urgency, p);
         for _ in 0..2 {
             chord = base + self.drift(time, p);
-            time = self.time(chord.length(), sigma, urgency, p);
+            time = self.time(chord.length(), skew, pace, urgency, p);
         }
         let len = chord.length();
         if len < 1e-4 {
@@ -356,9 +356,14 @@ impl Hand {
                 Urgency::Precise => 0.7,
                 Urgency::Alert | Urgency::Engaged => 1.0,
             };
-        let reach = if first { REACH } else { REACH_CORRECTION } + p.hand.reach;
+        // A look that must be exact is taken with care: its first stroke lands as close as a correction.
+        let reach = if first && urgency != Urgency::Precise {
+            REACH
+        } else {
+            REACH_CORRECTION
+        } + p.hand.reach;
         let along = len * (reach + spread * rng.normal());
-        let across = len * 0.5 * spread * rng.normal();
+        let across = len * ACROSS * spread * rng.normal();
         let u = chord / len;
         let w = Vec2::new(-u.y, u.x);
         // A positive bend turns a stroke along +yaw toward +pitch first: its middle bulges up the screen.
@@ -367,8 +372,8 @@ impl Hand {
         } else {
             CORRECTION_BEND * rng.normal()
         };
-        let stroke = Stroke::new(at, u * along + w * across, time, sigma, bend.to_radians());
-        self.next_check = at + f64::from(p.lag.max(stroke.peak()));
+        let stroke = Stroke::new(at, u * along + w * across, time, skew, bend.to_radians());
+        self.next_check = at + f64::from(SEEN * time + p.lag);
         self.last_onset = Some(at);
         self.strokes.push(stroke);
     }
@@ -387,6 +392,7 @@ mod tests {
             model: AimModel::Hand,
             turn_speed: k.turn_speed,
             turn_accel: k.turn_accel,
+            stroke_time: k.hand_time,
             calm: 0.5,
             skill,
             scatter: k.aim_scatter,
@@ -461,9 +467,11 @@ mod tests {
                 let v = speeds(&views, 1000);
                 let top = v.iter().copied().fold(0.0, f32::max);
                 assert!(top <= p.turn_speed * 1.01, "{skill}: {top}");
+                // A bell tops at about twice its mean speed; a stroke a little slow and short tops lower.
+                let mean = 90.55 / (p.stroke_time * dmath::pow(90.55 / 30.0, TIME_POWER));
                 assert!(
-                    top > 0.5 * p.turn_speed.min(1500.0),
-                    "{skill}: a flick, not a crawl: {top}"
+                    (0.9 * mean..3.2 * mean).contains(&top),
+                    "{skill}, seed {seed}: {top} deg/s at the top, {mean} on average"
                 );
                 // No snap onto the goal: the speed never drops or jumps at once.
                 let jolt = v.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
@@ -548,7 +556,7 @@ mod tests {
             let mut rng = Pcg32::new(seed, 7);
             hand.update(&mut view, &goal, 0.001, &p, &mut rng);
             reach.push(hand.strokes[0].chord.y / 90.0);
-            for _ in 0..400 {
+            for _ in 0..800 {
                 hand.update(&mut view, &goal, 0.001, &p, &mut rng);
             }
             assert!(
@@ -558,24 +566,61 @@ mod tests {
         }
         let mean = reach.iter().sum::<f32>() / reach.len() as f32;
         let spread = (reach.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / reach.len() as f32).sqrt();
-        assert!((0.92..0.96).contains(&mean), "lands at {mean} of the way");
-        assert!((0.035..0.075).contains(&spread), "spread {spread}");
+        assert!((0.85..0.89).contains(&mean), "lands at {mean} of the way");
+        assert!((0.05..0.09).contains(&spread), "spread {spread}");
         let over = reach.iter().filter(|r| **r > 1.0).count();
-        assert!((1..40).contains(&over), "a few overshoot: {over} of 200");
+        assert!((1..25).contains(&over), "a few overshoot: {over} of 200");
+    }
+
+    /// The first stroke at a goal takes as long as the recorded player's flicks at enemies of its length, from 12° to
+    /// 93°: their median for a hard bot, their quickest tenth for an expert (the minimum-jerk times that measure as
+    /// their strokes did).
+    #[test]
+    fn first_strokes_take_as_long_as_the_recorded_flicks() {
+        let presets = Presets::default();
+        let recorded = [
+            (12.1, 0.223, 0.145),
+            (22.5, 0.242, 0.167),
+            (42.5, 0.275, 0.189),
+            (92.8, 0.346, 0.216),
+        ];
+        for (yaw, hard, expert) in recorded {
+            for (k, skill, want) in [(&presets.hard, 75, hard), (&presets.expert, 100, expert)] {
+                let p = params(k, skill);
+                let goal = LookGoal::new(Vec3::new(0.0, yaw, 0.0), Urgency::Engaged);
+                let time = median(
+                    (0..40)
+                        .map(|seed| {
+                            let mut hand = Hand::default();
+                            let mut rng = Pcg32::new(seed, 7);
+                            let mut view = Vec3::ZERO;
+                            hand.update(&mut view, &goal, 0.001, &p, &mut rng);
+                            hand.strokes[0].time
+                        })
+                        .collect(),
+                );
+                assert!(
+                    (time / want - 1.0).abs() < 0.08,
+                    "skill {skill}, {yaw}°: {time} s against the recorded {want} s"
+                );
+            }
+        }
     }
 
     #[test]
     fn presets_aim_like_their_players() {
         let presets = Presets::default();
-        // (preset, skill, turn, seconds to within 2° to stay: the median's least and most)
+        // (preset, skill, turn, seconds to within 2° to stay: the median's least and most). The recorded player got
+        // onto an enemy 25°–50° off in some 0.35 s.
         let cases = [
-            (&presets.easy, 25, 90.0, [0.26, 0.33]),
-            (&presets.normal, 50, 90.0, [0.17, 0.22]),
-            (&presets.hard, 75, 90.0, [0.13, 0.17]),
-            (&presets.hard, 75, 150.0, [0.18, 0.23]),
-            (&presets.expert, 100, 10.0, [0.02, 0.06]),
-            (&presets.expert, 100, 90.0, [0.10, 0.14]),
-            (&presets.expert, 100, 150.0, [0.14, 0.19]),
+            (&presets.easy, 25, 90.0, [0.68, 0.90]),
+            (&presets.normal, 50, 90.0, [0.53, 0.70]),
+            (&presets.hard, 75, 30.0, [0.30, 0.40]),
+            (&presets.hard, 75, 90.0, [0.41, 0.54]),
+            (&presets.hard, 75, 150.0, [0.47, 0.63]),
+            (&presets.expert, 100, 10.0, [0.09, 0.13]),
+            (&presets.expert, 100, 90.0, [0.29, 0.38]),
+            (&presets.expert, 100, 150.0, [0.33, 0.44]),
         ];
         for (k, skill, yaw, [lo, hi]) in cases {
             let p = params(k, skill);
@@ -602,7 +647,7 @@ mod tests {
                 (38.0 - 30.0 * into, -30.0)
             }
         };
-        for (k, skill) in [(&presets.hard, 75), (&presets.expert, 100)] {
+        for (k, skill, back_within) in [(&presets.hard, 75, 0.55), (&presets.expert, 100, 0.4)] {
             let p = params(k, skill);
             let latency = k.aim_latency;
             let views = run(&p, 1000, 3.0, 5, |t| {
@@ -623,12 +668,12 @@ mod tests {
                     .collect();
                 let peak = errors.iter().map(|e| e.1.abs()).fold(0.0, f32::max);
                 assert!(
-                    (1.5..7.0).contains(&peak),
+                    (2.0..8.0).contains(&peak),
                     "skill {skill}, leg {leg}: the view trails by {peak}° at most"
                 );
                 let back = errors.iter().rev().find(|e| e.1.abs() > 1.0).map_or(0.0, |e| e.0);
                 assert!(
-                    back < 0.35,
+                    back < back_within,
                     "skill {skill}, leg {leg}: back on it {back} s after the turn"
                 );
                 let glued = errors.iter().filter(|e| e.1.abs() < 0.02).count();
@@ -669,7 +714,7 @@ mod tests {
     #[test]
     fn precise_looks_settle_within_the_protocols_reach() {
         let presets = Presets::default();
-        for (k, skill, by) in [(&presets.easy, 25, 0.55), (&presets.expert, 100, 0.3)] {
+        for (k, skill, by) in [(&presets.normal, 50, 0.95), (&presets.expert, 100, 0.42)] {
             let p = params(k, skill);
             for seed in 0..20 {
                 let views = flick(&p, -20.0, 90.0, Urgency::Precise, seed);
@@ -693,7 +738,7 @@ mod tests {
         let (calm, alert) = (time(Urgency::Calm), time(Urgency::Alert));
         assert!(calm > alert * 1.2, "calm {calm}, alert {alert}");
         let views = flick(&p, 0.0, 90.0, Urgency::Calm, 1);
-        assert!(within(&views, goal, 2.0) < 0.6);
+        assert!(within(&views, goal, 2.0) < 0.9);
     }
 
     #[test]
