@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lb_config::profiles::{ChatSpec, PersonaSpec, TraitsSpec};
+use lb_config::profiles::{ChatSpec, HandSpec, PersonaSpec, TraitsSpec};
 use lb_config::skill::{Presets, SkillBand, SkillOverrides, SkillParams, SkillValue};
 use lb_core::rng::{Pcg32, fnv1a64, splitmix64};
 
@@ -13,6 +13,8 @@ use crate::style::{StyleId, StyleTable};
 const FILL_STREAM: u64 = 0x7065_7273;
 /// Stream of the chat traits' draws, apart from [`FILL_STREAM`] so they never move the others.
 const CHAT_STREAM: u64 = 0x6368_6174;
+/// Stream of the hand's draws, apart from the others for the same reason.
+const HAND_STREAM: u64 = 0x6861_6e64;
 pub const DEFAULT_SKILL: u8 = 50;
 /// Built-in manners of writing a personality without its own `chat.style` gets one of.
 pub const CHAT_MANNERS: u8 = 8;
@@ -60,7 +62,47 @@ pub struct Persona {
     pub seed: u64,
     pub overrides: SkillOverrides,
     pub chat: ChatTraits,
+    pub hand: HandTraits,
     pub source: PersonaSource,
+}
+
+/// How a personality's hand moves the mouse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandTraits {
+    /// Its strokes take 1/speed of its skill's time and land speed times as wide.
+    pub speed: f32,
+    /// Degrees a sweep across the screen turns from its start to its end: positive bulges up, negative down.
+    pub bend: f32,
+    /// Added to the share of the way its strokes land at.
+    pub reach: f32,
+}
+
+impl HandTraits {
+    pub const NEUTRAL: HandTraits = HandTraits {
+        speed: 1.0,
+        bend: 15.0,
+        reach: 0.0,
+    };
+
+    fn resolve(spec: Option<&HandSpec>, seed: u64) -> HandTraits {
+        let mut rng = Pcg32::new(seed, HAND_STREAM);
+        let speed = rng.range_f32(0.88, 1.12);
+        let side = if rng.next_f32() < 0.5 { -1.0 } else { 1.0 };
+        let bend = side * rng.range_f32(8.0, 22.0);
+        let reach = rng.range_f32(-0.03, 0.03);
+        let spec = spec.copied().unwrap_or_default();
+        HandTraits {
+            speed: spec.speed.unwrap_or(speed),
+            bend: spec.bend.unwrap_or(bend),
+            reach: spec.reach.unwrap_or(reach),
+        }
+    }
+}
+
+impl Default for HandTraits {
+    fn default() -> HandTraits {
+        HandTraits::NEUTRAL
+    }
 }
 
 /// How a personality talks in the chat.
@@ -166,6 +208,7 @@ impl Persona {
             seed,
             overrides: spec.overrides.clone(),
             chat: ChatTraits::resolve(spec.chat.as_ref(), style, seed),
+            hand: HandTraits::resolve(spec.hand.as_ref(), seed),
             source,
         }
     }
@@ -195,6 +238,7 @@ impl Persona {
             created,
             overrides: self.overrides.clone(),
             chat: None,
+            hand: None,
         }
     }
 }
@@ -386,6 +430,45 @@ mod tests {
         assert!(a.chat.call.is_empty());
         assert_eq!(b.chat.call, ["Джина", "Джинка"], "names trimmed");
         assert_eq!((a.chat.manner, a.chat.typing_rank), (b.chat.manner, b.chat.typing_rank));
+    }
+
+    #[test]
+    fn hand_traits_come_from_their_own_stream() {
+        let base = PersonaSpec {
+            name: "Gina".into(),
+            ..Default::default()
+        };
+        let a = Persona::resolve(&base, PersonaSource::Unsaved, &models(), &StyleTable::default());
+        assert!((0.88..=1.12).contains(&a.hand.speed));
+        assert!((8.0..=22.0).contains(&a.hand.bend.abs()));
+        assert!((-0.03..=0.03).contains(&a.hand.reach));
+        let sides: std::collections::BTreeSet<bool> = (0..40)
+            .map(|i| {
+                let spec = PersonaSpec {
+                    name: format!("bot{i}"),
+                    ..Default::default()
+                };
+                Persona::resolve(&spec, PersonaSource::Unsaved, &models(), &StyleTable::default())
+                    .hand
+                    .bend
+                    > 0.0
+            })
+            .collect();
+        assert_eq!(sides.len(), 2, "arcs bulge to either side");
+        let set = PersonaSpec {
+            hand: Some(HandSpec {
+                speed: Some(1.2),
+                bend: None,
+                reach: Some(-0.05),
+            }),
+            ..base
+        };
+        let b = Persona::resolve(&set, PersonaSource::Unsaved, &models(), &StyleTable::default());
+        assert_eq!((b.hand.speed, b.hand.bend, b.hand.reach), (1.2, a.hand.bend, -0.05));
+        assert_eq!(
+            (a.aggression, a.fear, &a.model, a.colors, a.chat.manner),
+            (b.aggression, b.fear, &b.model, b.colors, b.chat.manner)
+        );
     }
 
     #[test]

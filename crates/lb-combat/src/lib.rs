@@ -11,6 +11,6 @@ pub mod grenade;
 pub mod policy;
 pub mod target;
 
-pub use aim::{Aim, AimSkill, Shot};
+pub use aim::{Aim, AimPoint, AimSkill, Shot};
 pub use fight::{Fight, FightInput, FightMove, FightSkill};
 pub use policy::{Armed, Choice};

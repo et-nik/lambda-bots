@@ -38,7 +38,8 @@ Game DLL: BugfixedHL-Rebased (production) and hlsdk-portable. Only the `valve` m
    normal skill).
 
 When upgrading, replace `config/difficulty.yaml` too unless you changed it on purpose: the file overrides the built-in
-skill table, and the server warns about every parameter that differs from it. Copy the new templates of
+skill table, and the server warns about every parameter that differs from it. A table from before the hand aim keeps
+the bots on yapb's spring look. Copy the new templates of
 `config/chat/` you do not have yet (`server.yaml`, `bots.yaml`, `maps.yaml`, `phrases.yaml`) next to your
 `players.yaml`; without `phrases.yaml` the bots use the ready phrases built into the module. Build `lb-cli` from the
 same release: recordings of another format do not replay.
@@ -62,7 +63,7 @@ How vision, hearing and memory work, and the skill parameters behind them: `docs
 
 Bots pick a goal (fight, look for a lost enemy, see about a sound, back off to cover, collect an item, use a wall
 charger, wait by an item about to come back, hold a spot, lay a trap, roam) by weighted utility with commitment,
-weighted by their play style and their mood, fight with yapb's movement and aim model, and choose weapons by expected
+weighted by their play style and their mood, fight with yapb's movement and aim like a hand on a mouse, and choose weapons by expected
 damage at the distance and the guns their style and personality favour. They use
 the whole arsenal the way the game works it: the gauss charged and let go on target, the crossbow's scope snapped on
 and kept until the kill, guided rockets, the MP5's grenades, cooked hand grenades, piles of satchels set off from out

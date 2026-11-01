@@ -32,6 +32,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 add_library(lambdabots_mm SHARED
+    adapter/src/aimlog.cpp
     adapter/src/arena.cpp
     adapter/src/capture.cpp
     adapter/src/exports.cpp

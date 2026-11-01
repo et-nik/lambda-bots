@@ -1632,7 +1632,7 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
         ),
         format!(
             "  skill{}: recognition {:.2}-{:.2} s (not before {:.2} s), aim latency {:.2} s, {:?} aim, headshot \
-             {:.0}%, turn {:.0} deg/s at {:.0} deg/s²",
+             {:.0}% (climbs to the head in {:.2} s), turn {:.0} deg/s at {:.0} deg/s²",
             if reflex == 1.0 {
                 String::new()
             } else {
@@ -1644,8 +1644,20 @@ fn profile(rt: &Runtime, args: &[&str]) -> Vec<String> {
             k.aim_latency,
             k.aim_model,
             k.headshot * 100.0,
+            k.head_climb,
             k.turn_speed,
             k.turn_accel
+        ),
+        format!(
+            "  hand: 30° strokes in {:.2} s, landing spread {:.0}% of a stroke, corrections after {:.2} s; speed ×{:.2}, \
+             sweeps bend {:.0}° {}, reach {:+.2}",
+            k.hand_time,
+            k.aim_scatter * 100.0,
+            k.hand_lag,
+            p.hand.speed,
+            p.hand.bend.abs(),
+            if p.hand.bend >= 0.0 { "up" } else { "down" },
+            p.hand.reach
         ),
         format!(
             "         hearing {:.3} (bearing {:.0} deg), memory {:.0} s, dodge jump {}, tricks {}, long jumps {:.0}% \
@@ -1761,6 +1773,9 @@ fn kick(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<String> {
     let names: Vec<String> = indices.iter().map(|&i| rt.bots[i].persona.name.clone()).collect();
     for &i in indices.iter().rev() {
         rt.kick_bot_index(host, i, "kicked by admin");
+    }
+    for name in &names {
+        rt.mark_kicked(name);
     }
     let count = if target == Some("all") {
         0

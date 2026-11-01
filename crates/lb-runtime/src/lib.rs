@@ -185,6 +185,9 @@ pub struct Runtime {
     pub carry_over: Vec<String>,
     /// Personalities an admin asked for with `lb add <name>`; they join next, whatever the filters say.
     pub requested: Vec<String>,
+    /// Personalities whose bots an admin kicked (`lb kick`, or the server's `kick`): a chat line left unsaid does not
+    /// bring them back; it waits in case one joins anyway.
+    pub kicked: Vec<String>,
     /// The quota could not be filled; warned once until a bot joins again.
     roster_warned: bool,
     pub names: NamePool,
@@ -367,6 +370,7 @@ impl Runtime {
             styles,
             styles_source,
             requested: Vec::new(),
+            kicked: Vec::new(),
             roster_warned: false,
             init,
             config,
@@ -784,6 +788,8 @@ impl Runtime {
         self.save_experience();
         self.keep_respawns();
         self.chat_map_end();
+        let chat = &self.chat;
+        self.kicked.retain(|k| chat.carried_personas().any(|c| c == k));
         if self.config.bots.save_names {
             let saved: Vec<String> = self
                 .bots
@@ -1805,6 +1811,9 @@ impl Runtime {
                         if let Some(i) = self.bots.iter().position(ours) {
                             let bot = self.bots.remove(i);
                             tracing::info!("bot {} left ({})", bot.persona.name, bot.state.as_str());
+                            if bot.is_active() {
+                                self.mark_kicked(&bot.persona.name);
+                            }
                         }
                         self.game.scoreboard.clear_slot(e.slot);
                     }
@@ -2361,6 +2370,7 @@ impl Runtime {
                 }
                 self.bots.push(bot);
                 self.roster_warned = false;
+                self.kicked.retain(|k| *k != persona.name);
                 Some(persona.name.clone())
             }
             CreateBotOutcome::ServerFull => {
@@ -2389,9 +2399,10 @@ impl Runtime {
             || (!prefix.is_empty() && clients.find_name(&format!("{prefix}{name}")).is_some())
     }
 
-    /// Who joins next, in order: a personality an admin asked for (`lb add <name>`), one that played before the map
-    /// change, a new personality while the filtered roster is smaller than `roster.generate.pool`, a weighted pick
-    /// among the admitted ones, and a new personality when everyone admitted is already playing.
+    /// Who joins next, in order: a personality an admin asked for (`lb add <name>`), one whose bot left with a chat
+    /// line unsaid (not kicked by an admin), one that played before the map change, a new personality while the
+    /// filtered roster is smaller than `roster.generate.pool`, a weighted pick among the admitted ones, and a new
+    /// personality when everyone admitted is already playing.
     pub fn next_persona(&mut self) -> Option<Arc<Persona>> {
         let (clients, bots, prefix) = (&self.clients, &self.bots, self.config.bots.name_prefix.as_str());
         let busy = |name: &str| Self::name_busy(clients, bots, prefix, name);
@@ -2402,9 +2413,10 @@ impl Runtime {
                 None => tracing::warn!("no personality named {name}"),
             }
         }
-        // A personality whose line waits for its bot comes back first, to say it.
+        // A personality whose line waits for its bot comes back first, to say it, unless an admin kicked it.
         for name in self.chat.carried_personas() {
-            if let Some(p) = self.roster.get(name)
+            if !self.kicked.iter().any(|k| k == name)
+                && let Some(p) = self.roster.get(name)
                 && self.filter.admits(&p)
                 && !busy(&p.name)
             {
@@ -2497,6 +2509,7 @@ impl Runtime {
     /// A new client in a slot means its previous occupant is gone even if no disconnect was reported
     /// (Metamod-FWGS does not forward ClientDisconnect).
     fn drop_slot_ghosts(&mut self, slot: u8, new_gen: Option<u32>) {
+        let mut kicked = Vec::new();
         self.bots.retain(|b| {
             let ghost = b.id.slot == slot && Some(b.id.generation) != new_gen;
             if ghost {
@@ -2505,9 +2518,23 @@ impl Runtime {
                     b.persona.name,
                     b.state.as_str()
                 );
+                if b.is_active() {
+                    kicked.push(b.persona.name.clone());
+                }
             }
             !ghost
         });
+        for name in kicked {
+            self.mark_kicked(&name);
+        }
+    }
+
+    /// An admin removed the personality's bot: with `lb kick`, or the server dropped it while it played (its `kick`, a
+    /// plugin's).
+    pub(crate) fn mark_kicked(&mut self, name: &str) {
+        if !self.kicked.iter().any(|k| k == name) {
+            self.kicked.push(name.to_string());
+        }
     }
 
     /// Kicked or faulted bots whose disconnect never arrives: one more kick after 3 s, forgotten after 6 s.
