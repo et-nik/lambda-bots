@@ -103,10 +103,10 @@ as the runtime does not use it either. Everything else stays as the server had i
 server's config to. The players' chat, login and registration lines with their passwords as typed, and the bots'
 lines are in it too.
 
-The file starts with `LBREC\0\r\n` and a format version, 5 since the bots' lines on their way carry over a map
-change. Then come blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored
+The file starts with `LBREC\0\r\n` and a format version, 6 since the weapon data tells of the RPG's laser and
+rockets (5: the bots' lines on their way carry over a map change). Then come blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored
 as their bytes, so a recording is tied to the ABI version, which the replay checks. A recording of another format is
-refused (`recording format 4, this build reads 5`): replay it with the `lb-cli` of its own release, and build
+refused (`recording format 5, this build reads 6`): replay it with the `lb-cli` of its own release, and build
 `lb-cli` together with the plugin.
 
 ## What a replay checks

@@ -15,6 +15,8 @@ namespace lb {
 namespace {
 
 constexpr int kMaxCvars = 256;
+// `WEAPON_RPG`: only with it in hand does `UpdateClientData` fill `vuser2.y` and `vuser2.z`.
+constexpr int kWeaponRpg = 8;
 
 struct CvarSlots {
     cvar_t storage[kMaxCvars];
@@ -269,6 +271,10 @@ int32_t h_get_weapon_data(void *, uint8_t slot, void *out_raw, uint32_t cap) {
     out->primary_ammo = static_cast<int32_t>(cd.vuser4[1]);
     out->secondary_type = static_cast<int32_t>(cd.vuser3[2]);
     out->secondary_ammo = static_cast<int32_t>(cd.vuser4[2]);
+    if (cd.m_iId == kWeaponRpg) {
+        out->rpg_laser = static_cast<int32_t>(cd.vuser2[1]);
+        out->rpg_rockets = static_cast<int32_t>(cd.vuser2[2]);
+    }
     for (int i = 0; i < LB_MAX_WEAPONS; i++) {
         const weapon_data_t &w = weapons[i];
         if (w.m_iId <= 0) continue;

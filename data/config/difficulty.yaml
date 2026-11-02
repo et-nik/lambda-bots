@@ -43,6 +43,10 @@ schema: lambdabots/difficulty@1
 #                         hopping
 #   bhop_speed_uncapped   bunny hop speed limit on a server that does not crop (BugfixedHL's default
 #                         mp_bunnyhop 1); ~ = as bhop_speed
+#   rpg_unguided          rockets go unguided, the RPG's laser off, at targets closer than this many units, and
+#                         the launcher is reloaded at once after the shot (a rocket every 2 s, not every 3.5);
+#                         ~ = always guided (noob and easy); 0 makes a preset that has them always guided too,
+#                         as ~ there keeps the built-in distance
 
 presets:
   noob:
@@ -77,6 +81,7 @@ presets:
     gauss_walls: false
     bhop_speed: ~
     bhop_speed_uncapped: ~
+    rpg_unguided: ~
   easy:
     recognition_delay: [0.4, 0.6]
     recognition_floor: 0.22
@@ -109,6 +114,7 @@ presets:
     gauss_walls: false
     bhop_speed: ~
     bhop_speed_uncapped: ~
+    rpg_unguided: ~
   normal:
     recognition_delay: [0.22, 0.35]
     recognition_floor: 0.16
@@ -141,6 +147,7 @@ presets:
     gauss_walls: false
     bhop_speed: ~
     bhop_speed_uncapped: ~
+    rpg_unguided: 500
   hard:
     recognition_delay: [0.14, 0.22]
     recognition_floor: 0.13
@@ -173,6 +180,7 @@ presets:
     gauss_walls: true
     bhop_speed: 1.5
     bhop_speed_uncapped: 1.7
+    rpg_unguided: 800
   expert:
     recognition_delay: [0.08, 0.14]
     recognition_floor: 0.10
@@ -205,3 +213,4 @@ presets:
     gauss_walls: true
     bhop_speed: 1.7
     bhop_speed_uncapped: 2.0
+    rpg_unguided: 1000

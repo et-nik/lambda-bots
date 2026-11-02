@@ -36,7 +36,7 @@ use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
 pub const MAGIC: &[u8; 8] = b"LBREC\0\r\n";
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 /// Uncompressed bytes gathered before a block goes to the writer thread.
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
@@ -2268,13 +2268,13 @@ mod tests {
     fn a_recording_of_another_format_is_refused() {
         let root = dir("record-format");
         let path = root.join("old.lbrec");
-        std::fs::write(&path, [MAGIC.as_slice(), &4u32.to_le_bytes()].concat()).unwrap();
+        std::fs::write(&path, [MAGIC.as_slice(), &5u32.to_le_bytes()].concat()).unwrap();
         let Err(err) = Reader::open(&path) else {
-            panic!("a recording of format 4 opens");
+            panic!("a recording of format 5 opens");
         };
-        assert!(err.contains("recording format 4, this build reads 5"), "{err}");
+        assert!(err.contains("recording format 5, this build reads 6"), "{err}");
         let err = replay(&path, &ReplayOptions::default(), &mut |_| {}).unwrap_err();
-        assert!(err.contains("recording format 4"), "{err}");
+        assert!(err.contains("recording format 5"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

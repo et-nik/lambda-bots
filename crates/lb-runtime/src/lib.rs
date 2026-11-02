@@ -19,6 +19,7 @@ pub mod nav_test;
 pub mod orders;
 pub mod perf;
 pub mod record;
+pub mod rocket_stats;
 pub mod roster;
 pub mod selftest;
 pub mod stall;
@@ -305,6 +306,8 @@ pub struct Runtime {
     pub items_give: Vec<String>,
     /// Rounds, damage, kills and suicides per weapon (`lb stats`).
     pub arms_stats: arms_stats::ArmsStats,
+    /// The bots' rockets from the shot to the blast, and their launcher fights (`lb stats`).
+    pub rocket_stats: rocket_stats::RocketStats,
     /// Each bot's tricks when the statistics were last reset.
     pub tricks_base: Vec<(BotId, commands::TrickTotals)>,
     /// The server cropped a bot's jump on this map though its rules say it does not crop: bunny hops keep under the
@@ -451,6 +454,7 @@ impl Runtime {
             weapons_give: Vec::new(),
             items_give: Vec::new(),
             arms_stats: arms_stats::ArmsStats::default(),
+            rocket_stats: rocket_stats::RocketStats::default(),
             tricks_base: Vec::new(),
             crop_seen: false,
             outside: record::OutsideMode::Live,
@@ -668,6 +672,7 @@ impl Runtime {
         // Sim time restarts with every map; the first frame of this one sets it again. The weapon statistics go on
         // counting over the change.
         self.arms_stats.since -= self.now.secs();
+        self.rocket_stats.new_map(self.now.secs());
         self.now = SimTime::ZERO;
         self.last_quota_check = SimTime::ZERO;
         self.last_cvar_poll = SimTime::ZERO;
@@ -1085,6 +1090,7 @@ impl Runtime {
             }
         }
         self.count_rounds();
+        self.watch_rockets();
         self.check_departures(host);
         if let Some(result) = self.poll_nav_loader() {
             let map = self.nav_loader.take().map(|l| l.map).unwrap_or_default();
@@ -1280,6 +1286,7 @@ impl Runtime {
         self.projectile_entities.clear();
         // Gone off this frame: the entity stays a moment, hidden, where it burst.
         let mut bursts: Vec<(u16, Vec3)> = Vec::new();
+        let boxes = self.player_boxes();
         for e in &snapshots {
             let kind = *self
                 .projectile_kinds
@@ -1288,6 +1295,12 @@ impl Runtime {
             let Some(kind) = kind else { continue };
             let v = |x: LbVec3| Vec3::new(x.x, x.y, x.z);
             self.launch_seen(e.ent.index, kind, e.model_id, e.owner.index, v(e.origin), v(e.velocity));
+            if kind == ProjectileKind::Rocket {
+                let owner = u8::try_from(e.owner.index).unwrap_or(0);
+                let burst = e.effects & EF_NODRAW != 0;
+                self.rocket_stats
+                    .seen(e.ent.index, owner, v(e.origin), burst, self.now, &boxes);
+            }
             if e.effects & EF_NODRAW != 0 {
                 bursts.push((e.ent.index, v(e.origin)));
                 continue;
@@ -1302,6 +1315,7 @@ impl Runtime {
                 armed: kind == ProjectileKind::Tripmine && e.solid != SOLID_NOT,
             });
         }
+        self.rocket_stats.snapshot_done(self.now, &boxes);
         if !self.watched.is_empty() {
             let row = arms_stats::Row::plain(WeaponId::Tripmine);
             let laid: Vec<_> = self
@@ -1415,17 +1429,17 @@ impl Runtime {
                 } else {
                     Row::plain(w)
                 };
-                (miss <= arms_stats::SOURCE_MATCH).then_some((miss, u16::from(b.id.slot), row))
+                (miss <= arms_stats::SOURCE_MATCH).then_some((miss, u16::from(b.id.slot), row, None))
             });
         // The game never lets a hornet sting the one who fired it.
         let own_hornet = |l: &Launched| l.row.weapon == WeaponId::Hornetgun && l.owner == u16::from(victim.0);
         let thrown = self
             .launched
-            .values()
-            .filter(|l| !own_hornet(l))
-            .filter_map(|l| l.miss(source, now).map(|miss| (miss, l.owner, l.row)));
+            .iter()
+            .filter(|(_, l)| !own_hornet(l))
+            .filter_map(|(index, l)| l.miss(source, now).map(|miss| (miss, l.owner, l.row, Some(*index))));
         let best = shooter.chain(thrown).min_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some((_, owner, row)) = best
+        if let Some((_, owner, row, _)) = best
             && owner == u16::from(victim.0)
         {
             let first = self
@@ -1474,7 +1488,12 @@ impl Runtime {
                 );
             }
         }
-        let owner = best.and_then(|(_, owner, row)| {
+        if let Some((_, _, row, Some(index))) = best
+            && row.weapon == WeaponId::Rpg
+        {
+            self.rocket_stats.damage(index, victim.0, damage, now);
+        }
+        let owner = best.and_then(|(_, owner, row, _)| {
             let bot = self
                 .bots
                 .iter()
@@ -1626,6 +1645,7 @@ impl Runtime {
             WeaponId::Tripmine,
         ];
         let now = self.now;
+        let boxes = self.player_boxes();
         for bot in &mut self.bots {
             let fov = bot.self_state.body.fov;
             if fov > 0.0 && fov < 89.0 {
@@ -1665,6 +1685,10 @@ impl Runtime {
                     let scoped = w == WeaponId::Crossbow && bot.zoomed_at.is_some_and(|t| now.since(t) < SCOPE_LINGER);
                     let row = if scoped { Row::alt(w) } else { Row::plain(w) };
                     self.arms_stats.fired(row, (last_primary - primary) as u32, distance);
+                    if w == WeaponId::Rpg {
+                        let f = rocket_frame(bot, &boxes, &self.game.weapons);
+                        self.rocket_stats.shot(bot.id.slot, now, rocket_stats::Shot::of(&f));
+                    }
                 }
                 if w == WeaponId::Mp5 && last_secondary > secondary {
                     self.arms_stats
@@ -1672,6 +1696,31 @@ impl Runtime {
                 }
             }
             bot.rounds = rounds;
+        }
+    }
+
+    /// Boxes of the players in the game, for `lb stats`: the dead too, where they fell (a blast that kills is seen
+    /// after its victim died).
+    fn player_boxes(&self) -> Vec<(u8, rocket_stats::PlayerBox)> {
+        self.clients_now
+            .iter()
+            .filter(|c| c.state == lb_raw::ClientState::Spawned)
+            .map(|c| {
+                (
+                    c.slot,
+                    rocket_stats::PlayerBox::new(c.origin, c.mins, c.maxs).moving(c.velocity),
+                )
+            })
+            .collect()
+    }
+
+    /// What each bot does with the launcher this frame, for `lb stats`.
+    fn watch_rockets(&mut self) {
+        let now = self.now;
+        let boxes = self.player_boxes();
+        for bot in &self.bots {
+            let f = rocket_frame(bot, &boxes, &self.game.weapons);
+            self.rocket_stats.frame(bot.id.slot, now, &f);
         }
     }
 
@@ -1712,6 +1761,8 @@ impl Runtime {
                 current: WeaponId::from_id(ws.current),
                 next_attack: ws.next_attack,
                 primary_ammo: ws.primary_ammo,
+                rpg_laser: ws.rpg_laser != 0,
+                rpg_rockets: ws.rpg_rockets,
                 weapons,
             });
         }
@@ -1937,6 +1988,15 @@ impl Runtime {
                                 x.died(at);
                             }
                             let ours = |slot: u8| self.bots.iter().any(|b| b.id.slot == slot && b.is_active());
+                            if weapon == "rpg_rocket"
+                                && ours(*killer)
+                                && let Some(c) = self.clients_now.iter().find(|c| c.slot == *victim)
+                            {
+                                self.rocket_stats.kill(*killer, *victim, c.origin, self.now);
+                            }
+                            if ours(*victim) {
+                                self.rocket_stats.died(*victim, self.now);
+                            }
                             self.arms_stats.death(
                                 weapon,
                                 *killer != 0 && killer != victim && ours(*killer),
@@ -3192,6 +3252,46 @@ fn arsenal(state: &SelfState, registry: &WeaponRegistry) -> smallvec::SmallVec<[
             }
         })
         .collect()
+}
+
+/// What `bot` does with the launcher, for `lb stats`: the target is the one in its sight, where it truly is.
+fn rocket_frame(
+    bot: &Bot,
+    boxes: &[(u8, rocket_stats::PlayerBox)],
+    registry: &WeaponRegistry,
+) -> rocket_stats::BotFrame {
+    let body = &bot.self_state.body;
+    let alive = bot.state == BotState::Alive;
+    let arsenal = arsenal(&bot.self_state, registry);
+    let rpg = arsenal.iter().find(|a| a.id == WeaponId::Rpg);
+    let prediction = bot.self_state.prediction.as_ref();
+    let (forward, _, _) = lb_core::math::view_angle_vectors(bot.view);
+    let target = bot.brain.mind.target.and_then(|k| {
+        bot.brain
+            .beliefs
+            .track(k)
+            .filter(|t| t.state == lb_knowledge::TrackState::Visible)?;
+        let (_, b) = boxes.iter().find(|(slot, _)| *slot == k.slot)?;
+        Some((k.slot, *b, ((b.min + b.max) * 0.5).distance(body.origin)))
+    });
+    rocket_stats::BotFrame {
+        alive,
+        carries: rpg.is_some(),
+        in_hand: alive && bot.self_state.current_weapon.get() == Some(WeaponId::Rpg),
+        melee: alive && bot.self_state.current_weapon.get() == Some(WeaponId::Crowbar),
+        clip: rpg.and_then(|a| a.clip).unwrap_or(0),
+        rockets: rpg.and_then(Armed::rounds).unwrap_or(0),
+        reloading: prediction
+            .and_then(|p| p.weapons[WeaponId::Rpg as usize])
+            .is_some_and(|w| w.reloading),
+        laser: prediction.is_some_and(|p| p.rpg_laser),
+        target,
+        eye: body.origin + body.view_ofs,
+        forward,
+        airborne: !bot.self_state.on_ground(),
+        firing: bot.brain.mind.firing,
+        hold: bot.brain.mind.hold_fire,
+    }
 }
 
 /// `give` client commands for `weapons` and some of their ammo (the game honors them with `sv_cheats 1`).

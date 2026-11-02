@@ -258,6 +258,10 @@ skill_params! {
     bhop_speed: Option<f32>,
     /// The same on a server that does not crop (BugfixedHL's default `mp_bunnyhop 1`); none = as `bhop_speed`.
     bhop_speed_uncapped: Option<f32>,
+    /// Rockets go unguided, the RPG's laser off, at targets closer than this many units: reloaded at once after the
+    /// shot, a rocket every 2 s rather than every 3.5; none = always guided (in a preset file, 0: `~` there keeps the
+    /// built-in value).
+    rpg_unguided: Option<f32>,
 }
 
 impl SkillParams {
@@ -404,6 +408,7 @@ impl Default for Presets {
             gauss_walls: false,
             bhop_speed,
             bhop_speed_uncapped: None,
+            rpg_unguided: None,
         };
         use AimModel::*;
         let mut presets = Presets {
@@ -539,6 +544,9 @@ impl Default for Presets {
         }
         presets.hard.bhop_speed_uncapped = Some(1.7);
         presets.expert.bhop_speed_uncapped = Some(2.0);
+        presets.normal.rpg_unguided = Some(500.0);
+        presets.hard.rpg_unguided = Some(800.0);
+        presets.expert.rpg_unguided = Some(1000.0);
         presets
     }
 }
@@ -615,6 +623,9 @@ pub fn validate_params(p: &SkillParams, at: &str, path: &str) -> Result<(), Conf
             return Err(bad(name, "must be in 1..=4 (a multiple of maxspeed) or ~"));
         }
     }
+    if p.rpg_unguided.is_some_and(|v| v < 0.0) {
+        return Err(bad("rpg_unguided", "must not be negative, or ~"));
+    }
     Ok(())
 }
 
@@ -674,6 +685,8 @@ mod tests {
         assert_eq!(bhop(100), (Some(1.7), Some(2.0)));
         let (capped, uncapped) = bhop(87);
         assert!(capped.is_some_and(|v| v > 1.5 && v < 1.7) && uncapped.is_some_and(|v| v > 1.7 && v < 2.0));
+        assert_eq!(p.at(49).rpg_unguided, None, "guided rockets only below normal");
+        assert_eq!(p.at(62).rpg_unguided, Some(644.0));
     }
 
     #[test]

@@ -21,9 +21,7 @@ use lb_decision::{Decider, Goal, GoalKind, Situation};
 use lb_game::dll::DllProfile;
 use lb_game::gungame::{GunGame, Kit};
 use lb_game::items::Ammo;
-use lb_game::mechanics::{
-    AltFire, Attack, BOLT_SPEED, DART_SPEED, Damages, ROCKET_GUIDE, ROCKET_SPEED, WeaponClass, spec,
-};
+use lb_game::mechanics::{AltFire, Attack, BOLT_SPEED, DART_SPEED, Damages, ROCKET_GUIDE, WeaponClass, spec};
 use lb_game::self_state::Prediction;
 use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
@@ -34,9 +32,10 @@ use lb_styles::{Emotions, GoalAffinity, TrickLikes};
 use smallvec::SmallVec;
 
 use crate::BotBrain;
-use crate::arms::Arms;
+use crate::arms::{Arms, Rocket};
 use crate::attention::LookReason;
 use crate::goals::Task;
+use crate::launcher::{self, Laser};
 
 const COMBAT_PERIOD: f64 = 0.1;
 /// Share of its turn acceleration the bot uses to look along the way and around.
@@ -61,13 +60,16 @@ const GUIDE_SLACK: f32 = 0.4;
 const ROCKET_BACK_OFF: f32 = 450.0;
 /// Taking the launcher up wants this much over the least distance for a rocket.
 const ROCKET_PICK: f32 = 100.0;
+/// A loaded launcher is kept against the crowbar this far inside the crowbar's reach, the crowbar this far outside it.
+const REACH_MARGIN: f32 = 16.0;
 /// The crossbow's scope goes on only with the target this close to the view's center (the zoomed view is 20° wide).
 const SCOPE_START_DOT: f32 = 0.9945;
 /// A bolt's and the egon beam's end blast reach this far: the line of fire must be clear beyond it.
 const BOLT_CLEAR: f32 = 160.0;
 const EGON_CLEAR: f32 = 128.0;
-/// Seconds a look along an explosive's line holds.
+/// Seconds a look along an explosive's line holds, while the view stays within a degree of where it was.
 const BLAST_CHECK_PERIOD: f64 = 0.03;
+const BLAST_CHECK_TURN: f32 = 0.99985;
 /// At a charger's spot within this, across.
 const CHARGER_SPOT: f32 = 24.0;
 /// A charger that gave nothing for this long is spent; nobody stays at one longer than the timeout.
@@ -270,7 +272,7 @@ pub struct Character {
 }
 
 impl Character {
-    fn aim(&self) -> AimSkill {
+    pub(crate) fn aim(&self) -> AimSkill {
         AimSkill {
             headshot: self.skill.headshot,
             latency: self.skill.aim_latency,
@@ -354,7 +356,7 @@ pub struct Mind {
     target_since: SimTime,
     /// The last look along the line an explosive would take (a wall or someone close in front): when, for which
     /// weapon, and whether it was clear.
-    blast_check: Option<(SimTime, WeaponId, bool)>,
+    blast_check: Option<(SimTime, WeaponId, Vec3, Option<&'static str>)>,
     /// Using a charger: which, since when, when it last gave something and what the bot had then.
     charging: Option<(usize, SimTime, SimTime, f32)>,
     /// What the goal is doing: where it chose to go and what it does there.
@@ -376,6 +378,8 @@ pub struct Mind {
     pub(crate) duel: Option<(PlayerKey, f32, f32)>,
     /// What the bot's GunGame level gave it, on the last frame.
     pub(crate) kit: Option<Kit>,
+    /// The target in sight came within the rocket's least distance then, and has stayed there.
+    pub(crate) rocket_close: Option<(PlayerKey, SimTime)>,
 }
 
 impl Mind {
@@ -401,6 +405,27 @@ impl Mind {
 
     pub fn reloading(&self, now: SimTime) -> bool {
         now < self.reload_until
+    }
+
+    /// A reload of `seconds` is asked for now.
+    pub(crate) fn start_reload(&mut self, now: SimTime, seconds: f32) {
+        if !self.reloading(now) {
+            self.reload_until = now + f64::from(seconds);
+        }
+    }
+
+    /// The game reloads now, for `seconds` more at least; or it does not.
+    pub(crate) fn follow_reload(&mut self, now: SimTime, reloading: bool, seconds: f32) {
+        self.reload_until = if reloading {
+            self.reload_until.max(now + f64::from(seconds))
+        } else {
+            self.reload_until.min(now)
+        };
+    }
+
+    /// The bot was hurt a moment ago.
+    pub(crate) fn under_fire(&self, now: SimTime) -> bool {
+        self.seen_damage.is_some_and(|d| now.since(d) <= UNDER_FIRE_FOR)
     }
 
     pub fn last_enemy_seen(&self) -> SimTime {
@@ -619,14 +644,19 @@ impl BotBrain {
             .filter(|t| t.velocity_known(now))
             .map_or(250.0, |t| t.vel.truncate().length());
         // Near its least distance a rocket comes in and out of reach as the enemy's pace changes: the launcher is taken
-        // up again only with a margin over it, not to switch back and forth.
+        // up again only with a margin over it, not to switch back and forth. Pressed, it is fired closer.
         let rockets = body.weapon == Some(WeaponId::Rpg) || m.choice.map(Choice::weapon) == Some(WeaponId::Rpg);
+        launcher::watch_close(m, body, track, distance);
+        let rocket_min = match track {
+            Some(t) if launcher::pressed(m, body, ch, t, distance) => launcher::least(m, body, ch, t, distance),
+            Some(t) => launcher::rocket_from(body, t, distance) + if rockets { 0.0 } else { ROCKET_PICK },
+            None => rocket_min(body) + if rockets { 0.0 } else { ROCKET_PICK },
+        };
         let t = Target {
             distance,
             speed,
             aim_sigma: ch.aim_sigma(distance),
-            rocket_min: track.map_or(rocket_min(body), |t| rocket_from(body, t, distance))
-                + if rockets { 0.0 } else { ROCKET_PICK },
+            rocket_min,
         };
         // A weapon the game just would not draw (it has no ammo for it, whatever the bot believed) is left alone.
         let refused = self.motor.weapon.refused(now);
@@ -652,6 +682,31 @@ impl BotBrain {
                 policy::KEEP_MARGIN
             },
         );
+        // A loaded launcher with the enemy too close for a rocket stays in hand, out of the crowbar's reach (a margin
+        // either way, not to switch back and forth at its edge): the bot backs off to fire it, or fires it pressed,
+        // rather than run in with the crowbar. A guided rocket on its way keeps the launcher in hand: its laser spot
+        // goes with it.
+        let launcher = like(WeaponId::Rpg) > 0.0 && (!body.underwater || spec(WeaponId::Rpg).underwater);
+        let launcher_loaded = launcher && body.armed(WeaponId::Rpg).is_some_and(Armed::loaded);
+        let fallback = body.fallback();
+        let edge = spec(fallback).reach
+            + if body.weapon == Some(fallback) {
+                REACH_MARGIN
+            } else {
+                -REACH_MARGIN
+            };
+        let choice = if launcher && launcher::guiding(body) && m.arms.rocket_flying(now).is_some_and(|r| r.guided) {
+            Choice::Reload(WeaponId::Rpg)
+        } else if choice == Choice::Use(fallback)
+            && fallback != WeaponId::Rpg
+            && launcher_loaded
+            && track.is_some()
+            && distance > edge
+        {
+            Choice::Use(WeaponId::Rpg)
+        } else {
+            choice
+        };
         if m.choice != Some(choice) {
             if let Choice::Use(w) = choice {
                 m.click_interval = fire::click_interval(w, ch.skill.semi_auto_delay, &mut rng.combat);
@@ -1018,6 +1073,11 @@ impl BotBrain {
         let weapon_choice = m.choice.map(Choice::weapon);
         m.firing = false;
         m.hold_fire = None;
+        // The empty launcher is reloaded the moment the game lets it be, a target in sight or not.
+        launcher::follow_reload(m, body);
+        if let Some(reload) = launcher::quick_reload(m, body) {
+            self.intents.weapon(Prio::Threat, reload);
+        }
         // With a throwable in hand the view faces the enemy, not aimed; a throw turns to its own arc and the satchel
         // radio watches its charges over it (their protocols' looks come first). On the tripmine level nothing is
         // fired at anyone: the view and the weapon are the goal's and the mines'.
@@ -1031,12 +1091,23 @@ impl BotBrain {
             }
             (Some(t), Some(choice)) if t.state == TrackState::Visible => {
                 m.target_at = now;
+                // The game's clip is ahead of the HUD's the choice went by.
+                let choice = match choice {
+                    Choice::Reload(WeaponId::Rpg) if launcher::loaded(body) == Some(true) => Choice::Use(WeaponId::Rpg),
+                    c => c,
+                };
                 let distance = t.pos.distance(body.eye);
                 let w = choice.weapon();
                 let armed = body.armed(w).copied().unwrap_or_else(|| Armed::new(w, None, None));
                 let mode = fire::mode(&armed, distance, m.arms.double, ch.aim_sigma(distance));
-                let shot = shot_of(w, mode.attack, body.zoomed());
-                let Some(aim) = m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat) else {
+                let laser_on = launcher::laser_on(m, body);
+                let aim = if w == WeaponId::Rpg {
+                    launcher::aim(m, t, body, ch, laser_on, nav, &mut rng.combat)
+                } else {
+                    let shot = shot_of(w, mode.attack, body.zoomed());
+                    m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat)
+                };
+                let Some(aim) = aim else {
                     m.hold_fire = Some("no aim point yet");
                     return;
                 };
@@ -1072,31 +1143,65 @@ impl BotBrain {
                                 toggle
                             }
                             None => {
-                                let reacquired = self
-                                    .perception
-                                    .vision
-                                    .contacts
-                                    .iter()
-                                    .find(|c| c.who == t.who)
-                                    .is_some_and(|c| c.reacquired);
-                                let shot = Aimed {
-                                    view: self.motor.view,
-                                    target: t,
-                                    weapon: w,
-                                    mode,
-                                    aim,
-                                    distance,
-                                    in_hand,
-                                    reacquired,
+                                let laser = if w == WeaponId::Rpg && in_hand {
+                                    launcher::laser(m, body, launcher::wants_laser(ch, distance, laser_on))
+                                } else {
+                                    Laser::Ready
                                 };
-                                shoot(m, &shot, &self.beliefs, nav, body, rng)
+                                match laser {
+                                    Laser::Switch(toggle) => {
+                                        m.hold_fire = Some("the laser goes on or off");
+                                        toggle
+                                    }
+                                    Laser::Wait => {
+                                        m.hold_fire = Some("the laser goes on or off");
+                                        WeaponIntent::hold(w)
+                                    }
+                                    Laser::Ready => {
+                                        let reacquired = self
+                                            .perception
+                                            .vision
+                                            .contacts
+                                            .iter()
+                                            .find(|c| c.who == t.who)
+                                            .is_some_and(|c| c.reacquired);
+                                        let rocket_floor = if w == WeaponId::Rpg {
+                                            launcher::least(m, body, ch, t, distance)
+                                        } else {
+                                            0.0
+                                        };
+                                        let shot = Aimed {
+                                            view: self.motor.view,
+                                            target: t,
+                                            weapon: w,
+                                            mode,
+                                            aim,
+                                            distance,
+                                            in_hand,
+                                            reacquired,
+                                            rocket_floor,
+                                            guided: laser_on,
+                                        };
+                                        shoot(m, &shot, &self.beliefs, nav, body, rng)
+                                    }
+                                }
                             }
                         }
                     }
+                    // The launcher in hand is reloaded by `launcher::quick_reload` as soon as the game lets it be (not
+                    // while its laser guides a rocket).
+                    Choice::Reload(w) if w == WeaponId::Rpg && launcher::loaded(body).is_some() => {
+                        m.hold_fire = Some(if launcher::guiding(body) {
+                            "guiding its rocket"
+                        } else {
+                            "nothing loaded: reloading"
+                        });
+                        WeaponIntent::hold(w)
+                    }
                     Choice::Reload(w) => {
                         m.hold_fire = Some("nothing loaded: reloading");
-                        if body.weapon == Some(w) && !m.reloading(now) {
-                            m.reload_until = now + f64::from(spec(w).reload);
+                        if body.weapon == Some(w) {
+                            m.start_reload(now, spec(w).reload);
                         }
                         WeaponIntent {
                             reload: true,
@@ -1217,19 +1322,6 @@ pub(crate) fn rocket_min(body: &Body) -> f32 {
     policy::rocket_min(body.health, body.damages.primary(WeaponId::Rpg))
 }
 
-/// Rockets are not fired at `t`, `distance` away, closer than this: [`rocket_min`] where the rocket will meet it,
-/// the target and the bot closing in on each other meanwhile.
-fn rocket_from(body: &Body, t: &EnemyTrack, distance: f32) -> f32 {
-    let to = (t.pos - body.origin).truncate().normalize_or_zero();
-    let theirs = if t.velocity_known(body.now) {
-        (-t.vel.truncate()).dot(to).max(0.0)
-    } else {
-        0.0
-    };
-    let mine = body.velocity.truncate().dot(to).max(0.0);
-    rocket_min(body) + (theirs + mine) * rocket_flight(distance)
-}
-
 /// Aggression and fear with GunGame's say in them.
 fn gungame_spirit(gungame: Option<&GunGame>, aggression: f32, fear: f32) -> (f32, f32) {
     let (more, less) = match gungame {
@@ -1341,13 +1433,12 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         enemy: t.pos,
         enemy_facing: t.traits.facing,
         enemy_faces_me: target::faces(t, body.origin),
-        under_fire: m.seen_damage.is_some_and(|d| now.since(d) <= UNDER_FIRE_FOR),
+        under_fire: m.under_fire(now),
         approach: body.health.clamp(0.0, 100.0) * ch.aggression,
         weapon: body.weapon.map_or(WeaponClass::Melee, |w| spec(w).class),
         reloading: m.reloading(now),
         hold_ground: now < m.arms.hold_until,
-        back_off: m.arms.guide.is_some_and(|(until, _, _)| now < until)
-            && t.pos.distance(body.origin) < ROCKET_BACK_OFF,
+        back_off: m.arms.rocket_flying(now).is_some() && t.pos.distance(body.origin) < ROCKET_BACK_OFF,
         on_ground: body.on_ground,
         velocity: body.velocity.truncate(),
         maxspeed: body.maxspeed,
@@ -1367,16 +1458,6 @@ pub(crate) fn fight_skill(ch: &Character) -> FightSkill {
     }
 }
 
-/// Seconds a rocket takes to fly `distance`: 250 units/s for the 0.4 s before it ignites, some 1200 on average
-/// after.
-fn rocket_flight(distance: f32) -> f32 {
-    if distance <= 100.0 {
-        distance / 250.0
-    } else {
-        0.4 + (distance - 100.0) / 1200.0
-    }
-}
-
 /// A shot the aim is on: the view, the target and the weapon worked in `mode` at `aim`, `distance` away.
 struct Aimed<'a> {
     view: Vec3,
@@ -1388,6 +1469,10 @@ struct Aimed<'a> {
     in_hand: bool,
     /// The target was seen again moments after it was lost, rather than new to the bot.
     reacquired: bool,
+    /// A rocket is fired no closer than this ([`launcher::least`]).
+    rocket_floor: f32,
+    /// The RPG's laser is on.
+    guided: bool,
 }
 
 /// Where the game launches `w`'s projectile from when looking along `view`, and how far along the view it must fly
@@ -1403,41 +1488,42 @@ fn launch(w: WeaponId, eye: Vec3, view: Vec3, zoomed: bool, rockets_from: f32) -
     }
 }
 
-/// The line an explosive would take from where it is launched is clear of walls and of other players near the
-/// shooter's end: looked at while the shot is about to go, again every 30 ms at most.
-fn blast_clear(
+/// Why an explosive is not fired now: the line it would take from where it is launched meets a wall, or another
+/// player near the shooter's end, where its blast would reach the shooter; a rocket also where it would go off well
+/// away from the target ([`launcher::way`]). Looked at while the shot is about to go, again every 30 ms at most.
+fn blast_hold(
     m: &mut Mind,
     a: &Aimed<'_>,
     beliefs: &lb_knowledge::Beliefs,
     tracer: &mut dyn lb_worldq::Tracer,
     body: &Body,
-) -> bool {
-    let Some((from, need)) = launch(
-        a.weapon,
-        body.eye,
-        a.view,
-        body.zoomed(),
-        rocket_from(body, a.target, a.distance),
-    ) else {
-        return true;
-    };
-    if let Some((at, w, clear)) = m.blast_check
+) -> Option<&'static str> {
+    let (from, need) = launch(a.weapon, body.eye, a.view, body.zoomed(), a.rocket_floor)?;
+    let (forward, _, _) = lb_core::math::view_angle_vectors(a.view);
+    if let Some((at, w, was, hold)) = m.blast_check
         && w == a.weapon
         && body.now.since(at) < BLAST_CHECK_PERIOD
+        && was.dot(forward) > BLAST_CHECK_TURN
     {
-        return clear;
+        return hold;
     }
-    let (forward, _, _) = lb_core::math::view_angle_vectors(a.view);
     let reach = a.aim.distance(body.eye);
     let to = from + forward * reach;
-    let walls = tracer.trace(&lb_worldq::TraceQuery::line(from, to)).fraction * reach;
     let people = a.weapon != WeaponId::Egon && crate::arms::crowded(beliefs, from, to, Some(a.target.who));
-    let clear = walls >= need && !people;
-    m.blast_check = Some((body.now, a.weapon, clear));
-    clear
+    let hold = if people {
+        Some("the blast would reach it")
+    } else if a.weapon == WeaponId::Rpg {
+        launcher::way(m, body, body.eye + forward * reach, a.aim, a.guided, need, tracer)
+    } else {
+        let walls = tracer.trace(&lb_worldq::TraceQuery::line(from, to)).fraction * reach;
+        (walls < need).then_some("the blast would reach it")
+    };
+    m.blast_check = Some((body.now, a.weapon, forward, hold));
+    hold
 }
 
-/// Fires at a target in sight when the view is on it; a fired rocket is guided from then on.
+/// Fires at a target in sight when the view is on it; a fired rocket is noted, and guided from then on with the
+/// laser on.
 fn shoot(
     m: &mut Mind,
     a: &Aimed<'_>,
@@ -1457,8 +1543,14 @@ fn shoot(
         distance,
         enemy_faces_me: target::faces(t, body.origin),
         weapon: w,
-        rocket_min: rocket_from(body, t, distance),
+        rocket_min: a.rocket_floor,
+        guided: a.guided,
     };
+    let loaded = match w {
+        WeaponId::Rpg => launcher::loaded(body),
+        _ => None,
+    }
+    .unwrap_or_else(|| body.armed(w).is_some_and(|a| a.clip.is_none_or(|c| c > 0)));
     // An explosive bursting on a wall or on someone close in front would hit the bot.
     let hold = if !a.in_hand {
         Some(if body.weapon == Some(w) {
@@ -1466,14 +1558,18 @@ fn shoot(
         } else {
             "its weapon is not out yet"
         })
+    } else if w == WeaponId::Rpg && !loaded {
+        Some(if launcher::guiding(body) {
+            "guiding its rocket"
+        } else {
+            "nothing loaded"
+        })
     } else if !scoped {
         Some("waiting for the scope")
     } else if !fire::on_target(&shot) {
         Some(fire::off_target(&shot))
-    } else if !blast_clear(m, a, beliefs, tracer, body) {
-        Some("the blast would reach it")
     } else {
-        None
+        blast_hold(m, a, beliefs, tracer, body)
     };
     let engaged = hold.is_none();
     // The gauss protocol charges; plain shots only when it rolled for them or no charge can start.
@@ -1485,11 +1581,20 @@ fn shoot(
             m.reactions
                 .record(now.since(t.noticed_at), now.since(t.recognized_at), a.reacquired);
         }
-        let loaded = body.armed(w).is_some_and(|a| a.clip.is_none_or(|c| c > 0));
-        if w == WeaponId::Rpg && loaded && m.arms.guide.is_none_or(|(until, _, _)| now >= until) {
-            let flight = (rocket_flight(distance) + GUIDE_SLACK).min(ROCKET_GUIDE);
-            m.arms.guide = Some((now + f64::from(flight), aim, t.who));
-            m.arms.hold_until = m.arms.hold_until.max(now + f64::from(flight));
+        // Noted when it leaves: not while the launcher is still being drawn.
+        if w == WeaponId::Rpg && loaded && launcher::ready(body) != Some(false) && m.arms.rocket_flying(now).is_none() {
+            let flight = lb_combat::rocket::flight(aim.distance(body.eye), launcher::along(body, aim));
+            let until = now + f64::from((flight + GUIDE_SLACK).min(ROCKET_GUIDE));
+            m.arms.rocket = Some(Rocket {
+                until,
+                arrives: now + f64::from(flight),
+                at: aim,
+                target: t.who,
+                guided: a.guided,
+            });
+            if a.guided {
+                m.arms.hold_until = m.arms.hold_until.max(until);
+            }
         }
         if w == WeaponId::Shotgun {
             m.arms.double = fire::roll_double(&mut rng.combat);
@@ -1580,19 +1685,18 @@ fn start_scope(m: &mut Mind, view: Vec3, aim: Vec3, target: PlayerKey, body: &Bo
     }
 }
 
-/// How the shot flies, for the aim: projectiles lead the target, rockets go for the feet. A zoomed crossbow shoots a
-/// hitscan bolt in multiplayer, and a scope steadies the aim.
+/// How the shot flies, for the aim: projectiles lead the target (rockets are aimed by [`launcher::aim`]). A zoomed
+/// crossbow shoots a hitscan bolt in multiplayer, and a scope steadies the aim.
 fn shot_of(w: WeaponId, attack: Attack, zoomed: bool) -> Shot {
-    let (speed, feet) = match (w, attack) {
-        (WeaponId::Rpg, _) => (Some(ROCKET_SPEED), true),
-        (WeaponId::Crossbow, _) if !zoomed => (Some(BOLT_SPEED), false),
-        (WeaponId::Hornetgun, Attack::Secondary) => (Some(DART_SPEED), false),
-        _ => (None, false),
+    let speed = match (w, attack) {
+        (WeaponId::Crossbow, _) if !zoomed => Some(BOLT_SPEED),
+        (WeaponId::Hornetgun, Attack::Secondary) => Some(DART_SPEED),
+        _ => None,
     };
     Shot {
         weapon: Some(w),
         speed,
-        feet,
+        feet: false,
         steady: zoomed,
     }
 }

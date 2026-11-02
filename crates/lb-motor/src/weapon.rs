@@ -1,6 +1,6 @@
 //! The weapon controller: selects weapons with their client command and waits for `CurWeapon` to confirm, keeps
 //! the trigger off while switching and for the 0.5 s deploy, and works the trigger: held for automatic weapons,
-//! clicked at a cadence for the others.
+//! clicked at a cadence for the others. A mode switch (the RPG's laser) is a tap of its own, outside the cadence.
 
 use lb_core::time::SimTime;
 use lb_game::input::{IN_ATTACK, IN_ATTACK2, IN_RELOAD};
@@ -20,6 +20,9 @@ pub enum Fire {
     None,
     Primary,
     Secondary,
+    /// A tap of the secondary attack that switches a mode (the RPG's laser guide): pressed on this frame whatever the
+    /// cadence, and neither a click nor a shot.
+    Toggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,6 +140,7 @@ impl WeaponController {
             return 0;
         }
         let bit = match intent.fire {
+            Fire::Toggle => return IN_ATTACK2,
             Fire::None => 0,
             Fire::Primary => IN_ATTACK,
             Fire::Secondary => IN_ATTACK2,
