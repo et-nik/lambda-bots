@@ -5,6 +5,7 @@
 pub mod arms;
 pub mod attention;
 pub mod goals;
+mod launcher;
 pub mod mind;
 pub mod patrol;
 pub mod trail;

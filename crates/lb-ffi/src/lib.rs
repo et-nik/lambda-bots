@@ -816,6 +816,10 @@ pub struct LbWeaponState {
     pub secondary_type: i32,
     pub secondary_ammo: i32,
     pub weapons: [LbWeaponData; LB_MAX_WEAPONS],
+    /// With the RPG in hand: its laser guide is on (`vuser2.y`, `m_fSpotActive`) and its rockets in flight
+    /// (`vuser2.z`, `m_cActiveRockets`); zero with any other weapon.
+    pub rpg_laser: i32,
+    pub rpg_rockets: i32,
 }
 
 pub const LB_PRINT_CONSOLE: u8 = 1;

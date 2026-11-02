@@ -780,6 +780,10 @@ typedef struct LbWeaponState {
   int32_t secondary_type;
   int32_t secondary_ammo;
   struct LbWeaponData weapons[LB_MAX_WEAPONS];
+  // With the RPG in hand: its laser guide is on (`vuser2.y`, `m_fSpotActive`) and its rockets in flight
+  // (`vuser2.z`, `m_cActiveRockets`); zero with any other weapon.
+  int32_t rpg_laser;
+  int32_t rpg_rockets;
 } LbWeaponState;
 
 typedef struct LbHostApi {

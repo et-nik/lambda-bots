@@ -81,6 +81,9 @@ pub struct Prediction {
     pub next_attack: f32,
     /// Ammo of the active weapon's first type the player carries.
     pub primary_ammo: i32,
+    /// With the RPG in hand: its laser guide is on, and how many of its rockets are in flight.
+    pub rpg_laser: bool,
+    pub rpg_rockets: i32,
     pub weapons: [Option<PredictedWeapon>; 32],
 }
 

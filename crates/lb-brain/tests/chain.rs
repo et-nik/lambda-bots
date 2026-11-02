@@ -115,7 +115,7 @@ fn a_gungame_bot_throws_its_grenades_and_reaches_for_nothing_else() {
 }
 
 #[test]
-fn a_gungame_launcher_too_close_backs_off_and_stays_in_hand() {
+fn a_gungame_launcher_too_close_backs_off_then_fires_pressed() {
     let world = World {
         players: vec![player(2, Vec3::new(160.0, 0.0, 0.0), Vec3::ZERO)],
         ..World::default()
@@ -126,15 +126,21 @@ fn a_gungame_launcher_too_close_backs_off_and_stays_in_hand() {
         r.outs.iter().all(|o| o.commands.is_empty()),
         "no crowbar where the level gave none"
     );
-    assert!(r.first_shot.is_none(), "no rocket into its own blast");
-    // The scene does not move the bot: stuck, it backs out aside now and then, never at the enemy.
-    let late = &r.outs[150..];
-    let backing = late.iter().filter(|o| o.forward < -100.0).count();
+    // Recognized in some 0.3 s, the enemy stays within the rocket's least distance: the bot backs off for its patience
+    // (under a second, by its aggression), then fires as close as the blast leaves it some health.
+    let shot = r.first_shot.expect("pressed, it fires at last");
+    assert!((0.5..1.5).contains(&shot), "first rocket at {shot}");
+    let before = &r.outs[30..(shot / 0.01) as usize];
+    let backing = before.iter().filter(|o| o.forward < -100.0).count();
     assert!(
-        backing > 60,
-        "out to where a rocket spares it: {backing} frames backing off"
+        backing * 2 > before.len(),
+        "out of its blast first: {backing} of {} frames",
+        before.len()
     );
-    assert!(late.iter().all(|o| o.forward < 100.0), "never toward the enemy");
+    assert!(
+        r.outs[30..].iter().all(|o| o.forward < 100.0),
+        "never toward the enemy once it is recognized"
+    );
 }
 
 #[test]
@@ -234,4 +240,55 @@ fn something_moving_off_to_the_side_is_looked_at_before_it_is_recognized() {
         .map(|i| i as f64 * f64::from(setup.frame))
         .expect("looked that way");
     assert!(turned < recognized, "turned at {turned}, recognized at {recognized}");
+}
+
+/// The aim at each rocket fired at slot 2 strafing (or running) across the bot's view 800 units off, and where the
+/// target was then.
+fn rockets_at_a_crossing(turn_every: Option<f64>) -> Vec<(f64, Vec3, Vec3)> {
+    let world = World {
+        players: vec![player(2, Vec3::new(800.0, -200.0, 0.0), Vec3::new(0.0, 250.0, 0.0))],
+        ..World::default()
+    };
+    let kit = [Armed::new(WeaponId::Rpg, Some(1), Some(4))];
+    let dress = move |b: &mut Body| b.arsenal = kit.iter().copied().collect();
+    let setup = Setup {
+        skill: 75,
+        weapon: WeaponId::Rpg,
+        ..Setup::default()
+    };
+    // The scene sees each frame's aim before the next.
+    let mut frames = Vec::new();
+    let r = run_scene(world, 3000, &setup, &dress, &mut |sc| {
+        if let Some(every) = turn_every {
+            let leg = (sc.now.secs() / every) as i64;
+            sc.world.players[1].velocity.y = if leg % 2 == 0 { 250.0 } else { -250.0 };
+        }
+        frames.push((sc.now.secs(), sc.world.players[1].origin, sc.brain.mind.last_aim));
+    });
+    r.outs
+        .iter()
+        .zip(frames.iter().skip(1))
+        .filter(|(o, _)| o.buttons & IN_ATTACK != 0)
+        .filter_map(|(_, (t, at, aim))| Some((*t, *at, (*aim)?)))
+        .collect()
+}
+
+#[test]
+fn a_rocket_leads_a_run_but_not_a_strafe() {
+    let run = rockets_at_a_crossing(None);
+    let (_, target, aim) = run.first().copied().expect("fired at the runner");
+    assert!(aim.y - target.y > 120.0, "led well ahead of a runner: {target} {aim}");
+    // Strafing 0.4 s each way about y = -150, once a strafe there and back is seen: the rockets go nearer the middle
+    // than 200 units, where a lead by what the target does at the shot would put them at the least. The hand trails
+    // the aim point as it swings, and the trigger comes as the view catches up with it, out to either side more often
+    // than in the middle.
+    let strafe = rockets_at_a_crossing(Some(0.4));
+    let off: Vec<f32> = strafe
+        .iter()
+        .filter(|(t, ..)| *t > 1.5)
+        .map(|(_, _, aim)| (aim.y + 150.0).abs())
+        .collect();
+    assert!(off.len() >= 10, "fired at the strafer: {strafe:?}");
+    let mean = off.iter().sum::<f32>() / off.len() as f32;
+    assert!(mean < 120.0 && off.iter().all(|d| *d < 200.0), "{off:?}");
 }

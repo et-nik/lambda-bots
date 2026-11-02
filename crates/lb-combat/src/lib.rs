@@ -9,6 +9,7 @@ pub mod fight;
 pub mod fire;
 pub mod grenade;
 pub mod policy;
+pub mod rocket;
 pub mod target;
 
 pub use aim::{Aim, AimPoint, AimSkill, Shot};

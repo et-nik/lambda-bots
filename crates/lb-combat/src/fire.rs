@@ -24,11 +24,16 @@ pub struct Shot {
     pub weapon: WeaponId,
     /// Rockets are not fired closer than this (`policy::rocket_min`).
     pub rocket_min: f32,
+    /// A rocket would follow the laser spot: the view guides it on the way.
+    pub guided: bool,
 }
 
-/// A rocket's blast makes up for this much of a miss, units: its aim may be off by that much, within these angles.
+/// A guided rocket's view may be off its point by this much, units, within these angles: the guide makes up for the
+/// rest. An unguided one flies where the view is, its blast making up for less.
 const ROCKET_SLACK: f32 = 80.0;
 const ROCKET_AIM: [f32; 2] = [5.7, 10.0];
+const UNGUIDED_SLACK: f32 = 40.0;
+const UNGUIDED_AIM: [f32; 2] = [2.0, 6.0];
 /// The least angle counted on the body, degrees.
 const ON_BODY_MIN: f32 = 0.4;
 /// Closer than this anything in the view's way is fired at.
@@ -58,8 +63,13 @@ pub fn on_target(s: &Shot) -> bool {
         // One rocket per reload, aimed at the feet: worth a careful aim far off, and close by the blast makes up for
         // a miss.
         WeaponId::Rpg => {
-            let slack = lb_core::dmath::atan2(ROCKET_SLACK, s.distance.max(1.0)).to_degrees();
-            return dot > lb_core::dmath::cos(slack.clamp(ROCKET_AIM[0], ROCKET_AIM[1]).to_radians());
+            let (slack, cone) = if s.guided {
+                (ROCKET_SLACK, ROCKET_AIM)
+            } else {
+                (UNGUIDED_SLACK, UNGUIDED_AIM)
+            };
+            let slack = lb_core::dmath::atan2(slack, s.distance.max(1.0)).to_degrees();
+            return dot > lb_core::dmath::cos(slack.clamp(cone[0], cone[1]).to_radians());
         }
         WeaponId::Crossbow if s.distance >= XBOW_ZOOM_FROM => return dot > 0.998,
         // The beam sweeps onto the target.
@@ -183,6 +193,7 @@ mod tests {
             enemy_faces_me: faces,
             weapon,
             rocket_min: 300.0,
+            guided: true,
         }
     }
 
@@ -212,6 +223,16 @@ mod tests {
             !on_target(&shot(off, true, WeaponId::Rpg)),
             "rockets are aimed with care far off"
         );
+        let a_little_off = Vec3::new(800.0, 60.0, 0.0);
+        assert!(
+            on_target(&shot(a_little_off, false, WeaponId::Rpg)),
+            "the guide makes up for it"
+        );
+        let unguided = Shot {
+            guided: false,
+            ..shot(a_little_off, false, WeaponId::Rpg)
+        };
+        assert!(!on_target(&unguided), "an unguided rocket flies where the view is");
         assert!(!on_target(&shot(Vec3::new(200.0, 0.0, 0.0), false, WeaponId::Crowbar)));
         assert!(on_target(&shot(Vec3::new(40.0, 0.0, 0.0), false, WeaponId::Crowbar)));
     }

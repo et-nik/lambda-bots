@@ -381,6 +381,17 @@ impl ArmsStats {
     }
 }
 
+/// A rocket the bot fired: on its way until `until` (when it should have gone off, with some slack), due at the target
+/// at `arrives`; the point it was fired at, the target, and whether the laser guides it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rocket {
+    pub until: SimTime,
+    pub arrives: SimTime,
+    pub at: Vec3,
+    pub target: PlayerKey,
+    pub guided: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Arms {
     pub gauss: Gauss,
@@ -409,8 +420,15 @@ pub struct Arms {
     trap_throw: bool,
     landed: usize,
     next_barrage: SimTime,
-    /// A fired rocket is guided until then; the point it was fired at and the target.
-    pub guide: Option<(SimTime, Vec3, PlayerKey)>,
+    /// The bot's last rocket while it is on its way.
+    pub rocket: Option<Rocket>,
+    /// The RPG's laser: when it was last switched and what the game told of it before; how many switches the game
+    /// never showed (a DLL that does not tell, after which the laser is left as it is).
+    pub(crate) laser_flip: Option<(SimTime, bool)>,
+    pub(crate) laser_unseen: u8,
+    /// The floor in front of the target is out of an unguided rocket's way: it is aimed at the target's middle until
+    /// then.
+    pub(crate) rocket_high_until: SimTime,
     /// The bot's own rocket or launched grenade is on its way to the target until then.
     pub hold_until: SimTime,
     /// Both shotgun barrels on the next shot.
@@ -476,6 +494,11 @@ impl Arms {
         }
     }
 
+    /// The bot's rocket on its way to `now`, guided or not.
+    pub fn rocket_flying(&self, now: SimTime) -> Option<&Rocket> {
+        self.rocket.as_ref().filter(|r| now < r.until)
+    }
+
     /// A protocol runs or the gauss charges: nothing else starts.
     pub fn busy(&self) -> bool {
         self.active.is_some() || self.gauss.active()
@@ -489,8 +512,10 @@ impl Arms {
         if self.gauss.active() {
             parts.push(format!("gauss {} {:.1} s", self.gauss.phase(), self.gauss.charge(now)));
         }
-        if self.guide.is_some_and(|(until, _, _)| now < until) {
-            parts.push("guiding a rocket".into());
+        match self.rocket_flying(now) {
+            Some(r) if r.guided => parts.push("guiding a rocket".into()),
+            Some(_) => parts.push("a rocket on its way".into()),
+            None => {}
         }
         if self.dodge.is_some_and(|(until, _)| now < until) {
             parts.push("dodging".into());
@@ -1917,17 +1942,18 @@ impl BotBrain {
                 }
             }
         }
-        // The rocket follows the view.
-        if self.mind.arms.guide.is_some() {
+        // A guided rocket follows the view.
+        if self.mind.arms.rocket.is_some() {
             match self.rocket_spot(body) {
-                Some(point) => self.intents.look(
+                Some(point) if self.mind.arms.rocket.is_some_and(|r| r.guided) => self.intents.look(
                     Prio::Protocol,
                     LookIntent::Point {
                         at: point,
                         engaged: true,
                     },
                 ),
-                None => self.mind.arms.guide = None,
+                Some(_) => {}
+                None => self.mind.arms.rocket = None,
             }
         }
         // Between the grenades of a series the grenade stays in hand.
@@ -2366,20 +2392,20 @@ impl BotBrain {
         }
     }
 
-    /// Where the bot's rocket in flight is guided to, and so goes off: the target it was fired at while that stays far
-    /// enough (a new target close by, or this one come close, would bring the rocket back to the bot), else the point
-    /// it was fired at.
+    /// Where the bot's rocket in flight goes off: for a guided one, where it is guided to, the target it was fired at
+    /// while that stays far enough (a new target close by, or this one come close, would bring the rocket back to the
+    /// bot), else the point it was fired at; an unguided one flies on to that point.
     fn rocket_spot(&self, body: &Body) -> Option<Vec3> {
-        let (until, at, target) = self.mind.arms.guide?;
-        if body.now >= until {
-            return None;
+        let r = self.mind.arms.rocket_flying(body.now)?;
+        if !r.guided {
+            return Some(r.at);
         }
         let near = crate::mind::rocket_min(body);
         Some(
             self.mind
                 .last_aim
-                .filter(|p| self.mind.target == Some(target) && p.distance(body.eye) >= near)
-                .unwrap_or(at),
+                .filter(|p| self.mind.target == Some(r.target) && p.distance(body.eye) >= near)
+                .unwrap_or(r.at),
         )
     }
 
@@ -3949,7 +3975,13 @@ pub(crate) mod tests {
         let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
         let enemy = PlayerKey { slot: 5, userid: 50 };
         // Fired at an enemy 250 units off, the rocket guided there until 2 s.
-        brain.mind.arms.guide = Some((SimTime(2.0), Vec3::new(250.0, 0.0, 0.0), enemy));
+        brain.mind.arms.rocket = Some(Rocket {
+            until: SimTime(2.0),
+            arrives: SimTime(1.6),
+            at: Vec3::new(250.0, 0.0, 0.0),
+            target: enemy,
+            guided: true,
+        });
         let going = |brain: &mut BotBrain, dir: Vec2, now: f64| {
             brain.intents.clear();
             brain.intents.movement(Prio::Goal, MoveIntent { dir, speed: 300.0 });

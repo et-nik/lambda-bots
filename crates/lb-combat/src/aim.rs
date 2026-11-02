@@ -60,6 +60,17 @@ pub struct Shot {
     pub steady: bool,
 }
 
+/// A target as the aim sees it ([`Aim::seen`]): its box's center and velocity, whether it stands on the ground and
+/// crouches, and the aim error to add to the point chosen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seen {
+    pub center: Vec3,
+    pub vel: Vec3,
+    pub on_ground: bool,
+    pub crouched: bool,
+    pub error: Vec3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AimSkill {
     pub headshot: f32,
@@ -194,6 +205,53 @@ impl Aim {
         })
     }
 
+    /// What the aim goes by for a shot it places itself (a rocket, see [`crate::rocket`]): the target as seen
+    /// `latency` ago carried forward to now, and the aim error now. Called instead of [`Aim::point`].
+    pub fn seen(&mut self, now: SimTime, eye: Vec3, skill: &AimSkill, rng: &mut Pcg32) -> Option<Seen> {
+        let seen_until = now + -f64::from(skill.latency);
+        let s = self
+            .history
+            .iter()
+            .rev()
+            .find(|s| s.t <= seen_until)
+            .or(self.history.front())
+            .copied()?;
+        let ahead = (now.since(s.t) as f32).clamp(0.0, 0.5);
+        let center = s.pos + s.vel * ahead;
+        let dt = self.last_update.map_or(0.0, |t| now.since(t).clamp(0.0, 0.25)) as f32;
+        self.last_update = Some(now);
+        self.drift(dt, center.distance(eye), skill, rng);
+        Some(Seen {
+            center,
+            vel: s.vel,
+            on_ground: s.on_ground,
+            crouched: s.crouched,
+            error: self.error,
+        })
+    }
+
+    /// The target's mean velocity along the ground over the `window` seconds up to what the aim goes by now (`latency`
+    /// ago): what of its run goes on, the strafing back and forth averaged out; over what there is of it, from a fifth
+    /// on.
+    pub fn mean_velocity(&self, now: SimTime, latency: f32, window: f64) -> Option<Vec3> {
+        let seen_until = now + -f64::from(latency);
+        let last = self
+            .history
+            .iter()
+            .rev()
+            .find(|s| s.t <= seen_until)
+            .or(self.history.front())?;
+        let first = self
+            .history
+            .iter()
+            .rev()
+            .find(|s| last.t.since(s.t) >= window)
+            .or(self.history.front())
+            .filter(|s| last.t.since(s.t) >= 0.2 * window)?;
+        let way = (last.pos - first.pos) / last.t.since(first.t) as f32;
+        Some(Vec3::new(way.x, way.y, 0.0))
+    }
+
     fn drift(&mut self, dt: f32, distance: f32, skill: &AimSkill, rng: &mut Pcg32) {
         if dt <= 0.0 {
             return;
@@ -237,6 +295,29 @@ fn climb((z, rate): (f32, f32), goal: f32, dt: f32, time: f32) -> (f32, f32) {
 mod tests {
     use super::*;
     use lb_knowledge::*;
+
+    fn sighting(t: f64, pos: Vec3) -> Sighting {
+        Sighting {
+            who: PlayerKey { slot: 2, userid: 7 },
+            relation: Relation::Enemy,
+            t: SimTime(t),
+            pos,
+            sigma: 1.0,
+            distance: 500.0,
+            visibility: 1.0,
+            parts: parts::CHEST,
+            stance: Stance::Standing,
+            on_ground: true,
+            on_ladder: false,
+            in_water: false,
+            facing: 0.0,
+            weapon: None,
+            firing: false,
+            render: RenderCue::default(),
+            first: false,
+            noticed_at: SimTime::ZERO,
+        }
+    }
 
     fn track(t: f64, x: f32, vx: f32) -> EnemyTrack {
         let mut b = Beliefs::default();
@@ -391,6 +472,39 @@ mod tests {
         assert!(
             (points.last().unwrap().1.at.z - CHEST[0]).abs() < 0.05,
             "then settles on the chest"
+        );
+    }
+
+    #[test]
+    fn the_mean_velocity_averages_out_a_strafe() {
+        let skill = skill(0.0);
+        let mut aim = Aim::default();
+        let mut rng = Pcg32::new(1, 1);
+        aim.follow(&track(1.0, 400.0, 200.0), &skill, &mut rng);
+        assert_eq!(aim.mean_velocity(SimTime(1.0), 0.0, 0.5), None, "a single sighting");
+        let mut b = Beliefs::default();
+        let mut aim = Aim::default();
+        // Strafing 0.25 s each way at 200 units/s across +y, a sighting every 0.05 s.
+        for i in 0..21 {
+            let t = 0.05 * f64::from(i);
+            let phase = (t / 0.25) as i32;
+            let into = (t - 0.25 * f64::from(phase)) as f32;
+            let y = if phase % 2 == 0 {
+                200.0 * into
+            } else {
+                50.0 - 200.0 * into
+            };
+            let mut s = sighting(t, Vec3::new(600.0, y, 0.0));
+            s.first = i == 0;
+            b.on_sighting(&s);
+            aim.follow(&b.tracks[0], &skill, &mut rng);
+        }
+        let v = aim.mean_velocity(SimTime(1.0), 0.0, 0.5).unwrap();
+        assert!(v.length() < 30.0, "{v}");
+        assert!(
+            b.tracks[0].vel.length() > 100.0,
+            "the track's own velocity swings: {}",
+            b.tracks[0].vel
         );
     }
 

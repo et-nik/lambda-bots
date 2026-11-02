@@ -178,6 +178,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
         "stats" => match rest.first().copied() {
             Some("reset") => {
                 rt.arms_stats.reset(rt.now.secs());
+                rt.rocket_stats.reset(rt.now.secs());
                 rt.tricks_base = rt.bots.iter().map(|b| (b.id, bot_tricks(b))).collect();
                 for b in &mut rt.bots {
                     b.stall.counts = Default::default();
@@ -186,6 +187,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             }
             _ => {
                 let mut out = rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages);
+                out.extend(rt.rocket_stats.report(rt.now.secs()));
                 out.push(trick_totals(rt).line());
                 let mut stalls = crate::stall::Stalls::default();
                 for b in &rt.bots {

@@ -198,7 +198,15 @@ reach the bot is not taken: no crossbow bolt under 160 units, no egon under 128,
 (300 units) unless the bot has health to spare: from 200 units with 80 health, from 250 with 60, taking up to 40 or 20
 of the blast. A rocket in the clip counts as ready to go (a shot takes 1.5 s, the reload 2 s more), so a bot with the
 RPG in hand fires it rather than switching away close by, and one without it takes the launcher up only 100 units
-beyond that least distance, which moves with the enemy's pace (not to switch back and forth at its edge). The egon
+beyond that least distance, which moves with the enemy's pace (not to switch back and forth at its edge). With a
+rocket in the clip and the enemy too close for it, the launcher stays in hand rather than the crowbar beyond the
+crowbar's reach (16 units inside it while the launcher is out, 16 beyond it while the crowbar is): the bot backs off to
+fire it. With its guided rocket on the way, the launcher stays in hand whatever the distance: its laser spot would go
+out with it. An enemy that stays that close (0.25 s for the boldest, a second for the
+most careful), hurts the bot or comes within 160 units **presses** it: the rocket goes as close as its blast leaves the
+bot 15 health (from some 120 units at full health, closer with armor; a blast whose line into the bot meets its head
+does three times as much: the trade may kill it), and a bot with 35 health or less under fire
+fires it at anyone beyond the crowbar's reach (not in GunGame). The egon
 and the gauss lead up close, rockets and the zoomed
 crossbow far away, much as yapb's fixed order had it. The gun in hand counts 1.2 times more, against switching back and
 forth between two about as good; with a target in sight within 1200 units 1.5 times, as a switch costs half a second
@@ -234,8 +242,23 @@ the shot.
   part is in front of them, and then they lift the crosshair.
 - The bot aims where it saw the enemy `aim_latency` seconds ago, carried forward with the velocity it saw then. A
   sudden turn is missed for that long. It starts aiming on the frame it recognizes the enemy.
-- Projectiles lead the target by their flight time. Rockets go for the feet of a target on the ground, where a near
-  miss still catches it in the blast.
+- Projectiles lead the target by their flight time.
+- **Rockets** go where the target will be when the rocket gets there, led along the ground (the track's vertical speed
+  lags a landing), its flight timed as the game's rocket flies, the bot's own speed along the view added: 0.4 s to 100
+  units, 0.7 s to 300, 1.1 s to 1000 standing; 0.53 s to 300 running in. The lead goes by the target's mean velocity
+  over the last 0.8 s, and by what it does now beyond that for 0.2 s at most: a runner is led the whole way, a player
+  strafing back and forth gets the rocket near the middle of the strafe rather than far out to the side they were
+  going at the shot. The laser's line and the rocket meet the target's hitboxes, not its box: the shins some 12 units
+  across, the hips and chest twice that.
+  - At the floor on the near side of the target's box, 1–4 units over it, no higher than lets a rocket (or the
+    laser's line) passing between its legs meet the floor 30 units on: a near miss bursts on the floor beside the
+    target, its blast pulled up into its box, rather than on a wall far behind it. A target in a jump is aimed at the
+    floor under it, one high in the air at its middle.
+  - **Guided**, the lead shrinks as the rocket flies, so the spot comes onto that floor as the rocket does.
+  - **Unguided**, the view makes up for the rocket's path, which runs above the view's line (5.6 units looking level,
+    12.6 at 30° up or down) and 8 units to its right.
+  - A lead into a wall stops short of it; one where the floor in front of the target is out of sight, or out of the
+    rocket's way, goes for its middle.
 - A slowly drifting error grows with distance and shrinks with skill.
 - The view moves like a hand on a mouse (aim model `hand`, easy to expert). Its numbers come from a player's aim
   recorded on the stand with `lb_aimlog` (20 minutes of deathmatch against hard and expert bots):
@@ -271,22 +294,37 @@ the shot.
   - further away: within 8°, or within 26° when the enemy is looking at it.
 - The 357 beyond 90 units and the shotgun beyond 272 fire only with the view on the body. That is within the angle
   half a body's width (12 units) makes at that distance, and at least 0.4°: each of their shots must count.
-- Rockets wait until the view is on the aim point: within 5.7° far off, and closer by as far off as the blast makes
-  up for (80 units), up to 10°; the egon's beam sweeps onto the target from 14° off.
+- Rockets wait until the view is on the aim point: guided within 5.7° far off, and closer by as far off as the blast
+  makes up for (80 units), up to 10°; unguided within 40 units of it, 2–6°. The egon's beam sweeps onto the target
+  from 14° off.
 - An explosive is not fired when it would burst close to the bot, looked at along the line it takes from where the
-  game launches it (a rocket leaves below and to the right of the eye): a rocket with a wall closer along it than it
-  may be fired (200–300 units, as above), a bolt with one under 160, the egon's beam end under 128, and a rocket or a
-  bolt with someone else standing near the first 350 units of it. An MP5 grenade's arc is looked along again from where the bot is when it fires, and the
-  shot is called off if a wall, a player or the target itself (closer than 300 units) came in the way.
+  game launches it: a bolt with a wall under 160 units along it, the egon's beam end under 128, and a rocket or a
+  bolt with someone else standing near the first 350 units of it. A rocket's own way is looked along, from the view
+  itself, which the trigger lets be some degrees off the aim point (past a corner a rocket clips it): it leaves below
+  and to the right of the eye and rises some 11 units over the view's line in its first 80 units, where a door's
+  lintel catches it; then guided, toward the spot; unguided, along its path above the view's line, 64 units past the
+  point; looked along again once the view turns by a degree. It is not fired where it would go off closer than it may
+  be fired (200–300 units, as above, its blast pulled 58 units out of the wall toward the bot), nor where it would meet
+  something 120 units or more from the point it goes for. An MP5 grenade's arc is looked along again from where the bot
+  is when it fires, and the shot is called off if a wall, a player or the target itself (closer than 300 units) came
+  in the way.
 - Automatic weapons and the glock are held down: the game fires them as fast as they cycle. Others are clicked as fast
   as they fire within 272 units, and further off with a pause from `semi_auto_delay` (yapb).
 - After a weapon switch it waits for the game to confirm it and 0.5 s more for the deploy.
-- **Rockets are guided:** the RPG's rocket follows the laser spot, which is where the bot looks, so after a shot the
-  view stays on the target until the rocket should get there, and 0.4 s more (6 s at most; the rocket crawls at 250
-  units/s for its first 0.4 s): on the target it was fired at, and only while
+- **The RPG's laser** is off for targets closer than the skill's `rpg_unguided` (500 units normal, 800 hard, 1000
+  expert; always on below normal), on further, within 10% of it as it is: switched with a tap of the secondary
+  attack while the launcher is loaded and ready, the shot held for it. The game tells the laser's state and the
+  rockets in flight in the weapon data (`vuser2`); a game that never shows two switches in a row is left as it is for
+  the life.
+- **Unguided, the launcher is reloaded at once:** R the frame after the shot starts the reload while the game would
+  still wait out the 1.5 s of the shot, a rocket every 2 s rather than every 3.5. With the laser on the game does not
+  reload until the rocket goes off; R is pressed the moment it has. The bot reckons with the reload once the game shows
+  it, and for as long.
+- **Guided rockets** follow the laser spot, which is where the bot looks, so after a shot the view stays on the target
+  until the rocket should get there, and 0.4 s more (6 s at most): on the target it was fired at, and only while
   that stays 450 units away or more (a new target close by, or this one come close, would bring the rocket back);
-  otherwise on the point it was fired at. While its rocket or launched grenade is on the way, the bot does not close
-  in on the target.
+  otherwise on the point it was fired at. While its guided rocket or launched grenade is on the way, the bot does not
+  close in on the target; with any rocket of its own on the way to a target under 450 units it backs off.
 
 **The gauss** is fought charged, as players do (the plain primary attack is a beginner's): at a target at any distance
 the bot charges as often as its skill's `gauss_charge` (0.2 for beginners, 0.75 normal, 0.85–0.9 hard and expert),
@@ -339,7 +377,7 @@ away (550 for a bot under 40 health), with nobody near the first stretch of the 
   | 357, crossbow, RPG                   | never            |
 
   A hurt or timid bot (health × aggression under 30) keeps its distance, as yapb's did; nobody closes in while
-  reloading or while its own rocket, grenade or satchels are on the way to the target. With a throwable in hand or being
+  reloading or while its own guided rocket, grenade or satchels are on the way to the target. With a throwable in hand or being
   drawn the bot does not close in on an enemy more than 128 units above or below it (another floor; on GunGame's
   octagon, another ring): no drop down to it, no lift up. From hard up a bot bunny hops along the path instead, where
   the way lets it (see *Tricks*): the movement keys and the jump are the hops', the view stays on the enemy and the
@@ -844,7 +882,14 @@ For weapon tests on a stand server started with `sv_cheats 1`:
   bullets are credited to the bot standing where the damage came from, bolts, rockets, grenades, satchels, mines,
   snarks and hornets to whoever threw or fired the one seen there. The crossbow's zoomed shots and the MP5's grenades
   have rows of their own. It also counts what the bots' own explosives did to them, kills and suicides from the kill
-  feed, the tricks, and the stalls by cause.
+  feed, the tricks, and the stalls by cause. Rockets get lines of their own: how many a minute and with the laser on,
+  damage and kills per rocket, where they went off from the target's box (by bands and by the target's distance, the
+  laser on and off apart), how often the view was on the target's box at the shot and while guiding, the pace between
+  rockets and how soon after the shot the reload started, the time with the target close by (within 300 units) and
+  what was in hand then, and why the bots held their fire with the launcher in hand and a target in sight. Rockets
+  that went off 60 units or more from the target's box are told apart: short of it, past it, aside, over its head.
+  A rocket first seen gone off (close by, the game clears its owner in the blast) is the shot fired nearest to it a
+  moment before, the shooter dead or not; one still on its way is left out. The latest 20,000 rockets are kept.
 - `lb selftest` checks the game DLL's weapon rules with one bot while the others stand still.
 - `lb items <item>…` hands items out on every spawn (`lb items longjump`; `lb items none` stops it).
 - `lb gg mines <name|#userid|all>` has bots play GunGame's tripmine level on a server with no GunGame: only the
