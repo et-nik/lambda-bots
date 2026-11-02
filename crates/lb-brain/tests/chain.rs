@@ -40,6 +40,7 @@ fn a_silent_hidden_enemy_changes_no_command() {
     let base = World {
         walls: vec![wall(700.0, 500.0)],
         players: vec![visible],
+        ..World::default()
     };
     let mut with_hidden = base.clone();
     with_hidden
@@ -155,10 +156,7 @@ fn a_recognized_enemy_is_aimed_at_on_the_same_frame() {
     // The scene sees the intents of the frame before.
     let (mut aimed, mut last) = (None, SimTime::ZERO);
     let r = run_scene(world, 1000, &setup, &|_| {}, &mut |sc| {
-        let aiming = matches!(
-            sc.brain.intents.look,
-            Some((Prio::Threat, LookIntent::Point { engaged: true, .. }))
-        );
+        let aiming = matches!(sc.brain.intents.look, Some((Prio::Threat, LookIntent::Track { .. })));
         if aiming && aimed.is_none() {
             aimed = Some(last);
         }
@@ -280,8 +278,10 @@ fn a_rocket_leads_a_run_but_not_a_strafe() {
     let run = rockets_at_a_crossing(None);
     let (_, target, aim) = run.first().copied().expect("fired at the runner");
     assert!(aim.y - target.y > 120.0, "led well ahead of a runner: {target} {aim}");
-    // Strafing 0.4 s each way about y = -150, once a strafe there and back is seen: the rockets go near the middle,
-    // not 250 units out to either side as a lead by what the target does at the shot would put them.
+    // Strafing 0.4 s each way about y = -150, once a strafe there and back is seen: the rockets go nearer the middle
+    // than 200 units, where a lead by what the target does at the shot would put them at the least. The hand trails
+    // the aim point as it swings, and the trigger comes as the view catches up with it, out to either side more often
+    // than in the middle.
     let strafe = rockets_at_a_crossing(Some(0.4));
     let off: Vec<f32> = strafe
         .iter()
@@ -290,5 +290,5 @@ fn a_rocket_leads_a_run_but_not_a_strafe() {
         .collect();
     assert!(off.len() >= 10, "fired at the strafer: {strafe:?}");
     let mean = off.iter().sum::<f32>() / off.len() as f32;
-    assert!(mean < 90.0 && off.iter().all(|d| *d < 150.0), "{off:?}");
+    assert!(mean < 120.0 && off.iter().all(|d| *d < 200.0), "{off:?}");
 }

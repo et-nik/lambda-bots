@@ -12,11 +12,19 @@ schema: lambdabots/difficulty@1
 #   reacquire_delay       seconds to recognize again an enemy lost less than reacquire_grace seconds ago
 #   reacquire_grace       seconds after losing sight during which an enemy is recognized again quickly
 #   aim_latency           view latency of the aim, seconds
-#   aim_model             newbie | spring | spring_combat
+#   aim_model             newbie | spring | spring_combat | hand (a hand on a mouse: strokes along arcs that land a
+#                         little short and are corrected, a pursuit that lags behind a moving target)
 #   headshot              chance to aim at the head for a contact
 #   aim_error             aim error amplitude x, y, z (units)
 #   turn_speed            maximum turn rate, degrees per second
-#   turn_accel            maximum turn acceleration, degrees per second squared: how hard the view is flicked
+#   turn_accel            maximum turn acceleration of the springs (the aim models other than hand), degrees per
+#                         second squared: how hard the view is flicked
+#   hand_time             seconds a hand's stroke of 30 degrees takes; one of A degrees takes about
+#                         hand_time * (A / 30)^0.22
+#   aim_scatter           spread of where a hand's stroke lands, a share of its length (along it; half across)
+#   hand_lag              seconds the hand takes to answer what it sees: before it corrects a stroke, and the lag
+#                         of its pursuit of a moving target
+#   head_climb            seconds to bring the aim from the body up to the head once the view is on the target
 #   semi_auto_delay       extra pause between semi-automatic shots, seconds [min, max]
 #   stay_mid / stay_far   chance to stand still in a fight at 768..1024 / beyond 1024 units
 #   crouch_tap            chance of a crouch tap while strafing
@@ -61,6 +69,10 @@ presets:
     aim_error: [20, 20, 40]
     turn_speed: 300
     turn_accel: 3000
+    hand_time: 0.50
+    aim_scatter: 0.18
+    hand_lag: 0.22
+    head_climb: 0.6
     semi_auto_delay: [0.5, 0.6]
     stay_mid: 0.50
     stay_far: 0.75
@@ -89,11 +101,15 @@ presets:
     reacquire_delay: 0.15
     reacquire_grace: 1.5
     aim_latency: 0.15
-    aim_model: spring
+    aim_model: hand
     headshot: 0.20
     aim_error: [15, 15, 30]
     turn_speed: 600
     turn_accel: 5000
+    hand_time: 0.42
+    aim_scatter: 0.15
+    hand_lag: 0.17
+    head_climb: 0.5
     semi_auto_delay: [0.3, 0.4]
     stay_mid: 0.30
     stay_far: 0.55
@@ -122,11 +138,15 @@ presets:
     reacquire_delay: 0.10
     reacquire_grace: 2.0
     aim_latency: 0.10
-    aim_model: spring
+    aim_model: hand
     headshot: 0.25
     aim_error: [10, 10, 20]
     turn_speed: 1000
     turn_accel: 9000
+    hand_time: 0.34
+    aim_scatter: 0.11
+    hand_lag: 0.13
+    head_climb: 0.4
     semi_auto_delay: [0.15, 0.25]
     stay_mid: 0.12
     stay_far: 0.30
@@ -155,11 +175,15 @@ presets:
     reacquire_delay: 0.06
     reacquire_grace: 2.5
     aim_latency: 0.07
-    aim_model: spring_combat
+    aim_model: hand
     headshot: 0.50
     aim_error: [5, 5, 10]
     turn_speed: 1600
     turn_accel: 15000
+    hand_time: 0.265
+    aim_scatter: 0.09
+    hand_lag: 0.10
+    head_climb: 0.3
     semi_auto_delay: [0.08, 0.14]
     stay_mid: 0.05
     stay_far: 0.12
@@ -188,11 +212,15 @@ presets:
     reacquire_delay: 0.04
     reacquire_grace: 3.0
     aim_latency: 0.05
-    aim_model: spring_combat
+    aim_model: hand
     headshot: 0.75
     aim_error: [1.5, 1.5, 3.0]
     turn_speed: 2500
     turn_accel: 24000
+    hand_time: 0.175
+    aim_scatter: 0.07
+    hand_lag: 0.08
+    head_climb: 0.2
     semi_auto_delay: [0.0, 0.05]
     stay_mid: 0.0
     stay_far: 0.05

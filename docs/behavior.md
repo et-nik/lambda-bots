@@ -236,6 +236,10 @@ the shot.
 **Aim.**
 - Head or body is decided once per contact, from the skill's `headshot` chance. The shotgun aims at the body beyond
   272 units, the MP5 beyond 544.
+- A new contact is aimed at the height the crosshair already crosses it at, when that is on the body, else at the
+  chest. Once the view is on the body, the aim climbs to the head (or settles on the chest) over the skill's
+  `head_climb` seconds: 0.6 s noob, 0.5 easy, 0.4 normal, 0.3 hard and 0.2 expert. A player's flick lands on whatever
+  part is in front of them, and then they lift the crosshair.
 - The bot aims where it saw the enemy `aim_latency` seconds ago, carried forward with the velocity it saw then. A
   sudden turn is missed for that long. It starts aiming on the frame it recognizes the enemy.
 - Projectiles lead the target by their flight time.
@@ -243,9 +247,9 @@ the shot.
   lags a landing), its flight timed as the game's rocket flies, the bot's own speed along the view added: 0.4 s to 100
   units, 0.7 s to 300, 1.1 s to 1000 standing; 0.53 s to 300 running in. The lead goes by the target's mean velocity
   over the last 0.8 s, and by what it does now beyond that for 0.2 s at most: a runner is led the whole way, a player
-  strafing back and forth gets the rocket near the middle of his strafe rather than far out to the side he was going
-  at the shot. The laser's line and the rocket meet the
-  target's hitboxes, not its box: the shins some 12 units across, the hips and chest twice that.
+  strafing back and forth gets the rocket near the middle of the strafe rather than far out to the side they were
+  going at the shot. The laser's line and the rocket meet the target's hitboxes, not its box: the shins some 12 units
+  across, the hips and chest twice that.
   - At the floor on the near side of the target's box, 1–4 units over it, no higher than lets a rocket (or the
     laser's line) passing between its legs meet the floor 30 units on: a near miss bursts on the floor beside the
     target, its blast pulled up into its box, rather than on a wall far behind it. A target in a jump is aimed at the
@@ -256,20 +260,40 @@ the shot.
   - A lead into a wall stops short of it; one where the floor in front of the target is out of sight, or out of the
     rocket's way, goes for its middle.
 - A slowly drifting error grows with distance and shrinks with skill.
-- The view turns like a damped spring whose stiffness follows the skill's `turn_accel`, capped by `turn_speed`:
-  flicked at full acceleration at an enemy, at a glimpse, a shot, a hit or whatever a weapon or a jump needs, turned at
-  half of it to look along the way and around, and stiffer still in a fight for hard and expert bots. A 90° flick
-  takes some 0.1 s for an expert, 0.13 s hard, 0.22 s normal and 0.3 s easy; noob bots use yapb's wandering mouse
-  model. The view is worked out over each frame's own time, so it moves on every frame whatever the server's rate.
+- The view moves like a hand on a mouse (aim model `hand`, easy to expert). Its numbers come from a player's aim
+  recorded on the stand with `lb_aimlog` (20 minutes of deathmatch against hard and expert bots):
+  - Every move is a stroke that speeds up and slows down smoothly, a symmetric bell of speed (the minimum-jerk
+    profile, the recorded player's mean one), its top a little before or after the middle by the stroke. It follows
+    an arc: the wrist or the elbow turns the mouse about a point behind it, so a sweep across the screen bulges up or
+    down, the personality's own way.
+  - A stroke of A degrees takes about `hand_time`·(A/30)^0.22 seconds, give or take 15%, and stays under
+    `turn_speed`. `hand_time`, the time of a 30° stroke, is 0.175 s for an expert, 0.265 s hard, 0.34 s normal and
+    0.42 s easy. A hard bot flicks at an enemy as the recorded player did as a rule, an expert as they did at their
+    quickest tenth: a 90° flick takes some 0.43 s normal, 0.34 s hard and 0.22 s expert.
+  - A first stroke lands some 13% short on average (the recorded flicks landed some 15% short), scattered by
+    `aim_scatter` of its length (40% of that across). When 70% of a stroke's time has gone by, the hand sees where it
+    is going and, `hand_lag` seconds later, strokes again for the miss. A correction lands 3% short and joins a
+    stroke still under way without a stop. Within its tolerance a miss is crept off.
+  - A moving target is followed with the lag of `hand_lag`. The view trails a strafing enemy, runs on past it for a
+    moment when it turns back, and then catches up. It is never glued to it.
+  - Looks along the way and around take 1.4 times as long and are let be 2° off. A glimpse, a shot or a hit is let be
+    1° off, an enemy about half its width, and whatever a weapon or a jump needs 0.2°; such a look lands its first
+    stroke as close as a correction.
+  - Noob bots use yapb's wandering mouse model. The models `spring` and `spring_combat` keep yapb's damped spring,
+    stiffer in a fight with `spring_combat`.
+  - The view is worked out over each frame's own time, and strokes start at their own moments. It moves on every
+    frame and the same way at any server rate.
 - `bots.reflex` in `config/lambdabots.yaml` (cvar `lb_reflex`, 0.5–2) makes every bot that many times as quick on top
-  of its skill: recognition, the aim's latency and the scope's settling take that share of the time, and turns are
-  that much faster.
+  of its skill. Recognition, the aim's latency, the hand's lag, the climb to the head and the scope's settling take
+  that share of the time, and so do the hand's strokes. The turn rate and acceleration are that many times higher.
 
 **Trigger.**
 - The bot fires when the view is on the target closely enough (yapb's cones):
   - under 90 units: always;
   - under 128 units: within about 37°;
   - further away: within 8°, or within 26° when the enemy is looking at it.
+- The 357 beyond 90 units and the shotgun beyond 272 fire only with the view on the body. That is within the angle
+  half a body's width (12 units) makes at that distance, and at least 0.4°: each of their shots must count.
 - Rockets wait until the view is on the aim point: guided within 5.7° far off, and closer by as far off as the blast
   makes up for (80 units), up to 10°; unguided within 40 units of it, 2–6°. The egon's beam sweeps onto the target
   from 14° off.

@@ -8,10 +8,11 @@
 
 #![forbid(unsafe_code)]
 
+mod hand;
 pub mod look;
 pub mod weapon;
 
-use lb_core::math::{dir_to_view_angles, world_vel_to_move};
+use lb_core::math::{angle_diff, dir_to_view_angles, world_vel_to_move};
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
 use lb_core::{Vec2, Vec3};
@@ -24,6 +25,10 @@ pub use weapon::{Fire, WeaponController, WeaponIntent};
 
 /// A point to look at closer than this across is right above or below the eyes.
 const NEAR_POINT: f32 = 16.0;
+/// Half a body's width less a margin, units: how wide a target is to aim at.
+pub const BODY_HALF_WIDTH: f32 = 12.0;
+/// A target's angular speed is taken from where it goes in this long, seconds.
+const RATE_PROBE: f32 = 0.05;
 
 /// Channel priorities (design §7.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,6 +52,8 @@ pub enum Prio {
 pub enum LookIntent {
     /// Look at a point; `engaged` marks aiming at an enemy.
     Point { at: Vec3, engaged: bool },
+    /// Aim at an enemy's body: the point to aim at and how fast it moves against the eyes, units per second.
+    Track { at: Vec3, vel: Vec3 },
     /// Hold view angles (ladders).
     Angles(Vec3),
 }
@@ -145,11 +152,13 @@ pub struct MotorOut {
     pub commands: SmallVec<[String; 2]>,
 }
 
-/// How urgently a look granted at `prio` turns the view: aiming at an enemy, anything that calls for the view at
-/// once (alerts, threats, weapon protocols, traversals), or calm.
+/// How urgently a look granted at `prio` turns the view: aiming at an enemy, a weapon protocol or a traversal that
+/// needs the view exactly, anything else that calls for the view at once (alerts, threats), or calm.
 fn urgency(prio: Prio, engaged: bool) -> Urgency {
     if engaged {
         Urgency::Engaged
+    } else if prio >= Prio::Protocol {
+        Urgency::Precise
     } else if prio >= Prio::Alert {
         Urgency::Alert
     } else {
@@ -185,28 +194,36 @@ impl Motor {
         self.last_sent = buttons;
     }
 
+    /// View angles toward `d`. Right above or below the eyes (closer than `near` across) a point gives no heading:
+    /// the yaw is kept instead of spinning to it, and only the pitch follows (an enemy overhead is still looked at).
+    fn angles_to(&self, d: Vec3, near: f32) -> Vec3 {
+        let mut angles = dir_to_view_angles(d);
+        if d.truncate().length() < near {
+            angles.y = self.view.y;
+        }
+        angles
+    }
+
     pub fn run(&mut self, intents: &Intents, input: &MotorInput, params: &LookParams, rng: &mut Pcg32) -> MotorOut {
         let mut out = MotorOut::default();
         if let Some((prio, look)) = intents.look {
             let goal = match look {
                 LookIntent::Point { at, engaged } => {
+                    let angles = self.angles_to(at - input.eye, if engaged { 1.0 } else { NEAR_POINT });
+                    LookGoal::new(angles, urgency(prio, engaged))
+                }
+                LookIntent::Track { at, vel } => {
                     let d = at - input.eye;
-                    // Right above or below the eyes a point gives no heading: keep the yaw instead of spinning to
-                    // it and only pitch (an enemy overhead is still looked at).
-                    let near = if engaged { 1.0 } else { NEAR_POINT };
-                    let mut angles = dir_to_view_angles(d);
-                    if d.truncate().length() < near {
-                        angles.y = self.view.y;
-                    }
+                    let angles = self.angles_to(d, 1.0);
+                    let ahead = self.angles_to(d + vel * RATE_PROBE, 1.0);
                     LookGoal {
                         angles,
-                        urgency: urgency(prio, engaged),
+                        urgency: Urgency::Engaged,
+                        rate: Some(Vec2::new(ahead.x - angles.x, angle_diff(ahead.y, angles.y)) / RATE_PROBE),
+                        size: lb_core::dmath::atan(BODY_HALF_WIDTH / d.length().max(1.0)).to_degrees(),
                     }
                 }
-                LookIntent::Angles(angles) => LookGoal {
-                    angles,
-                    urgency: urgency(prio, false),
-                },
+                LookIntent::Angles(angles) => LookGoal::new(angles, urgency(prio, false)),
             };
             let moving = input.velocity.length() > 1.0;
             self.look.update(
@@ -219,6 +236,8 @@ impl Motor {
                 self.weapon.fired_at,
                 rng,
             );
+        } else {
+            self.look.coast(&mut self.view, input.dt, params);
         }
         out.angles = self.view;
         if let Some((_, m)) = intents.movement {

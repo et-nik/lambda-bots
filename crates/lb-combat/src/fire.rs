@@ -1,6 +1,6 @@
 //! Fire control: pull the trigger when the view is on the target closely enough (yapb `focusEnemy`), the target is
-//! within the weapon's reach, and no blast would reach the shooter; semi-automatic weapons are clicked at a human
-//! cadence. The secondary attack is used where it pays: the glock's rapid fire when it lands more bullets a second
+//! within the weapon's reach, and no blast would reach the shooter; the 357's shots, and the shotgun's beyond its
+//! spray, wait for the view on the body; semi-automatic weapons are clicked at a human cadence. The secondary attack is used where it pays: the glock's rapid fire when it lands more bullets a second
 //! than the aimed shots (up close), the hornet gun's darts up close, both shotgun barrels up close (and half the
 //! time a little farther); the crossbow's scope is snapped on for single far shots (`arms::scope`).
 
@@ -9,7 +9,9 @@ use lb_core::math::view_angle_vectors;
 use lb_core::rng::Pcg32;
 use lb_game::mechanics::{AltFire, Attack, BODY, Trigger, WeaponClass, spec};
 use lb_game::weapons::WeaponId;
+use lb_motor::BODY_HALF_WIDTH;
 
+use crate::aim::SPRAY_DISTANCE;
 use crate::policy::{Armed, XBOW_UNZOOM, XBOW_ZOOM_FROM};
 
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +34,19 @@ const ROCKET_SLACK: f32 = 80.0;
 const ROCKET_AIM: [f32; 2] = [5.7, 10.0];
 const UNGUIDED_SLACK: f32 = 40.0;
 const UNGUIDED_AIM: [f32; 2] = [2.0, 6.0];
+/// The least angle counted on the body, degrees.
+const ON_BODY_MIN: f32 = 0.4;
+/// Closer than this anything in the view's way is fired at.
+const POINT_BLANK: f32 = 90.0;
+
+/// The view is on the body at `aim`: within the angle half a body's width makes at that distance.
+pub fn on_body(view: Vec3, eye: Vec3, aim: Vec3) -> bool {
+    let (forward, _, _) = view_angle_vectors(view);
+    let to = aim - eye;
+    let d = to.length().max(1.0);
+    let off = lb_core::dmath::acos(forward.dot(to / d).clamp(-1.0, 1.0));
+    off <= lb_core::dmath::atan(BODY_HALF_WIDTH / d).max(ON_BODY_MIN.to_radians())
+}
 
 /// The view is on the target closely enough to fire.
 pub fn on_target(s: &Shot) -> bool {
@@ -59,9 +74,12 @@ pub fn on_target(s: &Shot) -> bool {
         WeaponId::Crossbow if s.distance >= XBOW_ZOOM_FROM => return dot > 0.998,
         // The beam sweeps onto the target.
         WeaponId::Egon => return dot > 0.97,
+        // One shot that must count: a second's wait for the next.
+        WeaponId::Python if s.distance >= POINT_BLANK => return on_body(s.view, s.eye, s.aim),
+        WeaponId::Shotgun if s.distance > SPRAY_DISTANCE => return on_body(s.view, s.eye, s.aim),
         _ => {}
     }
-    if s.distance < 90.0 {
+    if s.distance < POINT_BLANK {
         return true;
     }
     if s.distance < 128.0 {
@@ -217,6 +235,28 @@ mod tests {
         assert!(!on_target(&unguided), "an unguided rocket flies where the view is");
         assert!(!on_target(&shot(Vec3::new(200.0, 0.0, 0.0), false, WeaponId::Crowbar)));
         assert!(on_target(&shot(Vec3::new(40.0, 0.0, 0.0), false, WeaponId::Crowbar)));
+    }
+
+    #[test]
+    fn single_shots_wait_for_the_body() {
+        let off = |distance: f32, deg: f32| Vec3::new(distance, distance * lb_core::dmath::tan(deg.to_radians()), 0.0);
+        // 2° off at 500 units is 17 units: past the body's edge, though well inside yapb's cones.
+        assert!(on_target(&shot(off(500.0, 2.0), true, WeaponId::Mp5)));
+        assert!(!on_target(&shot(off(500.0, 2.0), true, WeaponId::Python)));
+        assert!(on_target(&shot(off(500.0, 1.0), true, WeaponId::Python)));
+        assert!(
+            on_target(&shot(off(60.0, 20.0), false, WeaponId::Python)),
+            "point blank"
+        );
+        assert!(!on_target(&shot(off(400.0, 3.0), true, WeaponId::Shotgun)));
+        assert!(
+            on_target(&shot(off(200.0, 3.0), true, WeaponId::Shotgun)),
+            "the spray makes up for it"
+        );
+        assert!(
+            on_body(Vec3::ZERO, Vec3::ZERO, off(3000.0, 0.3)),
+            "the least angle far off"
+        );
     }
 
     #[test]

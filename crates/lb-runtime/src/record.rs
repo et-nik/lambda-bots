@@ -36,7 +36,7 @@ use crate::roster::RosterFilter;
 use crate::{CORE_VERSION, InitData, Runtime, commands, nav, panic_message};
 
 pub const MAGIC: &[u8; 8] = b"LBREC\0\r\n";
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 /// Uncompressed bytes gathered before a block goes to the writer thread.
 const BLOCK: usize = 1 << 20;
 /// A recording stops by itself past this much uncompressed data.
@@ -137,6 +137,7 @@ pub struct Carried {
     pub strings: StringTable,
     pub carry_over: Vec<String>,
     pub requested: Vec<String>,
+    pub kicked: Vec<String>,
     pub roster_warned: bool,
     pub rng: Pcg32,
     pub master_seed: u64,
@@ -227,6 +228,7 @@ impl Runtime {
             strings: self.strings.clone(),
             carry_over: self.carry_over.clone(),
             requested: self.requested.clone(),
+            kicked: self.kicked.clone(),
             roster_warned: self.roster_warned,
             rng: self.rng.clone(),
             master_seed: self.master_seed,
@@ -245,6 +247,7 @@ impl Runtime {
         self.strings = c.strings;
         self.carry_over = c.carry_over;
         self.requested = c.requested;
+        self.kicked = c.kicked;
         self.roster_warned = c.roster_warned;
         self.rng = c.rng;
         self.master_seed = c.master_seed;
@@ -1926,6 +1929,74 @@ mod tests {
     }
 
     #[test]
+    fn a_kicked_bot_whose_line_waits_does_not_come_back_for_it() {
+        use lb_chat::Outcome;
+
+        let answer = "привет, Гордон";
+        for server_kick in [false, true] {
+            let root = dir(&format!("record-kicked-{server_kick}"));
+            let fake = crate::chat::FakeBackend::answering(&[Outcome::Line(answer.into())]);
+            let (mut rt, mut rec, mut server) = chat_server(&root, fake);
+            new_map(&mut rt, &mut rec, &mut server, 1, false);
+            frames(&mut rt, &mut rec, &mut server, 0..900, |rt, _, server, n| {
+                if n == 800 {
+                    server.says.push((850, format!("{}, привет", netname(rt))));
+                }
+            });
+            assert!(rt.bots[0].chat.busy().is_some(), "the answer waits to be typed");
+            let kicked = rt.bots[0].persona.name.clone();
+            if server_kick {
+                let (slot, userid) = (rt.bots[0].id.slot, rt.bots[0].userid);
+                server.client_events = vec![(950, LB_CLIENT_EV_DISCONNECT, slot, userid, "")];
+            } else {
+                command(&mut rt, &mut rec, &mut server, &["lb", "kick", &kicked]);
+            }
+            frames(&mut rt, &mut rec, &mut server, 900..1000, |_, _, _, _| {});
+            if !server_kick {
+                command(&mut rt, &mut rec, &mut server, &["lb", "add", "1"]);
+            }
+            frames(&mut rt, &mut rec, &mut server, 1000..1600, |_, _, _, _| {});
+            let playing = |rt: &Runtime| -> Vec<String> {
+                rt.bots
+                    .iter()
+                    .filter(|b| b.is_active())
+                    .map(|b| b.persona.name.clone())
+                    .collect()
+            };
+            let stayed = playing(&rt);
+            assert_eq!(stayed.len(), 1, "server kick {server_kick}: {stayed:?}");
+            assert_ne!(
+                stayed[0], kicked,
+                "server kick {server_kick}: not brought back for its line"
+            );
+            step(&mut rt, &mut rec, &mut server, Entry::MapEnd);
+
+            server.client_events.clear();
+            new_map(&mut rt, &mut rec, &mut server, 2, true);
+            frames(&mut rt, &mut rec, &mut server, 0..7000, |_, _, _, _| {});
+            assert_eq!(
+                playing(&rt),
+                stayed,
+                "server kick {server_kick}: the bot that played comes back"
+            );
+            assert!(!said(&server, answer), "server kick {server_kick}: {:?}", server.sent);
+            assert_eq!(
+                rt.chat.counts.lost, 1,
+                "server kick {server_kick}: the line is not said"
+            );
+            rec.finish(&mut rt, "test over");
+            let opts = ReplayOptions {
+                dir: Some(root.join("replay")),
+                keep_dir: true,
+                max_diffs: 5,
+            };
+            let report = replay(&recording(&root), &opts, &mut |_| {}).unwrap();
+            assert!(report.matches(), "{}", report.lines().join("\n"));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
     fn an_answer_that_comes_after_the_map_change_is_said_on_the_next_map_and_replays() {
         use lb_chat::Outcome;
         use lb_chat::botchat::Phase;
@@ -2268,13 +2339,13 @@ mod tests {
     fn a_recording_of_another_format_is_refused() {
         let root = dir("record-format");
         let path = root.join("old.lbrec");
-        std::fs::write(&path, [MAGIC.as_slice(), &5u32.to_le_bytes()].concat()).unwrap();
+        std::fs::write(&path, [MAGIC.as_slice(), &6u32.to_le_bytes()].concat()).unwrap();
         let Err(err) = Reader::open(&path) else {
-            panic!("a recording of format 5 opens");
+            panic!("a recording of format 6 opens");
         };
-        assert!(err.contains("recording format 5, this build reads 6"), "{err}");
+        assert!(err.contains("recording format 6, this build reads 7"), "{err}");
         let err = replay(&path, &ReplayOptions::default(), &mut |_| {}).unwrap_err();
-        assert!(err.contains("recording format 5"), "{err}");
+        assert!(err.contains("recording format 6"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -15,6 +15,7 @@
 //!   health. A bot about to die under fire fires at anyone beyond the crowbar's reach (not in GunGame, where a
 //!   suicide costs).
 
+use lb_combat::AimPoint;
 use lb_combat::rocket::{self, Height};
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
@@ -237,7 +238,8 @@ pub(crate) fn least(m: &Mind, body: &Body, ch: &Character, t: &EnemyTrack, dista
 }
 
 /// Where the view goes for a rocket at `t`, `guided` by the laser or not ([`Mind::aim`] goes by what the bot saw of
-/// it, the aim error added).
+/// it, the aim error added), and how fast that point moves: the target's speed along the ground. A guided rocket on its
+/// way is steered by the guide's look (`arms`), which outranks this one.
 pub(crate) fn aim(
     m: &mut Mind,
     t: &EnemyTrack,
@@ -246,7 +248,7 @@ pub(crate) fn aim(
     guided: bool,
     tracer: &mut dyn Tracer,
     rng: &mut Pcg32,
-) -> Option<Vec3> {
+) -> Option<AimPoint> {
     let now = body.now;
     let skill = ch.aim();
     let seen = m.aim.seen(now, body.eye, &skill, rng)?;
@@ -274,11 +276,12 @@ pub(crate) fn aim(
         Height::Floor
     };
     let point = rocket::aim_point(body.eye, seen.center, ahead, half, seen.on_ground, height, tracer) + seen.error;
-    Some(if guided {
+    let at = if guided {
         point
     } else {
         rocket::unguided_view(body.eye, point, along(body, point))
-    })
+    };
+    Some(AimPoint { at, vel })
 }
 
 /// Why a rocket fired now along the view, on `look`, would do no good: its blast would reach the bot, which may be no

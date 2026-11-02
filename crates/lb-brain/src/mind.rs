@@ -28,7 +28,7 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{Fire, Intents, LookIntent, LookParams, MoveIntent, Prio, StanceIntent, WeaponIntent};
 use lb_nav_api::{MapView, NavService, NavStatus, NavStep};
-use lb_styles::{Emotions, GoalAffinity, TrickLikes};
+use lb_styles::{Emotions, GoalAffinity, HandTraits, TrickLikes};
 use smallvec::SmallVec;
 
 use crate::BotBrain;
@@ -269,6 +269,7 @@ pub struct Character {
     pub affinity: GoalAffinity,
     pub weapons: WeaponLike,
     pub tricks: TrickLikes,
+    pub hand: HandTraits,
 }
 
 impl Character {
@@ -278,6 +279,7 @@ impl Character {
             latency: self.skill.aim_latency,
             error: self.skill.aim_error,
             skill: self.level,
+            head_climb: self.skill.head_climb,
         }
     }
 
@@ -558,8 +560,12 @@ impl BotBrain {
             model: ch.skill.aim_model,
             turn_speed: ch.skill.turn_speed,
             turn_accel: ch.skill.turn_accel,
+            stroke_time: ch.skill.hand_time,
             calm: CALM_LOOK,
             skill: ch.level,
+            scatter: ch.skill.aim_scatter,
+            lag: ch.skill.hand_lag,
+            hand: ch.hand,
         };
         self.motor.run(&self.intents, &input, &look, &mut rng.motor)
     }
@@ -1101,16 +1107,18 @@ impl BotBrain {
                 let armed = body.armed(w).copied().unwrap_or_else(|| Armed::new(w, None, None));
                 let mode = fire::mode(&armed, distance, m.arms.double, ch.aim_sigma(distance));
                 let laser_on = launcher::laser_on(m, body);
-                let aim = if w == WeaponId::Rpg {
+                let point = if w == WeaponId::Rpg {
                     launcher::aim(m, t, body, ch, laser_on, nav, &mut rng.combat)
                 } else {
                     let shot = shot_of(w, mode.attack, body.zoomed());
-                    m.aim.point(now, body.eye, &shot, &aim_skill, &mut rng.combat)
+                    m.aim
+                        .point(now, body.eye, self.motor.view, &shot, &aim_skill, &mut rng.combat)
                 };
-                let Some(aim) = aim else {
+                let Some(point) = point else {
                     m.hold_fire = Some("no aim point yet");
                     return;
                 };
+                let aim = point.at;
                 m.last_aim = Some(aim);
                 // A throwable is not aimed, as players hold one: the view faces the enemy, down at the ground some way
                 // toward it; a throw turns to its own arc.
@@ -1123,7 +1131,10 @@ impl BotBrain {
                         engaged: false,
                     }
                 } else {
-                    LookIntent::Point { at: aim, engaged: true }
+                    LookIntent::Track {
+                        at: aim,
+                        vel: point.vel - body.velocity,
+                    }
                 };
                 self.intents.look(Prio::Threat, look);
                 let intent = match choice {

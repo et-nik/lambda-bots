@@ -527,16 +527,8 @@ impl Arms {
 /// The view is on the aim point closely enough for a shot that must count: within the angle a body's width makes at
 /// that distance.
 pub(crate) fn on_target(view: Vec3, eye: Vec3, aim: Vec3) -> bool {
-    let (forward, _, _) = view_angle_vectors(view);
-    let to = aim - eye;
-    let d = to.length().max(1.0);
-    let off = lb_core::dmath::acos(forward.dot(to / d).clamp(-1.0, 1.0));
-    off <= lb_core::dmath::atan(ON_TARGET_HALF_WIDTH / d).max(ON_TARGET_MIN.to_radians())
+    lb_combat::fire::on_body(view, eye, aim)
 }
-
-/// Half a body's width less a margin, and the least angle counted on target, degrees.
-const ON_TARGET_HALF_WIDTH: f32 = 12.0;
-const ON_TARGET_MIN: f32 = 0.4;
 
 /// A move is checked this far ahead against known beams and blasts, seconds.
 const BEAM_LOOKAHEAD: f32 = 0.3;
@@ -2772,6 +2764,7 @@ pub(crate) mod tests {
             affinity: lb_styles::StyleId::Balanced.goal_affinity(),
             weapons: crate::WeaponLike::default(),
             tricks: lb_styles::StyleId::Balanced.trick_likes(),
+            hand: lb_styles::HandTraits::NEUTRAL,
         }
     }
 
@@ -3294,10 +3287,7 @@ pub(crate) mod tests {
                 b.weapon = Some(weapon);
                 brain.act(&b, &character(), &mut Open, None, &mut rng);
             }
-            matches!(
-                brain.intents.look,
-                Some((Prio::Threat, LookIntent::Point { engaged: true, .. }))
-            )
+            matches!(brain.intents.look, Some((Prio::Threat, LookIntent::Track { .. })))
         };
         assert!(aimed(WeaponId::Glock));
         assert!(aimed(WeaponId::Snark), "the snarks in hand, the glock coming out");

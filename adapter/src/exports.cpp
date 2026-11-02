@@ -1,6 +1,7 @@
 // Metamod plugin entry points and hook tables.
 #include <string>
 
+#include "aimlog.h"
 #include "arena.h"
 #include "capture.h"
 #include "hooks.h"
@@ -283,6 +284,7 @@ LB_EXPORT LB_ENTRY int Meta_Attach(mm::PlugLoadTime now, mm::MetaFunctions *tabl
     const bool late = now > mm::PT_STARTUP && map_running();
     core_init(late);
     g_engfuncs.pfnAddServerCommand("lb", cmd_lb);
+    g_engfuncs.pfnAddServerCommand("lb_aimlog", aimlog_command);
     if (late && state().core_ok) {
         begin_map(true);
         scan_existing_clients();
@@ -300,6 +302,7 @@ LB_EXPORT LB_ENTRY int Meta_Detach(mm::PlugLoadTime, mm::PlUnloadReason) {
         std::snprintf(cmd, sizeof(cmd), "kick #%d\n", s.userid);
         g_engfuncs.pfnServerCommand(cmd);
     }
+    aimlog_map_end();
     core_shutdown(LB_SHUTDOWN_DETACH);
     rehlds_shutdown();
     const uint8_t no_messages[32] = {};

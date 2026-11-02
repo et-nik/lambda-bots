@@ -76,8 +76,9 @@ chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
   however late its reply comes: it never goes stale, and no other line takes its place (a bot with a line on its way
   is asked for nothing else; an answer to it waits, as above). A model's line asked for or on its way when the map
   changes, or when its bot leaves, is said by the same personality's bot once it is back: that personality joins
-  first, and the line waits for the player it answers (or, for a line to everybody, all who were in the game) to be in
-  the game again, 30 s into the map at most. It counts in the new map's lines a minute; a team line goes to everybody
+  first (not one whose bot an admin kicked, with `lb kick` or the server's `kick`: its line only waits in case it joins
+  anyway), and the line waits for the player it answers (or, for a line to everybody, all who were in the game) to be
+  in the game again, 30 s into the map at most. It counts in the new map's lines a minute; a team line goes to everybody
   on a map without teams. One whose bot is not back within a minute (of the map's start, for a line carried over) is
   dropped, and a ready phrase is never carried over: it costs nothing, and its moment is gone. When the quota drops,
   a bot with a line on its way is the last to leave. A model's line dropped after it came (that, chat switched off,

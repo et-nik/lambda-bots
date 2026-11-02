@@ -103,10 +103,11 @@ as the runtime does not use it either. Everything else stays as the server had i
 server's config to. The players' chat, login and registration lines with their passwords as typed, and the bots'
 lines are in it too.
 
-The file starts with `LBREC\0\r\n` and a format version, 6 since the weapon data tells of the RPG's laser and
-rockets (5: the bots' lines on their way carry over a map change). Then come blocks: a compressed length and an lz4 block of postcard-encoded records. ABI structures are stored
-as their bytes, so a recording is tied to the ABI version, which the replay checks. A recording of another format is
-refused (`recording format 5, this build reads 6`): replay it with the `lb-cli` of its own release, and build
+The file starts with `LBREC\0\r\n` and a format version, 7 since the weapon data tells of the RPG's laser and
+rockets (6: the personalities an admin kicked carry over a map change). Then come blocks: a compressed length and an
+lz4 block of postcard-encoded records. ABI structures are stored as their bytes, so a recording is tied to the ABI
+version, which the replay checks. A recording of another format is refused (`recording format 6, this build reads
+7`): replay it with the `lb-cli` of its own release, and build
 `lb-cli` together with the plugin.
 
 ## What a replay checks
@@ -165,3 +166,25 @@ recording with a changed master seed is caught at the first differing random see
   developer) should match too, since the core uses IEEE arithmetic and `dmath`, but they have not been tried yet.
 - The files the runtime reads are taken when the recording starts. If they were edited on disk and not reloaded,
   the replay runs with the edited files and warns.
+
+## Aim log
+
+`lb_aimlog on|off` (a server command; no argument shows what it is doing) writes how people aim, to tune the bots'
+hand by: one tab-separated file a map, `logs/aim-<map>-<date>.tsv`. It lives in the adapter, outside the core, and
+no bot sees any of it. Each line starts with its kind and the time in seconds since the file began:
+
+| Line | What it holds                                                                                               |
+|------|-------------------------------------------------------------------------------------------------------------|
+| `P`  | a player first seen or renamed: slot, userid, bot or not, name                                              |
+| `C`  | every usercmd of a human as the server runs it: msec, view angles, buttons, movement, weapon, lerp_msec     |
+| `S`  | every player's state up to 250 times a second, bots too: position, velocity, view height and angles, flags  |
+| `V`  | another player came into or went out of a human's sight: from the eye to the other's eye and middle         |
+| `E`  | a weapon event                                                                                              |
+| `T`  | the engine's time, once a second                                                                            |
+
+The ignored test `aim_style` (`crates/lb-brain/tests/aim_style.rs`) writes the same lines for a whole bot that fights
+enemies a recorded player faced: `LB_AIMSIM=<dir> LB_AIMSIM_REPLAY=<file> cargo test --release -p lb-brain --test
+aim_style -- --ignored --nocapture`. The replay file holds every 4 ms where each enemy was from the player's eye, how
+it moved and whether the player could see it (`t slot shown dx dy dz vx vy vz yaw flags`). The player's aim and the
+bots' then compare on the same targets. Without `LB_AIMSIM_REPLAY` the enemy strafes and stops around the bot at
+random.
