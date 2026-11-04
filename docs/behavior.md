@@ -419,15 +419,15 @@ one it holds.
 **Throws.** Three times a second a bot with grenades, satchels or snarks weighs a throw at the nearest enemy: one in
 sight, or one lost up to 3 s ago whose position is still known to within 400 units. With satchels it is an enemy in
 sight, within a throw's reach the one with the most others in sight about it (within the blast, the closer the more):
-the satchel goes into the crowd. Each kind that fits the distance has its chance per weighing: 0.9 for a grenade,
-0.35 for satchels and 0.6 for snarks at an enemy out of sight, and 0.9, 0.45 and 0.6 at one in sight (a satchel 0.9
-on GunGame's satchel level). The best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for
-experts) and the style's liking for throws, a little more for bold bots and a little less for careful ones, is the
-chance to throw at all (0.95 at most); which kind goes is drawn as likely as its own chance. So a grenade that fits
-is thrown almost always. After a grenade the next throw is weighed about a second later, after satchels 1–2.5 s later
-(at once on the satchel level), after snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the
-crowbar, throws are the weapon:
-twice as likely, and grenades from 150 units (yapb's grenade war).
+the satchel goes into the crowd. Each kind that fits the distance has its chance per weighing: at an enemy out of
+sight 0.9 for a grenade and 0.6 for snarks (satchels go at one only on chance, below, with no grenade or snark on the
+bot), at one in sight 0.9 for a grenade, 0.45 for satchels (0.9 on GunGame's satchel level) and 0.6 for snarks. The
+best of them, times the skill's `throw_rate` (0.5 for beginners up to 1.4 for experts) and the style's liking for
+throws, a little more for bold bots and a little less for careful ones, is the chance to throw at all (0.95 at most);
+which kind goes is drawn as likely as its own chance. So a grenade that fits is thrown almost always. After a grenade
+the next throw is weighed about a second later, after satchels 1–2.5 s later (at once on the satchel level), after
+snarks 1–2.5 s later: they cost nothing to let go. With no gun left but the crowbar, throws are the weapon: twice as
+likely, and grenades from 150 units (yapb's grenade war).
 - **Grenades with no enemy known.** Now and then (a chance of 0.03 per weighing, times `throw_rate` and the style's
   liking: about every 10 s for a normal bot) one goes where an enemy is expected, 350–1000 units away and up to 48
   units off the spot: where a lost enemy would come into view, else a sound heard in the last 4 s, else the busiest
@@ -538,14 +538,15 @@ twice as likely, and grenades from 150 units (yapb's grenade war).
   the enemies that came into sight (21% before), 1.1 s after it did (2.5 s), the first 2.3 s after a spawn (7.8 s),
   for 1 suicide and 1072 damage to the bots themselves (none and 65 before).
 - **The satchels go off**, all of them wherever they lie (the radio reaches 4096 units), once the bot is out of their
-  blast (300 units for the multiplayer satchel's 120 damage; it backs off first). What they would do to someone is
-  their blasts together: a satchel does 120 damage, less the further off, so two lying close reach further than one.
-  A satchel the bot has not seen lying (nor just now) may have bounced or slid some way off where it was thrown to:
-  the bot keeps 100 units further from it. At the edge of the blast of those it has seen lying they go off as well
-  when an enemy in sight (or lost half a second ago) takes 2.5 times the damage the bot would and 40 or more, so long
-  as the bot takes no more than 10 and keeps 60 health (where it will be as they go off; never where a suicide costs
-  a GunGame kill): a satchel that does the enemy some harm at last, rather than one lying until the enemy walks away
-  from it. Once the radio's button is down the press goes through.
+  blast (300 units for the multiplayer satchel's 120 damage; it backs off first), and running back into it only with
+  health to spare for what it takes where it will be as they go off. What they would do to someone is their blasts
+  together: a satchel does 120 damage, less the further off, so two lying close reach further than one. A satchel the
+  bot has not seen lying (nor just now) may have bounced or slid some way off where it was thrown to: the bot keeps 100
+  units further from it. At the edge of the blast of those it has seen lying they go off as well when an enemy in sight
+  (or lost half a second ago) takes 2.5 times the damage the bot would and 40 or more, so long as the bot takes no more
+  than 10 and keeps 60 health (where it will be as they go off; never where a suicide costs a GunGame kill): a satchel
+  that does the enemy some harm at last, rather than one lying until the enemy walks away from it. Once the radio's
+  button is down the press goes through.
   The bot sets them off:
   - with an enemy in their blast for 40 damage or more (one satchel 200 units away), where it will be by the time
     they go off: the radio takes a second to draw, and is pressed only while the enemy is still in the blast (for up

@@ -167,14 +167,17 @@ impl SatchelStats {
         };
     }
 
-    /// Sim time restarts with every map: what is under way is dropped (satchels not seen to end with it), the counts go
-    /// on.
+    /// Sim time restarts with every map: what is under way is dropped (satchels not seen to end with it, spells in
+    /// sight counted as they stand), the counts go on.
     pub fn new_map(&mut self, now: f64) {
         self.since -= now;
         self.done
             .extend(self.flying.drain(..).map(|(_, s)| s).filter(|s| s.end.is_some()));
         keep_last(&mut self.done);
-        self.watch.clear();
+        for s in std::mem::take(&mut self.watch).into_values().filter_map(|w| w.spell) {
+            self.count_spell(s);
+        }
+        self.last_off.clear();
     }
 
     /// A bot's own counts of why its satchels went off and why its satchel protocols failed (`lb brain`): what they
@@ -376,9 +379,7 @@ impl SatchelStats {
         };
         let spell = match w.spell.take() {
             Some(s) => {
-                self.spells += 1;
-                self.spell_time += s.last_seen.since(s.since);
-                self.spells_thrown += u32::from(s.thrown);
+                self.count_spell(s);
                 Some(s)
             }
             None => w
@@ -402,10 +403,14 @@ impl SatchelStats {
         };
         if let Some(s) = w.spell.take() {
             w.ended = Some((now, s));
-            self.spells += 1;
-            self.spell_time += s.last_seen.since(s.since);
-            self.spells_thrown += u32::from(s.thrown);
+            self.count_spell(s);
         }
+    }
+
+    fn count_spell(&mut self, s: Spell) {
+        self.spells += 1;
+        self.spell_time += s.last_seen.since(s.since);
+        self.spells_thrown += u32::from(s.thrown);
     }
 
     /// Every frame, for each bot.
@@ -428,28 +433,28 @@ impl SatchelStats {
             w.alive_since = Some(now);
         }
         let before = w.carried.replace(f.carried);
+        let armed = f.carried > 0 || f.out;
+        let seen = armed && f.enemy.is_some();
+        // Before the throws: one on the frame the enemy comes into sight is thrown in its spell.
+        if seen {
+            w.spell
+                .get_or_insert(Spell {
+                    since: now,
+                    last_seen: now,
+                    thrown: false,
+                })
+                .last_seen = now;
+        }
         if let Some(before) = before {
             for _ in f.carried..before {
                 self.thrown(slot, now, f);
             }
         }
-        let armed = f.carried > 0 || f.out;
         if armed {
             self.armed_time += dt;
         }
         let w = self.watch.entry(slot).or_default();
-        let seen = armed && f.enemy.is_some();
-        if seen {
-            if let Some(s) = &mut w.spell {
-                s.last_seen = now;
-            } else {
-                w.spell = Some(Spell {
-                    since: now,
-                    last_seen: now,
-                    thrown: false,
-                });
-            }
-        } else if w.spell.is_some_and(|s| now.since(s.last_seen) > SPELL_GAP || !armed) {
+        if !seen && w.spell.is_some_and(|s| now.since(s.last_seen) > SPELL_GAP || !armed) {
             self.end_spell(slot, now);
         }
         if seen {
@@ -610,12 +615,20 @@ impl SatchelStats {
             first.len(),
         ));
         let mut reactions = self.reactions.clone();
+        // The spells still open count as they stand, as their time in sight and their throws' reactions do.
+        let (spells, spell_time, spells_thrown) = self
+            .watch
+            .values()
+            .filter_map(|w| w.spell)
+            .fold((self.spells, self.spell_time, self.spells_thrown), |(n, t, k), s| {
+                (n + 1, t + s.last_seen.since(s.since), k + u32::from(s.thrown))
+            });
         out.push(format!(
             "    enemies in sight with satchels on: {:.0} s in {} spells, a satchel thrown in {:.0}%, the first {} after \
              the enemy came in sight (median; quartiles {}–{}); died in {} spells without a throw, in {} with one",
-            self.spell_time,
-            self.spells,
-            self.spells_thrown as f32 / self.spells.max(1) as f32 * 100.0,
+            spell_time,
+            spells,
+            spells_thrown as f32 / spells.max(1) as f32 * 100.0,
             secs(median(&mut reactions)),
             secs(quantile(&mut reactions, 0.25)),
             secs(quantile(&mut reactions, 0.75)),
@@ -640,7 +653,7 @@ impl SatchelStats {
                 .iter()
                 .position(|t| {
                     acc += t;
-                    acc >= yaw_total / 2.0
+                    yaw_total > 0.0 && acc >= yaw_total / 2.0
                 })
                 .map_or("-".to_string(), |i| format!("{}°", i * 5 + 2))
         };
@@ -793,5 +806,83 @@ mod tests {
         s.snapshot_done(SimTime(2.0), &[]);
         assert_eq!(s.throws, 1);
         assert!(!s.done[0].burst && s.done[0].throw.enemy.is_none());
+    }
+
+    #[test]
+    fn a_set_off_on_the_last_map_gives_no_reason_to_blasts_on_this_one() {
+        let mut s = SatchelStats::default();
+        s.brain(
+            1,
+            SimTime(300.0),
+            &[],
+            Some((SimTime(300.0), "an enemy in the blast")),
+            &[],
+        );
+        s.new_map(400.0);
+        s.frame(1, SimTime(0.0), &frame(3, None));
+        s.frame(1, SimTime(1.0), &frame(2, None));
+        s.seen(5, 1, Vec3::ZERO, false, SimTime(1.05), &[]);
+        s.seen(5, 1, Vec3::ZERO, true, SimTime(2.0), &[]);
+        s.frame(1, SimTime(2.5), &frame(1, None));
+        s.seen(6, 1, Vec3::ZERO, false, SimTime(2.55), &[]);
+        s.brain(1, SimTime(3.9), &[], Some((SimTime(3.9), "on chance")), &[]);
+        s.seen(6, 1, Vec3::ZERO, true, SimTime(4.0), &[]);
+        let whys: Vec<_> = s.flying.iter().map(|(i, s)| (*i, s.why)).collect();
+        assert_eq!(whys, vec![(5, None), (6, Some("on chance"))]);
+    }
+
+    #[test]
+    fn a_throw_as_the_enemy_comes_into_sight_is_thrown_in_its_spell() {
+        let mut s = SatchelStats::default();
+        s.frame(1, SimTime(0.0), &frame(2, None));
+        s.frame(1, SimTime(0.05), &frame(1, Some(400.0)));
+        s.died(1, SimTime(0.5));
+        assert_eq!((s.spells, s.spells_thrown, s.died_dry, s.died_thrown), (1, 1, 0, 1));
+        assert_eq!(s.reactions, vec![0.0]);
+    }
+
+    #[test]
+    fn the_report_counts_a_spell_still_open_once() {
+        let mut s = SatchelStats::default();
+        for i in 0..=20 {
+            s.frame(
+                1,
+                SimTime(f64::from(i) * 0.05),
+                &frame(if i < 10 { 2 } else { 1 }, Some(300.0)),
+            );
+        }
+        let open = s.report(60.0).join("\n");
+        assert!(open.contains("1 s in 1 spells, a satchel thrown in 100%"), "{open}");
+        s.frame(1, SimTime(1.6), &frame(1, None));
+        assert_eq!(s.spells, 1);
+        let ended = s.report(60.0).join("\n");
+        assert!(ended.contains("1 s in 1 spells, a satchel thrown in 100%"), "{ended}");
+    }
+
+    #[test]
+    fn a_spell_open_as_the_map_changes_stays_counted() {
+        let mut s = SatchelStats::default();
+        for i in 0..=20 {
+            s.frame(
+                1,
+                SimTime(f64::from(i) * 0.05),
+                &frame(if i < 10 { 2 } else { 1 }, Some(300.0)),
+            );
+        }
+        let open = s.report(60.0).join("\n");
+        assert!(open.contains("1 s in 1 spells, a satchel thrown in 100%"), "{open}");
+        s.new_map(1.0);
+        assert_eq!(s.spells, 1);
+        let after = s.report(59.0).join("\n");
+        assert!(after.contains("1 s in 1 spells, a satchel thrown in 100%"), "{after}");
+    }
+
+    #[test]
+    fn no_enemy_in_sight_with_satchels_in_hand_gives_no_yaw() {
+        let mut s = SatchelStats::default();
+        s.frame(1, SimTime(0.0), &frame(2, None));
+        s.frame(1, SimTime(0.1), &frame(1, None));
+        let report = s.report(60.0).join("\n");
+        assert!(report.contains("the view's yaw off it - (median)"), "{report}");
     }
 }

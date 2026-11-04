@@ -18,6 +18,7 @@ use lb_game::weapons::WeaponId;
 use lb_knowledge::PlayerKey;
 use lb_motor::{LookIntent, MoveIntent};
 
+use super::throw::throw_held;
 use super::{Hands, Request, Status, hold, press, settled, takes};
 
 /// Drawing the satchel radio takes a second (`CSatchel::Deploy`).
@@ -33,13 +34,14 @@ const SHOOT_FOR: f64 = 4.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Draw,
-    /// Pressing `button`: since `at`, once the game takes it, with `before` satchels in the pocket then; `last`: the
-    /// other button did not do it.
+    /// Pressing `button`: since `at`, once the game takes it, with `before` satchels in the pocket and the primary
+    /// attack held back `hold` then; `last`: the other button did not do it.
     Press {
         button: Attack,
         since: SimTime,
         at: Option<SimTime>,
         before: i32,
+        hold: f32,
         last: bool,
     },
 }
@@ -79,6 +81,7 @@ impl SatchelTrigger {
         let game = h.predicted(w);
         let state = game.map_or(0, |p| p.charge_ready);
         let count = h.reserve(w);
+        let primary = game.map_or(0.0, |p| p.next_primary);
         if state == 2 {
             if let Phase::Press {
                 button, at: Some(_), ..
@@ -112,6 +115,7 @@ impl SatchelTrigger {
                     since: now,
                     at: None,
                     before: count,
+                    hold: primary,
                     last: false,
                 };
                 self.update(h, go)
@@ -121,6 +125,7 @@ impl SatchelTrigger {
                 since,
                 at,
                 before,
+                hold,
                 last,
             } => {
                 let Some(at) = at else {
@@ -140,6 +145,7 @@ impl SatchelTrigger {
                         since,
                         at: Some(now),
                         before: count,
+                        hold: primary,
                         last,
                     };
                     return Status::Running(Request {
@@ -147,15 +153,19 @@ impl SatchelTrigger {
                         ..Request::default()
                     });
                 };
-                if !last && (count < before || now.since(at) > NO_EFFECT) {
+                // One handed back at once (GunGame's satchel level) keeps the count: thrown, it shows in the primary
+                // held back.
+                let threw = count < before || throw_held(game, hold);
+                if !last && (threw || now.since(at) > NO_EFFECT) {
                     // Another satchel thrown, or nothing done: the other button sets them off here. Let go first,
                     // and press it once the game takes it (a throw holds the buttons back up to a second).
-                    self.threw |= count < before;
+                    self.threw |= threw;
                     self.phase = Phase::Press {
                         button: button.other(),
                         since: now,
                         at: None,
                         before: count,
+                        hold: primary,
                         last: true,
                     };
                     return waiting;
@@ -494,6 +504,40 @@ mod tests {
         let gone = predicted(2, 2);
         assert_eq!(trigger.update(&hands(0.62, &fewer, &gone, dll), true), Status::Done);
         assert_eq!(trigger.button, Some(Attack::Secondary), "the button that set them off");
+    }
+
+    #[test]
+    fn a_detonate_press_that_throws_one_handed_back_at_once_is_still_seen_thrown() {
+        // As above, on GunGame's satchel level: the game hands the satchel back, the count stays.
+        let dll = DllProfile::default();
+        let mut trigger = SatchelTrigger::new(SimTime(0.0));
+        let arsenal = [Armed::new(WeaponId::Satchel, None, Some(3))];
+        let out = predicted(1, 3);
+        assert_eq!(
+            fire(trigger.update(&hands(0.0, &arsenal, &out, dll), true)),
+            Fire::Primary
+        );
+        let thrown = held_back(1, 3, 0.98, 0.48);
+        assert_eq!(
+            fire(trigger.update(&hands(0.02, &arsenal, &thrown, dll), true)),
+            Fire::None,
+            "let go before the other button"
+        );
+        assert!(trigger.threw);
+        // The pocket empty, the primary still held back from a throw before: the press threw nothing.
+        let dll = DllProfile::resolve("auto", true);
+        let mut trigger = SatchelTrigger::new(SimTime(0.0));
+        let empty = [Armed::new(WeaponId::Satchel, None, Some(0))];
+        for (t, primary) in [(0.0, 1.0), (0.2, 0.8)] {
+            let left = held_back(1, 0, primary, 0.0);
+            assert_eq!(
+                fire(trigger.update(&hands(t, &empty, &left, dll), true)),
+                Fire::Secondary
+            );
+        }
+        let left = held_back(1, 0, 0.65, 0.0);
+        assert_eq!(fire(trigger.update(&hands(0.35, &empty, &left, dll), true)), Fire::None);
+        assert!(!trigger.threw);
     }
 
     #[test]

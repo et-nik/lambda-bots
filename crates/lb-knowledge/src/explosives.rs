@@ -58,7 +58,8 @@ pub struct Charge {
     pub seen: Option<SimTime>,
 }
 
-/// A charge last seen moving slower than this lies where it was seen.
+/// A charge last seen moving slower than this lies where it was seen: on a floor the engine stops one slower than 30
+/// units a second dead (`SV_Physics_Toss`), so one lying reads 0.
 const CHARGE_AT_REST: f32 = 20.0;
 
 impl Charge {

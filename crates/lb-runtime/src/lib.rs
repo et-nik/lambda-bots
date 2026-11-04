@@ -1244,6 +1244,9 @@ impl Runtime {
             if let Some(lb_game::gungame::Kit::Throwable(w)) = bot.drill {
                 let carried = arsenal(&bot.self_state, &self.game.weapons);
                 let left = carried.iter().find(|a| a.id == w).and_then(|a| a.reserve).unwrap_or(0);
+                if left != bot.drill_count.0 {
+                    bot.drill_count = (left, now);
+                }
                 // The game takes no satchel while some are out (BugfixedHL: with 5 carried and out together), and
                 // leaves the one refused lying where it was given: one every 0.3 s ran the server out of entities in
                 // minutes. Satchels are kept up to a full pocket, as the plugin's never runs dry.
@@ -1264,7 +1267,8 @@ impl Runtime {
                         .as_ref()
                         .and_then(|p| p.weapons[w as usize])
                         .is_none_or(|p| p.charge_ready == 0);
-                    (full, (out == 0 && idle) || (bugfixed && left + out < full))
+                    let still = now.since(bot.drill_count.1);
+                    (full, drill_satchel_taken(left, out, full, idle, bugfixed, still))
                 } else {
                     (THROWABLES_KEPT, true)
                 };
@@ -3430,6 +3434,16 @@ fn satchel_frame(
     }
 }
 
+/// A satchel thrown is in the entity snapshots (every 0.05 s) only once the adapter's registry has next looked for new
+/// entities (every 0.05 s too), while the pocket shows it gone at once: till then it passes for none out.
+const THROWN_SEEN: f64 = 0.1;
+
+/// `lb gg satchels`: whether the game takes a satchel given to a bot with `left` carried and `out` seen out (`full`
+/// together at most), its radio `idle`, its pocket unchanged for `still` seconds.
+fn drill_satchel_taken(left: i32, out: i32, full: i32, idle: bool, bugfixed: bool, still: f64) -> bool {
+    still >= THROWN_SEEN && ((out == 0 && idle) || (bugfixed && left + out < full))
+}
+
 /// `give` client commands for `weapons` and some of their ammo (the game honors them with `sv_cheats 1`).
 fn give_weapons(bot: &mut Bot, weapons: &[WeaponId]) {
     for &w in weapons {
@@ -4023,5 +4037,34 @@ fn quota_mode_name(mode: QuotaMode) -> &'static str {
         QuotaMode::Normal => "normal",
         QuotaMode::Fill => "fill",
         QuotaMode::Match => "match",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drill_satchel_not_given_on_a_throw_not_yet_seen() {
+        for bugfixed in [false, true] {
+            assert!(
+                !drill_satchel_taken(4, 0, 5, true, bugfixed, 0.02),
+                "the pocket one fewer, the satchel not in the snapshot yet (BugfixedHL {bugfixed})"
+            );
+            assert!(
+                drill_satchel_taken(4, 0, 5, true, bugfixed, 0.5),
+                "none out (BugfixedHL {bugfixed})"
+            );
+        }
+        assert!(
+            !drill_satchel_taken(4, 1, 5, false, true, 0.5),
+            "5 carried and out together"
+        );
+        assert!(drill_satchel_taken(2, 1, 5, false, true, 0.5));
+        assert!(!drill_satchel_taken(2, 1, 5, false, false, 0.5), "some out");
+        assert!(
+            !drill_satchel_taken(4, 0, 5, false, false, 0.5),
+            "just set off: the radio still out"
+        );
     }
 }

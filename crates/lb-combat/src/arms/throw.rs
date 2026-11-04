@@ -27,6 +27,7 @@ use lb_core::Vec3;
 use lb_core::math::{dir_to_view_angles, view_angle_vectors};
 use lb_core::time::SimTime;
 use lb_game::mechanics::{Attack, GRENADE_FUSE, GRENADE_MIN_COOK, Trigger};
+use lb_game::self_state::PredictedWeapon;
 use lb_game::weapons::WeaponId;
 use lb_knowledge::PlayerKey;
 use lb_motor::{LookIntent, MoveIntent, WeaponIntent};
@@ -212,8 +213,9 @@ pub struct Thrower {
     pub landings: Vec<Vec3>,
     /// The satchel button that throws here, once one did or the one the DLL profile names did nothing.
     button: Option<Attack>,
-    /// Satchels were out when the button was pressed.
+    /// Satchels were out when the button was pressed; the game held the primary attack back this long then.
     pressed_out: bool,
+    pressed_hold: f32,
     /// What a press showed of the server's satchel buttons: the one that sets the charges off. Taken by the caller.
     pub learned: Option<Attack>,
     /// A press set the satchels out off instead of throwing another.
@@ -248,6 +250,7 @@ impl Thrower {
             landings: Vec::new(),
             button: None,
             pressed_out: false,
+            pressed_hold: 0.0,
             learned: None,
             set_off: false,
             pin: None,
@@ -786,6 +789,7 @@ impl Thrower {
                     button,
                 };
                 self.pressed_out = out;
+                self.pressed_hold = game.map_or(0.0, |p| p.next_primary);
                 running(press(w, button, Trigger::Hold, 0.0), angles, false)
             }
             Phase::Jump { at } => {
@@ -805,6 +809,7 @@ impl Thrower {
                     button,
                 };
                 self.pressed_out = out;
+                self.pressed_hold = game.map_or(0.0, |p| p.next_primary);
                 running(press(w, button, Trigger::Hold, 0.0), angles, false)
             }
             Phase::Pressed { at, before, button } => {
@@ -816,7 +821,7 @@ impl Thrower {
                 }
                 // A satchel handed back at once (GunGame's satchel level) keeps the count: the throw shows in the
                 // charges come out, or in the primary held back as a throw holds it (a set-off holds it less).
-                let held = game.is_some_and(|p| p.next_primary > THROW_HOLDS);
+                let held = throw_held(game, self.pressed_hold);
                 if out && (count < before || !self.pressed_out || held) {
                     // A throw with charges out tells the buttons apart; so does one by the other button after a
                     // press that did nothing.
@@ -986,6 +991,13 @@ fn room_ahead(h: &Hands<'_>, tracer: &mut dyn Tracer) -> bool {
         h.origin + forward * SNARK_ROOM[1],
     ));
     !tr.start_solid && !tr.all_solid && tr.fraction > 0.25
+}
+
+/// The game holds the primary attack back as a satchel throw does, and longer than it did as the button was pressed
+/// (`pressed`): one was thrown. A hold left from a throw before shows nothing of this press (the secondary pressed
+/// while it lasts, or the prediction data not refreshed since the press).
+pub(super) fn throw_held(game: Option<PredictedWeapon>, pressed: f32) -> bool {
+    game.is_some_and(|p| p.next_primary > THROW_HOLDS.max(pressed))
 }
 
 #[cfg(test)]
@@ -1581,6 +1593,47 @@ mod tests {
             }
             assert_eq!((end, thrown), (Some(Status::Done), 1), "lag {lag}");
         }
+    }
+
+    #[test]
+    fn a_primary_held_back_from_a_throw_before_is_no_throw_of_the_secondary() {
+        // The classic SDK, a satchel out: the secondary throws, and the primary is still held back from the throws
+        // before. The game shows the press only as its data is refreshed, a satchel handed back at once.
+        let target = Vec3::new(250.0, 0.0, -36.0);
+        let throw = ballistics::satchel(&mut Unchecked, Vec3::ZERO, Vec3::ZERO, target, 800.0);
+        let mut th = Thrower::new(Kind::Satchel, target, throw, SimTime(0.0));
+        let mut scene = Scene {
+            view: Vec3::new(throw.pitch, throw.yaw, 0.0),
+            arsenal: vec![Armed::new(WeaponId::Satchel, None, Some(2))],
+            prediction: Prediction {
+                current: Some(WeaponId::Satchel),
+                primary_ammo: 2,
+                ..Prediction::default()
+            },
+            dll: DllProfile::resolve("classic", false),
+        };
+        let clocks = |primary: f32, secondary: f32| {
+            Some(PredictedWeapon {
+                charge_ready: 1,
+                next_primary: primary,
+                next_secondary: secondary,
+                ..PredictedWeapon::default()
+            })
+        };
+        scene.prediction.weapons[WeaponId::Satchel as usize] = clocks(1.0, 0.0);
+        let fire = |th: &mut Thrower, scene: &Scene, t: f64| match th
+            .update(&scene.hands(t, WeaponId::Satchel), &mut Unchecked)
+        {
+            Status::Running(r) => Some(r.weapon.unwrap().fire),
+            Status::Done => None,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(fire(&mut th, &scene, 0.0), Some(Fire::Secondary));
+        assert_eq!(fire(&mut th, &scene, 0.01), Some(Fire::Secondary), "nothing shown yet");
+        assert!(th.landings.is_empty());
+        scene.prediction.weapons[WeaponId::Satchel as usize] = clocks(1.98, 0.48);
+        assert_eq!(fire(&mut th, &scene, 0.02), None);
+        assert_eq!(th.landings.len(), 1);
     }
 
     #[test]

@@ -86,8 +86,8 @@ pub struct Bot {
     /// The GunGame level the bot's kit was last the tripmines on: the glock left with every mine out is still that
     /// level's.
     pub mines_level: Option<i32>,
-    /// `lb gg mines`: a GunGame level played on a server with none (the stand); when mines were last handed back, and
-    /// how many it carried and since when.
+    /// `lb gg`: a GunGame level played on a server with none (the stand); when its mines or throwables were last
+    /// handed back, and how many it carried and since when.
     pub drill: Option<lb_game::gungame::Kit>,
     pub drill_gave: SimTime,
     pub drill_count: (i32, SimTime),
