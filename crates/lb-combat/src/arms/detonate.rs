@@ -50,6 +50,9 @@ pub struct SatchelTrigger {
     started: SimTime,
     /// The button that set the charges off, once they went off.
     pub button: Option<Attack>,
+    /// A press threw another satchel instead (the other button sets them off): where it went is not known; it goes
+    /// off with the others.
+    pub threw: bool,
 }
 
 impl SatchelTrigger {
@@ -58,7 +61,14 @@ impl SatchelTrigger {
             phase: Phase::Draw,
             started: now,
             button: None,
+            threw: false,
         }
+    }
+
+    /// The radio's button is down: the charges are going off (or the button does something else here, which it
+    /// learns).
+    pub fn pressed(&self) -> bool {
+        matches!(self.phase, Phase::Press { at: Some(_), .. })
     }
 
     /// `go`: press once the radio is in hand and the game takes the button; until then, or when no longer told to
@@ -140,6 +150,7 @@ impl SatchelTrigger {
                 if !last && (count < before || now.since(at) > NO_EFFECT) {
                     // Another satchel thrown, or nothing done: the other button sets them off here. Let go first,
                     // and press it once the game takes it (a throw holds the buttons back up to a second).
+                    self.threw |= count < before;
                     self.phase = Phase::Press {
                         button: button.other(),
                         since: now,
@@ -180,8 +191,10 @@ const AIRBURST_PASS: f32 = 220.0;
 const PASSED: f32 = 24.0;
 /// The radio sets satchels off this long after a throw (`CSatchel::Throw`).
 const RADIO_READY: f64 = 0.5;
-/// A satchel that has not come by the enemy by then is left lying.
+/// A satchel that has not come by the enemy by then is left lying (see `Airburst::watching`); one that came by it as
+/// the bot came into its blast, this much later, the radio held up no longer.
 const AIRBURST_WATCH: f64 = 2.5;
+const AIRBURST_HELD: f64 = 1.0;
 /// The bot backs off the enemy this long after the throw, while the satchel flies.
 const BACK_OFF_FOR: f64 = 1.0;
 const BACK_OFF_SPEED: f32 = 320.0;
@@ -196,6 +209,7 @@ pub struct Airburst {
     pub button: Option<Attack>,
     /// How close the satchel came to the enemy while both were in sight.
     pub closest: Option<f32>,
+    watch: f64,
 }
 
 impl Airburst {
@@ -206,7 +220,24 @@ impl Airburst {
             trigger: None,
             button: None,
             closest: None,
+            watch: AIRBURST_WATCH,
         }
+    }
+
+    /// Left lying after `secs` rather than [`AIRBURST_WATCH`]: where the bot has another to throw.
+    pub fn watching(mut self, secs: f64) -> Airburst {
+        self.watch = secs;
+        self
+    }
+
+    /// The radio's button is down for it.
+    pub fn pressed(&self) -> bool {
+        self.trigger.as_ref().is_some_and(SatchelTrigger::pressed)
+    }
+
+    /// The radio's press threw another satchel instead (once).
+    pub fn take_threw(&mut self) -> bool {
+        self.trigger.as_mut().is_some_and(|t| std::mem::take(&mut t.threw))
     }
 
     /// The satchel was set off (rather than left lying).
@@ -223,9 +254,15 @@ impl Airburst {
         if let Some(t) = &mut self.trigger {
             let status = t.update(h, b.spared);
             self.button = t.button;
+            if matches!(status, Status::Running(_))
+                && !t.pressed()
+                && now.since(self.thrown) > self.watch + AIRBURST_HELD
+            {
+                return Status::Failed("the bot was in the blast");
+            }
             return status;
         }
-        if now.since(self.thrown) > AIRBURST_WATCH {
+        if now.since(self.thrown) > self.watch {
             return Status::Failed(if b.satchel.is_none() {
                 "the satchel was not in sight"
             } else if !b.spared {
@@ -448,6 +485,7 @@ mod tests {
             Fire::None,
             "let go before the other button"
         );
+        assert!(trigger.threw, "one more out, where it went not known");
         let later = held_back(1, 2, 0.5, 0.0);
         assert_eq!(
             fire(trigger.update(&hands(0.6, &fewer, &later, dll), true)),

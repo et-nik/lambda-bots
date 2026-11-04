@@ -179,6 +179,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             Some("reset") => {
                 rt.arms_stats.reset(rt.now.secs());
                 rt.rocket_stats.reset(rt.now.secs());
+                rt.satchel_stats.reset(rt.now.secs());
                 rt.tricks_base = rt.bots.iter().map(|b| (b.id, bot_tricks(b))).collect();
                 for b in &mut rt.bots {
                     b.stall.counts = Default::default();
@@ -188,6 +189,7 @@ pub fn execute(rt: &mut Runtime, host: &mut dyn Host, args: &[&str]) -> Vec<Stri
             _ => {
                 let mut out = rt.arms_stats.report(rt.now.secs(), &rt.game.rules.damages);
                 out.extend(rt.rocket_stats.report(rt.now.secs()));
+                out.extend(rt.satchel_stats.report(rt.now.secs()));
                 out.push(trick_totals(rt).line());
                 let mut stalls = crate::stall::Stalls::default();
                 for b in &rt.bots {
@@ -1248,8 +1250,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         let arms = &m.arms;
         let st = &arms.stats;
         out.push(format!(
-            "  arms: {}; thrown {} grenades ({} where an enemy was expected, {} in series), {} satchels, {} snarks ({} \
-             barrages); {} m203, {} mines laid, {} detonations, {} mines shot, {} scoped in {} zooms, gauss {} fired ({} \
+            "  arms: {}; thrown {} grenades ({} where an enemy was expected, {} in series), {} satchels ({} on \
+             chance), {} snarks ({} barrages); {} m203, {} mines laid, {} detonations, {} mines shot, {} scoped in {} zooms, gauss {} fired ({} \
              through walls) {} dumped {} plain rolls {:.1} s cramped, {} dodges, {} runs from snarks, {} failed{}; \
              explosives known: {} own satchels, {} mines, {} in flight",
             arms.describe(now),
@@ -1257,6 +1259,7 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             st.blind,
             st.series,
             st.satchels,
+            st.on_chance,
             st.snarks,
             st.barrages,
             st.lobs,

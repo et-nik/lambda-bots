@@ -21,6 +21,7 @@ pub mod perf;
 pub mod record;
 pub mod rocket_stats;
 pub mod roster;
+pub mod satchel_stats;
 pub mod selftest;
 pub mod stall;
 pub mod testrun;
@@ -311,6 +312,7 @@ pub struct Runtime {
     pub arms_stats: arms_stats::ArmsStats,
     /// The bots' rockets from the shot to the blast, and their launcher fights (`lb stats`).
     pub rocket_stats: rocket_stats::RocketStats,
+    pub satchel_stats: satchel_stats::SatchelStats,
     /// Each bot's tricks when the statistics were last reset.
     pub tricks_base: Vec<(BotId, commands::TrickTotals)>,
     /// The server cropped a bot's jump on this map though its rules say it does not crop: bunny hops keep under the
@@ -459,6 +461,7 @@ impl Runtime {
             items_give: Vec::new(),
             arms_stats: arms_stats::ArmsStats::default(),
             rocket_stats: rocket_stats::RocketStats::default(),
+            satchel_stats: satchel_stats::SatchelStats::default(),
             tricks_base: Vec::new(),
             crop_seen: false,
             outside: record::OutsideMode::Live,
@@ -677,6 +680,7 @@ impl Runtime {
         // counting over the change.
         self.arms_stats.since -= self.now.secs();
         self.rocket_stats.new_map(self.now.secs());
+        self.satchel_stats.new_map(self.now.secs());
         self.now = SimTime::ZERO;
         self.last_quota_check = SimTime::ZERO;
         self.last_cvar_poll = SimTime::ZERO;
@@ -1240,7 +1244,31 @@ impl Runtime {
             if let Some(lb_game::gungame::Kit::Throwable(w)) = bot.drill {
                 let carried = arsenal(&bot.self_state, &self.game.weapons);
                 let left = carried.iter().find(|a| a.id == w).and_then(|a| a.reserve).unwrap_or(0);
-                if left < THROWABLES_KEPT && now.since(bot.drill_gave) >= GIVE_EVERY {
+                // The game takes no satchel while some are out (BugfixedHL: with 5 carried and out together), and
+                // leaves the one refused lying where it was given: one every 0.3 s ran the server out of entities in
+                // minutes. Satchels are kept up to a full pocket, as the plugin's never runs dry.
+                let slot = u16::from(bot.id.slot);
+                let thrown = arms_stats::Row::plain(w);
+                let out = self
+                    .launched
+                    .values()
+                    .filter(|l| l.row == thrown && l.owner == slot && now.since(l.seen) <= 0.2)
+                    .count() as i32;
+                let full = lb_game::mechanics::carry_max(w);
+                let (kept, takes) = if w == WeaponId::Satchel {
+                    let bugfixed = self.game.dll.kind == lb_game::dll::DllKind::Bugfixed;
+                    // Just set off, the radio is still out a moment: the game counts that as some out.
+                    let idle = bot
+                        .self_state
+                        .prediction
+                        .as_ref()
+                        .and_then(|p| p.weapons[w as usize])
+                        .is_none_or(|p| p.charge_ready == 0);
+                    (full, (out == 0 && idle) || (bugfixed && left + out < full))
+                } else {
+                    (THROWABLES_KEPT, true)
+                };
+                if left < kept && takes && now.since(bot.drill_gave) >= GIVE_EVERY {
                     bot.pending_client_cmds.push(vec!["give".into(), w.classname().into()]);
                     bot.drill_gave = now;
                 }
@@ -1307,6 +1335,12 @@ impl Runtime {
                 self.rocket_stats
                     .seen(e.ent.index, owner, v(e.origin), burst, self.now, &boxes);
             }
+            if kind == ProjectileKind::Satchel {
+                let owner = u8::try_from(e.owner.index).unwrap_or(0);
+                let burst = e.effects & EF_NODRAW != 0;
+                self.satchel_stats
+                    .seen(e.ent.index, owner, v(e.origin), burst, self.now, &boxes);
+            }
             if e.effects & EF_NODRAW != 0 {
                 bursts.push((e.ent.index, v(e.origin)));
                 continue;
@@ -1322,6 +1356,7 @@ impl Runtime {
             });
         }
         self.rocket_stats.snapshot_done(self.now, &boxes);
+        self.satchel_stats.snapshot_done(self.now, &boxes);
         if !self.watched.is_empty() {
             let row = arms_stats::Row::plain(WeaponId::Tripmine);
             let laid: Vec<_> = self
@@ -1494,10 +1529,12 @@ impl Runtime {
                 );
             }
         }
-        if let Some((_, _, row, Some(index))) = best
-            && row.weapon == WeaponId::Rpg
-        {
-            self.rocket_stats.damage(index, victim.0, damage, now);
+        if let Some((_, _, row, Some(index))) = best {
+            if row.weapon == WeaponId::Rpg {
+                self.rocket_stats.damage(index, victim.0, damage, now);
+            } else if row.weapon == WeaponId::Satchel {
+                self.satchel_stats.damage(index, victim.0, damage, now);
+            }
         }
         let owner = best.and_then(|(_, owner, row, _)| {
             let bot = self
@@ -1720,13 +1757,18 @@ impl Runtime {
             .collect()
     }
 
-    /// What each bot does with the launcher this frame, for `lb stats`.
+    /// What each bot does with the launcher and with satchels this frame, for `lb stats`.
     fn watch_rockets(&mut self) {
         let now = self.now;
         let boxes = self.player_boxes();
         for bot in &self.bots {
             let f = rocket_frame(bot, &boxes, &self.game.weapons);
             self.rocket_stats.frame(bot.id.slot, now, &f);
+            let f = satchel_frame(bot, &boxes, &self.game.weapons);
+            self.satchel_stats.frame(bot.id.slot, now, &f);
+            let arms = &bot.brain.mind.arms.stats;
+            self.satchel_stats
+                .brain(bot.id.slot, now, &arms.satchel_offs, arms.pressed, &arms.failures);
         }
     }
 
@@ -2003,8 +2045,15 @@ impl Runtime {
                             {
                                 self.rocket_stats.kill(*killer, *victim, c.origin, self.now);
                             }
+                            if weapon == "satchel"
+                                && ours(*killer)
+                                && let Some(c) = self.clients_now.iter().find(|c| c.slot == *victim)
+                            {
+                                self.satchel_stats.kill(*killer, *victim, c.origin, self.now);
+                            }
                             if ours(*victim) {
                                 self.rocket_stats.died(*victim, self.now);
+                                self.satchel_stats.died(*victim, self.now);
                             }
                             self.arms_stats.death(
                                 weapon,
@@ -3318,6 +3367,66 @@ fn rocket_frame(
         airborne: !bot.self_state.on_ground(),
         firing: bot.brain.mind.firing,
         hold: bot.brain.mind.hold_fire,
+    }
+}
+
+/// What `bot` does with satchels, for `lb stats`: the enemy is the nearest in its sight, where it truly is.
+fn satchel_frame(
+    bot: &Bot,
+    boxes: &[(u8, rocket_stats::PlayerBox)],
+    registry: &WeaponRegistry,
+) -> satchel_stats::BotFrame {
+    use lb_brain::arms::Active;
+    use lb_combat::arms::throw::Kind;
+    let body = &bot.self_state.body;
+    let alive = bot.state == BotState::Alive;
+    let arsenal = arsenal(&bot.self_state, registry);
+    let carried = arsenal
+        .iter()
+        .find(|a| a.id == WeaponId::Satchel)
+        .and_then(|a| a.reserve)
+        .unwrap_or(0);
+    let eye = body.origin + body.view_ofs;
+    let enemy = bot
+        .brain
+        .beliefs
+        .visible_enemies()
+        .filter_map(|t| {
+            let (_, b) = boxes.iter().find(|(slot, _)| *slot == t.who.slot)?;
+            Some((t.who.slot, *b, ((b.min + b.max) * 0.5).distance(body.origin)))
+        })
+        .min_by(|a, b| a.2.total_cmp(&b.2));
+    let yaw_off = enemy.map(|(_, b, _)| {
+        let to = ((b.min + b.max) * 0.5 - eye).truncate();
+        let yaw = lb_core::dmath::atan2(to.y, to.x).to_degrees();
+        (yaw - bot.view.y + 540.0).rem_euclid(360.0) - 180.0
+    });
+    let doing = match &bot.brain.mind.arms.active {
+        Some(Active::Throw(t)) if t.kind == Kind::Satchel => Some(match t.phase() {
+            "jump" => "throwing: the jump",
+            "pressed" => "throwing: pressed",
+            _ if t.runs_up() => "throwing: the run-up",
+            _ => "throwing: drawing",
+        }),
+        Some(a) => Some(a.name()),
+        None => None,
+    };
+    satchel_stats::BotFrame {
+        alive,
+        carried,
+        in_hand: alive && bot.self_state.current_weapon.get() == Some(WeaponId::Satchel),
+        out: bot
+            .self_state
+            .prediction
+            .as_ref()
+            .and_then(|p| p.weapons[WeaponId::Satchel as usize])
+            .is_some_and(|w| w.charge_ready == 1),
+        enemy,
+        yaw_off,
+        speed: body.velocity.truncate().length(),
+        on_ground: bot.self_state.on_ground(),
+        doing,
+        hold: bot.brain.mind.arms.satchel_hold,
     }
 }
 
