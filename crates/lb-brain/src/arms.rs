@@ -115,13 +115,13 @@ const THROW_CHECK: f64 = 0.3;
 const UNSEEN_GRENADE: f32 = 0.9;
 const UNSEEN_SNARK: f32 = 0.6;
 const SEEN_GRENADE: f32 = 0.9;
-const SEEN_SATCHEL: f32 = 0.15;
+const SEEN_SATCHEL: f32 = 0.45;
 const SEEN_SNARK: f32 = 0.6;
 /// The chance per check at most.
 const THROW_CHANCE_MAX: f32 = 0.95;
 /// Seconds before the next throw is weighed after one: a grenade, satchels, snarks (which cost nothing to let go).
 const GRENADE_REST: [f32; 2] = [0.8, 1.2];
-const THROW_REST: [f32; 2] = [3.0, 6.0];
+const THROW_REST: [f32; 2] = [1.0, 2.5];
 const SNARK_REST: [f32; 2] = [1.0, 2.5];
 /// A grenade where an enemy is expected, none known: the chance per check (times the skill's `throw_rate` and the
 /// style's liking), how far off, how far from the spot it may land, and how recent a sound it goes at.
@@ -141,8 +141,17 @@ const TOO_HIGH: f32 = 500.0;
 const SNARK_TOO_HIGH: f32 = 200.0;
 /// Satchels are set off when their blasts together would do an enemy this much damage (one satchel 200 units away).
 const SATCHEL_WORTH: f32 = 40.0;
-/// The bot keeps this far beyond a satchel's blast before setting it off.
+/// The bot keeps this far beyond a satchel's blast before setting it off; this much further beyond one it has not seen
+/// lying (one that bounced off a wall or slid on, where it was not thrown to; suicides by such ones on the stand, the
+/// bots looking where they go rather than at their satchels).
 const SATCHEL_SPARED: f32 = 24.0;
+const SATCHEL_UNSURE: f32 = 100.0;
+/// Short of that, its satchels go off on an enemy taking this many times the damage the bot takes, at least
+/// [`SATCHEL_WORTH`], so long as the bot takes no more than this and keeps this much health: a satchel that does the
+/// enemy some harm at last, rather than one lying until the enemy walks away from it.
+const RISK_OWN: f32 = 10.0;
+const RISK_KEEP: f32 = 60.0;
+const RISK_GAIN: f32 = 2.5;
 /// Drawing the satchel radio takes a second; with it in hand the press takes a moment. An enemy is judged where it
 /// will be by the time the charges go off.
 const RADIO_DRAW: f32 = 1.0;
@@ -160,10 +169,25 @@ const SATCHEL_HEARD_NEAR: f32 = 200.0;
 const SATCHEL_DYING: f32 = 30.0;
 const SATCHEL_DYING_HURT: f64 = 0.5;
 /// Satchels go off once an enemy has been out of sight this long after it was seen by them (for so long it may still
-/// be there), or once they have lain this long with nobody in sight.
+/// be there), or once they have lain this long with nobody in sight (where satchels are handed back, whoever is in
+/// sight: the pocket takes no more with 5 out).
 const SATCHEL_LOST_WAIT: [f32; 2] = [1.0, 2.5];
 const SATCHEL_LOST_NEAR: f64 = 6.0;
 const SATCHEL_LIE: [f32; 2] = [8.0, 15.0];
+/// A satchel on chance, no enemy in sight (see `throw_on_chance`): the chance per look (times the skill's
+/// `throw_rate` and the style's liking) where satchels are handed back, and elsewhere, with this many on the bot at
+/// least; at most this many out (there; elsewhere none); how far off the spot is, how far from another of the bot's
+/// satchels, how far ahead of where the bot goes counts as ahead (the cosine); the rest after one, and how long it lies
+/// with nobody coming by it before it goes off.
+const CHANCE_SATCHEL_BACK: f32 = 0.35;
+const CHANCE_SATCHEL: f32 = 0.04;
+const CHANCE_CARRIED: i32 = 3;
+const CHANCE_OUT: usize = 3;
+const CHANCE_BAND: [f32; 2] = [350.0, 700.0];
+const CHANCE_SPACING: f32 = 250.0;
+const CHANCE_AHEAD: f32 = 0.3;
+const CHANCE_REST: [f32; 2] = [1.5, 3.5];
+const CHANCE_LIE: [f32; 2] = [2.0, 7.0];
 /// A pile is this many satchels (as many as the bot carries).
 pub(crate) const SATCHEL_PILE: [u32; 2] = [2, 4];
 /// At an enemy in sight this far away, a satchel is thrown on the run and set off as it comes by; it flies about
@@ -183,8 +207,18 @@ pub(crate) const REFILLED_AIRBURST: [f32; 2] = [200.0, 650.0];
 const REFILLED_SATCHEL: f32 = 0.9;
 const REFILLED_REST: [f32; 2] = [0.0, 0.3];
 const REFILLED_HOLD: f64 = 1.0;
-/// On the run a satchel there is given up at an enemy closer than this.
+/// There a satchel that has not come by the enemy this long after the throw is left lying (it goes off as an enemy
+/// comes by it, or another is thrown): most go off within it (median 0.75 s), and one watched longer kept the bot from
+/// another throw (on the stand, 2026-11-03: a quarter of the time with an enemy in sight).
+const REFILLED_WATCH: f64 = 1.5;
+/// On the run a satchel there is run at an enemy as close as this; one closer gets it at its feet at once.
 const REFILLED_RUN_CLOSE: f32 = 150.0;
+/// A satchel goes at an enemy in sight as close as this (there, and elsewhere): at its feet, the bot backing off from
+/// it after the throw and setting it off once out of its blast. The bot keeps further off as it fights (the bands
+/// above), but an enemy that comes closer gets the satchel all the same, not a wait for it to go away (on the stand,
+/// 2026-11-03, a fifth of the time with an enemy in sight went so).
+const REFILLED_THROW_CLOSE: f32 = 90.0;
+const THROW_CLOSE: f32 = 150.0;
 /// A grenade's run, a jump or a long jump at the enemy is not taken with a ledge (higher than a safe drop) this close
 /// along the way to it: it would carry the bot off its floor.
 const RUN_LEDGE: f32 = 150.0;
@@ -327,12 +361,16 @@ pub struct ArmsStats {
     pub blind: u32,
     pub series: u32,
     pub satchels: u32,
+    /// Of them, thrown on chance where an enemy may be.
+    pub on_chance: u32,
     pub snarks: u32,
     pub mines: u32,
     pub lobs: u32,
     pub detonations: u32,
     /// Why satchels were set off.
     pub satchel_offs: Vec<(&'static str, u32)>,
+    /// The radio's last press: when, why (counted as it goes down, the bot maybe dying of it).
+    pub pressed: Option<(SimTime, &'static str)>,
     pub barrages: u32,
     pub mine_shots: u32,
     /// Why mines were shot.
@@ -418,6 +456,10 @@ pub struct Arms {
     throw_aim: Option<PlayerKey>,
     /// The throw under way lays a trap: its satchels lie long.
     trap_throw: bool,
+    /// The throw under way is a satchel on chance, where an enemy may be: it lies a few seconds; the next is weighed
+    /// from then.
+    chance_throw: bool,
+    next_chance: SimTime,
     landed: usize,
     next_barrage: SimTime,
     /// The bot's last rocket while it is on its way.
@@ -439,6 +481,9 @@ pub struct Arms {
     pub zoom_flip: SimTime,
     zoomed: bool,
     next_throw: SimTime,
+    /// Why the last look for a satchel throw found none, the bot carrying satchels (for the stand statistics);
+    /// empty when one went or none is carried.
+    pub satchel_hold: &'static str,
     /// Grenades go one after another until none is left.
     pub series: bool,
     next_lob: SimTime,
@@ -660,6 +705,8 @@ struct SatchelPlan {
     lost_wait: f64,
     /// Off by then with nobody in sight.
     lie_until: SimTime,
+    /// One of them was thrown on chance: off by `lie_until` whoever is in sight.
+    chance: bool,
 }
 
 impl SatchelPlan {
@@ -667,6 +714,7 @@ impl SatchelPlan {
         SatchelPlan {
             lost_wait: f64::from(rng.combat.range_f32(SATCHEL_LOST_WAIT[0], SATCHEL_LOST_WAIT[1])),
             lie_until: now + f64::from(rng.combat.range_f32(SATCHEL_LIE[0], SATCHEL_LIE[1])),
+            chance: false,
         }
     }
 }
@@ -692,6 +740,37 @@ pub(crate) fn crowded(
             let along = (t.pos - eye).dot(dir).clamp(0.0, CROWD_REACH);
             (eye + dir * along).distance(t.pos) <= CROWD_RADIUS
         })
+}
+
+/// An enemy out of throwing reach above a bot at `origin`: too high, or in the air above its head.
+fn too_high(t: &EnemyTrack, origin: Vec3) -> bool {
+    let above = t.pos.z - origin.z;
+    above > TOO_HIGH || (!t.traits.on_ground && above > 72.0)
+}
+
+/// The enemy in sight a satchel goes at, of those not too high to throw at: of those within `reach` (along the
+/// ground), the one with the most of the others in sight about it within the blast's `radius` (each counted by how
+/// close), the nearer of two alike; with none within reach, the nearest.
+pub(crate) fn crowd_pick(
+    beliefs: &lb_knowledge::Beliefs,
+    origin: Vec3,
+    reach: f32,
+    radius: f32,
+) -> Option<&EnemyTrack> {
+    let seen: smallvec::SmallVec<[&EnemyTrack; 8]> = beliefs.visible_enemies().collect();
+    let far = |t: &EnemyTrack| (t.pos - origin).truncate().length();
+    let crowd = |t: &EnemyTrack| -> f32 {
+        seen.iter()
+            .map(|o| (1.0 - o.pos.distance(t.pos) / radius.max(1.0)).max(0.0))
+            .sum()
+    };
+    let throwable = || seen.iter().copied().filter(|t| !too_high(t, origin));
+    let within = throwable()
+        .filter(|t| far(t) <= reach)
+        .map(|t| (t, crowd(t)))
+        .max_by(|a, b| a.1.total_cmp(&b.1).then(far(b.0).total_cmp(&far(a.0))))
+        .map(|(t, _)| t);
+    within.or_else(|| throwable().min_by(|a, b| far(a).total_cmp(&far(b))))
 }
 
 /// An enemy in sight, or lost half a second ago with a tight position: sure enough to set off a trap on.
@@ -972,12 +1051,47 @@ impl BotBrain {
         Some(at + Vec3::Z * 16.0)
     }
 
-    /// The bot is out of the blast of its satchels at `charges`, with a margin: a blast reaches a little further than
-    /// its radius (it bursts above the floor and is measured to the near side of a body), and a satchel in flight is
-    /// known a moment late.
-    fn spared(body: &Body, charges: &[Vec3]) -> bool {
-        let clear = blast_radius(body.damages.satchel) + SATCHEL_SPARED;
-        charges.iter().all(|c| c.distance(body.origin) >= clear)
+    /// The bot may set its satchels at `charges` off now: out of their blast with a margin (a blast reaches a little
+    /// further than its radius: it bursts above the floor and is measured to the near side of a body; a satchel in
+    /// flight is known a moment late), a wider one for a satchel not seen lying, coming into it by the time they go off
+    /// only with health to spare for what it takes there; or at the edge of the blast of those it has seen lying, with
+    /// an enemy in sight (or lost a moment ago) taking far more of it than the bot, which keeps enough health for it
+    /// to be no suicide. Not there where a suicide costs a GunGame kill.
+    fn clear_of(&self, body: &Body, charges: &[Vec3]) -> bool {
+        let now = body.now;
+        let damage = body.damages.satchel;
+        let radius = blast_radius(damage);
+        let unsure: smallvec::SmallVec<[Vec3; 5]> = self
+            .explosives
+            .charges
+            .iter()
+            .filter(|c| !c.sure(now))
+            .map(|c| c.at(now, body.gravity))
+            .collect();
+        let margin = |c: &Vec3| SATCHEL_SPARED + if unsure.contains(c) { SATCHEL_UNSURE } else { 0.0 };
+        // What they do to the bot where it will be as they go off.
+        let at = body.origin + body.velocity * RADIO_PRESS;
+        let own: f32 = charges
+            .iter()
+            .map(|c| (damage * (1.0 - (c.distance(at) - margin(c)).max(0.0) / radius)).max(0.0))
+            .sum();
+        // Every bot running back in kept waiting held set-offs up (more standing, on the stand); those it killed were
+        // the hurt ones, of a few damage at the edge.
+        if charges.iter().all(|c| c.distance(body.origin) >= radius + margin(c))
+            && (own <= 0.0 || own + RISK_OWN < body.health)
+        {
+            return true;
+        }
+        if body.gungame.is_some_and(|g| g.descore()) || charges.iter().any(|c| unsure.contains(c)) {
+            return false;
+        }
+        let theirs = self
+            .beliefs
+            .enemies()
+            .filter(|t| fresh(t, now))
+            .map(|t| satchel_damage(charges, ahead(t, now, RADIO_PRESS), damage))
+            .fold(0.0, f32::max);
+        own <= RISK_OWN.min(body.health - RISK_KEEP) && theirs >= SATCHEL_WORTH.max(own * RISK_GAIN)
     }
 
     /// Sets the bot's satchels off, or draws the radio for them, once it is out of their blast (it backs off first):
@@ -1059,29 +1173,40 @@ impl BotBrain {
             t.state != TrackState::Visible && gone >= plan.lost_wait && gone <= SATCHEL_LOST_NEAR && hurts(t.pos) > 0.0
         });
         let calm = self.beliefs.visible_enemies().next().is_none();
-        // The radio does not wait up with an enemy away from them at the bot.
-        let free = !self.radio_threat(body, &charges);
+        // The radio does not wait up with an enemy away from them at the bot, one that needs a gun. Where satchels
+        // are handed back it never waits up: they go off with an enemy in their blast and the bot out of it, and
+        // meanwhile the bot throws on (a radio waiting for the bot to get out, its back to a wall, or for an enemy to
+        // come, kept it standing; on the stand, 2026-11-03, 138 waits in 10 minutes ended with nobody by them).
+        let back = refilled(body, WeaponId::Satchel);
+        let free = back || !self.radio_threat(body, &charges);
         let (why, wait) = if victim && free {
-            ("an enemy in their blast", Some(now + SATCHEL_WAIT))
+            ("an enemy in their blast", (!back).then_some(now + SATCHEL_WAIT))
         } else if dying {
             ("dying by them", None)
         } else if heard {
             ("someone heard by them", None)
         } else if lost {
             ("an enemy seen by them a moment ago", None)
-        } else if coming && free {
+        } else if back && carried(body, WeaponId::Satchel) == 0 {
+            // Satchels handed back only once none are out (the drill on a server with no GunGame): set off to throw on.
+            ("nothing left to throw", None)
+        } else if coming && free && !back {
             ("an enemy coming at them", Some(now + SATCHEL_WAIT))
-        } else if now < self.mind.arms.radio_until && free {
+        } else if now < self.mind.arms.radio_until && free && !back {
             ("an enemy expected by them", Some(self.mind.arms.radio_until))
-        } else if calm && now >= plan.lie_until {
+        } else if (calm || plan.chance || back) && now >= plan.lie_until {
             ("lying long enough", None)
         } else {
             return false;
         };
-        // Pressed at once: from out of their blast.
-        if wait.is_none() && !Self::spared(body, &charges) {
-            self.back_off_charges(&charges, body);
-            return true;
+        // Pressed at once: from out of their blast. Where satchels are handed back, another may be thrown meanwhile.
+        if wait.is_none() && !self.clear_of(body, &charges) {
+            // Where satchels are handed back the bot fights on by ones only lying long, and they go off once it is
+            // out of their blast: backing off from them at every look kept it from throwing on.
+            if !(back && why == "lying long enough") {
+                self.back_off_charges(&charges, body);
+            }
+            return !back;
         }
         self.mind.arms.detonate_why = why;
         self.mind.arms.detonate_wait = wait;
@@ -1112,7 +1237,7 @@ impl BotBrain {
         if charges.is_empty() {
             return Err("no charges known");
         }
-        let spared = Self::spared(body, &charges);
+        let spared = self.clear_of(body, &charges);
         let Some(until) = self.mind.arms.detonate_wait else {
             return if spared {
                 Ok(true)
@@ -1132,7 +1257,7 @@ impl BotBrain {
             }
             self.back_off_charges(&charges, body);
         }
-        if self.radio_threat(body, &charges) {
+        if !refilled(body, WeaponId::Satchel) && self.radio_threat(body, &charges) {
             self.mind.arms.radio_until = now;
             return Err("an enemy away from them");
         }
@@ -1237,6 +1362,11 @@ impl BotBrain {
             return false;
         }
         self.mind.arms.next_throw = now + THROW_CHECK;
+        self.mind.arms.satchel_hold = if carried(body, WeaponId::Satchel) > 0 {
+            "no enemy to throw at"
+        } else {
+            ""
+        };
         // A series ends with an enemy in sight close by (the gun then), or with one of its grenades come down near
         // the bot (off an edge on the way).
         let series = self.mind.arms.series
@@ -1257,23 +1387,39 @@ impl BotBrain {
         });
         let grenades_back = refilled(body, WeaponId::HandGrenade);
         let satchels_back = refilled(body, WeaponId::Satchel);
-        let Some(t) = self
-            .beliefs
-            .enemies()
-            .filter(|t| {
-                t.state == TrackState::Visible
-                    || (matches!(t.state, TrackState::RecentlyLost | TrackState::Predicted)
-                        && t.age(now) <= THROW_TRACK_AGE
-                        && t.sigma <= THROW_TRACK_SIGMA)
-            })
-            .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)))
-        else {
+        // With satchels, at an enemy in sight (the one with the most others about it within reach), not a nearer one
+        // lost: a satchel goes only at one in sight.
+        let reach = if satchels_back {
+            REFILLED_AIRBURST[1]
+        } else {
+            AIRBURST_BAND[1]
+        };
+        let crowd = (carried(body, WeaponId::Satchel) > 0)
+            .then(|| crowd_pick(&self.beliefs, body.origin, reach, blast_radius(body.damages.satchel)))
+            .flatten();
+        let Some(t) = crowd.or_else(|| {
+            self.beliefs
+                .enemies()
+                .filter(|t| {
+                    t.state == TrackState::Visible
+                        || (matches!(t.state, TrackState::RecentlyLost | TrackState::Predicted)
+                            && t.age(now) <= THROW_TRACK_AGE
+                            && t.sigma <= THROW_TRACK_SIGMA)
+                })
+                .min_by(|a, b| a.pos.distance(body.origin).total_cmp(&b.pos.distance(body.origin)))
+        }) else {
             return self.throw_blind(body, ch, nav, rng);
         };
         let seen = t.state == TrackState::Visible;
         let above = t.pos.z - body.origin.z;
-        if above > TOO_HIGH || (!t.traits.on_ground && above > 72.0) {
+        if too_high(t, body.origin) {
+            self.mind.arms.satchel_hold = "the enemy too high";
             return false;
+        }
+        // Lost a moment ago, with only satchels to throw: one goes where it will be, on chance.
+        if !seen && carried(body, WeaponId::HandGrenade) == 0 && carried(body, WeaponId::Snark) == 0 {
+            let spot = ahead(t, now, 1.0);
+            return self.throw_on_chance(body, ch, nav, rng, Some(spot));
         }
         let d = (t.pos - body.origin).truncate().length();
         let count = |w: WeaponId| carried(body, w);
@@ -1298,9 +1444,9 @@ impl BotBrain {
         let leaps = jumps && body.has_longjump && body.tricks.longjump;
         let satchel_band = [
             if satchels_back {
-                REFILLED_AIRBURST[0]
+                REFILLED_THROW_CLOSE
             } else {
-                AIRBURST_BAND[0]
+                THROW_CLOSE
             },
             if leaps {
                 LEAP_BAND[1]
@@ -1321,6 +1467,18 @@ impl BotBrain {
                 Way::Airburst,
                 if satchels_back { REFILLED_SATCHEL } else { SEEN_SATCHEL },
             ));
+        } else if satchels > 0 {
+            self.mind.arms.satchel_hold = if !free {
+                "its satchels out"
+            } else if !seen {
+                "the enemy out of sight"
+            } else if !(body.on_ground || satchels_back) {
+                "in the air"
+            } else if d < satchel_band[0] {
+                "the enemy too close"
+            } else {
+                "the enemy too far"
+            };
         }
         if count(WeaponId::Snark) > 0 && body.waterlevel < 2 && above <= SNARK_TOO_HIGH && in_band(SNARK_BAND) {
             ways.push((Way::Snark, if seen { SEEN_SNARK } else { UNSEEN_SNARK }));
@@ -1337,6 +1495,9 @@ impl BotBrain {
             let rate = ch.skill.throw_rate * ch.weapons.throwables;
             let chance = (best * rate * bold * if war { 2.0 } else { 1.0 }).min(THROW_CHANCE_MAX);
             if rng.combat.next_f32() >= chance {
+                if ways.iter().any(|w| w.0 == Way::Airburst) {
+                    self.mind.arms.satchel_hold = "the chance";
+                }
                 return false;
             }
             // One of them, as likely as its chance.
@@ -1425,7 +1586,14 @@ impl BotBrain {
                 }
             }
             Way::Airburst | Way::Snark => {
-                if !clear_line(nav, body.eye, floor + Vec3::Z * 8.0) {
+                // A satchel flies flat at the enemy: the line to its body will do where its feet are hidden (a step,
+                // a ledge in front).
+                let clear = clear_line(nav, body.eye, floor + Vec3::Z * 8.0)
+                    || (way == Way::Airburst && clear_line(nav, body.eye, t.pos));
+                if !clear {
+                    if way == Way::Airburst {
+                        self.mind.arms.satchel_hold = "no clear line to the enemy";
+                    }
                     return false;
                 }
                 let kind = if way == Way::Snark { Kind::Snark } else { Kind::Satchel };
@@ -1488,7 +1656,85 @@ impl BotBrain {
             Kind::Snark => SNARK_REST,
         };
         self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(rest[0], rest[1]));
+        self.mind.arms.satchel_hold = if satchels > 0 { "resting after a throw" } else { "" };
         true
+    }
+
+    /// A satchel where an enemy may be, none in sight: `lost` (where one lost a moment ago will be), where a lost one
+    /// would come into view, a sound heard lately, a spawn point in sight, the busiest way into the bot's sight; one
+    /// ahead of the bot's way first. It lies there and goes off when an enemy comes by it, is heard by it, or after a
+    /// few seconds, as players set off one thrown on chance. Where satchels are handed back, often, a few out at
+    /// once; elsewhere now and then with a few on the bot and none out.
+    fn throw_on_chance(
+        &mut self,
+        body: &Body,
+        ch: &Character,
+        nav: &mut dyn NavService,
+        rng: &mut BotRng,
+        lost: Option<Vec3>,
+    ) -> bool {
+        let now = body.now;
+        let back = refilled(body, WeaponId::Satchel);
+        let carried = carried(body, WeaponId::Satchel);
+        let out = self.explosives.charges.len();
+        let (chance, room) = if back {
+            (CHANCE_SATCHEL_BACK, out < CHANCE_OUT)
+        } else {
+            (CHANCE_SATCHEL, out == 0 && carried >= CHANCE_CARRIED)
+        };
+        // From a hop too where satchels are handed back, as at an enemy.
+        let footing = body.on_ground || back;
+        if carried == 0 || !room || !footing || body.waterlevel >= 2 || now < self.mind.arms.next_chance {
+            return false;
+        }
+        if rng.combat.next_f32() >= chance * ch.skill.throw_rate * ch.weapons.throwables {
+            self.mind.arms.satchel_hold = "no enemy in sight, a throw on chance not taken";
+            return false;
+        }
+        let heard = self
+            .beliefs
+            .hypotheses
+            .iter()
+            .filter(|h| matches!(h.kind, HypothesisKind::Sound(_)) && now.since(h.t) <= BLIND_HEARD)
+            .max_by(|a, b| a.t.0.total_cmp(&b.t.0))
+            .and_then(|h| h.pos);
+        let spawn = self
+            .spawns
+            .iter()
+            .copied()
+            .filter(|s| (CHANCE_BAND[0]..=CHANCE_BAND[1]).contains(&(*s - body.origin).truncate().length()))
+            .min_by(|a, b| a.distance(body.origin).total_cmp(&b.distance(body.origin)));
+        let heading = body.velocity.truncate().normalize_or_zero();
+        let ahead = |p: Vec3| heading.dot((p - body.origin).truncate().normalize_or_zero());
+        let mut spots: smallvec::SmallVec<[Vec3; 5]> = [lost, self.expect.map(|(_, p)| p), heard, spawn, self.approach]
+            .into_iter()
+            .flatten()
+            .filter(|p| (CHANCE_BAND[0]..=CHANCE_BAND[1]).contains(&(*p - body.origin).truncate().length()))
+            .filter(|p| self.charges_at(body).iter().all(|c| c.distance(*p) >= CHANCE_SPACING))
+            .collect();
+        // Ahead of where the bot goes first (a throw behind turns it round), the earlier of the list for alike.
+        spots.sort_by_key(|p| std::cmp::Reverse(ahead(*p) > CHANCE_AHEAD));
+        for spot in spots {
+            let floor = nav
+                .trace(&TraceQuery::line(spot + Vec3::Z * 16.0, spot - Vec3::Z * 96.0))
+                .end;
+            if !clear_line(nav, body.eye, floor + Vec3::Z * 12.0) {
+                continue;
+            }
+            let throw = ballistics::satchel(nav, body.origin, body.velocity, floor, body.gravity);
+            self.mind.arms.throw_aim = None;
+            self.mind.arms.chance_throw = true;
+            self.mind.arms.landed = 0;
+            self.mind.arms.active = Some(Active::Throw(
+                Thrower::new(Kind::Satchel, floor, throw, now).on_the_run(),
+            ));
+            self.mind.arms.next_chance = now + f64::from(rng.combat.range_f32(CHANCE_REST[0], CHANCE_REST[1]));
+            self.mind.arms.next_throw = now + f64::from(rng.combat.range_f32(REFILLED_REST[0], REFILLED_REST[1]));
+            self.mind.arms.satchel_hold = "resting after a throw";
+            return true;
+        }
+        self.mind.arms.satchel_hold = "no enemy in sight, no spot to throw at on chance";
+        false
     }
 
     /// A grenade where an enemy is expected when none is in sight or lost a moment ago: where a lost one would come
@@ -1499,7 +1745,7 @@ impl BotBrain {
         let grenades = carried(body, WeaponId::HandGrenade);
         if grenades == 0 || body.waterlevel >= 2 {
             self.mind.arms.series = false;
-            return false;
+            return grenades == 0 && self.throw_on_chance(body, ch, nav, rng, None);
         }
         if !self.mind.arms.series {
             let chance = BLIND_GRENADE * ch.skill.throw_rate * ch.weapons.throwables;
@@ -1746,6 +1992,13 @@ impl BotBrain {
                 .beliefs
                 .visible_enemies()
                 .any(|t| t.pos.distance(body.origin) < near);
+            let radio = |a: &Active| match a {
+                Active::Detonate(d) => d.pressed(),
+                Active::Airburst(a) => a.pressed(),
+                _ => false,
+            };
+            let pressed = radio(&active);
+            let throwing = matches!(&active, Active::Throw(t) if t.phase() == "pressed");
             let status = match &mut active {
                 Active::Throw(t) => {
                     // A grenade's plan follows the enemy in sight; a satchel at an enemy in sight goes where the enemy
@@ -1768,7 +2021,23 @@ impl BotBrain {
                             t.target = e.pos + lead - Vec3::Z * 32.0;
                         }
                     }
-                    let status = t.update(&hands, nav);
+                    // One on chance not yet let go makes way for one at an enemy come into sight in the band.
+                    let band = if refilled(body, WeaponId::Satchel) {
+                        REFILLED_AIRBURST
+                    } else {
+                        AIRBURST_BAND
+                    };
+                    let met = self.mind.arms.chance_throw
+                        && t.phase() == "draw"
+                        && self
+                            .beliefs
+                            .visible_enemies()
+                            .any(|e| (band[0]..=band[1]).contains(&(e.pos - body.origin).truncate().length()));
+                    let status = if met {
+                        Status::Failed("an enemy came into sight")
+                    } else {
+                        t.update(&hands, nav)
+                    };
                     // Each satchel of a pile is noted as it leaves the hand.
                     for landing in t.landings.iter().skip(self.mind.arms.landed) {
                         self.explosives.thrown_satchel(*landing, now);
@@ -1840,6 +2109,8 @@ impl BotBrain {
                         && !crowded(&self.beliefs, body.eye, landing, target.map(|t| t.who));
                     l.update(&hands, nav, clear)
                 }
+                // A press under way goes through: the charges are going off.
+                Active::Detonate(d) if d.pressed() => d.update(&hands, true),
                 Active::Detonate(d) => match self.detonate_go(body) {
                     Ok(go) => {
                         // Waiting with the radio up: watching the charges, where the enemy is to come by them.
@@ -1902,6 +2173,35 @@ impl BotBrain {
                     }
                 }
             };
+            // A throw pressed with satchels out may set them off instead (the buttons not learned yet).
+            let out = body
+                .prediction
+                .and_then(|p| p.weapons[WeaponId::Satchel as usize])
+                .is_some_and(|p| p.charge_ready == 1);
+            if out
+                && !throwing
+                && matches!(&active, Active::Throw(t) if t.kind == Kind::Satchel && t.phase() == "pressed")
+            {
+                self.mind.arms.stats.pressed = Some((now, "a throw pressed with satchels out"));
+            }
+            // A satchel thrown by the radio's press goes off with the others, from wherever it went: it is kept off
+            // as one not seen, from where the bot was.
+            let threw = match &mut active {
+                Active::Detonate(d) => std::mem::take(&mut d.threw),
+                Active::Airburst(a) => a.take_threw(),
+                _ => false,
+            };
+            if threw {
+                self.explosives.thrown_satchel(body.origin, now);
+            }
+            if !pressed && radio(&active) {
+                let why = if matches!(active, Active::Airburst(_)) {
+                    "in flight by the enemy"
+                } else {
+                    self.mind.arms.detonate_why
+                };
+                self.mind.arms.stats.pressed = Some((now, why));
+            }
             match status {
                 Status::Running(r) => {
                     requests.push(r);
@@ -1911,6 +2211,7 @@ impl BotBrain {
                 Status::Failed(why) => {
                     self.mind.arms.throw_aim = None;
                     self.mind.arms.trap_throw = false;
+                    self.mind.arms.chance_throw = false;
                     if matches!(&active, Active::Throw(t) if t.kind == Kind::Grenade) {
                         self.mind.arms.series = false;
                     }
@@ -1992,19 +2293,28 @@ impl BotBrain {
     /// whether the bot is out of the blast of its satchels.
     fn burst(&self, target: PlayerKey, body: &Body) -> Burst {
         let now = body.now;
+        // The newest, seen a moment ago; where satchels are handed back, out of sight as well, where it should be.
+        let back = refilled(body, WeaponId::Satchel);
         let satchel = self
             .explosives
             .charges
             .iter()
-            .filter(|c| c.seen.is_some_and(|t| now.since(t) <= AIRBURST_SEEN))
             .max_by(|a, b| a.since.0.total_cmp(&b.since.0))
+            .filter(|c| back || c.seen.is_some_and(|t| now.since(t) <= AIRBURST_SEEN))
             .map(|c| c.at(now, body.gravity));
-        let enemy = self
-            .beliefs
-            .track(target)
-            .filter(|t| t.state == TrackState::Visible || now.since(t.last_seen) <= AIRBURST_SEEN)
-            .map(|t| t.pos);
-        let spared = Self::spared(body, &self.charges_at(body));
+        // The enemy it was thrown at, or another in sight nearer to it (it goes off on whoever it comes by).
+        let watched = |t: &&EnemyTrack| t.state == TrackState::Visible || now.since(t.last_seen) <= AIRBURST_SEEN;
+        let aimed = self.beliefs.track(target).filter(watched).map(|t| t.pos);
+        let enemy = satchel
+            .and_then(|s| {
+                self.beliefs
+                    .enemies()
+                    .filter(watched)
+                    .map(|t| t.pos)
+                    .min_by(|a, b| a.distance(s).total_cmp(&b.distance(s)))
+            })
+            .or(aimed);
+        let spared = self.clear_of(body, &self.charges_at(body));
         Burst { satchel, enemy, spared }
     }
 
@@ -2211,6 +2521,16 @@ impl BotBrain {
                     let mut plan = SatchelPlan::roll(now, rng);
                     if std::mem::take(&mut self.mind.arms.trap_throw) {
                         plan.lie_until = now + f64::from(rng.combat.range_f32(TRAP_LIE[0], TRAP_LIE[1]));
+                    } else if std::mem::take(&mut self.mind.arms.chance_throw) {
+                        stats.on_chance += t.landings.len() as u32;
+                        // Set off on chance before long: whoever came by may be there.
+                        plan.lie_until = now + f64::from(rng.combat.range_f32(CHANCE_LIE[0], CHANCE_LIE[1]));
+                        plan.chance = true;
+                    }
+                    // One on chance out already goes off when it would have.
+                    if let Some(old) = self.mind.arms.satchels.filter(|p| p.chance) {
+                        plan.lie_until = plan.lie_until.min(old.lie_until);
+                        plan.chance = true;
                     }
                     self.mind.arms.satchels = Some(plan);
                     // Closing in would take the bot into its own blast.
@@ -2221,7 +2541,13 @@ impl BotBrain {
                     };
                     self.mind.arms.hold_until = self.mind.arms.hold_until.max(now + hold);
                     match aim {
-                        Some(target) => self.mind.arms.active = Some(Active::Airburst(Airburst::new(target, now))),
+                        Some(target) => {
+                            let mut a = Airburst::new(target, now);
+                            if refilled(body, WeaponId::Satchel) {
+                                a = a.watching(REFILLED_WATCH);
+                            }
+                            self.mind.arms.active = Some(Active::Airburst(a));
+                        }
                         None => self.back_off_satchels(&t.landings, body),
                     }
                 }
@@ -3038,6 +3364,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_satchel_goes_at_the_crowd_within_reach_never_at_one_too_high() {
+        let pick = |enemies: &[(u8, Vec3, bool)]| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            for &(slot, pos, on_ground) in enemies {
+                let mut s = seen(1.0, pos);
+                s.who = PlayerKey {
+                    slot,
+                    userid: i32::from(slot) * 10,
+                };
+                s.on_ground = on_ground;
+                brain.beliefs.on_sighting(&s);
+            }
+            brain.update(SimTime(1.0), &params(), None, None);
+            crowd_pick(&brain.beliefs, Vec3::ZERO, AIRBURST_BAND[1], 300.0).map(|t| t.who.slot)
+        };
+        let alone = (3, Vec3::new(400.0, 0.0, 0.0), true);
+        // Two together beat one alone; two on a floor 600 units up are out of reach.
+        let pair = [
+            (1, Vec3::new(300.0, 0.0, 0.0), true),
+            (2, Vec3::new(320.0, 30.0, 0.0), true),
+        ];
+        assert!(matches!(pick(&[pair[0], pair[1], alone]), Some(1 | 2)));
+        let up = pair.map(|(id, p, g)| (id, p + Vec3::Z * 600.0, g));
+        assert_eq!(pick(&[up[0], up[1], alone]), Some(3));
+        // One in the air above the bot's head; the nearest in sight past reach rather than a nearer one too high.
+        assert_eq!(pick(&[(1, Vec3::new(200.0, 0.0, 100.0), false), alone]), Some(3));
+        assert_eq!(pick(&[up[0], (3, Vec3::new(700.0, 0.0, 0.0), true)]), Some(3));
+        assert_eq!(pick(&[up[0]]), None);
+    }
+
+    #[test]
     fn a_step_heard_by_the_satchels_sets_them_off() {
         let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
         brain
@@ -3089,6 +3446,7 @@ pub(crate) mod tests {
         brain.mind.arms.satchels = Some(SatchelPlan {
             lost_wait: 10.0,
             lie_until: SimTime(100.0),
+            chance: false,
         });
         brain.update(SimTime(2.0), &params(), None, None);
         let mut b = body(2.0);
@@ -3112,27 +3470,138 @@ pub(crate) mod tests {
 
     #[test]
     fn a_bot_in_the_blast_of_its_satchels_backs_off_before_setting_them_off() {
-        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
-        brain
-            .explosives
-            .thrown_satchel(Vec3::new(260.0, 0.0, -36.0), SimTime(0.0));
-        brain.beliefs.on_sighting(&seen(2.0, Vec3::new(300.0, 100.0, 0.0)));
-        brain.update(SimTime(2.0), &params(), None, None);
-        let mut b = body(2.0);
-        b.arsenal.retain(|a| a.id != WeaponId::HandGrenade);
-        radio(&mut b, 0);
-        b.weapon = Some(WeaponId::Satchel);
-        let mut rng = BotRng::new(7, 7);
-        brain.weapon_options(&b, &character(), &mut Open, &mut rng);
-        assert_eq!(brain.mind.arms.detonate_why, "an enemy in their blast");
-        // An enemy by them, but the bot 260 units off them: the radio waits while it backs off.
+        let set_up = |at: f32, lying: bool| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            brain.explosives.thrown_satchel(Vec3::new(at, 0.0, -36.0), SimTime(0.0));
+            if lying {
+                brain.explosives.charges[0].seen = Some(SimTime(1.0));
+            }
+            brain.beliefs.on_sighting(&seen(2.0, Vec3::new(at + 40.0, 100.0, 0.0)));
+            brain.update(SimTime(2.0), &params(), None, None);
+            let mut b = body(2.0);
+            b.arsenal.retain(|a| a.id != WeaponId::HandGrenade);
+            radio(&mut b, 0);
+            b.weapon = Some(WeaponId::Satchel);
+            let mut rng = BotRng::new(7, 7);
+            brain.weapon_options(&b, &character(), &mut Open, &mut rng);
+            assert_eq!(brain.mind.arms.detonate_why, "an enemy in their blast");
+            (brain, b)
+        };
+        // An enemy by them, but the bot 150 units off them: the radio waits while it backs off.
+        let (mut brain, mut b) = set_up(150.0, true);
         assert_eq!(brain.detonate_go(&b), Ok(false));
         assert!(
             brain.mind.arms.dodge.is_some_and(|(_, away)| away.x < -0.9),
             "away from them"
         );
-        b.origin = Vec3::new(-80.0, 0.0, 0.0);
+        b.origin = Vec3::new(-200.0, 0.0, 0.0);
         assert_eq!(brain.detonate_go(&b), Ok(true), "out of their blast");
+        // Just out of it: running back into it only with health to spare for what it takes where it will be as they
+        // go off (9 damage).
+        b.origin = Vec3::new(-180.0, 0.0, 0.0);
+        assert_eq!(brain.detonate_go(&b), Ok(true), "standing just out of their blast");
+        b.velocity = Vec3::new(300.0, 0.0, 0.0);
+        assert_eq!(brain.detonate_go(&b), Ok(true), "running into their blast");
+        b.health = 15.0;
+        assert_eq!(brain.detonate_go(&b), Ok(false), "running into their blast, hurt");
+        b.velocity = -b.velocity;
+        assert_eq!(brain.detonate_go(&b), Ok(true), "running away from them, hurt");
+        // 300 units off, at the edge of their blast: set off, the enemy by them taking far more than the bot.
+        let (mut brain, mut b) = set_up(300.0, true);
+        assert_eq!(brain.detonate_go(&b), Ok(true), "at the edge");
+        // Not with the bot hurt already.
+        b.health = 50.0;
+        assert_eq!(brain.detonate_go(&b), Ok(false), "hurt");
+        // One never seen lying may be closer than believed: kept further off, 400 units not enough.
+        let (mut brain, mut b) = set_up(300.0, false);
+        assert_eq!(brain.detonate_go(&b), Ok(false), "not seen lying");
+        b.origin = Vec3::new(-110.0, 0.0, 0.0);
+        assert_eq!(brain.detonate_go(&b), Ok(false), "400 units off one not seen lying");
+        b.origin = Vec3::new(-140.0, 0.0, 0.0);
+        assert_eq!(brain.detonate_go(&b), Ok(true), "out of its blast with the margin");
+        b.velocity = Vec3::new(400.0, 0.0, 0.0);
+        b.health = 15.0;
+        assert_eq!(brain.detonate_go(&b), Ok(false), "running into the margin, hurt");
+    }
+
+    #[test]
+    fn on_the_satchel_level_the_radio_never_waits_up_the_bot_backs_off_and_throws_on() {
+        let go_with = |bot: Vec3, enemy: Vec3, pocket: i32| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            brain
+                .explosives
+                .thrown_satchel(Vec3::new(150.0, 0.0, -36.0), SimTime(0.0));
+            brain.explosives.charges[0].seen = Some(SimTime(1.0));
+            brain.beliefs.on_sighting(&seen(2.0, enemy));
+            brain.update(SimTime(2.0), &params(), None, None);
+            let mut b = body(2.0);
+            b.origin = bot;
+            b.arsenal.clear();
+            radio(&mut b, pocket);
+            b.weapon = Some(WeaponId::Satchel);
+            b.gungame = Some(lb_game::gungame::GunGame::drill(1, Kit::Throwable(WeaponId::Satchel)));
+            b.allowed = Kit::Throwable(WeaponId::Satchel).weapons();
+            let mut rng = BotRng::new(7, 7);
+            brain.weapon_options(&b, &character(), &mut Open, &mut rng);
+            brain
+        };
+        let go = |bot: Vec3| go_with(bot, Vec3::new(190.0, 100.0, 0.0), 5);
+        // An enemy by them, the bot 150 units off them: no radio up, it backs off (a throw may go meanwhile).
+        let brain = go(Vec3::ZERO);
+        assert!(!matches!(brain.mind.arms.active, Some(Active::Detonate(_))));
+        assert!(
+            brain.mind.arms.dodge.is_some_and(|(_, away)| away.x < -0.9),
+            "away from them"
+        );
+        // Out of their blast: set off at once, not waited on.
+        let brain = go(Vec3::new(-250.0, 0.0, 0.0));
+        assert!(matches!(brain.mind.arms.active, Some(Active::Detonate(_))));
+        assert_eq!(brain.mind.arms.detonate_why, "an enemy in their blast");
+        assert_eq!(brain.mind.arms.detonate_wait, None);
+        // Nobody by them, but none left in the pocket (handed back only once none are out): set off to throw on.
+        let away = Vec3::new(-250.0, 0.0, 0.0);
+        let brain = go_with(away, Vec3::new(-900.0, 300.0, 0.0), 1);
+        assert!(
+            !matches!(brain.mind.arms.active, Some(Active::Detonate(_))),
+            "one left to throw"
+        );
+        let brain = go_with(away, Vec3::new(-900.0, 300.0, 0.0), 0);
+        assert!(matches!(brain.mind.arms.active, Some(Active::Detonate(_))));
+        assert_eq!(brain.mind.arms.detonate_why, "nothing left to throw");
+    }
+
+    #[test]
+    fn a_satchel_on_chance_is_counted_once_it_leaves_the_hand() {
+        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+        brain.approach = Some(Vec3::new(500.0, 0.0, 0.0));
+        let satchels_back = |b: &mut Body| {
+            b.arsenal.clear();
+            b.arsenal.push(Armed::new(WeaponId::Satchel, None, Some(5)));
+            b.weapon = Some(WeaponId::Satchel);
+            b.gungame = Some(lb_game::gungame::GunGame::drill(1, Kit::Throwable(WeaponId::Satchel)));
+            b.allowed = Kit::Throwable(WeaponId::Satchel).weapons();
+        };
+        let (t, what) = first_protocol(&mut brain, 0.0, 10.0, None, &satchels_back).expect("a throw on chance");
+        assert_eq!(what, "satchel");
+        assert!(brain.mind.arms.chance_throw);
+        // An enemy comes into sight before it leaves the hand: the throw makes way for one at the enemy.
+        let t = t + 0.1;
+        brain.beliefs.on_sighting(&seen(t, Vec3::new(400.0, 0.0, 0.0)));
+        brain.update(SimTime(t), &params(), None, None);
+        let mut b = body(t);
+        satchels_back(&mut b);
+        let mut rng = BotRng::new(7, 7);
+        brain.run_protocols(&b, &character(), &mut Open, &mut rng);
+        assert_eq!(brain.mind.arms.last_failure, Some("an enemy came into sight"));
+        let counts = |brain: &BotBrain| (brain.mind.arms.stats.satchels, brain.mind.arms.stats.on_chance);
+        assert_eq!(counts(&brain), (0, 0));
+        let floor = Vec3::new(500.0, 0.0, -36.0);
+        let throw = ballistics::satchel(&mut Open, Vec3::ZERO, Vec3::ZERO, floor, 800.0);
+        let mut thrown = Thrower::new(Kind::Satchel, floor, throw, SimTime(t));
+        thrown.landings.push(floor);
+        brain.mind.arms.chance_throw = true;
+        brain.finished(&Active::Throw(thrown), &b, &mut rng);
+        assert_eq!(counts(&brain), (1, 1));
     }
 
     /// Open floor where a long jump lands safely anywhere.
@@ -3333,33 +3802,42 @@ pub(crate) mod tests {
     fn on_the_satchel_level_the_satchel_is_not_aimed_the_view_on_the_ground_toward_the_enemy() {
         use lb_game::gungame::GunGame;
         let enemy = Vec3::new(450.0, 100.0, 0.0);
-        let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
-        brain.mind.arms.next_throw = SimTime(100.0);
-        let mut rng = BotRng::new(7, 7);
-        for i in 0..10 {
-            let t = f64::from(i) * 0.1;
-            let mut sight = seen(t, enemy);
-            sight.first = i == 0;
-            brain.beliefs.on_sighting(&sight);
-            brain.update(SimTime(t), &params(), None, None);
-            let mut b = body(t);
-            b.arsenal.clear();
-            b.arsenal.push(Armed::new(WeaponId::Satchel, None, Some(5)));
-            b.weapon = Some(WeaponId::Satchel);
-            b.gungame = Some(GunGame::drill(1, Kit::Throwable(WeaponId::Satchel)));
-            b.allowed = Kit::Throwable(WeaponId::Satchel).weapons();
-            brain.act(&b, &character(), &mut Open, None, &mut rng);
-        }
-        assert_eq!(brain.mind.hold_fire, Some("nothing to fire but throws"));
-        let Some((Prio::Threat, LookIntent::Point { at, engaged: false })) = brain.intents.look else {
-            panic!("{:?}", brain.intents.look);
+        let view_with = |velocity: Vec3| {
+            let mut brain = BotBrain::new(1, lb_perception::PerceptionParams::from_skill(&character().skill));
+            brain.mind.arms.next_throw = SimTime(100.0);
+            let mut rng = BotRng::new(7, 7);
+            for i in 0..10 {
+                let t = f64::from(i) * 0.1;
+                let mut sight = seen(t, enemy);
+                sight.first = i == 0;
+                brain.beliefs.on_sighting(&sight);
+                brain.update(SimTime(t), &params(), None, None);
+                let mut b = body(t);
+                b.velocity = velocity;
+                b.arsenal.clear();
+                b.arsenal.push(Armed::new(WeaponId::Satchel, None, Some(5)));
+                b.weapon = Some(WeaponId::Satchel);
+                b.gungame = Some(GunGame::drill(1, Kit::Throwable(WeaponId::Satchel)));
+                b.allowed = Kit::Throwable(WeaponId::Satchel).weapons();
+                brain.act(&b, &character(), &mut Open, None, &mut rng);
+            }
+            assert_eq!(brain.mind.hold_fire, Some("nothing to fire but throws"));
+            let Some((Prio::Threat, LookIntent::Point { at, engaged: false })) = brain.intents.look else {
+                panic!("{:?}", brain.intents.look);
+            };
+            lb_core::math::dir_to_view_angles(at - Vec3::new(0.0, 0.0, 28.0))
         };
-        let view = lb_core::math::dir_to_view_angles(at - Vec3::new(0.0, 0.0, 28.0));
         let toward = lb_core::math::dir_to_view_angles(enemy);
+        let view = view_with(Vec3::ZERO);
         assert!(
             (view.y - toward.y).abs() < 1.0 && (10.0..20.0).contains(&view.x),
             "toward the enemy, some 15° down at the ground: {view}"
         );
+        // Running across: turned the way it goes, the enemy well in sight; backing off from it: facing it.
+        let view = view_with(Vec3::new(0.0, -300.0, 0.0));
+        assert!((-31.0..-29.0).contains(&(view.y - toward.y)), "{view} {toward}");
+        let view = view_with(-enemy.normalize() * 300.0);
+        assert!((view.y - toward.y).abs() < 1.0, "{view} {toward}");
     }
 
     #[test]

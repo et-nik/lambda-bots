@@ -58,7 +58,18 @@ pub struct Charge {
     pub seen: Option<SimTime>,
 }
 
+/// A charge last seen moving slower than this lies where it was seen: on a floor the engine stops one slower than 30
+/// units a second dead (`SV_Physics_Toss`), so one lying reads 0.
+const CHARGE_AT_REST: f32 = 20.0;
+
 impl Charge {
+    /// Seen lying, or just now: where it is known. One never seen, or seen on its way a while ago, may be some way off
+    /// where it is believed to be (bounced off a wall, slid on).
+    pub fn sure(&self, now: SimTime) -> bool {
+        self.seen
+            .is_some_and(|t| now.since(t) <= f64::from(CHARGE_CARRY) || self.vel.length() < CHARGE_AT_REST)
+    }
+
     /// Where it is at `now`: where it was seen, carried on by its motion for a moment (a satchel falls at half
     /// gravity).
     pub fn at(&self, now: SimTime, sv_gravity: f32) -> Vec3 {
@@ -116,7 +127,7 @@ const OWN_CHARGE_FLYING: f64 = 3.0;
 const CHARGE_CARRY: f32 = 0.2;
 /// A satchel first seen this shortly before its throw is noted is the one thrown (the game shows it at once).
 const JUST_THROWN: f64 = 0.5;
-/// An explosion this close to a mine or charge set it off.
+/// An explosion this close to a mine set it off.
 const BLOWN_WITH: f32 = 64.0;
 /// A tripmine bursts out along the way it faces ((damage − 24) × 0.6 off its wall, some 68 units past the mine at 150
 /// damage): an explosion this close to that line, this long, was the mine going off.
@@ -365,10 +376,10 @@ impl Explosives {
         }
     }
 
-    /// An explosion was seen or heard at `pos`: what lay there is gone.
+    /// An explosion was seen or heard at `pos`: what lay there is gone. Not the bot's satchels: a blast does them no
+    /// harm (`CSatchelCharge` takes no damage), and one forgotten would go off by the bot with the others.
     pub fn on_explosion(&mut self, pos: Vec3) {
         self.forget_mines(|m| m.blown_by(pos));
-        self.charges.retain(|c| c.pos.distance(pos) > BLOWN_WITH);
         self.flying.retain(|f| f.pos.distance(pos) > BLOWN_WITH);
         self.heard.retain(|h| h.at.distance(pos) > HEARD_SAME);
     }
@@ -547,6 +558,42 @@ mod tests {
         assert_eq!(e.charges[0].pos, Vec3::new(180.0, 20.0, 0.0));
         e.detonated();
         assert!(e.charges.is_empty());
+    }
+
+    #[test]
+    fn the_bots_satchels_lie_on_through_a_blast_by_them() {
+        let mut e = Explosives::default();
+        e.thrown_satchel(Vec3::new(500.0, 0.0, 0.0), SimTime(1.0));
+        e.on_explosion(Vec3::new(500.0, 0.0, 57.0));
+        assert_eq!(e.charges.len(), 1, "a blast does a satchel no harm");
+        e.detonated();
+        assert!(e.charges.is_empty());
+    }
+
+    #[test]
+    fn a_satchel_is_known_where_it_is_once_seen_lying_or_just_now() {
+        let mut e = Explosives::default();
+        e.thrown_satchel(Vec3::new(500.0, 0.0, 0.0), SimTime(1.0));
+        assert!(!e.charges[0].sure(SimTime(1.0)), "only where it was thrown to");
+        e.on_sighting(&seen(
+            ProjectileKind::Satchel,
+            41,
+            Vec3::new(40.0, 0.0, 30.0),
+            Vec3::new(300.0, 0.0, 100.0),
+            true,
+            1.05,
+        ));
+        assert!(e.charges[0].sure(SimTime(1.1)));
+        assert!(!e.charges[0].sure(SimTime(2.0)), "on its way a while ago");
+        e.on_sighting(&seen(
+            ProjectileKind::Satchel,
+            41,
+            Vec3::new(420.0, 0.0, 0.0),
+            Vec3::ZERO,
+            true,
+            2.2,
+        ));
+        assert!(e.charges[0].sure(SimTime(9.0)), "lying");
     }
 
     #[test]

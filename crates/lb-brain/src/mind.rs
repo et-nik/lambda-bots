@@ -106,8 +106,14 @@ const KEEP_MARGIN: f32 = 40.0;
 /// thrown on the run from no closer than its band.
 const GRENADE_KEEP: f32 = 280.0;
 const SNARK_KEEP: f32 = 200.0;
-/// With a throwable in hand the view is on the ground this far toward the enemy (some 15° down on level ground).
+/// With a throwable in hand the view is on the ground this far toward the enemy (some 15° down on level ground);
+/// running (this fast), turned toward the way the bot goes by up to this much (radians), the enemy still well in sight
+/// (the view is 90° across): players look where they go with one (the user with satchels, 73° off the nearest enemy,
+/// median), and a throw turns to its arc from there. Not backing off (the way that far round from the enemy).
 const THROWABLE_LOOK: f32 = 250.0;
+const THROWABLE_ALONG: f32 = 100.0;
+const THROWABLE_ASIDE: f32 = 0.52;
+const THROWABLE_BACK: f32 = 2.1;
 /// A throw on its way to an enemy this far off leaves the bot free to go about: its blast and its snarks are there.
 const THROWN_CLEAR: f32 = 600.0;
 /// Distances a GunGame duel is weighed at, and how much more damage a second a distance must give the bot (its own
@@ -1120,12 +1126,21 @@ impl BotBrain {
                 };
                 let aim = point.at;
                 m.last_aim = Some(aim);
-                // A throwable is not aimed, as players hold one: the view faces the enemy, down at the ground some way
-                // toward it; a throw turns to its own arc.
+                // A throwable is not aimed, as players hold one: the view faces the enemy (turned to where the bot runs),
+                // down at the ground some way toward it; a throw turns to its own arc.
                 let look = if matches!(choice, Choice::Use(w) if spec(w).class == WeaponClass::Throwable) {
                     let floor = body.origin - Vec3::Z * 36.0;
                     let to = t.pos - Vec3::Z * 36.0 - floor;
                     let share = (THROWABLE_LOOK / to.truncate().length().max(1.0)).min(1.0);
+                    let (flat, run) = (to.truncate(), body.velocity.truncate());
+                    let off = lb_core::dmath::atan2(run.y, run.x) - lb_core::dmath::atan2(flat.y, flat.x);
+                    let off = (off + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    let to = if run.length() >= THROWABLE_ALONG && off.abs() < THROWABLE_BACK {
+                        let (s, c) = lb_core::dmath::sin_cos(off.clamp(-THROWABLE_ASIDE, THROWABLE_ASIDE));
+                        Vec3::new(flat.x * c - flat.y * s, flat.x * s + flat.y * c, to.z)
+                    } else {
+                        to
+                    };
                     LookIntent::Point {
                         at: floor + to * share,
                         engaged: false,
@@ -1445,7 +1460,13 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
         enemy_facing: t.traits.facing,
         enemy_faces_me: target::faces(t, body.origin),
         under_fire: m.under_fire(now),
-        approach: body.health.clamp(0.0, 100.0) * ch.aggression,
+        // Where satchels are handed back they are the bot's only harm to do: it closes in for a throw whatever its
+        // health and style.
+        approach: if thrown && crate::arms::refilled(body, WeaponId::Satchel) {
+            100.0
+        } else {
+            body.health.clamp(0.0, 100.0) * ch.aggression
+        },
         weapon: body.weapon.map_or(WeaponClass::Melee, |w| spec(w).class),
         reloading: m.reloading(now),
         hold_ground: now < m.arms.hold_until,
