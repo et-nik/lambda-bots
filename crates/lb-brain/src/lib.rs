@@ -14,9 +14,11 @@ pub mod tricks;
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
+use lb_decision::GoalKind;
+use lb_game::weapons::WeaponId;
 use lb_knowledge::{
     BeliefParams, Beliefs, ChargerSpot, Chargers, DamageStimulus, EnemyTrack, Explosives, ItemSpot, Items, PlayerKey,
-    PublicEvent, Relation, Watch,
+    PublicEvent, Relation, TrackState, Watch,
 };
 use lb_motor::{Intents, Motor};
 use lb_nav_api::{MapView, NodeId};
@@ -40,6 +42,20 @@ const APPROACH_BAND: [f32; 2] = [350.0, 900.0];
 const EXPECT_PERIOD: f64 = 0.5;
 /// A place this dangerous (of the map's worst) makes a calm bot glance where the damage there came from.
 const DANGER_GLANCE: f32 = 0.25;
+/// The bot's trigger pull is at its target when it saw the target this long before at most.
+const SHOT_AT_SEEN: f64 = 0.5;
+
+/// The bot and one enemy shooting at each other, as the bot knows it: for the chat's firefights.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Exchange {
+    pub who: PlayerKey,
+    pub in_sight: bool,
+    /// The bot's last trigger pull at it, when newer than asked for.
+    pub shot: Option<SimTime>,
+    /// Its last shot at the bot the bot knows of, when newer than asked for: one it saw it fire while facing it, or
+    /// damage taken from its side.
+    pub shot_at_me: Option<SimTime>,
+}
 
 /// Where the bot looks from, for what it has in sight.
 #[derive(Clone, Copy, Debug)]
@@ -394,6 +410,45 @@ impl BotBrain {
         damage_dealer(&self.beliefs, d, eye).map(|t| t.pos)
     }
 
+    /// The enemies in sight and those shot at or shooting since `since`. A mine placed is no shot; an enemy's
+    /// grenades, satchels and snarks are none either, for nothing of them shows as a shot.
+    pub fn exchanges(&self, since: SimTime, eye: Vec3, weapon: Option<WeaponId>) -> Vec<Exchange> {
+        let fired = self
+            .motor
+            .weapon
+            .fired_at
+            .filter(|t| *t > since && weapon != Some(WeaponId::Tripmine));
+        let hit_by = self
+            .beliefs
+            .last_damage
+            .filter(|d| d.t > since)
+            .and_then(|d| Some((damage_dealer(&self.beliefs, &d, eye)?.who, d.t)));
+        self.beliefs
+            .enemies()
+            .filter_map(|t| {
+                let in_sight = t.state == TrackState::Visible;
+                let shot = fired.filter(|f| self.mind.target == Some(t.who) && f.since(t.last_seen) <= SHOT_AT_SEEN);
+                let seen_firing = t
+                    .traits
+                    .fired_at
+                    .filter(|f| *f > since && in_sight && lb_combat::target::faces(t, eye));
+                let hit = hit_by.filter(|(who, _)| *who == t.who).map(|(_, at)| at);
+                let shot_at_me = seen_firing.into_iter().chain(hit).reduce(SimTime::max);
+                (in_sight || shot.is_some() || shot_at_me.is_some()).then_some(Exchange {
+                    who: t.who,
+                    in_sight,
+                    shot,
+                    shot_at_me,
+                })
+            })
+            .collect()
+    }
+
+    /// The bot is pulling back from a fight.
+    pub fn retreating(&self) -> bool {
+        self.mind.goal.is_some_and(|g| g.kind == GoalKind::Retreat)
+    }
+
     /// Seconds since the bot last saw or heard an enemy (long when it never did).
     pub fn calm_for(&self, now: SimTime) -> f64 {
         self.beliefs
@@ -445,4 +500,118 @@ fn approach(at: NodeId, map: &dyn MapView) -> Option<Vec3> {
         }
     });
     best.map(|(n, _)| map.node_origin(n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arms::tests::{character, seen};
+
+    const EYE: Vec3 = Vec3::ZERO;
+
+    fn brain_seeing(t: f64, firing: bool, facing: f32) -> BotBrain {
+        let mut brain = BotBrain::new(1, PerceptionParams::from_skill(&character().skill));
+        let mut s = seen(t, Vec3::new(500.0, 0.0, 0.0));
+        s.firing = firing;
+        s.facing = facing;
+        brain.beliefs.on_sighting(&s);
+        brain.beliefs.update(
+            SimTime(t),
+            &BeliefParams {
+                track_forget: 12.0,
+                maxspeed: 300.0,
+            },
+        );
+        brain
+    }
+
+    #[test]
+    fn the_bots_shots_are_at_its_target_in_sight() {
+        let key = PlayerKey { slot: 5, userid: 50 };
+        let mut brain = brain_seeing(1.0, false, 0.0);
+        brain.mind.target = Some(key);
+        brain.motor.weapon.fired_at = Some(SimTime(1.2));
+        let ex = brain.exchanges(SimTime(1.0), EYE, Some(WeaponId::Shotgun));
+        assert_eq!(ex.len(), 1);
+        assert_eq!((ex[0].who, ex[0].in_sight), (key, true));
+        assert_eq!((ex[0].shot, ex[0].shot_at_me), (Some(SimTime(1.2)), None));
+        assert_eq!(
+            brain.exchanges(SimTime(1.2), EYE, Some(WeaponId::Shotgun))[0].shot,
+            None,
+            "not newer"
+        );
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, Some(WeaponId::Tripmine))[0].shot,
+            None,
+            "a mine placed"
+        );
+        brain.motor.weapon.fired_at = Some(SimTime(1.6));
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, Some(WeaponId::Shotgun))[0].shot,
+            None,
+            "seen too long ago"
+        );
+        brain.motor.weapon.fired_at = Some(SimTime(1.2));
+        brain.mind.target = None;
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, Some(WeaponId::Shotgun))[0].shot,
+            None,
+            "at nobody"
+        );
+    }
+
+    #[test]
+    fn an_enemy_shoots_at_the_bot_when_it_fires_facing_it_or_hurts_it_from_its_side() {
+        let toward_me = 180.0;
+        let brain = brain_seeing(1.0, true, toward_me);
+        let ex = brain.exchanges(SimTime(0.9), EYE, None);
+        assert_eq!(ex[0].shot_at_me, Some(SimTime(1.0)));
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, None)[0].shot_at_me,
+            None,
+            "not newer"
+        );
+
+        let mut brain = brain_seeing(1.0, true, 90.0);
+        assert_eq!(
+            brain.exchanges(SimTime(0.9), EYE, None)[0].shot_at_me,
+            None,
+            "firing elsewhere"
+        );
+        brain.beliefs.on_damage(&DamageStimulus {
+            t: SimTime(1.1),
+            bearing: Some(0.0),
+            amount: 20,
+            bits: 0,
+        });
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, None)[0].shot_at_me,
+            Some(SimTime(1.1))
+        );
+        brain.beliefs.on_damage(&DamageStimulus {
+            t: SimTime(1.15),
+            bearing: Some(180.0),
+            amount: 20,
+            bits: 0,
+        });
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, None)[0].shot_at_me,
+            None,
+            "damage from the other side"
+        );
+    }
+
+    #[test]
+    fn enemies_out_of_sight_and_quiet_are_left_out() {
+        let mut brain = brain_seeing(1.0, false, 0.0);
+        brain.beliefs.update(
+            SimTime(3.0),
+            &BeliefParams {
+                track_forget: 12.0,
+                maxspeed: 300.0,
+            },
+        );
+        assert!(brain.exchanges(SimTime(2.9), EYE, None).is_empty());
+        assert!(!brain.retreating());
+    }
 }

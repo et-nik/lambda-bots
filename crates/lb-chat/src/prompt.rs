@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::aliases::{self, Aliases};
+use crate::fight::{Fight, FightEnd};
 use crate::journal::{Event, Notable, Who};
 use crate::lang::{self, Lang};
 use crate::memory::{self, MapRecap, NOTES_MAX, PlayerMemory};
@@ -36,6 +37,8 @@ const LINES_SHOWN: usize = 3;
 const NOTES_PLAYERS: usize = 12;
 /// Seconds a GunGame level may come after the kill that gave it: the scoreboard is read once a second.
 const LEVEL_LAG: f64 = 2.0;
+/// Seconds a firefight's end may come after the kill that ended it: a won or lost one waits for a trade.
+const FIGHT_LAG: f64 = crate::fight::TRADE + 0.5;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Rendered {
@@ -315,6 +318,7 @@ impl Names<'_> {
             (Lang::En, Event::MatchEnd { winner: Some(w) }) => format!("the match is over, {} won", self.subj(w)),
             (Lang::Ru, Event::MatchEnd { winner: None }) => "матч окончен".into(),
             (Lang::En, Event::MatchEnd { winner: None }) => "the match is over".into(),
+            (_, Event::Fight(f)) => self.fight_line(f),
         }
     }
 
@@ -392,6 +396,144 @@ impl Names<'_> {
                     self.call(who)
                 )
             }
+            (_, Notable::Fight(f)) => self.fight(f),
+        }
+    }
+
+    /// A firefight that just ended, for the bot in it (with its health) or in the third person.
+    fn fight(&self, f: &Fight) -> String {
+        let (bot, foe, s, hp) = (self.call(&f.bot), self.call(&f.foe), f.whole_secs(), f.health);
+        let by = f.by().map(|w| self.call(w)).unwrap_or_default();
+        match (self.lang, &f.end, self.is_me(&f.bot)) {
+            (Lang::Ru, FightEnd::Won, true) => {
+                format!("Ты только что убил {foe} после перестрелки {s} с, у тебя осталось {hp} HP.")
+            }
+            (Lang::En, FightEnd::Won, true) => format!("You just killed {foe} after a {s} s firefight, {hp} HP left."),
+            (Lang::Ru, FightEnd::Won, false) => format!("{bot} убил {foe} после перестрелки {s} с."),
+            (Lang::En, FightEnd::Won, false) => format!("{bot} killed {foe} after a {s} s firefight."),
+            (Lang::Ru, FightEnd::Lost, me) => {
+                format!(
+                    "{foe} {}убил {} после перестрелки {s} с.",
+                    just_ru(me),
+                    self.obj(&f.bot)
+                )
+            }
+            (Lang::En, FightEnd::Lost, me) => {
+                format!(
+                    "{foe} {}killed {} after a {s} s firefight.",
+                    just_en(me),
+                    self.obj(&f.bot)
+                )
+            }
+            (Lang::Ru, FightEnd::Traded, true) => {
+                format!("Вы с {foe} только что убили друг друга после перестрелки {s} с.")
+            }
+            (Lang::En, FightEnd::Traded, true) => {
+                format!("You and {foe} just killed each other after a {s} s firefight.")
+            }
+            (Lang::Ru, FightEnd::Traded, false) => format!("{bot} и {foe} убили друг друга после перестрелки {s} с."),
+            (Lang::En, FightEnd::Traded, false) => {
+                format!("{bot} and {foe} killed each other after a {s} s firefight.")
+            }
+            (Lang::Ru, FightEnd::Stolen { .. }, true) => {
+                format!("{by} только что добил {foe}, с которым ты перестреливался {s} с.")
+            }
+            (Lang::En, FightEnd::Stolen { .. }, true) => {
+                format!("{by} just finished off {foe}, who you had been trading shots with for {s} s.")
+            }
+            (Lang::Ru, FightEnd::Stolen { .. }, false) => {
+                format!("{by} добил {foe}, с которым {bot} перестреливался {s} с.")
+            }
+            (Lang::En, FightEnd::Stolen { .. }, false) => {
+                format!("{by} finished off {foe}, who {bot} had been trading shots with for {s} s.")
+            }
+            (Lang::Ru, FightEnd::Helped { .. }, true) => {
+                format!("{by}, твой союзник, только что добил {foe}, с которым ты перестреливался {s} с.")
+            }
+            (Lang::En, FightEnd::Helped { .. }, true) => {
+                format!("{by}, your teammate, just finished off {foe}, who you had been trading shots with for {s} s.")
+            }
+            (Lang::Ru, FightEnd::Helped { .. }, false) => {
+                format!("{by} помог союзнику {bot}: добил {foe} после перестрелки {s} с.")
+            }
+            (Lang::En, FightEnd::Helped { .. }, false) => {
+                format!("{by} helped teammate {bot}: finished off {foe} after a {s} s firefight.")
+            }
+            (Lang::Ru, FightEnd::Interrupted { .. }, me) => format!(
+                "{by} {}убил {} посреди перестрелки с {foe} ({s} с).",
+                just_ru(me),
+                self.obj(&f.bot)
+            ),
+            (Lang::En, FightEnd::Interrupted { .. }, me) => format!(
+                "{by} {}killed {} in the middle of a {s} s firefight with {foe}.",
+                just_en(me),
+                self.obj(&f.bot)
+            ),
+            (Lang::Ru, FightEnd::Fled, true) => format!("{foe} ушёл из перестрелки с тобой ({s} с), у тебя {hp} HP."),
+            (Lang::En, FightEnd::Fled, true) => {
+                format!("{foe} broke off a {s} s firefight with you, you have {hp} HP.")
+            }
+            (Lang::Ru, FightEnd::Fled, false) => format!("{foe} ушёл из перестрелки с {bot} ({s} с)."),
+            (Lang::En, FightEnd::Fled, false) => format!("{foe} broke off a {s} s firefight with {bot}."),
+            (Lang::Ru, FightEnd::Retreated, true) => {
+                format!("Ты отступил из перестрелки с {foe} ({s} с), у тебя {hp} HP.")
+            }
+            (Lang::En, FightEnd::Retreated, true) => {
+                format!("You pulled back from a {s} s firefight with {foe}, {hp} HP left.")
+            }
+            (Lang::Ru, FightEnd::Retreated, false) => format!("{bot} отступил из перестрелки с {foe} ({s} с)."),
+            (Lang::En, FightEnd::Retreated, false) => format!("{bot} pulled back from a {s} s firefight with {foe}."),
+        }
+    }
+
+    /// The bot's own firefight among what happened, when no kill line it ended shows ([`Names::fight_tail`]).
+    fn fight_line(&self, f: &Fight) -> String {
+        let (foe, s, hp) = (self.call(&f.foe), f.whole_secs(), f.health);
+        let by = f.by().map(|w| self.call(w)).unwrap_or_default();
+        let how = match (self.lang, &f.end) {
+            (Lang::Ru, FightEnd::Won) => format!("ты убил его (у тебя {hp} HP)"),
+            (Lang::En, FightEnd::Won) => format!("you killed them ({hp} HP left)"),
+            (Lang::Ru, FightEnd::Lost) => "он убил тебя".into(),
+            (Lang::En, FightEnd::Lost) => "they killed you".into(),
+            (Lang::Ru, FightEnd::Traded) => "вы убили друг друга".into(),
+            (Lang::En, FightEnd::Traded) => "you killed each other".into(),
+            (Lang::Ru, FightEnd::Stolen { .. }) => format!("его добил {by}"),
+            (Lang::En, FightEnd::Stolen { .. }) => format!("{by} finished them off"),
+            (Lang::Ru, FightEnd::Helped { .. }) => format!("его добил союзник {by}"),
+            (Lang::En, FightEnd::Helped { .. }) => format!("teammate {by} finished them off"),
+            (Lang::Ru, FightEnd::Interrupted { .. }) => format!("тебя убил {by}"),
+            (Lang::En, FightEnd::Interrupted { .. }) => format!("{by} killed you"),
+            (Lang::Ru, FightEnd::Fled) => format!("он ушёл (у тебя {hp} HP)"),
+            (Lang::En, FightEnd::Fled) => format!("they broke off ({hp} HP left)"),
+            (Lang::Ru, FightEnd::Retreated) => format!("ты отступил (у тебя {hp} HP)"),
+            (Lang::En, FightEnd::Retreated) => format!("you pulled back ({hp} HP left)"),
+        };
+        match self.lang {
+            Lang::Ru => format!("перестрелка с {foe} {s} с: {how}"),
+            Lang::En => format!("{s} s firefight with {foe}: {how}"),
+        }
+    }
+
+    /// What a kill line gets after it when the kill ended the bot's firefight: `после перестрелки 5 с (у тебя 12 HP)`.
+    fn fight_tail(&self, f: &Fight) -> String {
+        let (s, hp) = (f.whole_secs(), f.health);
+        match (self.lang, &f.end) {
+            (Lang::Ru, FightEnd::Won) => format!(" после перестрелки {s} с (у тебя {hp} HP)"),
+            (Lang::En, FightEnd::Won) => format!(" after a {s} s firefight ({hp} HP left)"),
+            (Lang::Ru, FightEnd::Stolen { .. } | FightEnd::Helped { .. }) => {
+                format!(", ты перестреливался с ним {s} с")
+            }
+            (Lang::En, FightEnd::Stolen { .. } | FightEnd::Helped { .. }) => {
+                format!(", you had been trading shots with them for {s} s")
+            }
+            (Lang::Ru, FightEnd::Interrupted { .. }) => {
+                format!(" посреди перестрелки с {} ({s} с)", self.call(&f.foe))
+            }
+            (Lang::En, FightEnd::Interrupted { .. }) => {
+                format!(" in the middle of a {s} s firefight with {}", self.call(&f.foe))
+            }
+            (Lang::Ru, _) => format!(" после перестрелки {s} с"),
+            (Lang::En, _) => format!(" after a {s} s firefight"),
         }
     }
 
@@ -455,6 +597,31 @@ impl Names<'_> {
             .trim();
         (!weapon.is_empty()).then(|| lang::weapon_name(self.lang, weapon))
     }
+}
+
+/// The kill that ended the firefight `f`: the last kill between its two for a trade.
+fn ended(e: &Event, f: &Fight) -> bool {
+    let Event::Kill { killer, victim, .. } = e else {
+        return false;
+    };
+    let is = |a: &Who, b: &Who| killer.userid == a.userid && victim.userid == b.userid;
+    match &f.end {
+        FightEnd::Won => is(&f.bot, &f.foe),
+        FightEnd::Lost => is(&f.foe, &f.bot),
+        FightEnd::Traded => is(&f.bot, &f.foe) || is(&f.foe, &f.bot),
+        FightEnd::Stolen { by } | FightEnd::Helped { by } => is(by, &f.foe),
+        FightEnd::Interrupted { by } => is(by, &f.bot),
+        FightEnd::Fled | FightEnd::Retreated => false,
+    }
+}
+
+/// `только что ` for the bot's own moment.
+fn just_ru(me: bool) -> &'static str {
+    if me { "только что " } else { "" }
+}
+
+fn just_en(me: bool) -> &'static str {
+    if me { "just " } else { "" }
 }
 
 /// `a`, `a или b`, `a, b или c`.
@@ -766,9 +933,16 @@ pub fn words(req: &ChatRequest, known: &[Known<'_>], aliases: &Aliases) -> Vec<S
 }
 
 /// What happened in the game in the last [`GAME_WINDOW`] seconds, the chat left out, the latest [`GAME_SHOWN`]: a
-/// GunGame level goes with the kill that gave it.
-fn game_lines(names: &Names<'_>, events: &[Recent]) -> Vec<String> {
-    let mut lines: Vec<(f64, &Event, Option<i32>)> = Vec::new();
+/// GunGame level and the bot's own firefight go with the kill that gave or ended it. The firefight `told` is left
+/// out: the bot speaks of it, the reason tells it.
+fn game_lines(names: &Names<'_>, events: &[Recent], told: Option<&Fight>) -> Vec<String> {
+    struct Line<'a> {
+        age: f64,
+        event: &'a Event,
+        level: Option<i32>,
+        fight: Option<&'a Fight>,
+    }
+    let mut lines: Vec<Line<'_>> = Vec::new();
     for r in events.iter().filter(|r| r.age <= GAME_WINDOW) {
         match &r.event {
             Event::Chat { .. } => continue,
@@ -778,29 +952,60 @@ fn game_lines(names: &Names<'_>, events: &[Recent]) -> Vec<String> {
                 let kill = lines
                     .iter_mut()
                     .rev()
-                    .take_while(|(age, ..)| age - r.age <= LEVEL_LAG)
-                    .find(|(_, e, gave)| {
-                        gave.is_none() && matches!(e, Event::Kill { killer, .. } if killer.userid == who.userid)
+                    .take_while(|l| l.age - r.age <= LEVEL_LAG)
+                    .find(|l| {
+                        l.level.is_none()
+                            && matches!(l.event, Event::Kill { killer, .. } if killer.userid == who.userid)
                     });
                 if let Some(kill) = kill {
-                    kill.2 = Some(*level);
+                    kill.level = Some(*level);
+                    continue;
+                }
+            }
+            Event::Fight(f) if !names.is_me(&f.bot) || told == Some(f) => continue,
+            Event::Fight(f) => {
+                let kill = lines
+                    .iter_mut()
+                    .rev()
+                    .take_while(|l| l.age - r.age <= FIGHT_LAG)
+                    .find(|l| l.fight.is_none() && ended(l.event, f));
+                if let Some(kill) = kill {
+                    kill.fight = Some(f);
                     continue;
                 }
             }
             _ => {}
         }
-        lines.push((r.age, &r.event, None));
+        lines.push(Line {
+            age: r.age,
+            event: &r.event,
+            level: None,
+            fight: None,
+        });
     }
     let skip = lines.len().saturating_sub(GAME_SHOWN);
     lines
         .into_iter()
         .skip(skip)
-        .map(|(age, e, level)| {
-            let text = match level {
-                Some(level) => names.leveled(&names.event(e), level),
-                None => names.event(e),
+        .map(|l| {
+            let mut text = match l.event {
+                Event::Fight(f) => names.fight_line(f),
+                e => names.event(e),
             };
-            format!("[{}] {text}", lang::ago(names.lang, age))
+            // A third player's kill: the level is theirs, the firefight the bot's (`…, ты перестреливался с ним`).
+            let level_first = l
+                .fight
+                .is_some_and(|f| matches!(f.end, FightEnd::Stolen { .. } | FightEnd::Helped { .. }));
+            if let Some(level) = l.level.filter(|_| level_first) {
+                text = names.leveled(&text, level);
+            }
+            if let Some(f) = l.fight {
+                text.push_str(&names.fight_tail(f));
+            }
+            if let Some(level) = l.level.filter(|_| !level_first) {
+                text = names.leveled(&text, level);
+            }
+            format!("[{}] {text}", lang::ago(names.lang, l.age))
         })
         .collect()
 }
@@ -1354,7 +1559,14 @@ pub fn render(
     block(
         &mut user,
         title("Что было в игре:", "What happened in the game:"),
-        &game_lines(&names, &req.events),
+        &game_lines(
+            &names,
+            &req.events,
+            match &req.trigger {
+                Trigger::Notable(Notable::Fight(f)) => Some(f),
+                _ => None,
+            },
+        ),
     );
     lines(&mut user, &names, req, ctx.talks, &words, now);
     ask(&mut user, &names, req, &partner_lines(req, known, ctx.talks));
@@ -2686,6 +2898,143 @@ mod tests {
             humans: 21,
         };
         assert_eq!(moment(Lang::Ru, &n), "112S: 21 убийство подряд без смертей");
+    }
+
+    #[test]
+    fn firefights_in_the_prompt() {
+        let (gordon, alyx) = (who(5, "Gordon", false), who(6, "Alyx", false));
+        let fight = |end: FightEnd, secs: f32, health: i32| Fight {
+            bot: me(),
+            foe: gordon.clone(),
+            secs,
+            health,
+            end,
+        };
+        let cases = [
+            (
+                fight(FightEnd::Won, 7.2, 12),
+                "Ты только что убил Gordon после перестрелки 7 с, у тебя осталось 12 HP.",
+                "You just killed Gordon after a 7 s firefight, 12 HP left.",
+            ),
+            (
+                fight(FightEnd::Lost, 6.6, 0),
+                "Gordon только что убил тебя после перестрелки 7 с.",
+                "Gordon just killed you after a 7 s firefight.",
+            ),
+            (
+                fight(FightEnd::Traded, 5.0, 0),
+                "Вы с Gordon только что убили друг друга после перестрелки 5 с.",
+                "You and Gordon just killed each other after a 5 s firefight.",
+            ),
+            (
+                fight(FightEnd::Stolen { by: alyx.clone() }, 4.0, 60),
+                "Alyx только что добил Gordon, с которым ты перестреливался 4 с.",
+                "Alyx just finished off Gordon, who you had been trading shots with for 4 s.",
+            ),
+            (
+                fight(FightEnd::Helped { by: alyx.clone() }, 4.0, 60),
+                "Alyx, твой союзник, только что добил Gordon, с которым ты перестреливался 4 с.",
+                "Alyx, your teammate, just finished off Gordon, who you had been trading shots with for 4 s.",
+            ),
+            (
+                fight(FightEnd::Interrupted { by: alyx.clone() }, 4.0, 0),
+                "Alyx только что убил тебя посреди перестрелки с Gordon (4 с).",
+                "Alyx just killed you in the middle of a 4 s firefight with Gordon.",
+            ),
+            (
+                fight(FightEnd::Fled, 5.0, 40),
+                "Gordon ушёл из перестрелки с тобой (5 с), у тебя 40 HP.",
+                "Gordon broke off a 5 s firefight with you, you have 40 HP.",
+            ),
+            (
+                fight(FightEnd::Retreated, 5.0, 15),
+                "Ты отступил из перестрелки с Gordon (5 с), у тебя 15 HP.",
+                "You pulled back from a 5 s firefight with Gordon, 15 HP left.",
+            ),
+        ];
+        for (f, ru, en) in &cases {
+            for (language, want) in [("ru", ru), ("en", en)] {
+                let req = ChatRequest {
+                    trigger: Trigger::Notable(Notable::Fight(f.clone())),
+                    chat: Vec::new(),
+                    talk: Vec::new(),
+                    events: vec![recent(1.0, Event::Fight(f.clone()))],
+                    ..request(language)
+                };
+                let r = render(&req, &[], &Aliases::default(), &[], &Context::default(), NOW);
+                let reason = r
+                    .user
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Повод: ").or(l.strip_prefix("Why now: ")));
+                let tail = if language == "ru" {
+                    "Скажи что-то своё и к месту или промолчи (-)."
+                } else {
+                    "Say something of your own that fits, or keep quiet (-)."
+                };
+                assert_eq!(reason, Some(format!("{want} {tail}").as_str()), "{language}");
+                assert!(
+                    !r.user.contains("1 с назад] перестрелка") && !r.user.contains("1s ago] 5 s firefight"),
+                    "the reason tells it once: {}",
+                    r.user
+                );
+            }
+        }
+
+        // Memory: in the third person, no health.
+        let won = Fight {
+            bot: who(7, "Kleiner", true),
+            ..fight(FightEnd::Lost, 7.0, 0)
+        };
+        assert_eq!(
+            moment(Lang::Ru, &Notable::Fight(won.clone())),
+            "Gordon убил Kleiner после перестрелки 7 с"
+        );
+        assert_eq!(
+            moment(Lang::En, &Notable::Fight(won)),
+            "Gordon killed Kleiner after a 7 s firefight"
+        );
+        let helped = Fight {
+            bot: who(7, "Kleiner", true),
+            ..fight(FightEnd::Helped { by: alyx.clone() }, 4.0, 60)
+        };
+        assert_eq!(
+            moment(Lang::Ru, &Notable::Fight(helped)),
+            "Alyx помог союзнику Kleiner: добил Gordon после перестрелки 4 с"
+        );
+
+        // What happened: the end goes with the kill that ended it; one without a kill, or past it, stands alone.
+        let req = ChatRequest {
+            events: vec![
+                recent(60.0, kill(&me(), &gordon, "shotgun")),
+                recent(59.0, Event::Fight(fight(FightEnd::Won, 5.0, 12))),
+                recent(50.0, kill(&alyx, &gordon, "9mmAR")),
+                recent(
+                    50.0,
+                    Event::Fight(fight(FightEnd::Stolen { by: alyx.clone() }, 4.0, 70)),
+                ),
+                recent(30.0, Event::Fight(fight(FightEnd::Fled, 5.0, 40))),
+                recent(20.0, kill(&gordon, &me(), "357")),
+                recent(16.0, Event::Fight(fight(FightEnd::Lost, 3.4, 0))),
+                recent(
+                    10.0,
+                    Event::Fight(Fight {
+                        bot: who(7, "Kleiner", true),
+                        ..fight(FightEnd::Won, 9.0, 5)
+                    }),
+                ),
+            ],
+            ..request("ru")
+        };
+        let r = render(&req, &[], &Aliases::default(), &[], &Context::default(), NOW);
+        for line in [
+            "[60 с назад] ты убил Gordon из дробовика после перестрелки 5 с (у тебя 12 HP)\n",
+            "[50 с назад] Alyx убил Gordon из MP5, ты перестреливался с ним 4 с\n",
+            "[30 с назад] перестрелка с Gordon 5 с: он ушёл (у тебя 40 HP)\n",
+            "[20 с назад] Gordon убил тебя из питона\n[16 с назад] перестрелка с Gordon 3 с: он убил тебя\n",
+        ] {
+            assert!(r.user.contains(line), "{line}{}", r.user);
+        }
+        assert!(!r.user.contains("Kleiner"), "another bot's fight: {}", r.user);
     }
 
     #[test]

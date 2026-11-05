@@ -112,6 +112,24 @@ chat in `logs/chatlog.<date>.log`, is written whether chat is on or off.
   of these. A dropped line is silence; the log and the transcript say `dropped (swearing)`, `dropped (slur)` or
   `dropped (cheating)`. Ready phrases are yours and go as written, but a name that swears or holds a slur never goes
   into one.
+- **Firefights.** A bot and a human shooting at each other, each in the other's sight, for at least 3 s of the part
+  where both shoot, is a firefight, and its end may get the bot's word. The bot tells it from what it knows itself,
+  twenty times a second: its own trigger pulls at its target seen within 0.5 s (a mine placed is none), the human's
+  shots it saw while the human faced it (within 15°), damage from the human's side (as the HUD compass shows it), whom
+  it has in sight, whether it pulls back. A human's grenades, satchels, snarks and crowbar show as no shot, so a fight
+  of throws alone is none. It counts from the answering side's first shot (a bot that opens at 0 s, answered at 0.8 s
+  and killing at 3.2 s has had 2.4 s: no fight); a side silent for more than 3 s ends it, and a shot nobody answered
+  before its side went 3 s quiet is forgotten. The ends: the bot won or lost (each waits 2 s for a trade); a trade,
+  the other one dying by the first within 2 s; a third human took the kill (`fight_stolen`), a teammate finished the
+  enemy off in team modes (`fight_helped`), a third human killed the bot in the middle of it (`fight_interrupted`);
+  the human broke off: stopped shooting, or went out of sight (`fight_fled`); the bot pulled back (`fight_retreat`).
+  None for a suicide or a death by the world, a player leaving, the match's end, a bot that turned away from the human
+  still shooting at it in its sight, a bot that died to another enemy it was shooting at (by a rocket or a grenade of
+  theirs on its way too, when the bot had killed them first); a bot coming between gets no word, but the fight is in
+  what happened. A long fight (6 s or more), a trade, or one the bot came out of alive (won, or the two apart) with 20
+  HP or less is bright: it always goes to the model and is remembered. Chances, for a bot of middling chattiness: a
+  bright one 35%, one a human came between 20%, any other 5%, in the hour's remarks and the gaps as any moment. Fights
+  among bots go to the debug log alone (`chat <bot>: fight with …`).
 - **GunGame.** The crowbar is a level's weapon there, so a crowbar kill is no humiliation: the bots neither crow nor
   grumble about it. A bot reaching the last level may say so.
 - **Team chat.** In team modes a bot hears its own team's `say_team` and answers there. Outside them `say_team` shows
@@ -131,7 +149,9 @@ its own words (the profile's `chat.about`, then your `config/chat/bots.yaml`), s
 - the minute, the bot's score or GunGame level, the leader, its mood;
 - the players on the server, each with their score or GunGame level, and the bot's score against each on this map;
   what the bots know of them, in full only for the player it answers; the last two maps;
-- what happened in the game: up to 10 kills and other events of the last 2 minutes;
+- what happened in the game: up to 10 kills and other events of the last 2 minutes, with the bot's own firefights
+  (`[40 с назад] ты убил Gordon из дробовика после перестрелки 5 с (у тебя 12 HP)`), but the one it speaks of: the
+  reason tells it (`Ты только что убил Gordon после перестрелки 7 с, у тебя осталось 12 HP.`);
 - its own recent lines (up to 5), so that it neither repeats nor contradicts itself;
 - its talk with the player: lines older than the chat below, from the last map, or from days before (the memory),
   each marked with when;
@@ -162,8 +182,9 @@ so does a list someone on the scoreboard is past: it is not the one the plugin p
 plugin's `gg_cfg_file`: a server that names another main file there gets `gungame.ini`'s levels on maps without their
 own file.
 
-Kill feed, chat, joins and the scoreboard are what every player sees; the request holds nothing a player could not
-know, besides your own words. Which players are bots is not said.
+Kill feed, chat, joins and the scoreboard are what every player sees, and a firefight is what the bot itself saw of
+it, its own health too; the request holds nothing a player could not know, besides your own words. Which players are
+bots is not said.
 
 ## Your words: `config/chat/`
 
@@ -285,7 +306,8 @@ without the file. A phrase costs no tokens and no request and is picked as soon 
 it like any line.
 
 - **Phrase or model.** A moment gets one of its phrases unless the model's share comes up (`chat.phrases.ai_share`,
-  0.15): then the model says something of its own. Greetings go to the model for players the bots know. Answers to
+  0.15): then the model says something of its own. Greetings go to the model for players the bots know, and so do
+  bright firefights (see How it plays). Answers to
   players (named, in a talk, questions, lines to everybody) always come from the model, and so does a word on a
   match another bot or nobody won: `win` is for the bot's own win, `gg` for a human's. While the model is out of
   reach (no key or a refused one, out of API credit, the day's tokens spent, waiting after failures), moments keep
@@ -309,23 +331,31 @@ it like any line.
 
 The moments, when they come, and the placeholders their phrases take:
 
-| Key               | When                                                                  | Placeholders        |
-|-------------------|-----------------------------------------------------------------------|---------------------|
-| `greet`           | a player the bots do not know joins, or says hi to everybody          | `{name}`            |
-| `streak`          | the bot kills 10 or more without dying, players among them            | `{count}`           |
-| `streak_other`    | a player kills 10 or more without dying                               | `{name}` `{count}`  |
-| `multikill`       | the bot kills 3 or more within 6 s, players among them                | `{count}`           |
-| `multikill_other` | a player kills 3 or more within 6 s                                   | `{name}` `{count}`  |
-| `revenge`         | the bot kills a player who had killed it 3 or more times in a row     | `{name}`            |
-| `nemesis`         | a player kills the bot the 3rd time in a row, then the 5th, the 7th … | `{name}` `{count}`  |
-| `crowbarred`      | a player kills the bot with the crowbar, not in GunGame               | `{name}`            |
-| `crowbar_kill`    | the bot kills a player with the crowbar, not in GunGame               | `{name}`            |
-| `own_blast`       | the bot blows itself up                                               | `{weapon}`          |
-| `own_blast_other` | a player blows themselves up                                          | `{name}` `{weapon}` |
-| `killed_typing`   | a player kills the bot while it types                                 | `{name}`            |
-| `last_level`      | the bot reaches the last GunGame level                                |                     |
-| `win`             | the map ends, the bot won                                             |                     |
-| `gg`              | the map ends, a human player won                                      | `{name}`            |
+| Key                 | When                                                                  | Placeholders        |
+|---------------------|-----------------------------------------------------------------------|---------------------|
+| `greet`             | a player the bots do not know joins, or says hi to everybody          | `{name}`            |
+| `streak`            | the bot kills 10 or more without dying, players among them            | `{count}`           |
+| `streak_other`      | a player kills 10 or more without dying                               | `{name}` `{count}`  |
+| `multikill`         | the bot kills 3 or more within 6 s, players among them                | `{count}`           |
+| `multikill_other`   | a player kills 3 or more within 6 s                                   | `{name}` `{count}`  |
+| `revenge`           | the bot kills a player who had killed it 3 or more times in a row     | `{name}`            |
+| `nemesis`           | a player kills the bot the 3rd time in a row, then the 5th, the 7th … | `{name}` `{count}`  |
+| `crowbarred`        | a player kills the bot with the crowbar, not in GunGame               | `{name}`            |
+| `crowbar_kill`      | the bot kills a player with the crowbar, not in GunGame               | `{name}`            |
+| `own_blast`         | the bot blows itself up                                               | `{weapon}`          |
+| `own_blast_other`   | a player blows themselves up                                          | `{name}` `{weapon}` |
+| `killed_typing`     | a player kills the bot while it types                                 | `{name}`            |
+| `last_level`        | the bot reaches the last GunGame level                                |                     |
+| `win`               | the map ends, the bot won                                             |                     |
+| `gg`                | the map ends, a human player won                                      | `{name}`            |
+| `fight_won`         | the bot kills a player after a firefight with them                    | `{name}`            |
+| `fight_lost`        | a player kills the bot after a firefight with it                      | `{name}`            |
+| `fight_traded`      | the bot and a player kill each other after a firefight                | `{name}`            |
+| `fight_stolen`      | another player kills the one the bot had a firefight with             | `{name}`: the other |
+| `fight_helped`      | a teammate kills the one the bot had a firefight with (team modes)    | `{name}`: the mate  |
+| `fight_interrupted` | another player kills the bot in the middle of a firefight             | `{name}`: the other |
+| `fight_fled`        | a player breaks off a firefight with the bot                          | `{name}`            |
+| `fight_retreat`     | the bot pulls back from a firefight with a player                     | `{name}`            |
 
 `{map}`, the map's name, fits every moment; any other placeholder is an error, and a phrase may use none: keep a few
 `gg` phrases without `{name}` for a winner whose name cannot go into one, as the shipped set does. Put `{name}` where
@@ -370,7 +400,8 @@ The worker keeps `data/chat/memory.json`. A player is remembered by SteamID, or 
 played, kills and deaths, the score against each bot, favourite weapons, GunGame wins, their last ten lines (noise,
 swearing and slurs left out; the map's nicknames and the players' aliases count as neither), their talks with the bots
 (the last 12 lines with each of the 3 bots they talked to last, by the bot's personality; the player's lines left out
-as their other lines are, the bots' kept as said), moments worth remembering, and notes; and, by nickname, the names
+as their other lines are, the bots' kept as said), moments worth remembering (bright firefights among them: `Gordon
+убил Kleiner после перестрелки 7 с`), and notes; and, by nickname, the names
 the model gave (see `players.yaml`). After every map one request
 asks the model to update the notes on the players the bots met (1–2 sentences each: how they play, what stood out, how
 they talk) unless `memory.ai_notes` is off, whoever is on the server then; a note is kept whether the model names the
@@ -613,7 +644,9 @@ credit, the day's tokens), what it read from `config/chat/`, the session's reque
 failures) and lines (said, not said), today's chat log and what every bot is typing, or will type once back in the
 game. `lb chat event` takes the keys of `phrases.yaml` and, like
 `test`, needs chat on: the bot says a phrase, or the model's line when its share comes up (with
-`chat.phrases.ai_share: 0`, always a phrase, except `greet` for a player the bots know).
+`chat.phrases.ai_share: 0`, always a phrase, except `greet` for a player the bots know and `fight_traded`, a bright
+fight). A `fight_*` key makes an ordinary 4 s firefight with you, the bot left with 55 HP; in `fight_stolen`,
+`fight_helped` and `fight_interrupted` you come between the bot and a made-up `Barney`.
 
 `lb chat say`, `test` and `event` turn down a bot with a line on its way and say so: nothing replaces that line.
 `lb chat off`, `lb_chat 0` and `lb config reload` with `chat.enabled: false` drop every line on its way, those waiting

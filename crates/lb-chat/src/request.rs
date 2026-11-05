@@ -6,6 +6,7 @@ use lb_core::time::SimTime;
 use serde::{Deserialize, Serialize};
 
 use crate::botchat::Pending;
+use crate::fight::{Fight, FightEnd};
 use crate::journal::{Notable, Who};
 use crate::talk::Social;
 
@@ -86,6 +87,7 @@ impl Trigger {
                 | Notable::Streak { killer, .. } => killer,
                 Notable::OwnBlast { victim, .. } => victim,
                 Notable::RageQuit { who, .. } => who,
+                Notable::Fight(f) => f.by().unwrap_or(&f.foe),
             }),
             Trigger::LastLevel => None,
         }
@@ -164,6 +166,7 @@ impl Trigger {
                 Notable::Multikill { killer, count, .. } => format!("{}: {count} kills at once", killer.name),
                 Notable::Streak { killer, count, .. } => format!("{}: {count} kills in a row", killer.name),
                 Notable::RageQuit { who, deaths } => format!("{} left after {deaths} deaths in a row", who.name),
+                Notable::Fight(f) => fight_summary(f),
             },
             Trigger::KilledWhileTyping { killer } => match killer {
                 Some(k) => format!("{} killed the bot while it typed", k.name),
@@ -172,6 +175,22 @@ impl Trigger {
             Trigger::LastLevel => "the bot reached the last level".into(),
         }
     }
+}
+
+/// A bot's firefight, in a few words, for logs.
+pub fn fight_summary(f: &Fight) -> String {
+    let (foe, secs) = (&f.foe.name, f.whole_secs());
+    let how = match &f.end {
+        FightEnd::Won => format!("fight with {foe}: won after {secs} s, {} HP", f.health),
+        FightEnd::Lost => format!("fight with {foe}: lost after {secs} s"),
+        FightEnd::Traded => format!("fight with {foe}: traded after {secs} s"),
+        FightEnd::Stolen { by } => format!("fight with {foe}: {} took the kill after {secs} s", by.name),
+        FightEnd::Helped { by } => format!("fight with {foe}: teammate {} finished them after {secs} s", by.name),
+        FightEnd::Interrupted { by } => format!("fight with {foe}: {} killed the bot after {secs} s", by.name),
+        FightEnd::Fled => format!("fight with {foe}: they broke off after {secs} s, {} HP", f.health),
+        FightEnd::Retreated => format!("fight with {foe}: the bot pulled back after {secs} s, {} HP", f.health),
+    };
+    if f.bright() { format!("{how} (bright)") } else { how }
 }
 
 /// The bot as the model plays it.
@@ -386,6 +405,27 @@ mod tests {
             text: "где рельсы?".into(),
             to_me,
         };
+        let fight = |secs: f32, health: i32, end: FightEnd| {
+            Trigger::Notable(Notable::Fight(Fight {
+                bot: who("Kleiner"),
+                foe: who("Gordon"),
+                secs,
+                health,
+                end,
+            }))
+        };
+        assert_eq!(
+            fight(4.4, 55, FightEnd::Won).summary(),
+            "fight with Gordon: won after 4 s, 55 HP"
+        );
+        assert_eq!(
+            fight(4.0, 0, FightEnd::Interrupted { by: who("Alyx") }).summary(),
+            "fight with Gordon: Alyx killed the bot after 4 s"
+        );
+        assert_eq!(
+            fight(6.5, 70, FightEnd::Fled).summary(),
+            "fight with Gordon: they broke off after 7 s, 70 HP (bright)"
+        );
         assert_eq!(asks(true).summary(), "Gordon asks the bot: где рельсы?");
         assert_eq!(asks(false).summary(), "Gordon asks everybody: где рельсы?");
         let t = Trigger::Greeted {

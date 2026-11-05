@@ -10,6 +10,7 @@ use lb_core::rng::Pcg32;
 use lb_styles::persona::CHAT_MANNERS;
 
 use crate::aliases::{self, Aliases};
+use crate::fight::FightEnd;
 use crate::journal::{Event, Notable, STREAK_SPOKEN, Who};
 use crate::lang::{self, Lang};
 use crate::profanity;
@@ -40,6 +41,16 @@ pub fn key(trigger: &Trigger, bot: i32) -> Option<Moment> {
             Notable::OwnBlast { victim, .. } if me(victim) => Some(Moment::OwnBlast),
             Notable::OwnBlast { .. } => Some(Moment::OwnBlastOther),
             Notable::RageQuit { .. } => None,
+            Notable::Fight(f) => me(&f.bot).then_some(match f.end {
+                FightEnd::Won => Moment::FightWon,
+                FightEnd::Lost => Moment::FightLost,
+                FightEnd::Traded => Moment::FightTraded,
+                FightEnd::Stolen { .. } => Moment::FightStolen,
+                FightEnd::Helped { .. } => Moment::FightHelped,
+                FightEnd::Interrupted { .. } => Moment::FightInterrupted,
+                FightEnd::Fled => Moment::FightFled,
+                FightEnd::Retreated => Moment::FightRetreat,
+            }),
         },
         Trigger::KilledWhileTyping { .. } => Some(Moment::KilledTyping),
         Trigger::LastLevel => Some(Moment::LastLevel),
@@ -466,6 +477,22 @@ mod tests {
             }),
             None
         );
+        let fight = |bot: &Who, end: FightEnd| {
+            Notable::Fight(crate::fight::Fight {
+                bot: bot.clone(),
+                foe: h.clone(),
+                secs: 4.0,
+                health: 50,
+                end,
+            })
+        };
+        assert_eq!(of(fight(&me, FightEnd::Won)), Some(Moment::FightWon));
+        assert_eq!(
+            of(fight(&me, FightEnd::Stolen { by: other.clone() })),
+            Some(Moment::FightStolen)
+        );
+        assert_eq!(of(fight(&me, FightEnd::Retreated)), Some(Moment::FightRetreat));
+        assert_eq!(of(fight(&other, FightEnd::Won)), None, "another bot's fight");
         for (trigger, moment) in [
             (Trigger::Joined { who: h.clone() }, Some(Moment::Greet)),
             (

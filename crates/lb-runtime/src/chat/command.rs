@@ -2,7 +2,7 @@
 
 use lb_chat::botchat::Phase;
 use lb_chat::journal::{MULTIKILL, NEMESIS, STREAK_SPOKEN};
-use lb_chat::{Notable, Priority, Trigger, Who, sanitize};
+use lb_chat::{Fight, FightEnd, Notable, Priority, Trigger, Who, sanitize};
 use lb_config::chat_phrases::Moment;
 use lb_host::Host;
 
@@ -72,9 +72,29 @@ fn tester(rt: &Runtime) -> Who {
     }
 }
 
-/// The trigger of `moment` for the bot `me`; `other` is the other one in it.
+/// The trigger of `moment` for the bot `me`; `other` is the other one in it: for a firefight, the one the bot shot it
+/// out with, or the one who came between (with a made-up enemy). The firefight is an ordinary one, but a trade.
 fn moment_trigger(moment: Moment, me: Who, other: Who) -> Trigger {
     let weapon = "satchel".to_string();
+    let fight = |foe: Who, end: FightEnd| {
+        Trigger::Notable(Notable::Fight(Fight {
+            bot: me.clone(),
+            foe,
+            secs: 4.0,
+            health: if matches!(end, FightEnd::Lost | FightEnd::Traded | FightEnd::Interrupted { .. }) {
+                0
+            } else {
+                55
+            },
+            end,
+        }))
+    };
+    let enemy = Who {
+        slot: 0,
+        userid: -2,
+        name: "Barney".into(),
+        bot: false,
+    };
     match moment {
         Moment::Greet => Trigger::Joined { who: other },
         Moment::Streak => Trigger::Notable(Notable::Streak {
@@ -127,6 +147,14 @@ fn moment_trigger(moment: Moment, me: Who, other: Who) -> Trigger {
             winner: Some(other),
             won: false,
         },
+        Moment::FightWon => fight(other, FightEnd::Won),
+        Moment::FightLost => fight(other, FightEnd::Lost),
+        Moment::FightTraded => fight(other, FightEnd::Traded),
+        Moment::FightStolen => fight(enemy, FightEnd::Stolen { by: other }),
+        Moment::FightHelped => fight(enemy, FightEnd::Helped { by: other }),
+        Moment::FightInterrupted => fight(enemy, FightEnd::Interrupted { by: other }),
+        Moment::FightFled => fight(other, FightEnd::Fled),
+        Moment::FightRetreat => fight(other, FightEnd::Retreated),
     }
 }
 

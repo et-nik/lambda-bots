@@ -11,21 +11,32 @@ schema: lambdabots/chat-phrases@1
 # the game.
 #
 # Moments and their placeholders ({map}, the map's name, fits all; any other is an error; a phrase may use none):
-#   greet            a player the bot does not know joins, or says hi to all          {name}
-#   streak           the bot kills 10+ without dying, players among them              {count}
-#   streak_other     a player kills 10+ without dying                                 {name} {count}
-#   multikill        the bot kills 3+ within seconds, players among them              {count}
-#   multikill_other  a player kills 3+ within seconds                                 {name} {count}
-#   revenge          the bot kills a player who had killed it 3+ times in a row       {name}
-#   nemesis          a player kills the bot the 3rd time in a row, then every 2 more  {name} {count}
-#   crowbarred       a player kills the bot with the crowbar (not in GunGame)         {name}
-#   crowbar_kill     the bot kills a player with the crowbar (not in GunGame)         {name}
-#   own_blast        the bot blows itself up                                          {weapon}
-#   own_blast_other  a player blows themselves up                                     {name} {weapon}
-#   killed_typing    a player kills the bot while it types                            {name}
-#   last_level       the bot reaches the last GunGame level
-#   win              the bot wins the map
-#   gg               a human player wins the map                                      {name}
+#   greet             a player the bot does not know joins, or says hi to all          {name}
+#   streak            the bot kills 10+ without dying, players among them              {count}
+#   streak_other      a player kills 10+ without dying                                 {name} {count}
+#   multikill         the bot kills 3+ within seconds, players among them              {count}
+#   multikill_other   a player kills 3+ within seconds                                 {name} {count}
+#   revenge           the bot kills a player who had killed it 3+ times in a row       {name}
+#   nemesis           a player kills the bot the 3rd time in a row, then every 2 more  {name} {count}
+#   crowbarred        a player kills the bot with the crowbar (not in GunGame)         {name}
+#   crowbar_kill      the bot kills a player with the crowbar (not in GunGame)         {name}
+#   own_blast         the bot blows itself up                                          {weapon}
+#   own_blast_other   a player blows themselves up                                     {name} {weapon}
+#   killed_typing     a player kills the bot while it types                            {name}
+#   last_level        the bot reaches the last GunGame level
+#   win               the bot wins the map
+#   gg                a human player wins the map                                      {name}
+#   fight_won         the bot kills a player after a firefight with them               {name}
+#   fight_lost        a player kills the bot after a firefight with it                 {name}
+#   fight_traded      the bot and a player kill each other after a firefight           {name}
+#   fight_stolen      another player kills the one the bot had a firefight with        {name}
+#   fight_helped      a teammate kills the one the bot had a firefight with            {name}
+#   fight_interrupted another player kills the bot in the middle of a firefight        {name}
+#   fight_fled        a player breaks off a firefight with the bot                     {name}
+#   fight_retreat     the bot pulls back from a firefight with a player                {name}
+# A firefight: the bot and a player in sight of each other both shooting for 3 s or more. A long one (6+ s),
+# a trade, or one the bot wins or breaks off with 20 HP or less always gets the model's word (these phrases while
+# it is out of reach). In fight_stolen, fight_helped and fight_interrupted {name} is the one who came between.
 # A map another bot or nobody won gets the model's word, or none while the model is out of reach.
 # {name} is the other player: their alias from players.yaml, else the name the model gave them (chat.memory.ai_aliases),
 # else the nickname without clan tags; none when a word of it swears or is a slur, so keep some phrases without it.
@@ -235,6 +246,104 @@ phrases:
       - "победа по делу, поздравляю"
       - "достойный победитель, gg"
       - "заслуженно, без вопросов"
+    fight_won:
+      - "хорошая перестрелка, {name}"
+      - "{name}, было жарко)"
+      - "достойно держался, {name}"
+      - "вот это была дуэль"
+      - "{name}, давно так не перестреливался"
+      - "серьезный был бой, {name}"
+      - "красивый бой, {name}, gg"
+      - "долго ты держался, {name}"
+      - "в этот раз за мной, {name}"
+      - "{name}, метко, но я быстрее"
+      - "уф, вот это перестрелка"
+      - "{name}, заставил попотеть"
+    fight_lost:
+      - "{name}, хорошая перестрелка"
+      - "{name}, сильно стреляешь"
+      - "ты был точнее, {name}"
+      - "почти, {name}, почти"
+      - "{name}, следующая моя"
+      - "достойно, {name}, ты быстрее"
+      - "эх, не дотянул"
+      - "хорошая дуэль, {name}, gg"
+      - "{name}, ну ты и меткий"
+      - "чуть-чуть не хватило"
+      - "реванш за мной, {name}"
+      - "{name}, красиво перестрелял"
+    fight_traded:
+      - "размен, {name})"
+      - "ничья, {name}"
+      - "{name}, вместе легли)"
+      - "один-один, {name}"
+      - "оба полегли, красиво"
+      - "{name}, честный размен"
+      - "никому не досталось)"
+      - "ну хоть с собой забрал"
+      - "{name}, ты меня, я тебя"
+      - "размен, все по-честному"
+    fight_stolen:
+      - "{name}, это был мой фраг!"
+      - "эй, {name}, он был мой"
+      - "{name}, украл фраг)"
+      - "{name}, добил за меня, спасибо)"
+      - "мой фраг, {name}!"
+      - "{name}, вот так и стараешься"
+      - "{name}, я его почти уже"
+      - "нечестно, {name}, я его вел"
+      - "забрал мой фраг, {name}"
+      - "{name}, я же его вел"
+      - "ну вот, увели фраг"
+    fight_helped:
+      - "спасибо, {name}"
+      - "{name}, выручил"
+      - "{name}, вовремя"
+      - "{name}, отличная помощь"
+      - "вместе сильнее, {name}"
+      - "{name}, спасибо за помощь"
+      - "хорошо прикрыл, {name}"
+      - "{name}, вот это команда"
+      - "вовремя подоспел, {name}"
+      - "{name}, с меня должок"
+      - "спасибо, вовремя"
+    fight_interrupted:
+      - "{name}, в спину?"
+      - "{name}, я вообще-то занят был"
+      - "{name}, не мешай дуэли"
+      - "{name}, ну хоть бы подождал"
+      - "эх, {name}, я же с другим бился"
+      - "{name}, третий лишний"
+      - "{name}, исподтишка?)"
+      - "не вовремя ты, {name}"
+      - "{name}, мы тут дуэлились вообще-то"
+      - "откуда ты взялся, {name}"
+      - "в спину, ну конечно"
+    fight_fled:
+      - "{name}, куда же ты)"
+      - "{name}, уже все?"
+      - "{name}, передумал?"
+      - "{name}, продолжим позже"
+      - "{name}, я еще здесь"
+      - "ушел, {name}? ладно"
+      - "{name}, догоню)"
+      - "{name}, куда спешишь?"
+      - "{name}, не прячься"
+      - "ничья пока, {name}"
+      - "{name}, вернись, доиграем"
+      - "куда же ты, только начали"
+    fight_retreat:
+      - "{name}, я еще вернусь"
+      - "тактическое отступление)"
+      - "{name}, перезаряжусь и вернусь"
+      - "пойду за аптечкой"
+      - "{name}, ничья пока"
+      - "отойду на минутку, {name}"
+      - "{name}, сильно жмешь"
+      - "не сейчас, {name}"
+      - "{name}, продолжим позже"
+      - "ухожу, но не прощаюсь"
+      - "стратегический отход, {name}"
   en:
     greet:
       - "hey {name}"
@@ -427,6 +536,100 @@ phrases:
       - "deserved win, no doubt"
       - "way too good today, congrats"
       - "great game, well earned"
+    fight_won:
+      - "good fight, {name}"
+      - "{name}, nice duel"
+      - "you made me work for it, {name}"
+      - "solid shooting, {name}, but mine"
+      - "what a duel"
+      - "{name}, that was intense"
+      - "this one's mine, {name}"
+      - "you put up a fight, {name}"
+      - "great duel, {name}, gg"
+      - "{name}, respect for that one"
+      - "long fight, {name}, gg"
+    fight_lost:
+      - "good fight, {name}"
+      - "{name}, you were faster"
+      - "nice shooting, {name}"
+      - "so close, {name}"
+      - "next one's mine, {name}"
+      - "you got me, {name}, gg"
+      - "{name}, that aim though"
+      - "almost had you"
+      - "well fought, {name}"
+      - "rematch soon, {name}"
+      - "fair duel, you won it"
+    fight_traded:
+      - "trade, {name})"
+      - "a draw, {name}"
+      - "{name}, we both went down"
+      - "fair trade, {name}"
+      - "one for one, {name}"
+      - "took you with me, {name}"
+      - "nobody wins that one"
+      - "both down, nice"
+      - "even trade, gg"
+      - "{name}, mutual destruction)"
+    fight_stolen:
+      - "{name}, that was my kill!"
+      - "hey {name}, that one was mine"
+      - "{name}, kill stealer)"
+      - "{name}, I had them"
+      - "my frag, {name}!"
+      - "thanks for the steal, {name}"
+      - "{name}, I was on them"
+      - "I did all the work, {name}"
+      - "{name}, you took my kill"
+      - "come on {name}, that was mine"
+      - "and there goes my kill"
+    fight_helped:
+      - "thanks, {name}"
+      - "{name}, good timing"
+      - "nice save, {name}"
+      - "{name}, great teamwork"
+      - "{name}, thanks for the help"
+      - "good cover, {name}"
+      - "teamwork, {name}"
+      - "{name}, owe you one"
+      - "right on time, {name}"
+      - "{name}, appreciated"
+      - "thanks, good timing"
+    fight_interrupted:
+      - "{name}, in the back?"
+      - "{name}, I was busy"
+      - "{name}, wait your turn"
+      - "rude, {name}, I was in a duel"
+      - "{name}, third wheel)"
+      - "where did you come from, {name}"
+      - "{name}, that was sneaky"
+      - "{name}, let us finish first"
+      - "bad timing, {name}"
+      - "{name}, not fair)"
+      - "in the back, of course"
+    fight_fled:
+      - "{name}, where are you going)"
+      - "{name}, done already?"
+      - "{name}, changed your mind?"
+      - "to be continued, {name}"
+      - "{name}, I'm still here"
+      - "{name}, come back"
+      - "{name}, don't hide"
+      - "running off, {name}?"
+      - "a draw for now, {name}"
+      - "{name}, we'll finish this"
+      - "leaving already? we just started"
+    fight_retreat:
+      - "{name}, I'll be back"
+      - "tactical retreat)"
+      - "need some health first"
+      - "{name}, round two later"
+      - "{name}, you hit hard"
+      - "strategic withdrawal"
+      - "not now, {name}"
+      - "{name}, later"
+      - "falling back, {name}"
+      - "regrouping, {name}"
 bots: []
 #  - name: "Plutonium"
 #    replace: false

@@ -14,7 +14,9 @@ use lb_chat::lang;
 use lb_chat::memory::{self, Forgotten, Memory, PlayerMemory};
 use lb_chat::phrases::{self, Offer, Ring};
 use lb_chat::prompt::{self, Context, Known, Rendered};
-use lb_chat::{Aliases, ChatRequest, Event, Failure, MapSummary, Outcome, Reply, Scene, profanity, sanitize};
+use lb_chat::{
+    Aliases, ChatRequest, Event, Failure, MapSummary, Notable, Outcome, Reply, Scene, Trigger, profanity, sanitize,
+};
 use lb_config::chat_phrases::Moment;
 use lb_config::main_config::{ChatConfig, ProviderKind};
 use lb_core::rng::{Pcg32, splitmix64};
@@ -844,11 +846,12 @@ impl Worker {
         )
     }
 
-    /// Whether the model meets a moment a phrase could: a greeting of a player the bots know, any other moment one
-    /// time in `chat.phrases.ai_share`.
+    /// Whether the model meets a moment a phrase could: a greeting of a player the bots know, a bright firefight
+    /// ([`lb_chat::Fight::bright`]), any other moment one time in `chat.phrases.ai_share`.
     fn models_turn(&self, req: &ChatRequest, offer: &Offer, rng: &mut Pcg32) -> bool {
-        match offer.moment {
-            Moment::Greet => self.knows(req),
+        match (offer.moment, &req.trigger) {
+            (Moment::Greet, _) => self.knows(req),
+            (_, Trigger::Notable(Notable::Fight(f))) if f.bright() => true,
             _ => rng.next_f32() < self.config.phrases.ai_share,
         }
     }
