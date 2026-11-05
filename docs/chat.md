@@ -642,10 +642,10 @@ server; what one server wants the bot to know goes in that server's `config/chat
 `lb chat status` tells whether the worker is ready or why requests wait (refused settings, failures, out of API
 credit, the day's tokens), what it read from `config/chat/`, the session's requests (model lines, phrases, silences,
 failures) and lines (said, not said), today's chat log and what every bot is typing, or will type once back in the
-game. `lb chat event` takes the keys of `phrases.yaml` and, like
-`test`, needs chat on: the bot says a phrase, or the model's line when its share comes up (with
-`chat.phrases.ai_share: 0`, always a phrase, except `greet` for a player the bots know and `fight_traded`, a bright
-fight). A `fight_*` key makes an ordinary 4 s firefight with you, the bot left with 55 HP; in `fight_stolen`,
+game. `lb chat event` takes the keys of `phrases.yaml` and, like `test`, needs chat on: the bot says a phrase, or the
+model's line when its share comes up (with `chat.phrases.ai_share: 0`, always a phrase, except `greet` for a player
+the bots know and `fight_traded`, a bright fight). A `fight_*` key makes an ordinary 4 s firefight with you, the bot
+left with 55 HP, or 0 in `fight_lost`, `fight_traded` and `fight_interrupted`, where it dies; in `fight_stolen`,
 `fight_helped` and `fight_interrupted` you come between the bot and a made-up `Barney`.
 
 `lb chat say`, `test` and `event` turn down a bot with a line on its way and say so: nothing replaces that line.

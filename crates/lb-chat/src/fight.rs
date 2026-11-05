@@ -28,7 +28,7 @@ pub const LOOK: f64 = 0.05;
 /// The bot pulling back this close to when the fight went quiet is what ended it.
 const RETREAT_LAG: f64 = 1.0;
 /// Seconds one side may go on after the other: shooting and still have stopped with it, in sight and still have
-/// gone with it. The bot's health is taken this long after the last shot at most.
+/// gone with it. The bot's health is taken up to this long after the first of the two stopped shooting.
 const TOGETHER: f64 = 0.5;
 
 /// How a fight ended.
@@ -123,7 +123,8 @@ struct Pair {
     /// First and last shot of each side in this exchange.
     bot_shots: Option<(SimTime, SimTime)>,
     foe_shots: Option<(SimTime, SimTime)>,
-    /// The bot's health when the shooting stopped, or now while it goes on.
+    /// The bot's health when the first of the two stopped shooting, or now while both go on; at the kill for a fight
+    /// it won.
     health: i32,
     /// When the bot last had the enemy in sight.
     seen_at: Option<SimTime>,
@@ -249,8 +250,10 @@ impl Fights {
         *self = Fights::default();
     }
 
-    /// What the bot knew at `now`: its and the enemies' shots since its last look, whom it sees, its health.
+    /// What the bot knew at `now`: its and the enemies' shots since its last look, whom it sees, its health. What a
+    /// side went silent in for longer than a pause ends first, so a shot after it opens a new exchange.
     pub fn look(&mut self, now: SimTime, look: &Look) {
+        self.expire(now);
         let me = look.bot.userid;
         for seen in &look.foes {
             let after = [self.deaths.get(&me), self.deaths.get(&seen.foe.userid)]
@@ -287,7 +290,7 @@ impl Fights {
                 continue;
             }
             pair.bot.clone_from(&look.bot);
-            if pair.last_shot().is_some_and(|l| now.since(l) <= TOGETHER) {
+            if pair.quiet_since().is_some_and(|q| now.since(q) <= TOGETHER) {
                 pair.health = look.health;
             }
             if look.foes.iter().any(|s| s.foe.userid == key.1 && s.in_sight) {
@@ -297,8 +300,9 @@ impl Fights {
         }
     }
 
-    /// A line of the kill feed: `killer` is `None` for the world, or the victim for a suicide.
-    pub fn death(&mut self, t: SimTime, killer: Option<&Who>, victim: &Who) {
+    /// A line of the kill feed: `killer` is `None` for the world, or the victim for a suicide; `health` is the
+    /// killer's, when it is one of the bots.
+    pub fn death(&mut self, t: SimTime, killer: Option<&Who>, victim: &Who, health: Option<i32>) {
         self.expire(t);
         self.deaths.insert(victim.userid, t);
         let killer = killer.filter(|k| k.userid != victim.userid);
@@ -337,7 +341,10 @@ impl Fights {
                     let wait = |end| Then::Wait(Decided { at: t, secs, end });
                     match (by_other, bot_died) {
                         (true, true) => wait(FightEnd::Lost),
-                        (true, false) => wait(FightEnd::Won),
+                        (true, false) => {
+                            pair.health = health.unwrap_or(pair.health);
+                            wait(FightEnd::Won)
+                        }
                         (false, true) if fought_killer => Then::Forget,
                         (false, true) => Then::End(pair.fight(secs, FightEnd::Interrupted { by: k.clone() })),
                         (false, false) => Then::End(pair.fight(secs, FightEnd::Stolen { by: k.clone() })),
@@ -474,7 +481,8 @@ mod tests {
         }
 
         fn death(&mut self, killer: Option<&Who>, victim: &Who) {
-            self.fights.death(SimTime(self.t), killer, victim);
+            let health = killer.filter(|k| k.userid == self.bot.userid).map(|_| self.health);
+            self.fights.death(SimTime(self.t), killer, victim, health);
             self.out.extend(self.fights.take(SimTime(self.t)));
         }
 
@@ -517,6 +525,17 @@ mod tests {
         assert!((f.secs - 3.5).abs() < 0.06, "{}", f.secs);
         assert_eq!((f.health, f.whole_secs()), (35, 4));
         assert!(!f.bright());
+
+        // The human's last hit came after the bot's last look: the health is the bot's at the kill.
+        let mut d = Duel::new();
+        d.health = 35;
+        d.shoot(4.0, every(0.1, 0.05, 4.0), every(0.5, 0.5, 4.0));
+        d.health = 12;
+        d.death(Some(&bot), &foe);
+        d.wait(6.5);
+        let f = d.only();
+        assert_eq!((&f.end, f.health), (&FightEnd::Won, 12));
+        assert!(f.bright(), "won on the edge");
     }
 
     #[test]
@@ -593,7 +612,7 @@ mod tests {
         d.shoot(4.0, every(0.1, 0.05, 4.0), every(0.5, 0.5, 4.0));
         d.fights.retain_bots(|id| id != d.bot.userid);
         let (bot, foe) = (d.bot.clone(), d.foe.clone());
-        d.fights.death(SimTime(4.0), Some(&bot), &foe);
+        d.fights.death(SimTime(4.0), Some(&bot), &foe, None);
         assert!(d.fights.take(SimTime(9.0)).is_empty());
     }
 
@@ -647,10 +666,10 @@ mod tests {
                 d.fights.look(SimTime(t), &look);
             }
             if killed_first {
-                d.fights.death(SimTime(t), Some(&bot), &third);
+                d.fights.death(SimTime(t), Some(&bot), &third, Some(50));
                 t += 0.25;
             }
-            d.fights.death(SimTime(t), Some(&third), &bot);
+            d.fights.death(SimTime(t), Some(&third), &bot, None);
             let out = d.fights.take(SimTime(t + 5.0));
             assert!(out.is_empty(), "{killed_first}: {out:?}");
         }
@@ -697,7 +716,7 @@ mod tests {
             }],
         };
         d.fights.look(SimTime(t), &look);
-        d.fights.death(SimTime(t), Some(&third), &bot);
+        d.fights.death(SimTime(t), Some(&third), &bot, None);
         assert!(
             d.fights.take(SimTime(t + 5.0)).is_empty(),
             "the short fight with the killer says it all, so nothing"
@@ -733,11 +752,17 @@ mod tests {
         assert_eq!((&f.end, f.health), (&FightEnd::Fled, 40));
         assert!((f.secs - 3.5).abs() < 0.06, "{}", f.secs);
 
-        // The human stops first while the bot goes on shooting: they broke off.
+        // The human stops first while the bot goes on shooting: they broke off. The health is the bot's as the human
+        // stopped: a medkit it ran over shooting after them is no part of the fight.
         let mut d = Duel::new();
-        d.shoot(6.0, every(0.1, 0.05, 6.0), every(0.5, 0.5, 4.0));
+        d.health = 15;
+        d.shoot(5.0, every(0.1, 0.05, 5.0), every(0.5, 0.5, 4.0));
+        d.health = 100;
+        d.shoot(6.0, every(0.1, 5.05, 6.0), |_| false);
         d.wait(9.0);
-        assert_eq!(d.only().end, FightEnd::Fled);
+        let f = d.only();
+        assert_eq!((&f.end, f.health), (&FightEnd::Fled, 15));
+        assert!(f.bright());
 
         // The human goes out of sight and the bot stops, the human still hurting it from where it was: hid.
         let mut d = Duel::new();
@@ -804,6 +829,25 @@ mod tests {
     }
 
     #[test]
+    fn shots_after_a_pause_open_a_new_exchange() {
+        // No look between 4 s and 7.2 s (a long frame): the first after the pause brings shots of both.
+        let mut d = Duel::new();
+        d.shoot(4.0, every(0.1, 0.05, 4.0), every(0.5, 0.5, 4.0));
+        d.t = 7.15;
+        d.shoot(9.0, every(0.1, 7.2, 9.0), every(0.5, 7.2, 9.0));
+        let (bot, foe) = (d.bot.clone(), d.foe.clone());
+        d.death(Some(&bot), &foe);
+        d.wait(12.0);
+        let f = d.only();
+        assert_eq!(
+            f.end,
+            FightEnd::Fled,
+            "the fight before the pause; the one after it is too short"
+        );
+        assert!((f.secs - 3.5).abs() < 0.06, "{}", f.secs);
+    }
+
+    #[test]
     fn shots_of_an_earlier_life_are_not_taken() {
         let mut d = Duel::new();
         let (bot, foe) = (d.bot.clone(), d.foe.clone());
@@ -825,7 +869,7 @@ mod tests {
             };
             d.fights.look(SimTime(t), &look);
         }
-        d.fights.death(SimTime(5.0), Some(&foe), &bot);
+        d.fights.death(SimTime(5.0), Some(&foe), &bot, None);
         assert!(d.fights.take(SimTime(9.0)).is_empty());
     }
 

@@ -303,6 +303,11 @@ fn who_of(slot: u8, c: &ClientInfo) -> Who {
     }
 }
 
+/// The bot's health as its HUD shows it.
+fn hud_health(bot: &Bot) -> i32 {
+    bot.self_state.body.health.max(0.0).ceil() as i32
+}
+
 /// Danger for a bot typing in the open: it stops standing to fight.
 fn typing_danger(bot: &Bot, now: SimTime) -> bool {
     let brain = &bot.brain;
@@ -546,7 +551,11 @@ impl Runtime {
             bot.chat.on_death(self.now, k.clone());
         }
         if self.config.chat.enabled {
-            self.chat.fights.death(self.now, k.as_ref(), &v);
+            let health = k
+                .as_ref()
+                .and_then(|k| self.bots.iter().find(|b| b.id.slot == k.slot && b.is_active()))
+                .map(hud_health);
+            self.chat.fights.death(self.now, k.as_ref(), &v, health);
         }
         let event = match (&k, killer) {
             (Some(k), _) => {
@@ -677,7 +686,7 @@ impl Runtime {
                 .collect();
             let look = Look {
                 bot: me,
-                health: body.health.max(0.0).ceil() as i32,
+                health: hud_health(b),
                 retreating: b.brain.retreating(),
                 foes,
             };

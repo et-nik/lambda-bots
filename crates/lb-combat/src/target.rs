@@ -16,9 +16,18 @@ const CURRENT_BONUS: f32 = 1.6;
 
 /// The track's observed facing points at `me`.
 pub fn faces(track: &EnemyTrack, me: Vec3) -> bool {
-    let d = me - track.pos;
+    toward(track.traits.facing, track.pos, me)
+}
+
+/// The track faced `me` when it last fired, as far as the bot saw.
+pub fn faced_when_firing(track: &EnemyTrack, me: Vec3) -> bool {
+    toward(track.traits.fired_facing, track.pos, me)
+}
+
+fn toward(facing: f32, from: Vec3, me: Vec3) -> bool {
+    let d = me - from;
     let toward_me = dmath::atan2(d.y, d.x).to_degrees();
-    angle_diff(track.traits.facing, toward_me).abs() <= FACING_ME_DEGREES
+    angle_diff(facing, toward_me).abs() <= FACING_ME_DEGREES
 }
 
 /// How the game mode favors a target: its distance counts as `scale` of what it is, and its priority is `weight`

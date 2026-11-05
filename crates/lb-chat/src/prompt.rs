@@ -520,11 +520,13 @@ impl Names<'_> {
         match (self.lang, &f.end) {
             (Lang::Ru, FightEnd::Won) => format!(" после перестрелки {s} с (у тебя {hp} HP)"),
             (Lang::En, FightEnd::Won) => format!(" after a {s} s firefight ({hp} HP left)"),
-            (Lang::Ru, FightEnd::Stolen { .. } | FightEnd::Helped { .. }) => {
-                format!(", ты перестреливался с ним {s} с")
-            }
-            (Lang::En, FightEnd::Stolen { .. } | FightEnd::Helped { .. }) => {
-                format!(", you had been trading shots with them for {s} s")
+            (Lang::Ru, FightEnd::Traded) => format!(" после перестрелки {s} с: вы убили друг друга"),
+            (Lang::En, FightEnd::Traded) => format!(" after a {s} s firefight: you killed each other"),
+            (Lang::Ru, FightEnd::Stolen { .. }) => format!(", ты перестреливался с ним {s} с"),
+            (Lang::En, FightEnd::Stolen { .. }) => format!(", you had been trading shots with them for {s} s"),
+            (Lang::Ru, FightEnd::Helped { .. }) => format!(", ты перестреливался с ним {s} с — союзник помог"),
+            (Lang::En, FightEnd::Helped { .. }) => {
+                format!(", you had been trading shots with them for {s} s — your teammate helped")
             }
             (Lang::Ru, FightEnd::Interrupted { .. }) => {
                 format!(" посреди перестрелки с {} ({s} с)", self.call(&f.foe))
@@ -3012,7 +3014,15 @@ mod tests {
                     50.0,
                     Event::Fight(fight(FightEnd::Stolen { by: alyx.clone() }, 4.0, 70)),
                 ),
+                recent(40.0, kill(&me(), &gordon, "shotgun")),
+                recent(39.0, kill(&gordon, &me(), "357")),
+                recent(39.0, Event::Fight(fight(FightEnd::Traded, 5.0, 0))),
                 recent(30.0, Event::Fight(fight(FightEnd::Fled, 5.0, 40))),
+                recent(25.0, kill(&alyx, &gordon, "9mmAR")),
+                recent(
+                    25.0,
+                    Event::Fight(fight(FightEnd::Helped { by: alyx.clone() }, 4.0, 70)),
+                ),
                 recent(20.0, kill(&gordon, &me(), "357")),
                 recent(16.0, Event::Fight(fight(FightEnd::Lost, 3.4, 0))),
                 recent(
@@ -3029,12 +3039,33 @@ mod tests {
         for line in [
             "[60 с назад] ты убил Gordon из дробовика после перестрелки 5 с (у тебя 12 HP)\n",
             "[50 с назад] Alyx убил Gordon из MP5, ты перестреливался с ним 4 с\n",
+            "[40 с назад] ты убил Gordon из дробовика\n[39 с назад] Gordon убил тебя из питона после перестрелки 5 с: вы \
+             убили друг друга\n",
             "[30 с назад] перестрелка с Gordon 5 с: он ушёл (у тебя 40 HP)\n",
+            "[25 с назад] Alyx убил Gordon из MP5, ты перестреливался с ним 4 с — союзник помог\n",
             "[20 с назад] Gordon убил тебя из питона\n[16 с назад] перестрелка с Gordon 3 с: он убил тебя\n",
         ] {
             assert!(r.user.contains(line), "{line}{}", r.user);
         }
         assert!(!r.user.contains("Kleiner"), "another bot's fight: {}", r.user);
+        let r = render(
+            &ChatRequest {
+                language: "en".into(),
+                ..req
+            },
+            &[],
+            &Aliases::default(),
+            &[],
+            &Context::default(),
+            NOW,
+        );
+        for tail in [
+            " after a 5 s firefight: you killed each other\n",
+            ", you had been trading shots with them for 4 s — your teammate helped\n",
+            ", you had been trading shots with them for 4 s\n",
+        ] {
+            assert!(r.user.contains(tail), "{tail}{}", r.user);
+        }
     }
 
     #[test]

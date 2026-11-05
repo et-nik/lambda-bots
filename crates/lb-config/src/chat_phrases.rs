@@ -58,7 +58,7 @@ pub enum Moment {
     FightLost,
     /// The bot and a human kill each other after a firefight.
     FightTraded,
-    /// Another human kills the one the bot was in a firefight with, outside team modes.
+    /// Another human, no teammate of the bot, kills the one the bot was in a firefight with.
     FightStolen,
     /// A human teammate kills the one the bot was in a firefight with.
     FightHelped,

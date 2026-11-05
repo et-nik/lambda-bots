@@ -11,6 +11,8 @@ pub mod patrol;
 pub mod trail;
 pub mod tricks;
 
+use std::collections::VecDeque;
+
 use lb_core::Vec3;
 use lb_core::rng::Pcg32;
 use lb_core::time::SimTime;
@@ -44,6 +46,8 @@ const EXPECT_PERIOD: f64 = 0.5;
 const DANGER_GLANCE: f32 = 0.25;
 /// The bot's trigger pull is at its target when it saw the target this long before at most.
 const SHOT_AT_SEEN: f64 = 0.5;
+/// Hits kept for [`BotBrain::exchanges`]: more than come between two of its looks.
+const HITS_KEPT: usize = 8;
 
 /// The bot and one enemy shooting at each other, as the bot knows it: for the chat's firefights.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +111,9 @@ pub struct BotBrain {
     pub item_focus: Option<usize>,
     /// Damage taken since the last frame, for the moods.
     pub(crate) hurt: bool,
+    /// The latest hits, the newest last: every one since a look counts in [`BotBrain::exchanges`], not the latest
+    /// alone.
+    hits: VecDeque<DamageStimulus>,
     /// Slot of the player who killed the bot last, from the kill feed.
     pub last_killer: Option<u8>,
     slot: u8,
@@ -143,6 +150,7 @@ impl BotBrain {
             next_expect: SimTime::ZERO,
             item_focus: None,
             hurt: false,
+            hits: VecDeque::new(),
             last_killer: None,
             slot,
             item_cursor: 0,
@@ -166,6 +174,7 @@ impl BotBrain {
     pub fn on_death(&mut self) {
         self.perception.reset();
         self.beliefs.on_own_death();
+        self.hits.clear();
         self.explosives.on_own_death();
         self.last_vision.clear();
         self.mind.reset();
@@ -212,6 +221,10 @@ impl BotBrain {
     pub fn on_damage(&mut self, d: &DamageStimulus) {
         self.beliefs.on_damage(d);
         self.hurt = true;
+        if self.hits.len() == HITS_KEPT {
+            self.hits.pop_front();
+        }
+        self.hits.push_back(*d);
     }
 
     pub fn hear(&mut self, sounds: &[SoundEvent], listener: &Listener, vis: &dyn VisSets, rng: &mut Pcg32) {
@@ -418,11 +431,12 @@ impl BotBrain {
             .weapon
             .fired_at
             .filter(|t| *t > since && weapon != Some(WeaponId::Tripmine));
-        let hit_by = self
-            .beliefs
-            .last_damage
+        let hit_by: Vec<(PlayerKey, SimTime)> = self
+            .hits
+            .iter()
             .filter(|d| d.t > since)
-            .and_then(|d| Some((damage_dealer(&self.beliefs, &d, eye)?.who, d.t)));
+            .filter_map(|d| Some((damage_dealer(&self.beliefs, d, eye)?.who, d.t)))
+            .collect();
         self.beliefs
             .enemies()
             .filter_map(|t| {
@@ -431,9 +445,9 @@ impl BotBrain {
                 let seen_firing = t
                     .traits
                     .fired_at
-                    .filter(|f| *f > since && in_sight && lb_combat::target::faces(t, eye));
-                let hit = hit_by.filter(|(who, _)| *who == t.who).map(|(_, at)| at);
-                let shot_at_me = seen_firing.into_iter().chain(hit).reduce(SimTime::max);
+                    .filter(|f| *f > since && in_sight && lb_combat::target::faced_when_firing(t, eye));
+                let hits = hit_by.iter().filter(|(who, _)| *who == t.who).map(|&(_, at)| at);
+                let shot_at_me = seen_firing.into_iter().chain(hits).reduce(SimTime::max);
                 (in_sight || shot.is_some() || shot_at_me.is_some()).then_some(Exchange {
                     who: t.who,
                     in_sight,
@@ -578,27 +592,48 @@ mod tests {
             None,
             "firing elsewhere"
         );
-        brain.beliefs.on_damage(&DamageStimulus {
-            t: SimTime(1.1),
-            bearing: Some(0.0),
+        let hit = |t: f64, bearing: f32| DamageStimulus {
+            t: SimTime(t),
+            bearing: Some(bearing),
             amount: 20,
             bits: 0,
-        });
+        };
+        brain.on_damage(&hit(1.1, 0.0));
         assert_eq!(
             brain.exchanges(SimTime(1.0), EYE, None)[0].shot_at_me,
             Some(SimTime(1.1))
         );
-        brain.beliefs.on_damage(&DamageStimulus {
-            t: SimTime(1.15),
-            bearing: Some(180.0),
-            amount: 20,
-            bits: 0,
-        });
+        brain.on_damage(&hit(1.15, 180.0));
         assert_eq!(
-            brain.exchanges(SimTime(1.0), EYE, None)[0].shot_at_me,
+            brain.exchanges(SimTime(1.12), EYE, None)[0].shot_at_me,
             None,
             "damage from the other side"
         );
+        assert_eq!(
+            brain.exchanges(SimTime(1.0), EYE, None)[0].shot_at_me,
+            Some(SimTime(1.1)),
+            "a later hit from elsewhere leaves the one from its side"
+        );
+    }
+
+    #[test]
+    fn an_enemy_shoots_at_the_bot_by_its_facing_when_it_fired() {
+        let look_again = |brain: &mut BotBrain, t: f64, facing: f32| {
+            let mut s = seen(t, Vec3::new(500.0, 0.0, 0.0));
+            (s.first, s.facing) = (false, facing);
+            brain.beliefs.on_sighting(&s);
+        };
+        // It fired at the bot and turned away before the bot's look.
+        let mut brain = brain_seeing(1.0, true, 180.0);
+        look_again(&mut brain, 1.04, 90.0);
+        assert_eq!(
+            brain.exchanges(SimTime(0.99), EYE, None)[0].shot_at_me,
+            Some(SimTime(1.0))
+        );
+        // It fired elsewhere and turned to the bot.
+        let mut brain = brain_seeing(1.0, true, 90.0);
+        look_again(&mut brain, 1.04, 180.0);
+        assert_eq!(brain.exchanges(SimTime(0.99), EYE, None)[0].shot_at_me, None);
     }
 
     #[test]
