@@ -71,6 +71,8 @@ pub struct ObservedTraits {
     pub in_water: bool,
     pub facing: f32,
     pub fired_at: Option<SimTime>,
+    /// Its facing when it fired at `fired_at`: the one seen with the shot, or the last one seen for a shot heard.
+    pub fired_facing: f32,
     pub render: RenderCue,
 }
 
@@ -162,7 +164,7 @@ impl EnemyTrack {
         self.distance = s.distance;
         self.visibility = s.visibility;
         self.parts = s.parts;
-        self.traits = traits_of(s, self.traits.fired_at);
+        self.traits = traits_of(s, Some(&self.traits));
         self.pos = self.fix_pos;
         self.sigma = self.fix_sigma;
         self.state = TrackState::Visible;
@@ -201,7 +203,12 @@ impl EnemyTrack {
     }
 }
 
-fn traits_of(s: &Sighting, fired_at: Option<SimTime>) -> ObservedTraits {
+fn traits_of(s: &Sighting, before: Option<&ObservedTraits>) -> ObservedTraits {
+    let (fired_at, fired_facing) = match before {
+        _ if s.firing => (Some(s.t), s.facing),
+        Some(b) => (b.fired_at, b.fired_facing),
+        None => (None, s.facing),
+    };
     ObservedTraits {
         weapon: s.weapon,
         stance: s.stance,
@@ -209,7 +216,8 @@ fn traits_of(s: &Sighting, fired_at: Option<SimTime>) -> ObservedTraits {
         on_ladder: s.on_ladder,
         in_water: s.in_water,
         facing: s.facing,
-        fired_at: if s.firing { Some(s.t) } else { fired_at },
+        fired_at,
+        fired_facing,
         render: s.render,
     }
 }
@@ -323,6 +331,7 @@ impl Beliefs {
             t.fuse(s.pos, sigma, s.t);
             if s.kind == SoundKind::Shot {
                 t.traits.fired_at = Some(s.t);
+                t.traits.fired_facing = t.traits.facing;
             }
             track = Some(t.who);
         }

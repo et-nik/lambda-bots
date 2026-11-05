@@ -20,14 +20,15 @@ use std::time::Duration;
 
 use lb_chat::addressing::{self, Noise};
 use lb_chat::botchat::{ASKED_KEEP, CALM_WAIT, notice_secs, think_secs, typing_secs};
+use lb_chat::fight::{self, Look, Seen};
 use lb_chat::journal::Entry;
 use lb_chat::lang::Lang;
 use lb_chat::memory::player_key;
 use lb_chat::prompt::{self, CHAT_WINDOW, GAME_WINDOW};
-use lb_chat::request::{PlayerMap, Recent, request_epoch, request_id};
+use lb_chat::request::{PlayerMap, Recent, fight_summary, request_epoch, request_id};
 use lb_chat::{
-    BotCard, Can, Carry, Cause, ChatRequest, Director, Event, Journal, Limits, MapSummary, Notable, Outcome, Pending,
-    PlayerCard, Priority, Reply, Scene, Social, Speak, Speaker, Trigger, Who, sanitize,
+    BotCard, Can, Carry, Cause, ChatRequest, Director, Event, Fight, FightEnd, Fights, Journal, Limits, MapSummary,
+    Notable, Outcome, Pending, PlayerCard, Priority, Reply, Scene, Social, Speak, Speaker, Trigger, Who, sanitize,
 };
 use lb_core::time::SimTime;
 use lb_game::dll::DllKind;
@@ -119,6 +120,9 @@ pub struct ChatRuntime {
     armed: Vec<u8>,
     /// Bots that reached the last level on this map.
     last_level: Vec<u8>,
+    /// The bots' firefights, and when the bots were last looked at for them.
+    fights: Fights,
+    fights_at: SimTime,
     pub match_over: bool,
     late_load: bool,
     pub log: VecDeque<String>,
@@ -158,6 +162,8 @@ impl ChatRuntime {
             gg_last: None,
             armed: Vec::new(),
             last_level: Vec::new(),
+            fights: Fights::default(),
+            fights_at: SimTime::ZERO,
             match_over: false,
             late_load: false,
             log: VecDeque::new(),
@@ -297,6 +303,11 @@ fn who_of(slot: u8, c: &ClientInfo) -> Who {
     }
 }
 
+/// The bot's health as its HUD shows it.
+fn hud_health(bot: &Bot) -> i32 {
+    bot.self_state.body.health.max(0.0).ceil() as i32
+}
+
 /// Danger for a bot typing in the open: it stops standing to fight.
 fn typing_danger(bot: &Bot, now: SimTime) -> bool {
     let brain = &bot.brain;
@@ -374,6 +385,7 @@ impl Runtime {
         }
         self.chat.causes.clear();
         self.chat.director.clear_waiting();
+        self.chat.fights.clear();
     }
 
     pub(crate) fn chat_map_start(&mut self, map: &str, epoch: u32, late_load: bool) {
@@ -400,6 +412,8 @@ impl Runtime {
         c.gg_last = None;
         c.armed.clear();
         c.last_level.clear();
+        c.fights.clear();
+        c.fights_at = SimTime::ZERO;
         c.match_over = false;
         c.late_load = late_load;
     }
@@ -495,6 +509,9 @@ impl Runtime {
                 }
             }
             ClientEventKind::Disconnect => {
+                if let Some(c) = &before {
+                    self.chat.fights.left(c.userid);
+                }
                 if let Some(c) = before.filter(|c| c.in_game && !c.is_fake) {
                     self.chat.social.left(&c.name, self.now);
                     self.chatlog(|log, days| log.leave(days, &c.name));
@@ -532,6 +549,13 @@ impl Runtime {
             .flatten();
         if let Some(bot) = self.bots.iter_mut().find(|b| b.id.slot == victim && b.is_active()) {
             bot.chat.on_death(self.now, k.clone());
+        }
+        if self.config.chat.enabled {
+            let health = k
+                .as_ref()
+                .and_then(|k| self.bots.iter().find(|b| b.id.slot == k.slot && b.is_active()))
+                .map(hud_health);
+            self.chat.fights.death(self.now, k.as_ref(), &v, health);
         }
         let event = match (&k, killer) {
             (Some(k), _) => {
@@ -622,8 +646,86 @@ impl Runtime {
 
     fn chat_match_end(&mut self, winner: Option<Who>) {
         self.chat.match_over = true;
+        self.chat.fights.clear();
         self.chat_push(Event::MatchEnd { winner: winner.clone() });
         self.chat.causes.push(Cause::MatchEnd { winner });
+    }
+
+    /// The bots' firefights ([`fight`]), [`fight::LOOK`] apart: what every bot alive knows of its enemies, then the
+    /// fights that ended. None once the match is over.
+    fn chat_watch_fights(&mut self) {
+        let now = self.now;
+        if self.chat.match_over || now.since(self.chat.fights_at) < fight::LOOK {
+            return;
+        }
+        let since = std::mem::replace(&mut self.chat.fights_at, now);
+        let clients = &self.clients;
+        let player = |slot: u8, userid: i32| {
+            clients
+                .get(slot)
+                .filter(|c| c.userid == userid && c.in_game)
+                .map(|c| who_of(slot, c))
+        };
+        for b in self.bots.iter().filter(|b| b.is_active() && b.state == BotState::Alive) {
+            let Some(me) = player(b.id.slot, b.userid) else {
+                continue;
+            };
+            let body = &b.self_state.body;
+            let foes = b
+                .brain
+                .exchanges(since, body.origin + body.view_ofs, b.self_state.current_weapon.get())
+                .into_iter()
+                .filter_map(|x| {
+                    Some(Seen {
+                        foe: player(x.who.slot, x.who.userid)?,
+                        in_sight: x.in_sight,
+                        bot_fired: x.shot,
+                        foe_fired: x.shot_at_me,
+                    })
+                })
+                .collect();
+            let look = Look {
+                bot: me,
+                health: hud_health(b),
+                retreating: b.brain.retreating(),
+                foes,
+            };
+            self.chat.fights.look(now, &look);
+        }
+        let bots: Vec<i32> = self.bots.iter().filter(|b| b.is_active()).map(|b| b.userid).collect();
+        self.chat.fights.retain_bots(|id| bots.contains(&id));
+        for f in self.chat.fights.take(now) {
+            self.chat_fight(f);
+        }
+    }
+
+    /// A firefight that ended. One of a bot with a human goes to the journal, the chat log and the director, and a
+    /// bright one to the memory; one between bots to the debug log alone, to watch fights on a server of bots.
+    fn chat_fight(&mut self, mut f: Fight) {
+        if f.foe.bot {
+            tracing::debug!("chat {}: {}", f.bot.name, fight_summary(&f));
+            return;
+        }
+        if let FightEnd::Stolen { by } = &f.end {
+            let teams = self.teams();
+            let team = |slot: u8| teams.get(usize::from(slot)).copied().unwrap_or(0);
+            if self.team_mode() && team(by.slot) != 0 && team(by.slot) == team(f.bot.slot) {
+                f.end = FightEnd::Helped { by: by.clone() };
+            }
+        }
+        self.chat
+            .log(self.now, format!("{}: {}", f.bot.name, fight_summary(&f)));
+        self.chat_push(Event::Fight(f.clone()));
+        let bright = f.bright();
+        let n = Notable::Fight(f);
+        if bright {
+            for id in n.people().into_iter().filter(|w| !w.bot).map(|w| w.userid) {
+                if self.chat.moments.len() < MOMENTS {
+                    self.chat.moments.push((id, n.clone()));
+                }
+            }
+        }
+        self.chat.causes.push(Cause::Notable(n));
     }
 
     /// GunGame levels and leader once a second (none in the warmup, whose frags are kills); a bot on the last level; a
@@ -898,6 +1000,7 @@ impl Runtime {
             .filter(|e| match &e.event {
                 Event::Chat { .. } => false,
                 Event::Join { who } => !self.chat_back(who.userid, e.t),
+                Event::Fight(f) => f.bot.userid == bot.userid,
                 _ => true,
             })
             .map(recent)
@@ -1212,6 +1315,7 @@ impl Runtime {
         let now = self.now;
         self.chat_bring_back();
         self.chat_watch_gungame();
+        self.chat_watch_fights();
         for bot in &mut self.bots {
             if bot.chat.busy().is_none()
                 && let Some((t, killer)) = bot.chat.killed_typing.take()

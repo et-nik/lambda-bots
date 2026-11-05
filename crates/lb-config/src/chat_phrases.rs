@@ -52,10 +52,26 @@ pub enum Moment {
     Win,
     /// The match ends and a human won.
     Gg,
+    /// The bot kills a human after a firefight with them (both shooting at each other for 3 s or more).
+    FightWon,
+    /// A human kills the bot after a firefight with it.
+    FightLost,
+    /// The bot and a human kill each other after a firefight.
+    FightTraded,
+    /// Another human, no teammate of the bot, kills the one the bot was in a firefight with.
+    FightStolen,
+    /// A human teammate kills the one the bot was in a firefight with.
+    FightHelped,
+    /// Another human kills the bot in the middle of its firefight with someone else.
+    FightInterrupted,
+    /// A human breaks off a firefight with the bot: stops shooting or goes out of its sight.
+    FightFled,
+    /// The bot pulls back from a firefight with a human.
+    FightRetreat,
 }
 
 impl Moment {
-    pub const ALL: [Moment; 15] = [
+    pub const ALL: [Moment; 23] = [
         Moment::Greet,
         Moment::Streak,
         Moment::StreakOther,
@@ -71,6 +87,14 @@ impl Moment {
         Moment::LastLevel,
         Moment::Win,
         Moment::Gg,
+        Moment::FightWon,
+        Moment::FightLost,
+        Moment::FightTraded,
+        Moment::FightStolen,
+        Moment::FightHelped,
+        Moment::FightInterrupted,
+        Moment::FightFled,
+        Moment::FightRetreat,
     ];
 
     /// The moment's key in `phrases.yaml`.
@@ -91,6 +115,14 @@ impl Moment {
             Moment::LastLevel => "last_level",
             Moment::Win => "win",
             Moment::Gg => "gg",
+            Moment::FightWon => "fight_won",
+            Moment::FightLost => "fight_lost",
+            Moment::FightTraded => "fight_traded",
+            Moment::FightStolen => "fight_stolen",
+            Moment::FightHelped => "fight_helped",
+            Moment::FightInterrupted => "fight_interrupted",
+            Moment::FightFled => "fight_fled",
+            Moment::FightRetreat => "fight_retreat",
         }
     }
 
@@ -108,7 +140,15 @@ impl Moment {
             | Moment::Crowbarred
             | Moment::CrowbarKill
             | Moment::KilledTyping
-            | Moment::Gg => &["name"],
+            | Moment::Gg
+            | Moment::FightWon
+            | Moment::FightLost
+            | Moment::FightTraded
+            | Moment::FightStolen
+            | Moment::FightHelped
+            | Moment::FightInterrupted
+            | Moment::FightFled
+            | Moment::FightRetreat => &["name"],
             Moment::Streak | Moment::Multikill => &["count"],
             Moment::StreakOther | Moment::MultikillOther | Moment::Nemesis => &["name", "count"],
             Moment::OwnBlast => &["weapon"],

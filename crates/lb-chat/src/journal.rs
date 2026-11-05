@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use lb_core::time::SimTime;
 use serde::{Deserialize, Serialize};
 
+use crate::fight::Fight;
 use crate::lang::is_explosive;
 
 /// Entries kept; older ones are summed up in the scores only.
@@ -78,6 +79,8 @@ pub enum Event {
     MatchEnd {
         winner: Option<Who>,
     },
+    /// One of our bots' firefights with a human ended: what that bot saw, for its own prompts only.
+    Fight(Fight),
 }
 
 impl Event {
@@ -94,6 +97,7 @@ impl Event {
             | Event::Level { who, .. }
             | Event::Leader { who } => vec![who],
             Event::MatchEnd { winner } => winner.iter().collect(),
+            Event::Fight(f) => [&f.bot, &f.foe].into_iter().chain(f.by()).collect(),
         }
     }
 
@@ -109,6 +113,7 @@ impl Event {
             | Event::Level { who, .. }
             | Event::Leader { who } => who.userid == userid,
             Event::MatchEnd { winner } => winner.as_ref().is_some_and(|w| w.userid == userid),
+            Event::Fight(f) => [&f.bot, &f.foe].into_iter().chain(f.by()).any(|w| w.userid == userid),
         }
     }
 }
@@ -136,6 +141,8 @@ pub enum Notable {
     Streak { killer: Who, count: u32, humans: u32 },
     /// Left soon after dying `deaths` times in a row.
     RageQuit { who: Who, deaths: u32 },
+    /// A bot's firefight with a human ended.
+    Fight(Fight),
 }
 
 impl Notable {
@@ -149,6 +156,8 @@ impl Notable {
             | Notable::Streak { killer: who, .. }
             | Notable::OwnBlast { victim: who, .. }
             | Notable::RageQuit { who, .. } => vec![who],
+            // The third player first: the bot speaks to them.
+            Notable::Fight(f) => f.by().into_iter().chain([&f.foe, &f.bot]).collect(),
         }
     }
 }
@@ -226,12 +235,18 @@ impl Journal {
         (killed(a, b), killed(b, a))
     }
 
-    /// Whether `a` and `b` killed one another lately.
+    /// Whether `a` and `b` killed one another or had a firefight lately.
     pub fn fought(&self, a: i32, b: i32, since: SimTime) -> bool {
-        self.entries.iter().rev().take_while(|e| e.t >= since).any(|e| {
-            matches!(&e.event, Event::Kill { killer, victim, .. }
-                if (killer.userid == a && victim.userid == b) || (killer.userid == b && victim.userid == a))
-        })
+        let pair = |x: &Who, y: &Who| (x.userid == a && y.userid == b) || (x.userid == b && y.userid == a);
+        self.entries
+            .iter()
+            .rev()
+            .take_while(|e| e.t >= since)
+            .any(|e| match &e.event {
+                Event::Kill { killer, victim, .. } => pair(killer, victim),
+                Event::Fight(f) => pair(&f.bot, &f.foe),
+                _ => false,
+            })
     }
 
     fn score_mut(&mut self, who: &Who) -> &mut Score {
@@ -341,7 +356,7 @@ impl Journal {
             Event::Join { who } | Event::Rename { who, .. } | Event::Leader { who } | Event::Chat { from: who, .. } => {
                 self.score_mut(who);
             }
-            Event::MatchEnd { .. } => {}
+            Event::MatchEnd { .. } | Event::Fight(_) => {}
         }
         self.entries.push_back(Entry { t, event });
         while self.entries.len() > KEEP {
@@ -354,6 +369,7 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fight::FightEnd;
 
     fn who(slot: u8, name: &str, bot: bool) -> Who {
         Who {
@@ -373,6 +389,33 @@ mod tests {
                 weapon: w.into(),
             },
         )
+    }
+
+    #[test]
+    fn a_firefight_is_a_fight_and_names_the_one_who_came_between_first() {
+        let (gordon, alyx, bot) = (who(1, "Gordon", false), who(3, "Alyx", false), who(2, "Kleiner", true));
+        let mut j = Journal::new("crossfire", SimTime(0.0));
+        let fight = Fight {
+            bot: bot.clone(),
+            foe: gordon.clone(),
+            secs: 4.0,
+            health: 30,
+            end: FightEnd::Stolen { by: alyx.clone() },
+        };
+        assert!(!j.fought(bot.userid, gordon.userid, SimTime(0.0)));
+        assert!(j.push(SimTime(10.0), Event::Fight(fight.clone())).is_empty());
+        assert!(j.fought(gordon.userid, bot.userid, SimTime(5.0)));
+        assert!(!j.fought(bot.userid, gordon.userid, SimTime(11.0)), "lately only");
+        assert!(
+            !j.fought(alyx.userid, bot.userid, SimTime(0.0)),
+            "who came between did not fight it"
+        );
+        assert_eq!(j.scores().len(), 0, "no score of a firefight");
+        let n = Notable::Fight(fight.clone());
+        let names: Vec<&str> = n.people().iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["Alyx", "Gordon", "Kleiner"]);
+        let event = Event::Fight(fight);
+        assert!(event.involves(alyx.userid) && event.involves(bot.userid) && !event.involves(99));
     }
 
     #[test]

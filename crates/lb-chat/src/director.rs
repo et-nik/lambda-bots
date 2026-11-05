@@ -36,6 +36,11 @@ const TALKED: f64 = 1800.0;
 const QUESTION_GAP: f64 = 120.0;
 /// Seconds between unasked answers to one player.
 const UNASKED_GAP: f64 = 240.0;
+/// Chances of a word on a firefight ([`crate::fight`]) for a bot of middling chattiness: a bright one, one a human
+/// third player ended, any other.
+const FIGHT_BRIGHT: f32 = 0.35;
+const FIGHT_THIRD: f32 = 0.2;
+const FIGHT_PLAIN: f32 = 0.05;
 
 /// Volume limits, from `chat.limits`, and the server's language.
 #[derive(Clone, Debug, PartialEq)]
@@ -973,9 +978,17 @@ impl Director {
                 None if human(killer) => (self.pick(any, Priority::Remark), 0.15),
                 _ => (None, 0.0),
             },
-            Notable::Nemesis { .. } | Notable::Revenge { .. } | Notable::Streak { .. } | Notable::RageQuit { .. } => {
-                (None, 0.0)
-            }
+            // Bots against bots, and a bot that came between, get no word: the line would be for a bot.
+            Notable::Fight(f) if human(&f.foe) => match (bot(&f.bot), f.by()) {
+                (Some(b), Some(by)) if human(by) => (Some(b), if f.bright() { FIGHT_BRIGHT } else { FIGHT_THIRD }),
+                (Some(b), None) => (Some(b), if f.bright() { FIGHT_BRIGHT } else { FIGHT_PLAIN }),
+                _ => (None, 0.0),
+            },
+            Notable::Nemesis { .. }
+            | Notable::Revenge { .. }
+            | Notable::Streak { .. }
+            | Notable::RageQuit { .. }
+            | Notable::Fight(_) => (None, 0.0),
         };
         let Some(speaker) = speaker else {
             return Vec::new();
@@ -990,6 +1003,7 @@ impl Director {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fight::{Fight, FightEnd};
 
     fn who(slot: u8, name: &str, bot: bool) -> Who {
         Who {
@@ -1490,6 +1504,54 @@ mod tests {
                 assert!(out.is_empty(), "{n:?}: {out:?}");
             }
         }
+    }
+
+    #[test]
+    fn firefights_get_a_word_rarely_the_bright_ones_and_those_a_human_came_into_more() {
+        let bots = vec![chatty(2, "Plutonium"), chatty(3, "Kleiner")];
+        let (pluto, kleiner) = (bots[0].who.clone(), bots[1].who.clone());
+        let (gordon, alyx) = (who(1, "Gordon", false), who(4, "Alyx", false));
+        let fight = |foe: &Who, secs: f32, health: i32, end: FightEnd| {
+            Notable::Fight(Fight {
+                bot: pluto.clone(),
+                foe: foe.clone(),
+                secs,
+                health,
+                end,
+            })
+        };
+        let said = |n: &Notable| {
+            (0..400)
+                .filter(|&seed| {
+                    let out = Room::new(seed, bots.clone(), roomy()).cause(1.0, &Cause::Notable(n.clone()));
+                    assert!(out.iter().all(|s| s.slot == 2 && s.unasked), "{out:?}");
+                    !out.is_empty()
+                })
+                .count()
+        };
+        // Chattiness 1: twice the chances of a bot of middling chattiness.
+        let plain = said(&fight(&gordon, 4.0, 55, FightEnd::Won));
+        assert!((20..=62).contains(&plain), "0.1 of 400: {plain}");
+        let long = said(&fight(&gordon, 7.0, 55, FightEnd::Won));
+        assert!((250..=310).contains(&long), "0.7 of 400: {long}");
+        let close = said(&fight(&gordon, 4.0, 12, FightEnd::Fled));
+        assert!((250..=310).contains(&close), "{close}");
+        let stolen = said(&fight(&gordon, 4.0, 55, FightEnd::Stolen { by: alyx.clone() }));
+        assert!((130..=190).contains(&stolen), "0.4 of 400: {stolen}");
+        assert_eq!(
+            said(&fight(&gordon, 9.0, 0, FightEnd::Interrupted { by: kleiner.clone() })),
+            0,
+            "a bot came between"
+        );
+        assert_eq!(said(&fight(&kleiner, 9.0, 5, FightEnd::Won)), 0, "a fight between bots");
+        let of_a_human = Notable::Fight(Fight {
+            bot: gordon.clone(),
+            foe: alyx.clone(),
+            secs: 9.0,
+            health: 5,
+            end: FightEnd::Won,
+        });
+        assert_eq!(said(&of_a_human), 0, "no bot of ours in it");
     }
 
     #[test]

@@ -41,8 +41,10 @@ When upgrading, replace `config/difficulty.yaml` too unless you changed it on pu
 skill table, and the server warns about every parameter that differs from it. A table from before the hand aim keeps
 the bots on yapb's spring look. Copy the new templates of
 `config/chat/` you do not have yet (`server.yaml`, `bots.yaml`, `maps.yaml`, `phrases.yaml`) next to your
-`players.yaml`; without `phrases.yaml` the bots use the ready phrases built into the module. Build `lb-cli` from the
-same release: recordings of another format do not replay.
+`players.yaml`; without `phrases.yaml` the bots use the ready phrases built into the module. A `phrases.yaml` of your
+own from before the firefight moments has no `fight_*` sections: those moments go to the model, within the hour's
+remarks, until you copy the sections from the new template. Build `lb-cli` from the same release: recordings of another
+format do not replay.
 
 The module depends only on glibc 2.27+ (Linux) or system libraries (Windows, macOS).
 
