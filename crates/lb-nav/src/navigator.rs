@@ -91,10 +91,11 @@ impl Navigator {
     }
 
     /// Seconds of navigating without moving 48 u away from where the bot last was; waiting for a lift or a door
-    /// does not count.
-    pub fn stuck_for(&mut self, origin: Vec3, now: f64) -> f64 {
+    /// does not count, nor being `held` in place by the game.
+    pub fn stuck_for(&mut self, origin: Vec3, now: f64, held: bool) -> f64 {
         if self.anchor_at == 0.0
             || self.waiting
+            || held
             || origin.distance(self.anchor) > 48.0
             || now - self.last_used > NAV_GAP
         {
@@ -756,6 +757,32 @@ mod line_tests {
                 beam.1
             ),
             "on the floor above"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stuck_tests {
+    use super::*;
+
+    #[test]
+    fn time_held_in_place_by_the_game_is_not_stuck() {
+        let mut nav = Navigator::default();
+        let spot = Vec3::new(10.0, 20.0, 36.0);
+        let mut t = 100.0;
+        let mut step = |nav: &mut Navigator, seconds: f64, held: bool| {
+            let mut stuck = 0.0;
+            for _ in 0..(seconds * 10.0) as usize {
+                t += 0.1;
+                stuck = nav.stuck_for(spot, t, held);
+            }
+            stuck
+        };
+        assert!((step(&mut nav, 5.0, false) - 4.9).abs() < 1e-6);
+        assert_eq!(step(&mut nav, 30.0, true), 0.0, "frozen");
+        assert!(
+            (step(&mut nav, 1.0, false) - 1.0).abs() < 1e-6,
+            "counts again from the thaw"
         );
     }
 }

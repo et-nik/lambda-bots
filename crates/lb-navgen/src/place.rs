@@ -9,8 +9,9 @@ use std::collections::VecDeque;
 use lb_core::Vec3;
 use lb_nav::NodeFlags;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
-use crate::field::{CELL, FloorField, NONE, SpanFlags};
+use crate::field::{CELL, FloorField, NONE, Span, SpanFlags};
 
 /// Nodes closer than this (and on the same floor) are one.
 const MERGE: f32 = 24.0;
@@ -132,6 +133,74 @@ pub fn spot_at(field: &FloorField, s: u32, extra: NodeFlags) -> Spot {
     }
 }
 
+/// Strips of floor at most this many cells across get the nodes found at their edges on their middle line.
+pub const NARROW: usize = 6;
+
+/// The span on the middle line of the narrow strip of floor span `s` is on, where the strip has a drop on either side
+/// (a ramp, a beam, the top of a wall; `drops(i, d)`: off span `i` in direction `d` the floor falls away): the middle
+/// of the strip across it through `s` along x or y, whichever is narrower (both on a small platform). Of two middle
+/// cells, the one no drop starts from, else the one on the negative side, so that a strip's nodes line up whichever
+/// of its edges they were found at. `s` itself where the strip is wider than `NARROW` cells, or has a wall or more
+/// floor on a side. Even a low drop counts: a bot that slips off a strip between two trenches has lost its way.
+pub fn strip_middle(spans: &[Span], s: u32, drops: impl Fn(u32, usize) -> bool) -> u32 {
+    let drops_from = |i: u32| (0..8).any(|d| drops(i, d));
+    let middle = |line: &[u32]| {
+        let mid = (line.len() - 1) / 2;
+        if line.len().is_multiple_of(2) && drops_from(line[mid]) && !drops_from(line[mid + 1]) {
+            line[mid + 1]
+        } else {
+            line[mid]
+        }
+    };
+    // Off both ends of the line across, a drop: straight out, or at either slant.
+    let both_sides = |line: &[u32], axis: usize| {
+        let off = |i: u32, d: usize| [d, (d + 1) % 8, (d + 7) % 8].into_iter().any(|d| drops(i, d));
+        off(line[0], axis + 4) && off(line[line.len() - 1], axis)
+    };
+    // Two cells across, a strip has no middle line: either is at an edge.
+    let across = |s: u32, axis: usize| {
+        let line = across(spans, s, axis);
+        if line.len() >= 3 && both_sides(&line, axis) {
+            line
+        } else {
+            SmallVec::new()
+        }
+    };
+    let (x, y) = (across(s, 0), across(s, 2));
+    let (first, other_axis) = match (x.is_empty(), y.is_empty()) {
+        (true, true) => return s,
+        (false, true) => return middle(&x),
+        (true, false) => return middle(&y),
+        (false, false) if x.len() <= y.len() => (middle(&x), 2),
+        (false, false) => (middle(&y), 0),
+    };
+    let line = across(first, other_axis);
+    if line.is_empty() { first } else { middle(&line) }
+}
+
+/// The spans across the strip `s` is on along `axis` (0 for x, 2 for y), from its negative side; none where it is
+/// wider than `NARROW` cells.
+fn across(spans: &[Span], s: u32, axis: usize) -> SmallVec<[u32; 16]> {
+    let run = |d: usize| {
+        let mut out: SmallVec<[u32; NARROW]> = SmallVec::new();
+        let mut i = s;
+        while out.len() < NARROW {
+            let n = spans[i as usize].next[d];
+            if n == NONE {
+                break;
+            }
+            out.push(n);
+            i = n;
+        }
+        out
+    };
+    let (back, ahead) = (run(axis + 4), run(axis));
+    if back.len() + 1 + ahead.len() > NARROW {
+        return SmallVec::new();
+    }
+    back.iter().rev().copied().chain([s]).chain(ahead).collect()
+}
+
 /// How far apart the nodes that fill the floor are: twice the room around them, within these bounds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spacing {
@@ -230,4 +299,91 @@ fn owners(field: &FloorField, spots: &[Spot]) -> Vec<u32> {
         }
     }
     owner
+}
+
+#[cfg(test)]
+mod tests {
+    use lb_core::Vec2;
+
+    use super::*;
+    use crate::field::{Cell, DIRS};
+
+    /// A flat floor over the cells, every one walkable to its neighbours among them.
+    fn floor(w: i32, h: i32) -> Vec<Span> {
+        let cells: Vec<(i32, i32)> = (0..w).flat_map(|x| (0..h).map(move |y| (x, y))).collect();
+        let index: FxHashMap<(i32, i32), u32> = cells.iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
+        cells
+            .iter()
+            .map(|&(x, y)| {
+                let mut next = [NONE; 8];
+                for (d, (dx, dy)) in DIRS.iter().enumerate() {
+                    next[d] = index.get(&(x + dx, y + dy)).copied().unwrap_or(NONE);
+                }
+                Span {
+                    cell: Cell { x, y },
+                    at: Vec2::new(x as f32 * CELL + 8.0, y as f32 * CELL + 8.0),
+                    feet: 0.0,
+                    flags: SpanFlags::empty(),
+                    support: 0,
+                    next,
+                    edge: 0,
+                }
+            })
+            .collect()
+    }
+
+    fn at(spans: &[Span], x: i32, y: i32) -> u32 {
+        spans.iter().position(|s| s.cell == Cell { x, y }).unwrap() as u32
+    }
+
+    fn middle(spans: &[Span], x: i32, y: i32, drops: impl Fn(Cell, usize) -> bool) -> (i32, i32) {
+        let c = spans[strip_middle(spans, at(spans, x, y), |s, d| drops(spans[s as usize].cell, d)) as usize].cell;
+        (c.x, c.y)
+    }
+
+    /// Drops off every edge of a `w` by `h` floor.
+    fn off_every_edge(w: i32, h: i32) -> impl Fn(Cell, usize) -> bool {
+        move |c, d| {
+            let (dx, dy) = DIRS[d];
+            !(0..w).contains(&(c.x + dx)) || !(0..h).contains(&(c.y + dy))
+        }
+    }
+
+    #[test]
+    fn edge_nodes_of_a_strip_with_drops_on_both_sides_line_up_on_its_middle() {
+        let spans = floor(12, 4);
+        let drops = off_every_edge(12, 4);
+        assert_eq!(middle(&spans, 5, 0, &drops), (5, 1));
+        assert_eq!(
+            middle(&spans, 5, 3, &drops),
+            (5, 1),
+            "the same line from the other edge"
+        );
+        assert_eq!(
+            middle(&spans, 11, 3, &drops),
+            (11, 1),
+            "a strip's end: across it, not along"
+        );
+        let beam = floor(12, 3);
+        assert_eq!(middle(&beam, 4, 2, off_every_edge(12, 3)), (4, 1));
+        let pipe = floor(12, 2);
+        assert_eq!(
+            middle(&pipe, 4, 1, off_every_edge(12, 2)),
+            (4, 1),
+            "no middle to two cells"
+        );
+    }
+
+    #[test]
+    fn a_ledge_along_a_wall_keeps_its_edge_node() {
+        let spans = floor(12, 3);
+        let off_the_top = |c: Cell, d: usize| c.y == 2 && matches!(d, 1..=3);
+        assert_eq!(middle(&spans, 5, 2, off_the_top), (5, 2));
+    }
+
+    #[test]
+    fn a_small_platform_has_it_in_the_middle_and_a_wide_floor_where_it_was() {
+        assert_eq!(middle(&floor(5, 5), 0, 0, off_every_edge(5, 5)), (2, 2));
+        assert_eq!(middle(&floor(12, 12), 5, 0, off_every_edge(12, 12)), (5, 0));
+    }
 }

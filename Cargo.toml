@@ -42,6 +42,7 @@ lb-testkit = { path = "crates/lb-testkit" }
 lb-mapmesh = { path = "crates/lb-mapmesh" }
 lb-chat = { path = "crates/lb-chat" }
 lb-llm = { path = "crates/lb-llm" }
+lb-demo = { path = "crates/lb-demo" }
 
 thiserror = "2"
 anyhow = "1"

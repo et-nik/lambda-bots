@@ -366,9 +366,21 @@ impl JumpExec {
                     return (step, ExecStatus::Running);
                 }
                 JumpPhase::Air => {
-                    // Steer at the landing, but stop pushing once over it.
+                    // Steer at the landing, but stop pushing once over it. Flying at it, pressing at it does nothing
+                    // (the air adds speed only up to 30 units/s along what is pressed), so a flight that would pass
+                    // the landing by is turned onto it by pressing square to the flight: a takeoff a few degrees off
+                    // still comes down on a beam. That takes nothing off the speed the jump was checked with, and
+                    // pressed into a wall the bot flies along, it does nothing.
                     let left = flat(b - i.origin).length();
                     let mut step = run(b, if left < 16.0 { 0.0 } else { i.max_speed });
+                    let v = flat(i.velocity);
+                    if left >= 16.0 && v.dot(flat(b - i.origin)) > 30.0 * left {
+                        let side = Vec2::new(-v.y, v.x).normalize();
+                        let miss = flat(b - i.origin).dot(side);
+                        if miss.abs() > 8.0 {
+                            step.move_dir = side * miss.signum();
+                        }
+                    }
                     step.mandatory = true;
                     step.duck = duck;
                     if !airborne && now - self.since > 0.1 {

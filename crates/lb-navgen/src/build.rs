@@ -17,7 +17,9 @@ use lb_bsp::world::WorldView;
 use lb_core::{Vec2, Vec3};
 use lb_kin::Physics;
 use lb_kin::tricks::{TrickPlan, plan_longjump};
-use lb_kin::validate::{JumpPlan, MoveVerdict, PushRun, plan_jump, simulate_drop, simulate_push, simulate_swim};
+use lb_kin::validate::{
+    JumpPlan, MoveVerdict, PushRun, ladder_exits, plan_jump, simulate_drop, simulate_push, simulate_swim,
+};
 use lb_nav::classify::{Classified, Classifier, DROP_SPEED, LONGJUMP_SETUP, crouch_origin, is_water, stand_origin};
 use lb_nav::graph::{GraphStats, LinkFlags, LinkKind, NavGraph, NavLink, NavNode, NodeFlags, NodeId};
 use lb_nav::plan::RUN_SPEED;
@@ -25,8 +27,8 @@ use lb_nav::validate::{WalkCheck, walk_straight};
 use lb_worldq::{HullKind, TraceQuery, Tracer};
 use rayon::prelude::*;
 
-use crate::field::{FloorField, NONE, STEP, SpanFlags, settle};
-use crate::place::{Spacing, Spot, borders, place, room, spot_at};
+use crate::field::{FloorField, LEDGE, NONE, STEP, SpanFlags, settle};
+use crate::place::{Spacing, Spot, borders, place, room, spot_at, strip_middle};
 use crate::push::{PushEntry, field_center, push_sites};
 use crate::site::{LadderSite, SeedKind, Site, TOP_BELOW, USE_REACH, flood_poses, ladder_ends, rest_poses, sites};
 
@@ -85,7 +87,8 @@ const LADDER_STEP: f32 = 64.0;
 const JUMP_REACH: f32 = 256.0;
 const JUMP_UP: f32 = 64.0;
 const JUMP_DOWN: f32 = 160.0;
-/// Jumps tried from one node.
+/// Jumps tried from one node: as many down (walked off the edge first) as across or up, so that the floor below a
+/// ledge does not crowd out the ledge across the gap.
 const JUMPS_PER_NODE: usize = 4;
 /// Ways into and out of the water are looked for this far from a node in it, a few per node.
 const SWIM_REACH: f32 = 192.0;
@@ -142,13 +145,17 @@ impl Required {
     }
 }
 
-/// A ladder's nodes: floor at its foot, the ladder itself bottom to top, the ledge at its top (indices into
-/// `Required`).
+/// A ladder's nodes: floor at its foot, the ladder itself bottom to top, the ledge at its top, and the floors it
+/// passes on the way with the node on it at their level (indices into `Required`).
 struct LadderChain {
     foot: Option<usize>,
     chain: Vec<usize>,
     top: Option<usize>,
+    exits: Vec<(usize, usize)>,
 }
+
+/// A ladder is tried every this many units up for floors to step off onto on the way.
+const EXIT_PROBE: f32 = 16.0;
 
 fn ladder_chain(v: &mut WorldView<'_>, field: &FloorField, l: &LadderSite, req: &mut Required) -> LadderChain {
     let ends = ladder_ends(v, l);
@@ -167,28 +174,69 @@ fn ladder_chain(v: &mut WorldView<'_>, field: &FloorField, l: &LadderSite, req: 
     let top = top_p.and_then(floor_spot).map(|s| req.push(s));
     let start = foot_p.map_or(l.bottom + 36.0, |p| p.z);
     let end = l.top - 8.0;
-    let mut chain = Vec::new();
-    let mut z = start;
-    loop {
-        let origin = l.spot.extend(z);
-        let on_floor = settle(v, origin).is_some_and(|(feet, _, _)| origin.z - 36.0 - feet < 4.0);
-        let mut flags = NodeFlags::LADDER;
-        if !on_floor {
-            flags |= NodeFlags::AIRBORNE;
-        }
-        chain.push(req.push(Spot {
-            span: NONE,
-            origin,
-            flags,
-            support: 0,
-            radius: 16.0,
-        }));
-        if z >= end {
-            break;
-        }
-        z = (z + LADDER_STEP).min(end);
+    let mut steps = vec![start];
+    while steps[steps.len() - 1] < end {
+        steps.push((steps[steps.len() - 1] + LADDER_STEP).min(end));
     }
-    LadderChain { foot, chain, top }
+    // Floors on the way up, stepped onto at their level; not those of the foot and the top.
+    let phys = Physics::default();
+    let mut found: Vec<(f32, Vec3)> = Vec::new();
+    let mut z = start + EXIT_PROBE;
+    while z < end {
+        for p in ladder_exits(v, &phys, l.spot.extend(z), l.normal) {
+            let level = (-24.0..=STEP).contains(&(p.z - z));
+            let fresh = [foot_p, top_p].into_iter().flatten().all(|q| (q.z - p.z).abs() > 24.0)
+                && found
+                    .iter()
+                    .all(|&(_, q)| (q.z - p.z).abs() > 24.0 || (q - p).truncate().length() > 64.0);
+            if level && fresh {
+                found.push((z, p));
+            }
+        }
+        z += EXIT_PROBE;
+    }
+    // A node at each of their levels, in place of one of the steps up there.
+    let last = steps.len() - 1;
+    let mut heights: Vec<f32> = steps
+        .iter()
+        .enumerate()
+        .filter(|&(i, h)| i == 0 || i == last || found.iter().all(|(z, _)| (h - z).abs() > EXIT_PROBE))
+        .map(|(_, &h)| h)
+        .chain(found.iter().map(|&(z, _)| z))
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    heights.dedup();
+    let chain: Vec<usize> = heights
+        .iter()
+        .map(|&z| {
+            let origin = l.spot.extend(z);
+            let on_floor = settle(v, origin).is_some_and(|(feet, _, _)| origin.z - 36.0 - feet < 4.0);
+            let mut flags = NodeFlags::LADDER;
+            if !on_floor {
+                flags |= NodeFlags::AIRBORNE;
+            }
+            req.push(Spot {
+                span: NONE,
+                origin,
+                flags,
+                support: 0,
+                radius: 16.0,
+            })
+        })
+        .collect();
+    let exits = found
+        .iter()
+        .filter_map(|&(z, p)| {
+            let k = heights.iter().position(|&h| h == z)?;
+            Some((chain[k], req.push(floor_spot(p)?)))
+        })
+        .collect();
+    LadderChain {
+        foot,
+        chain,
+        top,
+        exits,
+    }
 }
 
 /// Cells a door side node steps out from the door: clear of its leaf, still in reach of the use key.
@@ -325,32 +373,57 @@ fn use_spots(world: &BspWorld, mech: &Mechanisms, field: &FloorField, req: &mut 
     }
 }
 
-/// Edges to walk off and where the fall lands, one per stretch of ledge and floor below.
+/// Edges to walk off and where the fall lands, one per stretch of ledge and floor below. Over a drop higher than a jump
+/// gets back up, the edge node goes a cell back from the edge: a player on the edge cell may have its middle past the
+/// ledge and stand on a sliver of it, and walking from one such node to the next along the edge it slips off (off a low
+/// step it loses little, and the jump back up onto the node stays short). On a narrow strip with a drop on either side
+/// (a ramp, a beam) it goes on the strip's middle line instead: the nodes of drops off both sides would zigzag across it.
 fn drop_pairs(field: &FloorField, req: &mut Required) -> Vec<(usize, usize)> {
+    // Not into or out of push fields, nor down a ladder's shaft (the ladder takes a bot down).
+    let edge_ok = |s: u32| {
+        !field.spans[s as usize]
+            .flags
+            .intersects(SpanFlags::HAZARD | SpanFlags::GATE | SpanFlags::PUSH | SpanFlags::LADDER)
+    };
+    let landing_ok = |s: u32| {
+        !field.spans[s as usize]
+            .flags
+            .intersects(SpanFlags::HAZARD | SpanFlags::PUSH | SpanFlags::LADDER)
+    };
+    let drops: rustc_hash::FxHashSet<(u32, u8)> = field.falls.iter().map(|f| (f.from, f.dir)).collect();
+    let middle = |s: u32| {
+        let m = strip_middle(&field.spans, s, |i, d| drops.contains(&(i, d as u8)));
+        if edge_ok(m) { m } else { s }
+    };
+    // Only where that is farther from any edge: not onto the far side of a pipe, nor along a vent off whose end the
+    // drop goes, past a grate that a node right at it is found blocked by.
+    let back = |s: u32, dir: u8| {
+        let b = field.spans[s as usize].next[(dir as usize + 4) % 8];
+        let at_drop = |i: u32| (0..8).any(|d| drops.contains(&(i, d)));
+        let roomier = b != NONE && field.spans[b as usize].edge > field.spans[s as usize].edge;
+        if roomier && edge_ok(b) && !at_drop(b) { b } else { s }
+    };
     let mut chosen: Vec<(Vec3, f32)> = Vec::new();
     let mut out = Vec::new();
-    let mut falls: Vec<_> = field
+    let mut candidates: Vec<_> = field
         .falls
         .iter()
-        .filter(|f| {
-            let (a, b) = (&field.spans[f.from as usize], &field.spans[f.to as usize]);
-            // Not into or out of push fields, nor down a ladder's shaft (the ladder takes a bot down).
-            !a.flags
-                .intersects(SpanFlags::HAZARD | SpanFlags::GATE | SpanFlags::PUSH | SpanFlags::LADDER)
-                && !b
-                    .flags
-                    .intersects(SpanFlags::HAZARD | SpanFlags::PUSH | SpanFlags::LADDER)
-        })
+        .filter(|f| edge_ok(f.from) && landing_ok(f.to))
         .copied()
         .collect();
-    falls.sort_by(|x, y| {
+    candidates.sort_by(|x, y| {
         x.height
             .total_cmp(&y.height)
             .then(x.from.cmp(&y.from))
             .then(x.dir.cmp(&y.dir))
     });
-    for f in falls {
-        let edge = field.spans[f.from as usize].origin();
+    for f in candidates {
+        let from = match middle(f.from) {
+            m if m != f.from => m,
+            _ if f.height > LEDGE => back(f.from, f.dir),
+            _ => f.from,
+        };
+        let edge = field.spans[from as usize].origin();
         let land = field.spans[f.to as usize].feet;
         if chosen.iter().any(|(e, l)| {
             (*e - edge).truncate().length() < DROP_SPACING && (e.z - edge.z).abs() < 24.0 && (l - land).abs() < 48.0
@@ -358,7 +431,7 @@ fn drop_pairs(field: &FloorField, req: &mut Required) -> Vec<(usize, usize)> {
             continue;
         }
         chosen.push((edge, land));
-        let a = req.push(spot_at(field, f.from, NodeFlags::empty()));
+        let a = req.push(spot_at(field, from, NodeFlags::empty()));
         let b = req.push(spot_at(field, f.to, NodeFlags::empty()));
         out.push((a, b));
     }
@@ -800,10 +873,17 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
             while surface < nw.origin.z + 1024.0 && is_water(v.point_contents(nw.origin.with_z(surface + 8.0))) {
                 surface += 8.0;
             }
+            // Nearest first by the distance from the water over the node, from its floor up to the surface: a swimmer
+            // gets out, and a jumper in, anywhere along it, and the rim of a deep pool is no farther than its floor.
+            let column = |o: Vec3| {
+                let feet = o.z - 36.0;
+                let dz = feet - feet.clamp(nw.origin.z - 36.0, surface);
+                (o - nw.origin).truncate().extend(dz).length()
+            };
             let mut near: Vec<(f32, u32)> = placement
                 .around(nw.origin, SWIM_REACH)
                 .filter(|&l| land(&cls.nodes[l as usize]) && cls.nodes[l as usize].origin.z > nw.origin.z - STEP)
-                .map(|l| (cls.nodes[l as usize].origin.distance(nw.origin), l))
+                .map(|l| (column(cls.nodes[l as usize].origin), l))
                 .collect();
             near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
             for &(_, l) in near.iter().take(SWIMS_PER_NODE) {
@@ -864,9 +944,10 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         path.extend(chain);
         path.extend(lad.top.map(|k| id(k) as usize));
         path.dedup();
-        for w in path.windows(2) {
+        let exits = lad.exits.iter().map(|&(k, f)| [id(k) as usize, id(f) as usize]);
+        for w in path.windows(2).map(|w| [w[0], w[1]]).chain(exits) {
             for (a, b) in [(w[0], w[1]), (w[1], w[0])] {
-                if links.has(a as u32, b as u32) {
+                if a == b || links.has(a as u32, b as u32) {
                     continue;
                 }
                 let c = cls.classify(a, b, false);
@@ -912,16 +993,18 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
                 })
                 .collect();
             near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-            let mut taken = 0;
+            let mut taken = [0; 2];
             for (d, b) in near {
-                if taken >= JUMPS_PER_NODE {
-                    break;
-                }
-                if links.has(a, b) || links.within(a, b, 2.0 * d / RUN_SPEED) {
+                let down = cls.nodes[b as usize].origin.z < na.origin.z - STEP;
+                let k = usize::from(down);
+                if taken[k] >= JUMPS_PER_NODE || links.has(a, b) || links.within(a, b, 2.0 * d / RUN_SPEED) {
                     continue;
                 }
                 cands.push((a, b));
-                taken += 1;
+                taken[k] += 1;
+                if taken == [JUMPS_PER_NODE; 2] {
+                    break;
+                }
             }
         }
         // Up onto the ledges the floor field found, from wherever the nodes below are.

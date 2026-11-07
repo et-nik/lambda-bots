@@ -10,13 +10,13 @@ use lb_navgen::{GenOptions, generate, report};
 #[rustfmt::skip]
 const MAPS: &[(&str, usize)] = &[
     ("boot_camp", 150),
-    ("bounce", 58),
+    ("bounce", 60),
     ("crossfire", 109),
     ("datacore", 57),
     ("frenzy", 40),
     ("gasworks", 73),
     ("lambda_bunker", 44),
-    ("rapidcore", 58),
+    ("rapidcore", 61),
     ("snark_pit", 45),
     ("stalkyard", 70),
     ("subtransit", 64),
