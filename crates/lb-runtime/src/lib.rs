@@ -3779,6 +3779,7 @@ fn behave(
         input,
         stuck_kill: ctx.stuck_kill,
         calm,
+        frozen: bot.self_state.body.flags & lb_game::self_state::FL_FROZEN != 0,
         kill: false,
         budgets,
     };

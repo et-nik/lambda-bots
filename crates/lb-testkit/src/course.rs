@@ -768,7 +768,7 @@ impl<W: SimWorld> Course<W> {
             flights: None,
         };
         let (status, step) = drive(&mut bot.nav, &mut ctx, &input);
-        bot.stuck = bot.nav.stuck_for(p.origin, now);
+        bot.stuck = bot.nav.stuck_for(p.origin, now, false);
         bot.worst_stuck = bot.worst_stuck.max(bot.stuck);
         let phase = bot.nav.phase();
         if bot.phases.last().is_none_or(|(_, ph)| *ph != phase) {

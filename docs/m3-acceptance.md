@@ -49,13 +49,12 @@ back; `no floor`: the item floats or rests on an entity). What they have in comm
 | boot_camp  | 4 satchels                   | on a stand 45–50 units up: the jump checks fail                                 |
 | boot_camp  | egon, battery, 2 health kits | a room next to a corridor on the same level, with no way in the generator finds |
 | bounce     | 2 satchels, 2 grenades       | on top of a push-field shaft: no flight up it lands there                       |
-| bounce     | battery, health kit          | on islands reached only by a long jump from where no node stands                |
 | crossfire  | 12 items of the secret room  | its door opens from a plate behind it; the count of 27.09 took them as reached  |
 | datacore   | rpg, 3 rpg clips             | shelves 120–220 units up                                                        |
 | datacore   | tripmine, 357, rpg clip      | no floor under them (they rest on entities)                                     |
 | datacore   | snarks                       | in a pit with no way in or out                                                  |
 | frenzy     | long jump                    | on the central pillar, behind a railing                                         |
-| rapidcore  | gauss, rpg, 3 batteries      | 78–412 units up                                                                 |
+| rapidcore  | gauss, AR grenades, battery  | 172–412 units up                                                                |
 | snark_pit  | 4 satchels, 4 grenades       | the secret room: its button is inside it (`secret_gate`)                        |
 | snark_pit  | 4 gauss clips, 4 batteries   | a pocket beside the fan's vent at the top of the shaft                          |
 | snark_pit  | rpg                          | behind the vent of `fan1`, a push field switched off at the start               |
@@ -166,6 +165,48 @@ The live check confirms all 1120 special links of the new crossfire graph (0 dis
 on the move: a replay of the 28.09 recording with the look's owner logged puts 217 of the 688 turns over 45° on the
 path look itself and about 190 on glances at sounds and back; the rest is fighting. Why the path look turns that
 much is not known yet.
+
+## Narrow strips and ledge edges (2026-11-07)
+
+On dm_snow the nodes of the narrow ramps and ledges stood at their edges, now on one side and now on the other, and
+bots ran zigzag along them and fell off. A node at an edge goes there for a drop off it, and the edge cell is where a
+player hangs over the drop: the hull stands while any of it is over the floor, so its middle may be past the ledge
+and only a sliver of it on the floor. What changed:
+
+- **Drop edges.** On a strip 3–6 cells across with a drop on either side (a ramp, a beam, the top of a wall) the node
+  goes on its middle line. Over a drop higher than a jump gets back up, the node goes a cell back from the edge,
+  where it is farther from any edge. Pipes two cells across keep a node on either cell: nodes between the cells were
+  tried, and jumps from them failed on crossfire.
+- **Ladders** get exits onto the floors they pass on the way up (gasworks), not only at the foot and the top.
+- **Swims** into and out of a pool are tried with the land nearest the column of water over the node first, so the
+  rim of a deep pool is not passed over for its floor (mansion_ms).
+- **Jumps** are tried as many down as across or up, so a floor below a ledge does not take the place of the ledge
+  across a gap (stalkyard).
+- **Run-ups** need floor under them and a little to either side: a bot turning round on a beam swings a little wide.
+- **The jump's flight** (executor) is turned onto the landing. Pressing at the landing did nothing (the air adds
+  speed only up to 30 units/s along what is pressed, and the bot already flies that way); pressing square to the
+  flight turns it without taking anything off its speed, and a takeoff a few degrees off still comes down on a
+  beam. The planner checks jumps 3° off; the executor takes off up to 14° off.
+
+| Measure                                               | Before         | After          |
+|-------------------------------------------------------|----------------|----------------|
+| dm_snow, 300 routes across its narrow strips: arrived | 287            | 292            |
+| the same routes: links failed                         | 29             | 13             |
+| 26 maps of the GunGame server, 5200 routes: arrived   | 3110           | 3256           |
+| the same routes: links failed                         | 829            | 632            |
+| twelve standard maps: items reached                   | 810            | 814            |
+| offline course (`generated_course`): routes arrived   | 777/810, 95.9% | 776/814, 95.3% |
+| offline course: walking against a wall                | 1.6%           | 1.2%           |
+
+The routes run between places where players stood in the server's recorded demos, on the offline course with the
+generated graph: on each map 100 of any kind and 100 across narrow strips, 20 s each. The offline course is the
+same within its noise: one spot that fails fails several routes, to items near one another. The coverage report
+of 148 local maps: 25 cover more floor or reach more items, none less (CyanideStalkyard items 70 → 74, c2a2f floor
+81.8% → 98.5%).
+
+Found and not fixed: the ledge of ag_hidden_lab's rpg was reached only by a long jump from the edge of a walkway 4
+cells across, whose node is on its middle line now; boot_camp's ladders at (1568, 120) and (1568, −346) have their
+top exit beside the ladder above its top, and the bot jumps off backwards there (the old graph has them too).
 
 ## Planning
 

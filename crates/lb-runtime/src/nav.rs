@@ -607,6 +607,8 @@ pub struct BotNavService<'a, 'h> {
     pub stuck_kill: f64,
     /// No enemy in sight or heard for a while: a stuck bot may give up its life.
     pub calm: bool,
+    /// The game holds the bot in place (`FL_FROZEN`): a GunGame match won, until the map changes, or a warmup's end.
+    pub frozen: bool,
     /// Stuck beyond recovery: the bot should `kill` itself.
     pub kill: bool,
     /// What path searches and long jump checks may still spend this frame, for all bots.
@@ -626,7 +628,7 @@ impl BotNavService<'_, '_> {
     /// No progress for `stuck_kill` seconds of navigating (waiting for a lift or a door does not count), with
     /// no enemy around: give up on this life.
     fn stuck(&mut self) -> bool {
-        let stuck = self.nav.stuck_for(self.input.origin, self.input.now);
+        let stuck = self.nav.stuck_for(self.input.origin, self.input.now, self.frozen);
         if stuck > self.stuck_kill && self.calm && self.nav.failures_total > 0 {
             self.kill = true;
             self.nav.reset();

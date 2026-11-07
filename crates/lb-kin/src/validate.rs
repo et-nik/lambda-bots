@@ -28,29 +28,41 @@ pub mod takeoff {
 }
 
 /// Room behind a jump's takeoff at `from` for a run-up against `dir`, as much as `speed` needs: clear of walls, and
-/// with floor under it (not back off the ledge the jump starts from).
+/// with floor under it (not back off the ledge the jump starts from), and some to spare on either side: a bot turning
+/// round for the run-up swings a little wide.
 pub fn run_up_room(tracer: &mut dyn Tracer, from: Vec3, dir: Vec2, speed: f32) -> f32 {
     let want = 40.0 + speed * 0.1;
     // A step's height up, so stairs behind the takeoff do not count as a wall.
     let start = from + Vec3::Z * 18.0;
     let back = -dir.extend(0.0);
+    let side = Vec3::new(-dir.y, dir.x, 0.0) * RUN_UP_SPARE;
     let tr = tracer.trace(&TraceQuery::hull(start, start + back * want, HullKind::Stand));
     if tr.start_solid {
         return 0.0;
     }
     let clear = (want * tr.fraction - 4.0).max(0.0);
+    let mut floor = |p: Vec3| {
+        let down = tracer.trace(&TraceQuery::hull(p, p - Vec3::Z * 58.0, HullKind::Stand));
+        (!down.start_solid && down.fraction < 1.0).then_some(down.end.z)
+    };
+    let mut last = start.z - 18.0;
     let mut room = 0.0;
     while room + 8.0 <= clear {
         let p = start + back * (room + 8.0);
         // Stairs down behind the takeoff are run up; a ledge is not.
-        let down = tracer.trace(&TraceQuery::hull(p, p - Vec3::Z * 58.0, HullKind::Stand));
-        if down.start_solid || down.fraction >= 1.0 {
+        let stair = |z: Option<f32>| z.is_some_and(|z| (z - last).abs() <= 18.0);
+        let here = floor(p);
+        if !stair(here) || !stair(floor(p + side)) || !stair(floor(p - side)) {
             break;
         }
+        last = here.unwrap_or(last);
         room += 8.0;
     }
     room
 }
+
+/// Floor a run-up keeps to either side of its line.
+const RUN_UP_SPARE: f32 = 8.0;
 
 /// Command length of the simulation.
 pub(crate) const STEP_MS: u8 = 10;
@@ -312,28 +324,53 @@ pub fn simulate_climb(world: &mut dyn MoveWorld, phys: &Physics, start: Vec3, no
 /// Off the top of a ladder the climb cannot get over: backing away from it or sidestepping onto a floor no lower
 /// than a step below the feet.
 fn step_off(world: &mut dyn MoveWorld, phys: &Physics, at: Player, normal: Vec3) -> Option<Vec3> {
+    off_ladder(normal)
+        .into_iter()
+        .find_map(|dir| step_toward(world, phys, at, dir, 0))
+}
+
+/// Floors a player on a ladder at `at` (`normal` out of its face) gets onto by backing away from it or sidestepping,
+/// none lower than 48 units below the feet: where it stands on each, a few steps on, as at the top of a climb.
+pub fn ladder_exits(world: &mut dyn MoveWorld, phys: &Physics, at: Vec3, normal: Vec3) -> Vec<Vec3> {
+    let p = Player::standing(at);
+    off_ladder(normal)
+        .into_iter()
+        .filter_map(|dir| step_toward(world, phys, p, dir, 10))
+        .collect()
+}
+
+/// The ways off a ladder: away from its face, and to either side.
+fn off_ladder(normal: Vec3) -> [Vec3; 3] {
     let flat = Vec3::new(normal.x, normal.y, 0.0).normalize_or_zero();
     let side = Vec3::Z.cross(flat);
-    for dir in [flat, side, -side] {
-        let mut p = at;
-        let cmd = Cmd {
-            angles: dir_to_view_angles(dir),
-            forward: 400.0,
-            buttons: IN_FORWARD,
-            msec: STEP_MS,
-            ..Cmd::default()
-        };
-        for _ in 0..100 {
-            player_move(world, phys, &mut p, &cmd);
-            if !p.on_ladder && p.on_ground() {
-                break;
+    [flat, side, -side]
+}
+
+/// Off the ladder along `dir` onto floor, then `on` moves further while it lasts.
+fn step_toward(world: &mut dyn MoveWorld, phys: &Physics, at: Player, dir: Vec3, on: usize) -> Option<Vec3> {
+    let mut p = at;
+    let cmd = Cmd {
+        angles: dir_to_view_angles(dir),
+        forward: 400.0,
+        buttons: IN_FORWARD,
+        msec: STEP_MS,
+        ..Cmd::default()
+    };
+    let mut stood: Option<Player> = None;
+    let mut moves = 0;
+    while moves < 100 + on {
+        moves += 1;
+        player_move(world, phys, &mut p, &cmd);
+        if !p.on_ladder && p.on_ground() {
+            if stood.is_none() {
+                moves = 100;
             }
-        }
-        if !p.on_ladder && p.on_ground() && p.feet() >= at.feet() - 48.0 {
-            return Some(p.origin);
+            stood = Some(p);
+        } else if stood.is_some() {
+            break;
         }
     }
-    None
+    stood.filter(|s| s.feet() >= at.feet() - 48.0).map(|s| s.origin)
 }
 
 /// Directions a ladder is walked at by [`ladder_approaches`].
@@ -883,6 +920,33 @@ mod tests {
         assert!(v.ok, "{v:?}");
         assert!((v.impact - phys.fall_speed(300.0)).abs() < 25.0, "{v:?}");
         assert_eq!(phys.fall_damage(v.impact), 10.0);
+    }
+
+    #[test]
+    fn a_ladder_is_left_onto_a_floor_beside_it_on_the_way_up() {
+        let mut w = BoxWorld::new();
+        w.floor(0.0, 1024.0);
+        w.solid(Vec3::new(-32.0, -8.0, 0.0), Vec3::new(32.0, 0.0, 256.0));
+        w.volume(
+            Vec3::new(-24.0, 0.0, 0.0),
+            Vec3::new(24.0, 6.0, 256.0),
+            lb_worldq::contents::LADDER,
+        );
+        // A landing west of the ladder, 128 up.
+        w.solid(Vec3::new(-256.0, -8.0, 0.0), Vec3::new(-40.0, 96.0, 128.0));
+        let phys = Physics::default();
+        let on_ladder = |feet: f32| Vec3::new(0.0, 20.0, feet + 36.0);
+        let exits = ladder_exits(&mut w, &phys, on_ladder(128.0), Vec3::Y);
+        assert_eq!(exits.len(), 1, "{exits:?}");
+        let p = exits[0];
+        assert!(
+            p.x < -40.0 && (p.z - 36.0 - 128.0).abs() < 1.0,
+            "a few steps onto the landing: {p:?}"
+        );
+        assert!(
+            ladder_exits(&mut w, &phys, on_ladder(64.0), Vec3::Y).is_empty(),
+            "below it, only a fall"
+        );
     }
 
     #[test]
