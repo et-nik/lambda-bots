@@ -84,7 +84,11 @@ impl NavMap {
             Some((key, g)) => (g, Origin::Server, Some(key)),
             None => {
                 let started = std::time::Instant::now();
-                let g = lb_navgen::generate(&mut world, &mech, &lb_navgen::GenOptions::default(), "editor").graph;
+                let opts = lb_navgen::GenOptions {
+                    high_ground: mapload::high_ground(install, map, world.bsp.fingerprint.1).0,
+                    ..lb_navgen::GenOptions::default()
+                };
+                let g = lb_navgen::generate(&mut world, &mech, &opts, "editor").graph;
                 if g.is_empty() {
                     return Err("the generator found no floor".into());
                 }

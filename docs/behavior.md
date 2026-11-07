@@ -18,6 +18,8 @@ scored:
 | `charger`     | 1    | health under 60 or armor under 40 and a charger believed to give             | like `collect`, with 4 s of charging added to the travel (rank 2 as for health)   |
 | `control`     | 1    | an item worth having comes back soon (armor, the long jump, a big gun)       | its value × how well the wait fits: up to 8 s is as good as any, none beyond 25 s |
 | `camp`        | 1    | calm for 3 s, 50 health or more, a gun for the spot                          | the spot's score × (1.1 − aggression) × a travel penalty; counts only above 0.15  |
+|               |      | (a perch: calm for 2 s and a boost possible; rank 3 in a fight,              | (a perch: the style's liking of gauss jumps × the spot's score × a travel         |
+|               |      | see *Holding spots*)                                                         | penalty)                                                                          |
 | `trap`        | 1    | calm for 5 s, carrying tripmines or two satchels or more                     | the spot's traffic (or score) × a travel penalty; counts only above 0.15          |
 |               |      | (a trail: four mines or more and a gun to set them off)                      | (a trail: 0.45 × the style's `trap`)                                              |
 | `roam`        | 0    | always                                                                       | 0.2                                                                               |
@@ -67,8 +69,11 @@ few tens of them on the standard maps; `lb map` shows it):
   that go through each place.
 - **Chokepoints:** busy places where the way narrows to 192 units or less.
 - **Spots to hold:** *overwatch* spots see much of the traffic far away (700–3000 units) and little in close;
-  *ambush* spots are out of the way, little seen, 150–650 units from a chokepoint they see. Each comes with the
-  directions worth watching.
+  *ambush* spots are out of the way, little seen, 150–650 units from a chokepoint they see; *perches* are high ground
+  that only a gauss boost gets onto from where players go on foot (dm_snow's pillars, with the boost links of its
+  overlay), with a plain way back down, overlooking traffic 64 units or more below within 1500 units (as much of it as
+  15% of the most any place of the map sees within that reach at least): up to eight, 256 units apart. Each comes with
+  the directions worth watching.
 - **Walls for tripmines:** across busy corridors (the beam at 20 units above the floor trips standing and crouching
   players alike) and just past turns, where a player rounds the corner into the beam (yapb's corner mines, worked out
   ahead for the whole map). None within 256 units of a spawn point.
@@ -124,6 +129,28 @@ the MP5, the egon or the gauss for an ambush) may hold one of the map's spots: 6
 crouched at an ambush, half as long again for a style fond of it. It looks one way and the other every 1.5–4 s, or
 where a lost enemy would come into view, and holds its weapons for the distance it watches. Rushers never hold a spot;
 snipers hold overwatch spots most, trappers ambush spots.
+
+**High ground.** Players take the high ground a gauss boost gets onto when they hold the gauss: in the GunGame demos
+of dm_snow they went up onto its pillars about every 40 s they held the gauss, stayed 1.4–10 s (3.3 s half the time)
+and came down by a drop; up there they killed 7.2 a minute and died 1.2 times, against 4.6 and 4.7 on the floor. Most
+went up in a fight: in 22 of 29 boosts onto the pillars another player was in plain sight in front of them in the 2 s
+before, though only 6 had shot at anyone in the 4 s before. A bot whose skill does tricks (from normal up) with 50
+health takes a perch when it can boost (see *Tricks*: the gauss, 40 uranium, 60 health, 80 where a suicide costs a
+GunGame kill):
+- **calm** (no enemy about for 2 s), as readily as its style likes gauss jumps (0.6 for a balanced bot, 0.9 for a
+  controller), whatever its aggression, with any gun (the crossbow, the 357, the gauss or the RPG best);
+- **in a fight** (`camp` at rank 3, over the fight itself), when the style's roll says so (its liking as the chance,
+  rolled every 6–10 s), the enemy fought 300 units off or more and a perch 3 s away at most by the straight way. It
+  fights on the way there with plain gauss shots (a charged shot's throw would knock it off the takeoff); at the
+  takeoff it turns away for the boost, enemy or not. A climb under way (a calm one
+  too) goes on through a fight while the bot can boost and the enemy keeps 150 units off.
+
+Its way there takes the boost. Up there, calm, it holds the spot standing for 4–12 s, watching the floor below, and
+holds the perches within 700 units on its level without a boost; in a fight it fights (`engage`) and holds again
+after. It takes one again 20–35 s after. The bot stands on a perch's high ground once it is on its level within 128
+units of the spot, however it got there, and stays on it within 700 units on that level. In a fight on the high
+ground it does not close in (the way to the enemy would drop it down); the fight's ledge rule keeps its strafes from
+walking off.
 
 ## Waiting for items
 
@@ -710,8 +737,8 @@ not to makes the bots keep under the crop until the map changes.
     stretches; bold ones also round corners, down drops, over short stretches and one after another, and with more
     than 60 health onto a landing that hurts, as long as 40 are left (see `docs/navigation.md`);
   - gauss boost links, for styles that gauss-jump, with 40 uranium, when a boost can be made now: the skill does
-    tricks, the gauss is allowed and there are 16 uranium for a full charge, 60 health, no enemy seen for 2 s, out of
-    the water;
+    tricks, the gauss is allowed and there are 16 uranium for a full charge, 60 health, no enemy seen for 2 s (on the
+    way up to a perch an enemy about too), out of the water;
   - bunny hops, at the skill's speeds, while no weapon protocol runs (a throw, a mine, the scope, a boost), no trail
     of mines is being laid and no long jump of a fight (at an enemy, to dodge) has the keys (see
     `docs/navigation.md`).
@@ -746,13 +773,16 @@ not to makes the bots keep under the crop until the map changes.
   in hand and ready, 30 uranium and 60 health, no enemy about, on the ground: every 10–18 s the style's chance is
   rolled (4–6 s when the destination is near), and navigation looks for a boost that lands nearer the goal
   (`docs/navigation.md`).
+- **High ground by a boost:** the perches of the map (see *Holding spots*) are a goal of their own for a bot that can
+  boost, calm or in a fight; the way up takes the map's boost links.
 - **The boost itself** (`GaussBoost` protocol, `Protocol` priority): when navigation stands at a boost's takeoff and
   asks for it, and no other protocol runs, the bot draws the gauss, charges it 1.6 s (a full charge), turns back and
   down to the boost's view (2° close, or on after 1.2 s more), jumps and lets the charge go as it leaves the ground
   (at the latest 0.25 s after the jump), then holds the view for the 0.2 s the game takes to fire. The weapon, the
   look, the movement and the jump are the protocol's all the while, so a fight that starts does not fire the charge
-  the wrong way: an enemy in sight ends the boost before the jump (navigation stops asking), and the charge already
-  building goes on in the gauss's own protocol, held ready for the enemy or dumped safely. The gauss's own charges
+  the wrong way: an enemy in sight ends the boost before the jump (navigation stops asking; not on the way up to a
+  perch, where it goes on), and the charge already building goes on in the gauss's own protocol, held ready for the
+  enemy or dumped safely. The gauss's own charges
   wait while a boost runs.
 - **Dumping a charge** (any, not only a boost's) goes straight up, the recoil pressing the bot to the floor, when no
   level way is clear of the beam's burst on the nearest wall and the sky or a high ceiling is farther than every
@@ -761,8 +791,9 @@ not to makes the bots keep under the crop until the map changes.
 `lb brain` shows each bot's tricks: the speeds it bunny hops at now, whether it has the module, how readily it takes
 long jumps on the way and in a fight and whether they are bold and dodge, what navigation may do (and the fall damage
 a long jump on the way may take), its uranium, why the last look for a gauss jump came to nothing, how the tricks that left the ground went
-(landed where they should or not, by kind), the long jumps at enemies and to dodge, the gauss jumps found and the
-boosts started and fired. `lb stats` sums them over the bots since the last reset. A missed trick is logged with
+(landed where they should or not, by kind), the long jumps at enemies and to dodge, the gauss jumps found, the
+boosts started and fired, and the times on high ground (the climbs taken up in a fight). `lb stats` sums them over the
+bots since the last reset. A missed trick is logged with
 where it left the ground, how fast, and where it came down.
 
 ## GunGame
@@ -882,7 +913,8 @@ A look from Alert up is turned at the bot's full turn acceleration; a goal's loo
 - what the goal is doing (searching from where, hiding, holding a spot, waiting for an item, laying a trap), the mood
   against the personality's own, the goals taken so far, the goal changes (those before a hold ran out and those with
   no fight in them) and the changes of the enemy aimed at while the first was still in sight, and what came of the
-  goals: sounds seen about, covers found, spots held, items waited for, traps laid;
+  goals: sounds seen about, covers found, spots held, times on high ground (and the climbs taken up in a fight),
+  items waited for, traps laid;
 - the target and the weapon choice;
 - the weapon protocols: what runs now, throws, launched grenades, mines, detonations, gauss charges fired and dumped,
   dodges, and failures by reason;

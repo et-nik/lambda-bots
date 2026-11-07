@@ -7,6 +7,7 @@ use crate::chat_maps::ChatMapsFile;
 use crate::chat_phrases::ChatPhrasesFile;
 use crate::chat_players::ChatPlayersFile;
 use crate::chat_server::ChatServerFile;
+use crate::moves::MovesFile;
 use crate::names::NamesFile;
 use crate::overlay::OverlayFile;
 use crate::profiles::ProfilesFile;
@@ -38,6 +39,7 @@ pub fn check_text(text: &str, path: &str) -> Result<String, ConfigError> {
         "difficulty" => DifficultyFile::parse(text, path).map(|_| ()),
         "style" => StyleFile::parse(text, path).map(|_| ()),
         "overlay" => OverlayFile::parse(text, path).map(|_| ()),
+        "moves" => MovesFile::parse(text, path).map(|_| ()),
         "chat-players" => ChatPlayersFile::parse(text, path).map(|_| ()),
         "chat-server" => ChatServerFile::parse(text, path).map(|_| ()),
         "chat-bots" => ChatBotsFile::parse(text, path).map(|_| ()),

@@ -20,8 +20,8 @@ pub struct GraphKey {
     pub bsp_size: u64,
     /// Version of the generator: one that makes other graphs from the same map bumps it.
     pub generator: u32,
-    /// Hashes of the generator's settings (the player physics among them), the server rules that change links (fall
-    /// damage) and the map's overlay.
+    /// Hashes of the generator's settings (the player physics and the high ground of the map's moves file among them),
+    /// the server rules that change links (fall damage) and the map's overlay.
     pub physics: u64,
     pub rules: u64,
     pub overlay: u64,

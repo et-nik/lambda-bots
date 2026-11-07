@@ -30,7 +30,8 @@ pub fn key(world: &BspWorld, opts: &GenOptions, rules: u64, overlay: u64) -> Gra
     }
 }
 
-/// The key's hash of the settings a graph is made with (the player physics among them).
+/// The key's hash of the settings a graph is made with (the player physics and the high ground of the map's moves file
+/// among them).
 pub fn physics_hash(opts: &GenOptions) -> u64 {
     xxhash_rust::xxh3::xxh3_64(format!("{opts:?}").as_bytes())
 }

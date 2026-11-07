@@ -27,10 +27,12 @@ and its vertical push accelerates the player against gravity, at that many units
    (not radiation, poison and the other time-based kinds): a burning floor, freezing water. A ladder is climbed from
    a spot 14 units off the face of its box; where that spot is not on the ladder (a ladder on a slanted face, or one
    sunk into its wall but for a sliver) the spot is where a player walking at the ladder from all round stops on it,
-   with the normal of the face it meets.
+   with the normal of the face it meets. Then the floor is flooded on from the landings of the ways up onto high
+   ground players were seen to take (see "High ground players climb onto" below).
 2. **Nodes.** Required spots get a node first: spawn points, items, ladder ends and rungs every 64 units, lift
    platforms, teleports, drop edges and landings, push-field entries and landings, a spot in reach of every button, a
-   spot inside every trigger that sets a door or a lift off, and one on each side of every door. Then nodes fill the
+   spot inside every trigger that sets a door or a lift off, one on each side of every door, and the takeoffs and
+   landings of the ways up onto high ground. Then nodes fill the
    rest of the floor, the middles of corridors first, twice the room around them apart (112 to 224 units). Every span
    belongs to the node nearest to it on foot. Where two nodes whose floors meet cannot walk straight to each other
    (round a corner, through a doorway, past a pillar), a node goes on their border where it is widest, and the floor
@@ -52,9 +54,9 @@ and its vertical push accelerates the player against gravity, at that many units
      entries cannot walk to, nearest first.
    - Tricks (see "Long jumps and gauss boosts" below): long jumps across gaps, from nodes near an edge to nodes
      160–560 units off (48 up to 240 down) that the graph joins only by a way more than twice as long, where the jump
-     saves a second and a third of the way round and costs no fall damage. Gauss boosts are not made: they are put in
-     by hand (the map editor's Link tool, or `add_link` with `kind: gauss_boost` in an overlay), and planned and
-     checked then as a made one would be.
+     saves a second and a third of the way round and costs no fall damage. Gauss boosts are made only up onto high
+     ground players were seen to climb onto often enough (below); others are put in by hand (the map editor's Link
+     tool, or `add_link` with `kind: gauss_boost` in an overlay), and planned and checked then as a made one would be.
 5. **Report.** The coverage report (`lb-cli nav coverage`) counts the floor and the items a bot gets to from the
    spawn points and back, and lists the rest.
 
@@ -62,7 +64,8 @@ On crossfire this takes 0.44 s on the stand's cores (890 nodes, 4645 links, 3 of
 map, boot_camp, 1.3 s.
 A kept graph loads in under a millisecond (96 ms on the stand, with the BSP and the visibility sets). The file
 (`.lbnav`: postcard, LZ4, CRC-32C) is named by the key of what the graph was made from: the BSP (BLAKE3 and size),
-the generator's version, the physics, the rules and the overlay. Only a graph with exactly the same key is used; the
+the generator's version, its settings (the physics, the high ground of the map's moves file), the rules and the
+overlay. Only a graph with exactly the same key is used; the
 four most recently used are kept. `lb nav regen` throws a map's graphs away and makes it again.
 
 After the graph is loaded, the map's overlay patches are applied (see `docs/overlays.md`) and landmarks for the
@@ -88,6 +91,55 @@ Every special link is also checked on the live server once the map has loaded. T
 (the floor at both ends, the way between), at most 64 per frame, and compares them with the offline world. A link
 the server disagrees with is switched off. On crossfire, all 1120 special links of the generated graph are confirmed.
 `lb nav` shows the result.
+
+### High ground players climb onto
+
+High ground nobody walks onto (dm_snow's pillar tops, hl_pool_day's roofs) is not in the flooded floor and gets no
+nodes. Players get up there with gauss boosts; the generator makes those boosts, and the nodes up there, only where
+it was shown players do: `maps/<map>/moves.yaml` (schema `lambdabots/moves@1`), taken from recordings of their games.
+Without the file, or with nothing in it climbed often enough, the graph is what it was.
+
+`lb-cli demo moves <map.bsp> <file.dem|dir>... [--trusted <file.dem|dir>...] [--out <moves.yaml>]` reads HLTV and
+POV demos (the recordings of other maps in them are skipped) and finds the climbs of people (not bots) walking about:
+
+- a charged gauss shot (`events/gauss.sc` with its first flag clear) by a player off the floor for at most a second,
+  then down on floor 72 units higher at least (higher than any jump) within 2.5 s; a touch of the floor in the first
+  0.15 s after the shot at the same height is not the landing yet;
+- the takeoff is the last touch of the floor before the shot: the hull on the floor, or the lowest point of a bunny
+  hop over floor 32 units below at most; the landing is the first touch after it (player origins, every snapshot,
+  some 18 a second);
+- a track breaks where a snapshot is missing for 0.3 s or the player moves faster than 2500 units/s (a teleport or a
+  respawn).
+
+Each landing is put on the floor `generate` would flood. A landing on floor reached on foot is left out (a boost up
+onto a ledge with stairs round the corner). The rest are grouped by high ground (floor joined by walking up there),
+and in it climbs off within 128 units onto within 128 units (24 up or down) are one way up, the most central climb
+standing for it. The file holds counts only, no names: for each high ground the climbs, the players (told apart by
+SteamID, else by name, while it runs), the recordings and the trusted climbs, and its ways with their climbs.
+
+High ground is made when climbed 5 times by 3 players at least, or once in a trusted recording (`--trusted`: a
+recording of a player who shows how the map is played, such as one's own demo from the stand), 16 on a map at most,
+the trusted and the most climbed first. Its ways, the most used first, are checked: a boost (planned as an overlay's,
+`plan_boost` with the beam that spares the shooter) from the players' takeoff or a spot 48 or 96 units round it on the
+same floor, onto their landing or a spot 48 units round it. The floor is flooded on from the landings of the ways that
+check out; their takeoffs and landings are required nodes, and a boost link is made from each takeoff node onto the
+high ground, 6 onto each at most. Drops and walks lead back down as anywhere else.
+
+From the archive's demos (aggregate counts, 07.11.2026): of the 49 maps looked at (all 46 with 5 recordings or more,
+and 3 with fewer) these four have high ground climbed often enough. Elsewhere players boost mostly onto floor they
+could walk to (13thflaw: 36 of 41 climbs), which the generator leaves to its walks, jumps and long jumps.
+
+| Map         | Recordings | Climbs | Onto floor reached on foot | High ground | Made | Boosts | Nodes added |
+|-------------|------------|--------|----------------------------|-------------|------|--------|-------------|
+| dm_snow     | 9          | 18     | 2                          | 4           | 2    | 6      | 57          |
+| hl_pool_day | 12         | 21     | 1                          | 3           | 1    | 6      | 247         |
+| dam         | 7          | 21     | 6                          | 3           | 1    | 6      | 194         |
+| levels      | 8          | 28     | 21                         | 3           | 1    | 3      | 54          |
+
+On the obstacle course every boost made lands (21 of 21). From spawn points round the map the bots get up onto each
+top: dm_snow 24 of 24, hl_pool_day 24 of 24, dam 24 of 24 (a fifth spawn point has no standing spot on the course);
+levels 6 of 15: from most of its spawn points the graph does not get to the upper floor the boosts take off from.
+Every node added up there is reached from the spawn points and back.
 
 ## Contracts
 

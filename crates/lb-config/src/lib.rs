@@ -10,6 +10,7 @@ pub mod chat_server;
 pub mod check;
 pub mod main_config;
 pub mod map_tests;
+pub mod moves;
 pub mod names;
 pub mod overlay;
 pub mod profiles;

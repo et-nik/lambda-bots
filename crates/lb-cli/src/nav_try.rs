@@ -100,7 +100,15 @@ pub fn run(bsp: &Path, args: &[&str]) -> Result<bool> {
     let (key, mut graph, mut source) = match kept {
         Some((key, g)) => (Some(key), g, "the server's graph".to_string()),
         None => {
-            let g = lb_navgen::generate(&mut world, &mech, &lb_navgen::GenOptions::default(), &map).graph;
+            let high_ground = install
+                .as_deref()
+                .map(|i| lb_navgen::mapload::high_ground(i, &map, world.bsp.fingerprint.1).0)
+                .unwrap_or_default();
+            let opts = lb_navgen::GenOptions {
+                high_ground,
+                ..lb_navgen::GenOptions::default()
+            };
+            let g = lb_navgen::generate(&mut world, &mech, &opts, &map).graph;
             (
                 None,
                 g,

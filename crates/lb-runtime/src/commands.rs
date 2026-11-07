@@ -1179,7 +1179,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
         out.push(format!(
             "  mind: {}; aggression {:.2} (own {:.2}), fear {:.2} (own {:.2}); goals taken: {}; {} goal changes ({} \
              before the hold ran out, {} with no fight in them), {} target changes; {} sounds seen about, {} covers, {} \
-             spots held, {} items waited for, {} traps; stood still {:.0}% of the time out of fights, {:.0}% in them{}",
+             spots held, got onto high ground {} times ({} climbs taken up in a fight), {} items waited for, {} traps; \
+             stood still {:.0}% of the time out of fights, {:.0}% in them{}",
             m.task.as_ref().map(|t| task_text(t, now)).unwrap_or_else(|| "-".into()),
             m.mood.aggression,
             own_aggr,
@@ -1193,6 +1194,8 @@ fn brain(rt: &Runtime, args: &[&str]) -> Vec<String> {
             ms.investigated,
             ms.covers,
             ms.camps,
+            ms.perches,
+            ms.perch_fights,
             ms.controlled,
             ms.traps,
             ms.still_shares()[0] * 100.0,
@@ -1424,6 +1427,8 @@ pub struct TrickTotals {
     gauss_jumps: u32,
     boosts: u32,
     boosts_fired: u32,
+    perches: u32,
+    perch_fights: u32,
 }
 
 impl TrickTotals {
@@ -1439,6 +1444,8 @@ impl TrickTotals {
         d.gauss_jumps = d.gauss_jumps.saturating_sub(base.gauss_jumps);
         d.boosts = d.boosts.saturating_sub(base.boosts);
         d.boosts_fired = d.boosts_fired.saturating_sub(base.boosts_fired);
+        d.perches = d.perches.saturating_sub(base.perches);
+        d.perch_fights = d.perch_fights.saturating_sub(base.perch_fights);
         d
     }
 
@@ -1453,13 +1460,15 @@ impl TrickTotals {
             .collect();
         format!(
             "  tricks landed/left the ground: {}; {} long jumps at enemies, {} to dodge, {} gauss jumps on the way \
-             found, {} gauss boosts started, {} fired",
+             found, {} gauss boosts started, {} fired; got onto high ground {} times ({} climbs taken up in a fight)",
             went.join(", "),
             self.leaps,
             self.dodges,
             self.gauss_jumps,
             self.boosts,
-            self.boosts_fired
+            self.boosts_fired,
+            self.perches,
+            self.perch_fights
         )
     }
 }
@@ -1497,6 +1506,8 @@ fn bot_tricks(b: &crate::manager::Bot) -> TrickTotals {
         gauss_jumps: s.gauss_jumps,
         boosts: s.boosts,
         boosts_fired: s.boosts_fired,
+        perches: b.brain.mind.stats.perches,
+        perch_fights: b.brain.mind.stats.perch_fights,
     }
 }
 
@@ -1520,6 +1531,8 @@ pub fn trick_totals(rt: &Runtime) -> TrickTotals {
         t.gauss_jumps += d.gauss_jumps;
         t.boosts += d.boosts;
         t.boosts_fired += d.boosts_fired;
+        t.perches += d.perches;
+        t.perch_fights += d.perch_fights;
     }
     t
 }

@@ -1,0 +1,70 @@
+# High ground nobody walks onto that players got up onto with gauss boosts on hl_pool_day, from recordings of
+# their games (`lb-cli demo moves`): counts only. The generator makes boosts onto the high ground climbed in
+# a trusted recording, or 5 times by 3 players at least.
+schema: lambdabots/moves@1
+map: hl_pool_day
+bsp_size: 853936
+source:
+  recordings: 12
+  minutes: 235.6
+high_ground:
+- seen: 16
+  players: 8
+  recordings: 9
+  ways:
+  - from: [-327.0, 365.0, 36.0]
+    to: [-328.0, 261.0, 228.0]
+    seen: 2
+  - from: [-337.0, 660.0, 36.0]
+    to: [-135.0, -57.0, 228.0]
+    seen: 2
+  - from: [145.0, 589.0, 36.0]
+    to: [-62.0, 764.0, 228.0]
+    seen: 2
+  - from: [-832.0, 241.0, -184.0]
+    to: [-706.0, 41.0, 228.0]
+    seen: 1
+  - from: [-383.0, 606.0, 36.0]
+    to: [-579.0, 750.0, 228.0]
+    seen: 1
+  - from: [-369.0, 382.0, 36.0]
+    to: [-550.0, 434.0, 228.0]
+    seen: 1
+  - from: [-396.0, 523.0, 36.0]
+    to: [-367.0, 797.0, 228.0]
+    seen: 1
+  - from: [157.0, 348.0, 36.0]
+    to: [52.0, 1133.0, 228.0]
+    seen: 1
+  - from: [70.0, -391.0, -184.0]
+    to: [67.0, -187.0, 228.0]
+    seen: 1
+  - from: [95.0, 424.0, 36.0]
+    to: [187.0, 751.0, 228.0]
+    seen: 1
+  - from: [164.0, 411.0, 36.0]
+    to: [273.0, 292.0, 228.0]
+    seen: 1
+  - from: [106.0, 406.0, 36.0]
+    to: [275.0, 975.0, 228.0]
+    seen: 1
+  - from: [459.0, 772.0, -184.0]
+    to: [366.0, 942.0, 228.0]
+    seen: 1
+- seen: 2
+  players: 2
+  recordings: 2
+  ways:
+  - from: [-383.0, 609.0, 36.0]
+    to: [209.0, 303.0, 116.0]
+    seen: 1
+  - from: [200.0, 294.0, 36.0]
+    to: [240.0, 440.0, 116.0]
+    seen: 1
+- seen: 2
+  players: 2
+  recordings: 2
+  ways:
+  - from: [173.0, 358.0, 36.0]
+    to: [224.0, 530.0, 200.0]
+    seen: 2

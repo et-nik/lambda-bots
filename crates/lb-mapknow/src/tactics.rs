@@ -4,8 +4,9 @@
 //!   through each node (flow);
 //! - how wide the way is at each node, how much traffic it sees far and near;
 //! - chokepoints: narrow places with much traffic;
-//! - spots to hold: overwatch (long sightlines over traffic, little in close) and ambush (out of the way, close to a
-//!   chokepoint), each with the directions worth watching;
+//! - spots to hold: overwatch (long sightlines over traffic, little in close), ambush (out of the way, close to a
+//!   chokepoint) and perches (high ground over traffic that only a gauss boost gets onto), each with the directions
+//!   worth watching;
 //! - walls to set tripmines on, the beam across a busy corridor or just behind a turn (yapb's
 //!   `checkCornerTripminePlant`), never near where players spawn.
 //! - lanes: straight stretches of level floor to lay a tripmine trail along at a run.
@@ -14,7 +15,7 @@ use std::time::Instant;
 
 use lb_bsp::{BspWorld, MapVis};
 use lb_core::{Vec2, Vec3, dmath};
-use lb_nav::{NavGraph, NodeFlags};
+use lb_nav::{LinkKind, NavGraph, NodeFlags};
 use lb_nav_api::{CampKind, CampSpot, Lane, MineSpot, NodeId};
 use lb_worldq::{HullKind, TraceQuery, contents};
 use rayon::prelude::*;
@@ -25,7 +26,7 @@ use crate::paths;
 use crate::vis::VisTable;
 
 /// Bump whenever the same graph and map would give other tactics.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Eye above the player origin, standing and crouched.
 const EYE_STAND: f32 = 28.0;
@@ -50,6 +51,13 @@ const WATCH_FROM: f32 = 400.0;
 const AMBUSH_RANGE: [f32; 2] = [150.0, 650.0];
 const AMBUSH_SPACING: f32 = 256.0;
 const CAMPS: usize = 12;
+/// A perch overlooks traffic this far off at most and this much lower at least, as much of it as this share of the
+/// most any node of the map sees within that reach at least.
+const PERCH_REACH: f32 = 1500.0;
+const PERCH_ABOVE: f32 = 64.0;
+const PERCH_SIGHT: f32 = 0.15;
+const PERCH_SPACING: f32 = 256.0;
+const PERCHES: usize = 8;
 /// No spots to hold or mine this close to where players spawn.
 const SPAWN_CLEAR: f32 = 256.0;
 /// A tripmine's beam this high above the floor trips standing and crouching players alike.
@@ -244,6 +252,11 @@ impl MapTactics {
         t.chokes = t.find_chokes();
         t.camps = t.overwatch(&near_spawn);
         t.camps.extend(t.ambushes(&near_spawn));
+        let starts: Vec<NodeId> = spawns
+            .iter()
+            .filter_map(|p| t.grid.nearest(&t.origins, *p, 256.0, |i| !t.transit[i as usize]))
+            .collect();
+        t.camps.extend(t.perches(graph, &starts));
         let floors: Vec<f32> = (0..n)
             .map(|i| t.origins[i].z - if crouch[i] { FLOOR_CROUCH } else { FLOOR_STAND })
             .collect();
@@ -417,6 +430,97 @@ impl MapTactics {
             if out.len() < CAMPS && out.iter().all(|o| o.pos.distance(c.pos) >= AMBUSH_SPACING) {
                 out.push(c);
             }
+        }
+        let top = out.first().map_or(1.0, |c| c.score.max(1e-6));
+        for c in &mut out {
+            c.score /= top;
+        }
+        out
+    }
+
+    /// Perches: floors a gauss boost gets onto from where players go on foot (from `starts`, their spawn nodes) and
+    /// nothing else does, left by a drop or another plain way, overlooking traffic below; the best spread apart.
+    fn perches(&self, graph: &NavGraph, starts: &[NodeId]) -> Vec<CampSpot> {
+        let n = self.origins.len();
+        let reach = |from: &[NodeId], boosts: bool| {
+            let mut seen = vec![false; n];
+            for &s in from {
+                seen[s as usize] = true;
+            }
+            let mut stack = from.to_vec();
+            while let Some(a) = stack.pop() {
+                for l in graph.links(a) {
+                    let go = l.plain() || (boosts && l.valid() && l.kind == LinkKind::GaussBoost);
+                    if go && !seen[l.to as usize] {
+                        seen[l.to as usize] = true;
+                        stack.push(l.to);
+                    }
+                }
+            }
+            seen
+        };
+        let walked = reach(starts, false);
+        let mut stack: Vec<NodeId> = (0..n as NodeId).filter(|&i| walked[i as usize]).collect();
+        let boosted = reach(&stack, true);
+        let mut into: Vec<Vec<NodeId>> = vec![Vec::new(); n];
+        for a in 0..n as NodeId {
+            for l in graph.links(a).iter().filter(|l| l.plain()) {
+                into[l.to as usize].push(a);
+            }
+        }
+        let mut back = walked.clone();
+        while let Some(b) = stack.pop() {
+            for &a in &into[b as usize] {
+                if !back[a as usize] {
+                    back[a as usize] = true;
+                    stack.push(a);
+                }
+            }
+        }
+        let traffic = |i: usize, below: bool| -> f32 {
+            let o = self.origins[i];
+            self.vis
+                .seen_from(i as NodeId)
+                .filter(|&m| {
+                    let p = self.origins[m as usize];
+                    p.distance(o) <= PERCH_REACH && (!below || p.z <= o.z - PERCH_ABOVE)
+                })
+                .map(|m| self.flow[m as usize])
+                .sum()
+        };
+        let mut cands: Vec<(usize, f32)> = (0..n)
+            .filter(|&i| boosted[i] && !walked[i] && back[i] && !self.transit[i])
+            .map(|i| (i, traffic(i, true)))
+            .collect();
+        if cands.is_empty() {
+            return Vec::new();
+        }
+        let most = (0..n)
+            .filter(|&i| !self.transit[i])
+            .map(|i| traffic(i, false))
+            .fold(1e-6, f32::max);
+        cands.retain(|c| c.1 >= PERCH_SIGHT * most);
+        cands.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut out: Vec<CampSpot> = Vec::new();
+        for (i, score) in cands {
+            if out.len() == PERCHES {
+                break;
+            }
+            let p = self.origins[i];
+            if out.iter().any(|c| c.pos.distance(p) < PERCH_SPACING) {
+                continue;
+            }
+            let (watch, pitch, range) = self.watch_from(i as NodeId);
+            out.push(CampSpot {
+                node: i as NodeId,
+                pos: p,
+                kind: CampKind::Perch,
+                watch,
+                pitch,
+                range,
+                score,
+                guards: None,
+            });
         }
         let top = out.first().map_or(1.0, |c| c.score.max(1e-6));
         for c in &mut out {
@@ -728,6 +832,80 @@ mod tests {
         let (a, b) = (t(&mut made), t(&mut read));
         assert_eq!(a.stats.pairs, b.stats.pairs);
         assert_eq!(a.vis, b.vis);
+    }
+
+    /// High ground over a busy floor that only a gauss boost gets onto, with a drop back down, is a perch: not when a
+    /// ladder leads up there too, nor when nothing leads back down.
+    #[test]
+    fn perches_are_high_ground_only_a_boost_gets_onto() {
+        use lb_nav::graph::{GraphStats, LinkFlags, NavLink, NavNode};
+        let floor = 6;
+        let mut origins: Vec<Vec3> = (0..floor).map(|i| Vec3::new(i as f32 * 128.0, 0.0, 0.0)).collect();
+        origins.push(Vec3::new(256.0, 300.0, 192.0));
+        origins.push(Vec3::new(512.0, 300.0, 192.0));
+        let n = origins.len();
+        let link = |to: usize, kind: LinkKind| NavLink {
+            to: to as NodeId,
+            kind,
+            length: 128.0,
+            flags: LinkFlags::VALID,
+            cost: 0.5,
+            spec: lb_nav::graph::NO_SPEC,
+        };
+        let graph = |up: LinkKind, down: bool| {
+            let mut out: Vec<Vec<NavLink>> = vec![Vec::new(); n];
+            for (i, o) in out.iter_mut().enumerate().take(floor) {
+                if i > 0 {
+                    o.push(link(i - 1, LinkKind::Walk));
+                }
+                if i + 1 < floor {
+                    o.push(link(i + 1, LinkKind::Walk));
+                }
+            }
+            out[6].push(link(7, LinkKind::Walk));
+            out[7].push(link(6, LinkKind::Walk));
+            out[1].push(link(6, up));
+            if down {
+                out[7].push(link(5, LinkKind::Drop));
+            }
+            let nodes = origins
+                .iter()
+                .map(|&origin| NavNode {
+                    origin,
+                    flags: NodeFlags::empty(),
+                    radius: 16.0,
+                    support: 0,
+                    first_link: 0,
+                    link_count: 0,
+                })
+                .collect();
+            NavGraph::from_parts(nodes, out, Vec::new(), "test", GraphStats::default())
+        };
+        let (vis, _) = VisTable::build(&origins, &|_, _| true, &|_, _| true);
+        let t = MapTactics {
+            origins: origins.clone(),
+            transit: vec![false; n],
+            vis,
+            flow: (0..n).map(|i| if i < floor { 0.5 } else { 0.0 }).collect(),
+            spots: vec![SpotStats::default(); n],
+            ..MapTactics::default()
+        };
+        let perches = t.perches(&graph(LinkKind::GaussBoost, true), &[0]);
+        assert_eq!(perches.len(), 2, "{perches:?}");
+        assert!(
+            perches
+                .iter()
+                .all(|c| c.kind == CampKind::Perch && c.node >= 6 && c.pitch > 0.0),
+            "{perches:?}"
+        );
+        assert!(
+            t.perches(&graph(LinkKind::Ladder, true), &[0]).is_empty(),
+            "a ladder leads up"
+        );
+        assert!(
+            t.perches(&graph(LinkKind::GaussBoost, false), &[0]).is_empty(),
+            "no way back down"
+        );
     }
 
     /// Lanes run where a player laid tripmine trails on crossfire on the stand: across the yard and along its edges,

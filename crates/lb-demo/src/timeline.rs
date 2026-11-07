@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use crate::Error;
 use crate::delta::Layout;
 use crate::file::{DemoFile, FrameData};
-use crate::net::{Decoder, Entity, Msg, Stats};
+use crate::net::{Decoder, Entity, Event, Msg, Stats};
 
 /// `EF_NODRAW`: the entity is not drawn (an item taken and waiting to come back, a dead player gone).
 pub const EF_NODRAW: i32 = 128;
@@ -519,6 +519,18 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Recording>, Error> {
                     });
                 }
                 FrameData::ConsoleCommand(c) => b.rec.console.push((time, c)),
+                // An event the recording client played itself, its own weapon's: the server sends it no event for
+                // its own shots (`FEV_NOTHOST`), the client predicts them.
+                FrameData::Event { index, delay, args, .. } if segment.kind != 0 => {
+                    let entity = if args.entindex > 0 { args.entindex } else { -1 };
+                    let event = Event {
+                        index: index as u16,
+                        entity,
+                        args,
+                        delay,
+                    };
+                    apply(&mut b, &dec, time, Msg::Event(event));
+                }
                 _ => {}
             }
         }
@@ -624,5 +636,58 @@ fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file::{DEMO_PROTOCOL, ENTRY_SIZE, HEADER_SIZE};
+
+    /// A demo of one playback segment holding `frames` (each: type, time, number, data).
+    fn demo(frames: &[(u8, f32, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (n, &(kind, time, data)) in frames.iter().enumerate() {
+            body.push(kind);
+            body.extend_from_slice(&time.to_le_bytes());
+            body.extend_from_slice(&(n as i32).to_le_bytes());
+            body.extend_from_slice(data);
+        }
+        let start = HEADER_SIZE + 4 + ENTRY_SIZE;
+        let mut b = vec![0u8; HEADER_SIZE];
+        b[..8].copy_from_slice(b"HLDEMO\0\0");
+        b[8..12].copy_from_slice(&DEMO_PROTOCOL.to_le_bytes());
+        b[12..16].copy_from_slice(&48i32.to_le_bytes());
+        b[16..23].copy_from_slice(b"dm_test");
+        b[540..544].copy_from_slice(&(HEADER_SIZE as i32).to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        let mut e = vec![0u8; ENTRY_SIZE];
+        e[..4].copy_from_slice(&1i32.to_le_bytes());
+        e[4..12].copy_from_slice(b"Playback");
+        e[84..88].copy_from_slice(&(start as i32).to_le_bytes());
+        e[88..92].copy_from_slice(&(body.len() as i32).to_le_bytes());
+        b.extend_from_slice(&e);
+        b.extend_from_slice(&body);
+        b
+    }
+
+    #[test]
+    fn the_recording_players_own_shots_come_from_the_events_its_client_played() {
+        let mut event = Vec::new();
+        event.extend_from_slice(&0i32.to_le_bytes());
+        event.extend_from_slice(&7i32.to_le_bytes());
+        event.extend_from_slice(&0.1f32.to_le_bytes());
+        let mut args = [0u8; 72];
+        args[4..8].copy_from_slice(&1i32.to_le_bytes());
+        args[8..12].copy_from_slice(&64.0f32.to_le_bytes());
+        args[68..72].copy_from_slice(&1i32.to_le_bytes());
+        event.extend_from_slice(&args);
+        let recordings = read(&demo(&[(6, 12.5, &event), (5, 13.0, &[])])).unwrap();
+        let shots = &recordings[0].shots;
+        assert_eq!(shots.len(), 1);
+        let s = &shots[0];
+        assert_eq!((s.event.as_str(), s.entity), ("#7", 1));
+        assert!((s.time - 12.6).abs() < 1e-4, "{}", s.time);
+        assert_eq!((s.origin[0], s.bparam1, s.bparam2), (64.0, 0, 1));
     }
 }

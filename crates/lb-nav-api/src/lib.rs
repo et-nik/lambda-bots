@@ -24,6 +24,9 @@ pub enum CampKind {
     Overwatch,
     /// Out of the way, close to a chokepoint players come through.
     Ambush,
+    /// High ground over the ways players take that only a gauss boost gets onto: players below cannot follow on
+    /// foot, and the way down is a drop.
+    Perch,
 }
 
 impl CampKind {
@@ -31,6 +34,7 @@ impl CampKind {
         match self {
             CampKind::Overwatch => "overwatch",
             CampKind::Ambush => "ambush",
+            CampKind::Perch => "perch",
         }
     }
 }

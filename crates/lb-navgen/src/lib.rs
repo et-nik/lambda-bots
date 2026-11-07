@@ -6,6 +6,7 @@
 
 pub mod build;
 pub mod cache;
+pub mod climbs;
 pub mod field;
 pub mod mapload;
 pub mod patch;

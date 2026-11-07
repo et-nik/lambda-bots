@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 
 use lb_bsp::BspWorld;
 use lb_bsp::mech::Mechanisms;
+use lb_config::moves::MovesFile;
 use lb_config::overlay::{OverlayFile, Patch};
 use lb_nav::NavGraph;
 use lb_nav::store::GraphKey;
 
 use crate::cache::{GENERATOR, GraphCache};
+use crate::climbs::{HighGround, to_make};
 
 /// A map's overlay files under `maps/<map>/`, in the order they apply: the editors', then the hand-written one.
 pub const OVERLAYS: [&str; 2] = ["editor.yaml", "overlay.yaml"];
@@ -52,6 +54,48 @@ pub fn read_overlay_files(install: &Path, map: &str, bsp_size: u64) -> Vec<(&'st
             }
         })
         .collect()
+}
+
+/// `maps/<map>/moves.yaml`: how players were seen to get about the map (`lb-cli demo moves`), which the generator
+/// makes gauss boosts onto high ground from.
+pub const MOVES: &str = "moves.yaml";
+
+/// The high ground the generator makes gauss boosts onto on `map`: that of its `moves.yaml` climbed often enough
+/// (`climbs::to_make`), with what came of the file for the log. None without the file, or when it does not read or is
+/// for another build of the map.
+pub fn high_ground(install: &Path, map: &str, bsp_size: u64) -> (Vec<HighGround>, Option<String>) {
+    high_ground_in(&overlay_path(install, map, MOVES), map, bsp_size)
+}
+
+/// `high_ground` of the moves file at `path`.
+pub fn high_ground_in(path: &Path, map: &str, bsp_size: u64) -> (Vec<HighGround>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (Vec::new(), None);
+    };
+    match MovesFile::parse(&text, &path.display().to_string()) {
+        Ok(f) if f.bsp_size.is_some_and(|s| s != bsp_size) => {
+            let made = f.bsp_size.unwrap_or(0);
+            let note = format!(
+                "{}: seen on a {made}-byte {map}.bsp, this one has {bsp_size} bytes; not used",
+                path.display()
+            );
+            (Vec::new(), Some(note))
+        }
+        Ok(f) => {
+            let made = to_make(&f);
+            let note = format!(
+                "{}: boosts onto {} of the {} places up high players got onto, climbed often enough (from {} \
+                 recordings, {} trusted)",
+                path.display(),
+                made.len(),
+                f.high_ground.len(),
+                f.source.recordings,
+                f.source.trusted
+            );
+            (made, Some(note))
+        }
+        Err(e) => (Vec::new(), Some(format!("{e}; not used"))),
+    }
 }
 
 /// Leaves the world as the generator does: push fields found, movers and breakables where the map starts them.

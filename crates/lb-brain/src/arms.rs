@@ -1959,16 +1959,19 @@ impl BotBrain {
                 seen.or_else(|| through.map(|(p, _)| (p.distance(body.eye), on_target(self.motor.view, body.eye, p))));
             let expected = matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::Hunt(_))) || through.is_some();
             let fired = self.mind.arms.gauss.fired;
+            // On its way up to a perch the bot shoots plain: a charged shot's throw would knock it off the way to the
+            // takeoff, and the boost would wait for the gun.
+            let climbing = self.mind.perch_way;
             let input = GaussInput {
                 target,
                 expected,
-                precharge: ch.skill.gauss_precharge,
+                precharge: if climbing { 0.0 } else { ch.skill.gauss_precharge },
                 recoil_room: self.mind.arms.recoil_room,
                 wall_ahead: self.gauss_wall(body, nav),
                 full_damage: body.damages.gauss_charged,
                 heading: body.velocity.truncate().normalize_or_zero(),
                 allowed: body.allows(WeaponId::Gauss),
-                charge_share: ch.skill.gauss_charge,
+                charge_share: if climbing { 0.0 } else { ch.skill.gauss_charge },
                 dump: self.safe_dump(body, nav),
                 backfire: self.mind.arms.gauss_wall.map_or(0.0, |w| w.2),
                 min_damage: through.map_or(0.0, |(_, need)| need),

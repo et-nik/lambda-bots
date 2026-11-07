@@ -160,3 +160,64 @@ fn chargers_can_be_used() {
     }
     assert!(missing.is_empty(), "chargers without a spot: {missing:?}");
 }
+
+/// dm_snow's pillar tops are high ground nobody walks onto: the graph has no node up there, unless players were seen
+/// to get up with a gauss boost; then it has nodes up there, the boost, and ways back down. A way up onto floor
+/// reached on foot is left out.
+#[test]
+fn high_ground_players_climb_onto_gets_a_gauss_boost() {
+    use lb_core::Vec3;
+    use lb_navgen::climbs::{Climb, HighGround};
+    let Some(dir) = lb_bsp::test_maps_dir() else { return };
+    let Ok(bsp) = std::fs::read(dir.join("dm_snow.bsp")) else {
+        return;
+    };
+    let top = Vec3::new(900.0, 500.0, -60.0);
+    let make = |high_ground: Vec<HighGround>| {
+        let mut world = BspWorld::load(&bsp).unwrap();
+        let mech = Mechanisms::from_world(&world);
+        let opts = GenOptions {
+            high_ground,
+            ..GenOptions::default()
+        };
+        generate(&mut world, &mech, &opts, "dm_snow")
+    };
+    let up_there = |g: &lb_nav::NavGraph| {
+        (0..g.len() as u32)
+            .filter(|&n| {
+                let o = g.node(n).origin;
+                o.truncate().distance(top.truncate()) < 128.0 && (o.z - top.z).abs() < 8.0
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let plain = make(Vec::new());
+    assert!(up_there(&plain.graph).is_empty());
+    assert_eq!(plain.climbs, (0, 0));
+
+    let ways = vec![
+        Climb {
+            from: Vec3::new(1050.0, 250.0, -252.0),
+            to: top,
+        },
+        Climb {
+            from: Vec3::new(1050.0, 250.0, -252.0),
+            to: Vec3::new(1050.0, 100.0, -252.0),
+        },
+    ];
+    let climbed = make(vec![HighGround { ways }]);
+    let g = &climbed.graph;
+    let nodes = up_there(g);
+    assert!(!nodes.is_empty(), "no node on the top");
+    let boosts: Vec<(u32, u32)> = (0..g.len() as u32)
+        .flat_map(|a| g.links(a).iter().map(move |l| (a, l)))
+        .filter(|(_, l)| l.kind == lb_nav::LinkKind::GaussBoost)
+        .map(|(a, l)| (a, l.to))
+        .collect();
+    assert_eq!(boosts.len(), 1, "{boosts:?}");
+    assert!(nodes.contains(&boosts[0].1), "the boost lands on the top");
+    assert!(g.node(boosts[0].0).origin.z < -200.0, "it takes off from the floor");
+    assert_eq!(climbed.climbs, (1, 1), "the way onto the floor is left out");
+    let c = report::coverage(&climbed);
+    assert_eq!(c.roundtrip, c.nodes, "every node up there leads back down");
+}

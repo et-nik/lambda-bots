@@ -5,10 +5,10 @@
 use crate::Error;
 use crate::bits::latin1;
 
-const HEADER_SIZE: usize = 544;
-const ENTRY_SIZE: usize = 92;
+pub(crate) const HEADER_SIZE: usize = 544;
+pub(crate) const ENTRY_SIZE: usize = 92;
 const MAX_ENTRIES: usize = 1024;
-const DEMO_PROTOCOL: i32 = 5;
+pub(crate) const DEMO_PROTOCOL: i32 = 5;
 const PATH_SIZE: usize = 260;
 /// `demo_info_t`: the client's `ref_params_t`, the last `usercmd_t`, `movevars_t`, view and view model.
 const DEMO_INFO_SIZE: usize = 436;

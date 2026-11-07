@@ -900,6 +900,7 @@ dependencies = [
  "lb-runtime",
  "lb-testkit",
  "lb-worldq",
+ "rayon",
  "rustc-hash",
  "serde_json",
 ]

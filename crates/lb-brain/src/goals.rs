@@ -52,6 +52,15 @@ pub(crate) const FOND: f32 = 1.5;
 const CAMP_LOOK: [f32; 2] = [1.5, 4.0];
 const CAMP_REST: [f32; 2] = [50.0, 70.0];
 const FOND_CAMP_REST: [f32; 2] = [15.0, 25.0];
+/// High ground is held this long, and taken again no sooner than this after (players on dm_snow's pillars stay 1.4–10
+/// s, 3.3 s half the time, and go up again about every 40 s they hold the gauss).
+const PERCH_FOR: [f32; 2] = [4.0, 12.0];
+const PERCH_REST: [f32; 2] = [20.0, 35.0];
+/// The bot is still on the high ground it got onto while it is on its level this near the spot; it got onto it once
+/// it stands on its level this near.
+const PERCHED_AREA: f32 = 700.0;
+const PERCHED_LEVEL: f32 = 48.0;
+const PERCH_LANDED: f32 = 128.0;
 pub(crate) const TRAP_REST: [f32; 2] = [20.0, 30.0];
 pub(crate) const FOND_TRAP_REST: [f32; 2] = [10.0, 18.0];
 /// After a trap given up; on the tripmine level, where mines are all the bot has, this long.
@@ -95,9 +104,10 @@ pub enum Task {
         at: SimTime,
         arrived: bool,
     },
-    /// Holding a spot until `until` (set on arrival), looking one way or the other.
+    /// Holding a spot until `until` (set on arrival), looking one way or the other; a perch is high ground.
     Camp {
         spot: u16,
+        perch: bool,
         until: Option<SimTime>,
         look: usize,
         next_look: SimTime,
@@ -131,6 +141,12 @@ impl Task {
             Task::Investigate { .. } => "investigate",
             Task::Hide { arrived: true, .. } => "hide, there",
             Task::Hide { .. } => "hide, on the way",
+            Task::Camp {
+                perch: true,
+                until: Some(_),
+                ..
+            } => "perch, holding",
+            Task::Camp { perch: true, .. } => "perch, on the way",
             Task::Camp { until: Some(_), .. } => "camp, holding",
             Task::Camp { .. } => "camp, on the way",
             Task::Control { waited: true, .. } => "control, waiting",
@@ -169,6 +185,23 @@ fn watch_spot(map: &dyn MapView, spot: Vec3, me: Vec3) -> Option<Vec3> {
 
 pub(crate) fn at_spot(body: &Body, p: Vec3) -> bool {
     (body.origin - p).truncate().length() <= AT_SPOT && (body.origin.z - p.z).abs() <= 48.0
+}
+
+/// A bot at `origin` is still on the high ground of the perch at `spot` it got onto.
+pub(crate) fn still_perched(spot: Vec3, origin: Vec3) -> bool {
+    (origin - spot).truncate().length() <= PERCHED_AREA && (origin.z - spot.z).abs() <= PERCHED_LEVEL
+}
+
+/// The perch a bot at `origin` stands by on its high ground, however it got up there.
+pub(crate) fn perch_at(map: &dyn MapView, origin: Vec3) -> Option<Vec3> {
+    map.camp_spots()
+        .iter()
+        .find(|c| {
+            c.kind == CampKind::Perch
+                && (origin - c.pos).truncate().length() <= PERCH_LANDED
+                && (origin.z - c.pos.z).abs() <= PERCHED_LEVEL
+        })
+        .map(|c| c.pos)
 }
 
 /// Seconds of running the places are looked for within, around the bot.
@@ -536,6 +569,7 @@ impl BotBrain {
         if !matches!(self.mind.task, Some(Task::Camp { spot: s, .. }) if s == i) {
             self.mind.task = Some(Task::Camp {
                 spot: i,
+                perch: spot.kind == CampKind::Perch,
                 until: None,
                 look: 0,
                 next_look: now,
@@ -558,7 +592,14 @@ impl BotBrain {
                         let (range, fond) = match spot.kind {
                             CampKind::Overwatch => (CAMP_FOR, ch.affinity.camp >= FOND),
                             CampKind::Ambush => (AMBUSH_FOR, ch.affinity.ambush >= FOND),
+                            CampKind::Perch => (PERCH_FOR, false),
                         };
+                        if spot.kind == CampKind::Perch {
+                            if self.mind.perched.is_none() {
+                                self.mind.stats.perches += 1;
+                            }
+                            self.mind.perched = Some(spot.pos);
+                        }
                         let secs = rng.decision.range_f32(range[0], range[1]) * if fond { 1.5 } else { 1.0 };
                         let u = now + f64::from(secs);
                         if let Some(Task::Camp { until, .. }) = self.mind.task.as_mut() {
@@ -906,11 +947,20 @@ impl BotBrain {
     /// over has set its own rest, its task done).
     pub(crate) fn left_goal(&mut self, old: GoalKind, ch: &Character, now: SimTime, rng: &mut BotRng) {
         match old {
-            GoalKind::Camp(_) => {
-                let fond = ch.affinity.camp.max(ch.affinity.ambush) >= FOND;
-                let rest = if fond { FOND_CAMP_REST } else { CAMP_REST };
-                self.mind.camp_rest_until = now + f64::from(rng.decision.range_f32(rest[0], rest[1]));
-            }
+            GoalKind::Camp(_) => match self.mind.task {
+                // Called off up there for a fight, the high ground is held again after it.
+                Some(Task::Camp { perch: true, until, .. }) => {
+                    if until.is_none_or(|u| now >= u) || self.mind.perched.is_none() {
+                        let rest = f64::from(rng.decision.range_f32(PERCH_REST[0], PERCH_REST[1]));
+                        self.mind.perch_rest_until = now + rest;
+                    }
+                }
+                _ => {
+                    let fond = ch.affinity.camp.max(ch.affinity.ambush) >= FOND;
+                    let rest = if fond { FOND_CAMP_REST } else { CAMP_REST };
+                    self.mind.camp_rest_until = now + f64::from(rng.decision.range_f32(rest[0], rest[1]));
+                }
+            },
             GoalKind::PlantTrap(trap) => {
                 let mines_level = self.mind.kit == Some(lb_game::gungame::Kit::Mines);
                 if self.mind.task.is_some() {

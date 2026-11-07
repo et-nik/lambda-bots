@@ -648,6 +648,48 @@ much as before, and none killed its thrower.
   rocket flies.
 - Most of what is left of "not fought" is reloading with every gun empty.
 
+## High ground by a gauss boost (feedback, 2026-11-07)
+
+The owner asked for bots to gauss-jump onto dm_snow's raised area, its pillar tops, more often. In the archive's
+GunGame demos of dm_snow players spent 1.4% of their time alive up there and bots none; up there players killed 7.2 a
+minute and died 1.2 times (4.6 and 4.7 on the floor). Two things kept the bots down: the generated graph has no places
+up there (there is no way up on foot, and the generator makes no boosts), so only an overlay with boost links (the
+stand's) puts them in; and nothing gave a bot a reason to go, the tops being no spot to hold. Players mostly went up
+in a fight: in 22 of 29 boosts onto a pillar another player was in plain sight in front of them in the 2 s before.
+
+The map's tactics now mark perches (high ground only a boost gets onto, over traffic below), and a bot that can boost
+takes one calm or in a fight (`docs/behavior.md`, *Holding spots*).
+
+**On the stand** (dm_snow with its overlay, six bots with the gauss alone, 5 minutes each):
+
+| Version                             | Climbs started in a fight | Got onto high ground | Boosts started, fired | Pushed off the takeoff | Kills |
+|-------------------------------------|---------------------------|----------------------|-----------------------|------------------------|-------|
+| perches held calm only              | —                         | 1                    | 2, 2                  | 0                      | 127   |
+| and climbs in a fight               | 71                        | 26                   | 28, 20                | 36                     | 125   |
+| and plain gauss shots on the way up | 54                        | 31                   | 30, 23                | 0                      | 136   |
+
+A bot that charged the gauss at an enemy while it waited at the takeoff threw itself off it with the shot: on the way
+up it now shoots plain. In the last run 21 of the 22 boosts along links landed where they should. That is about one
+climb a minute for a bot, against one about every 40 s a player held the gauss.
+
+**Made by the generator** (the same day): the places up there and the boosts onto them now come from the map's moves
+file, taken from the archive's demos (`docs/navigation.md`, *High ground players climb onto*). On dm_snow two of the
+four pillars were climbed often enough (6 and 5 times, by 4 players each, in 9 recordings; the other two 3 and 2
+times): the graph gets 57 nodes up there and 6 boosts onto them, all of which the course's bots fly. On the stand
+without the overlay (the same six bots, 5 minutes):
+
+| Version                          | Climbs started in a fight | Got onto high ground | Boosts started, fired | Pushed off the takeoff | Boost links landed | Kills |
+|----------------------------------|---------------------------|----------------------|-----------------------|------------------------|--------------------|-------|
+| the overlay (all four pillars)   | 54                        | 31                   | 30, 23                | 0                      | 21 of 22           | 136   |
+| generated from the demos (two)   | 68                        | 48                   | 53, 37                | 4                      | 36 of 36           | 121   |
+
+The generated boosts take off where players did, three onto each pillar from different sides, so a bot finds one on
+its way more often. No bot killed itself. Kills: 121, against 125–136 in the runs with the overlay (a build ran on the
+same machine for the first minute and a half of this one).
+
+Left: the other two pillars, until the archive shows them climbed often enough (the moves file is made again from
+all the recordings).
+
 ## The 60-minute run
 
 Eight bots of the normal preset, the map's weapons, 1000 fps, a map change every 12 minutes: crossfire, stalkyard,

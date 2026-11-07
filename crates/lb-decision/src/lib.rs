@@ -29,7 +29,7 @@ use lb_game::mechanics::{WeaponClass, carry_max, spec};
 use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{Beliefs, Chargers, HypothesisKind, ItemState, Items, PlayerKey, Relation, TrackState};
-use lb_nav_api::{CampKind, MapView};
+use lb_nav_api::{CampKind, CampSpot, MapView};
 use lb_styles::GoalAffinity;
 use smallvec::SmallVec;
 
@@ -120,6 +120,16 @@ pub struct Situation<'a> {
     /// Holding a spot and laying a trap are allowed again (their rests are over).
     pub camp_ready: bool,
     pub trap_ready: bool,
+    /// How much the bot likes high ground a gauss boost gets onto (perches), 0..1: none when its skill does no tricks;
+    /// whether taking one is allowed again (its rest is over).
+    pub perch_like: f32,
+    pub perch_ready: bool,
+    /// A gauss boost can be made now: the gun, its uranium, the health (an enemy about or not).
+    pub can_boost: bool,
+    /// The bot stands on the high ground of a perch it got onto: the perches about it are held without a boost.
+    pub perched: bool,
+    /// The bot takes the high ground in a fight now (its style's roll, every few seconds).
+    pub perch_fight: bool,
     /// The trap followed now is under way: its mine being laid, or its satchels thrown and watched.
     pub trap_under_way: bool,
     /// Mines the bot knows of, its own and seen ones: no trap next to one; and how many of them are its own.
@@ -202,6 +212,17 @@ const CAMP_RANGE: f32 = 2500.0;
 const CAMP_CALM: f64 = 3.0;
 const TRAP_CALM: f64 = 5.0;
 const CAMP_HEALTH: f32 = 50.0;
+/// Calm this long before a boost up to a perch (a boost needs two seconds itself); a perched bot holds the perches
+/// this near on its own level.
+const PERCH_CALM: f64 = 2.0;
+const PERCH_AREA: f32 = 700.0;
+const PERCH_LEVEL: f32 = 48.0;
+/// In a fight a perch is taken this near (seconds the straight way), the enemy no nearer than `PERCH_FIGHT_NEAR`
+/// (turning away to boost in close would be the end of the bot); one on the way goes on until the enemy comes within
+/// `PERCH_KEEP_NEAR`.
+const PERCH_FIGHT_ETA: f32 = 3.0;
+const PERCH_FIGHT_NEAR: f32 = 300.0;
+const PERCH_KEEP_NEAR: f32 = 150.0;
 const CONTROL_THRESHOLD: f32 = 0.2;
 /// An item waited for that is back is taken from this close.
 const CONTROL_TAKE: f32 = 500.0;
@@ -405,17 +426,34 @@ fn investigations(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
     out.extend(best.into_iter().take(3));
 }
 
-fn camps(s: &Situation<'_>, out: &mut Vec<Goal>) {
+fn camps(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Goal>) {
     let Some(map) = s.map else { return };
     // On the tripmine level the glock hurts nobody: no spot is held with it.
-    if !s.camp_ready || !s.calm(CAMP_CALM) || s.health < CAMP_HEALTH || s.kit() == Some(Kit::Mines) {
+    if s.health < CAMP_HEALTH || s.kit() == Some(Kit::Mines) {
         return;
     }
+    let camp = s.camp_ready && s.calm(CAMP_CALM);
+    let perch = s.perch_ready && s.perch_like > 0.0 && s.calm(PERCH_CALM);
+    if !camp && !perch {
+        return;
+    }
+    let up_here = |p: Vec3| {
+        s.perched && (p.z - s.origin.z).abs() <= PERCH_LEVEL && (p - s.origin).truncate().length() <= PERCH_AREA
+    };
+    let open = |c: &CampSpot| match c.kind {
+        CampKind::Perch => perch && (s.can_boost || up_here(c.pos)),
+        CampKind::Overwatch | CampKind::Ambush => camp,
+    };
+    // One on the way up is `fight_perch`'s.
+    let on_the_way = |i: usize| !s.perched && current == Some(GoalKind::Camp(i as u16));
+    // Any gun does better from above; getting up there takes the gauss all the same.
     let suit = |kind: CampKind| match kind {
         CampKind::Overwatch if s.armed_with(&LONG_GUNS) => 1.0,
         CampKind::Overwatch if s.armed_with(&[WeaponId::Mp5]) => 0.4,
         CampKind::Ambush if s.armed_with(&CLOSE_GUNS) => 1.0,
         CampKind::Ambush if s.armed_with(&[WeaponId::Glock, WeaponId::Hornetgun]) => 0.4,
+        CampKind::Perch if s.armed_with(&LONG_GUNS) => 1.0,
+        CampKind::Perch if s.armed_with(&CLOSE_GUNS) || s.armed_with(&[WeaponId::Glock, WeaponId::Hornetgun]) => 0.6,
         _ => 0.0,
     };
     let aggr = s.aggression.clamp(0.0, 1.0);
@@ -423,14 +461,18 @@ fn camps(s: &Situation<'_>, out: &mut Vec<Goal>) {
         .camp_spots()
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.pos.distance(s.origin) <= CAMP_RANGE)
+        .filter(|&(i, c)| {
+            c.pos.distance(s.origin) <= CAMP_RANGE && open(c) && !(c.kind == CampKind::Perch && on_the_way(i))
+        })
         .map(|(i, c)| {
-            let like = match c.kind {
-                CampKind::Overwatch => s.affinity.camp,
-                CampKind::Ambush => s.affinity.ambush,
+            // Taking the high ground is no less bold than closing in: aggression does not hold it back.
+            let (like, holds_back) = match c.kind {
+                CampKind::Overwatch => (s.affinity.camp, 1.1 - aggr),
+                CampKind::Ambush => (s.affinity.ambush, 1.1 - aggr),
+                CampKind::Perch => (s.perch_like, 1.0),
             };
             let eta = s.eta(c.pos);
-            let w = like * c.score * (1.1 - aggr) * suit(c.kind) * dmath::exp(-eta / 12.0);
+            let w = like * c.score * holds_back * suit(c.kind) * dmath::exp(-eta / 12.0);
             (i, w, eta)
         })
         .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)));
@@ -443,6 +485,52 @@ fn camps(s: &Situation<'_>, out: &mut Vec<Goal>) {
             weight: w.min(1.0),
             hold: 1.5 * eta + 8.0,
         });
+    }
+}
+
+/// Taking the high ground in a fight, as players do: a perch close by, a boost possible, the enemy (`enemy`, the one
+/// fought) not in close. Rank 3: it takes over from the fight at once. One on the way goes on while the bot can boost,
+/// a fight or none (so does one taken up calm); up there the fight goes on as `engage`.
+fn fight_perch(s: &Situation<'_>, current: Option<GoalKind>, enemy: Option<Vec3>, out: &mut Vec<Goal>) {
+    let Some(map) = s.map else { return };
+    if !s.can_boost || s.perched || s.health < CAMP_HEALTH || s.kit() == Some(Kit::Mines) {
+        return;
+    }
+    let near = enemy.map_or(f32::INFINITY, |e| e.distance(s.origin));
+    let goal = |i: usize, eta: f32| Goal {
+        kind: GoalKind::Camp(i as u16),
+        rank: 3,
+        weight: 1.0,
+        hold: 1.5 * eta + 8.0,
+    };
+    if let Some(GoalKind::Camp(i)) = current
+        && let Some(c) = map
+            .camp_spots()
+            .get(usize::from(i))
+            .filter(|c| c.kind == CampKind::Perch)
+    {
+        if near >= PERCH_KEEP_NEAR {
+            out.push(goal(usize::from(i), s.eta(c.pos)));
+        }
+        return;
+    }
+    if enemy.is_none() || !s.perch_fight || !s.perch_ready || near < PERCH_FIGHT_NEAR {
+        return;
+    }
+    let best = map
+        .camp_spots()
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == CampKind::Perch)
+        .map(|(i, c)| (i, s.eta(c.pos), c.score))
+        .filter(|&(_, eta, _)| eta <= PERCH_FIGHT_ETA)
+        .max_by(|a, b| {
+            (a.2 * dmath::exp(-a.1))
+                .total_cmp(&(b.2 * dmath::exp(-b.1)))
+                .then(b.0.cmp(&a.0))
+        });
+    if let Some((i, eta, _)) = best {
+        out.push(goal(i, eta));
     }
 }
 
@@ -740,7 +828,8 @@ pub fn candidates(s: &Situation<'_>, current: Option<GoalKind>, out: &mut Vec<Go
         }
     }
     controls(s, current, out);
-    camps(s, out);
+    camps(s, current, out);
+    fight_perch(s, current, engage.map(|t| t.pos), out);
     traps(s, current, out);
     // On the tripmine level a trail is the way away from an enemy too.
     if mines_level && out.iter().any(|g| g.kind == GoalKind::PlantTrap(Trap::Trail)) {
@@ -958,6 +1047,11 @@ mod tests {
             calm_for: f64::INFINITY,
             camp_ready: true,
             trap_ready: true,
+            perch_like: 0.0,
+            perch_ready: true,
+            can_boost: false,
+            perched: false,
+            perch_fight: false,
             trap_under_way: false,
             mines: &[],
             own_mines: 0,
@@ -1289,6 +1383,145 @@ mod tests {
         s.weapons = &glock_only;
         let mut d = Decider::default();
         assert_eq!(d.decide(&s, &mut rng).kind, GoalKind::Roam, "no gun for the spot");
+    }
+
+    #[test]
+    fn a_bot_that_can_boost_takes_the_high_ground_and_holds_it_up_there() {
+        let map = OneSpot([lb_nav_api::CampSpot {
+            node: 0,
+            pos: Vec3::new(600.0, 0.0, 192.0),
+            kind: CampKind::Perch,
+            watch: [0.0, 90.0],
+            pitch: 20.0,
+            range: 700.0,
+            score: 1.0,
+            guards: None,
+        }]);
+        let kit = [
+            KIT[0],
+            Armed {
+                id: WeaponId::Gauss,
+                clip: None,
+                reserve: Some(100),
+                reserve2: None,
+            },
+        ];
+        let calm = Beliefs::default();
+        let none = |_| 0.0;
+        let mut rng = Pcg32::new(17, 17);
+        let mut s = situation(30.0, &calm, None, &kit, 100.0, None, &none);
+        s.map = Some(&map);
+        s.aggression = 0.9;
+        s.perch_like = 0.6;
+        s.can_boost = true;
+        let decide = |s: &Situation<'_>, rng: &mut Pcg32| Decider::default().decide(s, rng).kind;
+        assert_eq!(decide(&s, &mut rng), GoalKind::Camp(0), "an aggressive bot too");
+        s.can_boost = false;
+        assert_eq!(decide(&s, &mut rng), GoalKind::Roam, "no boost now: no way up");
+        s.perched = true;
+        s.origin = Vec3::new(300.0, 100.0, 192.0);
+        assert_eq!(
+            decide(&s, &mut rng),
+            GoalKind::Camp(0),
+            "up there already: held without one"
+        );
+        s.origin = Vec3::new(300.0, 100.0, 0.0);
+        assert_eq!(
+            decide(&s, &mut rng),
+            GoalKind::Roam,
+            "below it, a boost is needed again"
+        );
+        s.can_boost = true;
+        s.perch_like = 0.0;
+        assert_eq!(decide(&s, &mut rng), GoalKind::Roam, "a skill that does no tricks");
+        s.perch_like = 0.6;
+        s.perch_ready = false;
+        assert_eq!(decide(&s, &mut rng), GoalKind::Roam, "resting from the last one");
+    }
+
+    #[test]
+    fn in_a_fight_high_ground_close_by_is_taken_with_the_enemy_not_in_close() {
+        let map = OneSpot([lb_nav_api::CampSpot {
+            node: 0,
+            pos: Vec3::new(300.0, 0.0, 192.0),
+            kind: CampKind::Perch,
+            watch: [0.0, 90.0],
+            pitch: 20.0,
+            range: 700.0,
+            score: 1.0,
+            guards: None,
+        }]);
+        let kit = [
+            KIT[0],
+            Armed {
+                id: WeaponId::Gauss,
+                clip: None,
+                reserve: Some(100),
+                reserve2: None,
+            },
+        ];
+        let p = BeliefParams {
+            track_forget: 8.0,
+            maxspeed: 300.0,
+        };
+        let enemy_at = |x: f32| {
+            let mut b = Beliefs::default();
+            b.on_sighting(&sighting(0.0, Vec3::new(x, 0.0, 0.0)));
+            b.update(SimTime(0.0), &p);
+            b
+        };
+        let key = PlayerKey { slot: 3, userid: 30 };
+        let none = |_| 0.0;
+        let mut rng = Pcg32::new(19, 19);
+        let (far, mid, close) = (enemy_at(-600.0), enemy_at(-200.0), enemy_at(-100.0));
+        let fight = |b| {
+            let mut s = situation(0.0, b, None, &kit, 100.0, Some(key), &none);
+            s.map = Some(&map);
+            s.perch_like = 0.6;
+            s.can_boost = true;
+            s.perch_fight = true;
+            s
+        };
+        let mut d = Decider::default();
+        assert_eq!(
+            d.decide(&fight(&far), &mut rng).kind,
+            GoalKind::Camp(0),
+            "up from the fight"
+        );
+        assert_eq!(
+            d.decide(&fight(&mid), &mut rng).kind,
+            GoalKind::Camp(0),
+            "on the way it goes on"
+        );
+        assert_eq!(
+            d.decide(&fight(&close), &mut rng).kind,
+            GoalKind::Engage(key),
+            "but not with the enemy in close"
+        );
+        let fresh = |s: &Situation<'_>, rng: &mut Pcg32| Decider::default().decide(s, rng).kind;
+        assert_eq!(
+            fresh(&fight(&mid), &mut rng),
+            GoalKind::Engage(key),
+            "too close to turn away"
+        );
+        let mut s = fight(&far);
+        s.perch_fight = false;
+        assert_eq!(fresh(&s, &mut rng), GoalKind::Engage(key), "not rolled for now");
+        let mut s = fight(&far);
+        s.can_boost = false;
+        assert_eq!(fresh(&s, &mut rng), GoalKind::Engage(key), "no boost to get up there");
+        let mut s = fight(&far);
+        s.perched = true;
+        s.origin = Vec3::new(200.0, 0.0, 192.0);
+        assert_eq!(fresh(&s, &mut rng), GoalKind::Engage(key), "up there the fight goes on");
+        let further = enemy_at(-1100.0);
+        let mut s = fight(&further);
+        s.origin = Vec3::new(-500.0, 0.0, 0.0);
+        assert_eq!(
+            fresh(&s, &mut rng),
+            GoalKind::Engage(key),
+            "too far to run off from the fight"
+        );
     }
 
     #[test]
