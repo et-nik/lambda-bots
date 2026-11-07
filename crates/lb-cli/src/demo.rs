@@ -40,8 +40,8 @@ pub fn info(path: &Path, opts: &[&str]) -> Result<bool> {
 fn info_one(rec: &Recording, names: bool) -> bool {
     let kind = if rec.is_hltv() { "hltv" } else { "pov" };
     println!(
-        "== {} ({}) on {:?}, {kind}, {:.1} s, max clients {}",
-        rec.map, rec.game_dir, rec.hostname, rec.duration, rec.max_clients
+        "== {} ({}, crc {:08x}) on {:?}, {kind}, {:.1} s, max clients {}",
+        rec.map, rec.game_dir, rec.map_crc, rec.hostname, rec.duration, rec.max_clients
     );
     let s = &rec.stats;
     println!(
@@ -184,6 +184,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
     let _ = writeln!(meta, "map\t{}", rec.map);
     let _ = writeln!(meta, "game_dir\t{}", rec.game_dir);
     let _ = writeln!(meta, "hostname\t{}", rec.hostname);
+    let _ = writeln!(meta, "map_crc\t{:08x}", rec.map_crc);
     let _ = writeln!(meta, "kind\t{}", if rec.is_hltv() { "hltv" } else { "pov" });
     let _ = writeln!(meta, "recorder\t{}", rec.recorder.map_or(-1, i32::from));
     let _ = writeln!(meta, "max_clients\t{}", rec.max_clients);

@@ -147,6 +147,8 @@ pub struct Recording {
     pub map: String,
     pub game_dir: String,
     pub hostname: String,
+    /// CRC of the map's BSP as the server computed it (the demo header leaves it 0 in HLTV demos).
+    pub map_crc: u32,
     pub max_clients: u8,
     /// The slot of the recording player in a POV demo.
     pub recorder: Option<u8>,
@@ -517,6 +519,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Recording>, Error> {
 fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
     match m {
         Msg::ServerInfo {
+            map_crc,
             max_clients,
             player_num,
             hostname,
@@ -524,6 +527,7 @@ fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
             ..
         } => {
             b.started = true;
+            b.rec.map_crc = map_crc;
             b.rec.max_clients = max_clients;
             b.rec.hostname = hostname;
             b.rec.recorder = Some(player_num);

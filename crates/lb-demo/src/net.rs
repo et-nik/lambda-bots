@@ -88,6 +88,8 @@ pub struct Event {
 #[derive(Clone, Debug)]
 pub enum Msg {
     ServerInfo {
+        /// CRC-32 of the BSP's lumps but its entities (the engine's `CRC_MapFile`), to tell builds of a map apart.
+        map_crc: u32,
         max_clients: u8,
         player_num: u8,
         game_dir: String,
@@ -369,7 +371,7 @@ impl Decoder {
     fn server_info(&mut self, b: &mut Bits<'_>, out: &mut Vec<Msg>) -> Result<(), Error> {
         let _protocol = b.read_i32()?;
         let _spawn_count = b.read_i32()?;
-        let _crc = b.read_i32()?;
+        let map_crc = b.read_u32()?;
         b.skip_bytes(16)?;
         let max_clients = b.read_u8()?;
         let player_num = b.read_u8()?;
@@ -389,6 +391,7 @@ impl Decoder {
         self.stats = stats;
         self.max_clients = max_clients;
         out.push(Msg::ServerInfo {
+            map_crc,
             max_clients,
             player_num,
             game_dir,
