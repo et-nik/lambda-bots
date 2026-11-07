@@ -336,6 +336,37 @@ fn step_off(world: &mut dyn MoveWorld, phys: &Physics, at: Player, normal: Vec3)
     None
 }
 
+/// Directions a ladder is walked at by [`ladder_approaches`].
+const APPROACHES: usize = 16;
+
+/// Where a standing player at the height `z` is on the ladder whose box is `mins..maxs`, found the way a player
+/// gets on one: walking at its centre from all round until the wall behind it (or the far side of a ladder standing
+/// free) stops the walk. This finds a ladder on a slanted face, or one sunk into its wall but for a sliver, which
+/// spots at a fixed distance off the box miss. Each spot has the face normal there, and the walk met that face
+/// head-on enough (within 60° of its normal); the most head-on come first.
+pub fn ladder_approaches(world: &mut dyn MoveWorld, mins: Vec3, maxs: Vec3, z: f32) -> Vec<(Vec3, Vec3)> {
+    let centre = ((mins + maxs) * 0.5).truncate().extend(z);
+    let reach = (maxs - mins).truncate().length() * 0.5 + 24.0;
+    let mut found: Vec<(f32, Vec3, Vec3)> = Vec::new();
+    for k in 0..APPROACHES {
+        let (sin, cos) = lb_core::dmath::sin_cos(k as f32 * std::f32::consts::TAU / APPROACHES as f32);
+        let dir = Vec3::new(cos, sin, 0.0);
+        let tr = world.trace(&TraceQuery::hull(centre + dir * reach, centre, HullKind::Stand));
+        if tr.start_solid {
+            continue;
+        }
+        let Some(normal) = world.ladder(tr.end, HullKind::Stand).and_then(|l| l.normal) else {
+            continue;
+        };
+        let head_on = normal.dot(dir);
+        if head_on >= 0.5 {
+            found.push((head_on, tr.end, normal));
+        }
+    }
+    found.sort_by(|a, b| b.0.total_cmp(&a.0));
+    found.into_iter().map(|(_, spot, normal)| (spot, normal)).collect()
+}
+
 /// Swims from `from` to `to` the way a bot does: looking at the target and pressing forward, and jump while the
 /// target is higher and the player in water (it rises; at the surface the jump climbs out onto a ledge). Starts
 /// and ends on land too: walking into the water, or climbing out of it.
@@ -852,5 +883,25 @@ mod tests {
         assert!(v.ok, "{v:?}");
         assert!((v.impact - phys.fall_speed(300.0)).abs() < 25.0, "{v:?}");
         assert_eq!(phys.fall_damage(v.impact), 10.0);
+    }
+
+    #[test]
+    fn a_ladder_sunk_into_its_wall_is_got_on_from_the_front() {
+        let mut w = BoxWorld::new();
+        w.floor(0.0, 1024.0);
+        w.solid(Vec3::new(-32.0, -8.0, 0.0), Vec3::new(32.0, 0.0, 256.0));
+        let (lo, hi) = (Vec3::new(-24.0, -4.0, 0.0), Vec3::new(24.0, 2.0, 256.0));
+        w.volume(lo, hi, lb_worldq::contents::LADDER);
+        let found = ladder_approaches(&mut w, lo, hi, 100.0);
+        let &(spot, normal) = found.first().expect("a spot on the ladder");
+        assert_eq!(normal, Vec3::Y);
+        assert!(
+            spot.x.abs() < 1.0 && (spot.y - 16.031_25).abs() < 0.01,
+            "against the wall: {spot:?}"
+        );
+        assert!(
+            found.iter().all(|&(p, n)| n == Vec3::Y && p.y > 0.0),
+            "only its face, not behind the wall: {found:?}"
+        );
     }
 }

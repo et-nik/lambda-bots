@@ -423,6 +423,13 @@ impl Classifier<'_> {
                 best = Some((d, normal, p));
             }
         }
+        if best.is_none() {
+            let z = near.z.clamp(mins.z + 20.0, maxs.z + 16.0);
+            best = lb_kin::validate::ladder_approaches(self.world, mins, maxs, z)
+                .into_iter()
+                .map(|(p, normal)| (p.distance(toward), normal, p))
+                .min_by(|x, y| x.0.total_cmp(&y.0));
+        }
         best.map(|(_, n, p)| (n, p))
     }
 

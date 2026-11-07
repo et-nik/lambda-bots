@@ -1,0 +1,16 @@
+[package]
+name = "lb-demo"
+description = "GoldSrc demo reader: frames, network messages, delta-encoded entities, a timeline of the players"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+rustc-hash.workspace = true
+
+[lints]
+workspace = true

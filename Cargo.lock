@@ -889,6 +889,7 @@ dependencies = [
  "lb-bsp",
  "lb-config",
  "lb-core",
+ "lb-demo",
  "lb-ffi",
  "lb-game",
  "lb-kin",
@@ -899,6 +900,7 @@ dependencies = [
  "lb-runtime",
  "lb-testkit",
  "lb-worldq",
+ "rustc-hash",
  "serde_json",
 ]
 
@@ -952,6 +954,14 @@ dependencies = [
  "lb-nav-api",
  "lb-styles",
  "smallvec",
+]
+
+[[package]]
+name = "lb-demo"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "thiserror",
 ]
 
 [[package]]

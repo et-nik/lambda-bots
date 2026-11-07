@@ -9,8 +9,8 @@ use lb_core::{Vec2, Vec3};
 use lb_worldq::{HullKind, TraceQuery, Tracer, contents};
 
 use crate::field::{Surroundings, harmful_contents, settle};
-use lb_kin::Physics;
-use lb_kin::validate::simulate_climb;
+use lb_kin::validate::{ladder_approaches, simulate_climb};
+use lb_kin::{MoveWorld, Physics};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeedKind {
@@ -396,9 +396,37 @@ fn ladder_sites(world: &BspWorld, v: &mut WorldView<'_>) -> Vec<LadderSite> {
                 z += 8.0;
             }
         }
-        out.extend(best.map(|(_, site)| site));
+        let mut site = best.map(|(_, site)| site);
+        if site.is_none_or(|s| !on_ladder(v, &s)) {
+            site = approached_site(v, b.model, mins, maxs).or(site);
+        }
+        out.extend(site);
     }
     out
+}
+
+/// The site's spot is on its ladder halfway up.
+fn on_ladder(v: &mut WorldView<'_>, s: &LadderSite) -> bool {
+    let z = ((s.bottom + s.top) * 0.5).max(s.bottom + 36.0);
+    MoveWorld::ladder(v, s.spot.extend(z), HullKind::Stand).is_some()
+}
+
+/// A ladder's site found by walking at it ([`ladder_approaches`]), at the lowest height a player gets on it.
+fn approached_site(v: &mut WorldView<'_>, model: usize, mins: Vec3, maxs: Vec3) -> Option<LadderSite> {
+    let mut z = mins.z + 36.0;
+    while z <= maxs.z + 36.0 {
+        if let Some(&(spot, normal)) = ladder_approaches(v, mins, maxs, z).first() {
+            return Some(LadderSite {
+                model,
+                spot: spot.truncate(),
+                normal,
+                bottom: mins.z,
+                top: maxs.z,
+            });
+        }
+        z += 8.0;
+    }
+    None
 }
 
 /// The ledge at a ladder's top is at most this far below the top of the ladder (which may go on up the wall above
@@ -431,9 +459,14 @@ pub fn ladder_ends(v: &mut WorldView<'_>, l: &LadderSite) -> Vec<Vec3> {
     out
 }
 
-/// Damage per half-second tick of a `trigger_hurt` that makes it a place to keep out of; weaker ones (a trickle of
-/// radiation) are walked through.
+/// Damage per second of a `trigger_hurt` (its `dmg`; a player takes half of it every half second) that makes it a
+/// place to keep out of; weaker ones (a trickle of radiation) are walked through.
 const HARMFUL: f32 = 20.0;
+/// The same for the kinds of damage that stop when the touch does (not radiation, poison and the other time-based
+/// kinds): a burning or shocking floor, freezing water. Swimming across a lake that takes 8 a second kills.
+const HARMFUL_DIRECT: f32 = 5.0;
+/// `DMG_TIMEBASED`: the kinds that go on hurting a player after it leaves the trigger (and drowning).
+const DMG_TIMEBASED: u32 = !0x3fff;
 
 /// Hazards, gates and water, from the world and its mechanisms.
 pub struct Site<'a> {
@@ -451,12 +484,17 @@ impl<'a> Site<'a> {
             .triggers
             .iter()
             .filter(|t| {
+                let e = &world.entities[t.entity];
+                let lasting = e
+                    .get("damagetype")
+                    .and_then(|d| d.trim().parse::<u32>().ok())
+                    .is_some_and(|d| d & DMG_TIMEBASED != 0);
+                let least = if lasting { HARMFUL } else { HARMFUL_DIRECT };
                 t.kind == TriggerKind::Hurt
                     && t.spawnflags & 2 == 0
-                    && world.entities[t.entity]
-                        .get("dmg")
+                    && e.get("dmg")
                         .and_then(|d| d.trim().parse::<f32>().ok())
-                        .is_some_and(|d| d >= HARMFUL)
+                        .is_some_and(|d| d >= least)
             })
             .map(|t| t.model)
             .collect();
