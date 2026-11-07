@@ -397,7 +397,7 @@ fn ladder_sites(world: &BspWorld, v: &mut WorldView<'_>) -> Vec<LadderSite> {
             }
         }
         let mut site = best.map(|(_, site)| site);
-        if site.is_none_or(|s| !on_ladder(v, &s)) {
+        if site.is_none_or(|s| !on_ladder(v, &s) || climb_start(v, &s).is_none()) {
             site = approached_site(v, b.model, mins, maxs).or(site);
         }
         out.extend(site);
@@ -436,27 +436,37 @@ pub const TOP_BELOW: f32 = 96.0;
 /// Where a player gets off a ladder: the floor it climbs down to at the foot, and the ledge it steps onto at the top.
 pub fn ladder_ends(v: &mut WorldView<'_>, l: &LadderSite) -> Vec<Vec3> {
     let mut out = Vec::new();
-    // Climb from as low as a player fits on it.
+    let Some(p) = climb_start(v, l) else {
+        return out;
+    };
+    let phys = Physics::default();
+    if let Some(foot) = simulate_climb(v, &phys, p, l.normal, false)
+        && foot.z - 36.0 <= l.bottom + 48.0
+    {
+        out.push(foot);
+    }
+    if let Some(top) = simulate_climb(v, &phys, p, l.normal, true)
+        && top.z - 36.0 >= l.top - TOP_BELOW
+    {
+        out.push(top);
+    }
+    out
+}
+
+/// The lowest point at the site's spot where a player fits and is on the ladder: a spot found halfway up or by
+/// walking at the ladder may be clear of it lower down.
+fn climb_start(v: &mut WorldView<'_>, l: &LadderSite) -> Option<Vec3> {
     let mut z = l.bottom + 36.0;
     while z <= l.top + 36.0 {
         let p = l.spot.extend(z);
-        if !v.trace(&TraceQuery::hull(p, p, HullKind::Stand)).start_solid {
-            let phys = Physics::default();
-            if let Some(foot) = simulate_climb(v, &phys, p, l.normal, false)
-                && foot.z - 36.0 <= l.bottom + 48.0
-            {
-                out.push(foot);
-            }
-            if let Some(top) = simulate_climb(v, &phys, p, l.normal, true)
-                && top.z - 36.0 >= l.top - TOP_BELOW
-            {
-                out.push(top);
-            }
-            break;
+        if !v.trace(&TraceQuery::hull(p, p, HullKind::Stand)).start_solid
+            && MoveWorld::ladder(v, p, HullKind::Stand).is_some()
+        {
+            return Some(p);
         }
         z += 8.0;
     }
-    out
+    None
 }
 
 /// Damage per second of a `trigger_hurt` (its `dmg`; a player takes half of it every half second) that makes it a
@@ -485,10 +495,8 @@ impl<'a> Site<'a> {
             .iter()
             .filter(|t| {
                 let e = &world.entities[t.entity];
-                let lasting = e
-                    .get("damagetype")
-                    .and_then(|d| d.trim().parse::<u32>().ok())
-                    .is_some_and(|d| d & DMG_TIMEBASED != 0);
+                // The game reads it with `atoi`: -1 is every kind.
+                let lasting = e.int("damagetype").is_some_and(|d| d as u32 & DMG_TIMEBASED != 0);
                 let least = if lasting { HARMFUL } else { HARMFUL_DIRECT };
                 t.kind == TriggerKind::Hurt
                     && t.spawnflags & 2 == 0

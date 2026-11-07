@@ -60,6 +60,7 @@ pub struct PlayerState {
 
 #[derive(Clone, Debug)]
 pub struct Shot {
+    /// When the event plays: its message's time and the delay the server gave it.
     pub time: f32,
     pub event: String,
     pub entity: i32,
@@ -111,7 +112,9 @@ pub struct Projectile {
     pub owner: i32,
 }
 
-/// An item that appeared, was taken (hidden) or came back, or left the game.
+/// An item that came into the recording's entities, changed, or left them. Half-Life sends no hidden entity, so an
+/// item taken and waiting to come back leaves them; so does one removed from the game and, in a POV demo, one out of
+/// the player's view: the stream does not tell these apart.
 #[derive(Clone, Copy, Debug)]
 pub struct ItemChange {
     pub time: f32,
@@ -119,6 +122,7 @@ pub struct ItemChange {
     pub model: u16,
     pub origin: [f32; 3],
     pub visible: bool,
+    /// It left the entities.
     pub removed: bool,
 }
 
@@ -167,6 +171,7 @@ pub struct Recording {
     pub views: Vec<View>,
     pub commands: Vec<Command>,
     pub console: Vec<(f32, String)>,
+    /// The decoder's counts for this map alone, with the frames of the file that could not be read.
     pub stats: Stats,
     /// Frames that could not be read whole, with the reason (the first few).
     pub errors: Vec<(f32, String)>,
@@ -189,7 +194,6 @@ impl Recording {
 }
 
 /// Field slots of `entity_state_t` the timeline reads, resolved once the descriptions are known.
-#[derive(Default)]
 struct Fields {
     origin: [Option<crate::delta::Slot>; 3],
     angles: [Option<crate::delta::Slot>; 3],
@@ -266,27 +270,30 @@ fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
 #[derive(Default)]
 struct Builder {
     rec: Recording,
-    fields: Fields,
-    fields_size: usize,
     slot_player: FxHashMap<u8, u16>,
     server_time: f32,
     items_seen: FxHashMap<u16, (u16, bool)>,
     sound_index: FxHashMap<String, u16>,
     /// A server info opened this map.
     started: bool,
-    frames_failed: u64,
+    /// The decoder's counts when this map began.
+    stats_base: Stats,
+    /// Frames of the file that could not be read.
+    file_frames_failed: u64,
     first_time: Option<f32>,
 }
 
 impl Builder {
-    fn for_map(map: &str, game_dir: &str) -> Self {
+    fn for_map(map: &str, game_dir: &str, stats_base: &Stats) -> Self {
         let mut b = Builder::default();
         b.rec.map = map.trim_start_matches("maps/").trim_end_matches(".bsp").to_string();
         b.rec.game_dir = game_dir.to_string();
+        b.stats_base = stats_base.clone();
         b
     }
 
-    fn finish(mut self, dec: &Decoder, saw_view: bool, last_time: f32) -> Recording {
+    /// The recording with the decoder's counts and models as they were when the map ended.
+    fn finish(mut self, stats: &Stats, models: &FxHashMap<u16, String>, saw_view: bool, last_time: f32) -> Recording {
         if !saw_view {
             self.rec.recorder = None;
             self.rec.views.clear();
@@ -295,10 +302,10 @@ impl Builder {
         let first = self.first_time.unwrap_or(0.0);
         let last = self.rec.snapshots.last().map_or(last_time, |s| s.time);
         self.rec.duration = (last - first).max(0.0);
-        self.rec.stats = dec.stats.clone();
-        self.rec.stats.frames_failed = self.frames_failed;
+        self.rec.stats = stats_since(stats, &self.stats_base);
+        self.rec.stats.frames_failed += self.file_frames_failed;
         if self.rec.models.is_empty() {
-            self.rec.models = dec.resources.models.clone();
+            self.rec.models = models.clone();
         }
         self.rec
     }
@@ -309,21 +316,24 @@ impl Builder {
             return;
         }
         let name = info_value(info, "name").unwrap_or("").to_string();
+        let has = |k: &str| info_value(info, k).is_some();
+        let bot = info_value(info, "*bot") == Some("1") || (!has("*sid") && !has("rate") && !has("*hltv"));
+        let hltv = has("*hltv");
+        let steam_id = info_value(info, "*sid").unwrap_or("").to_string();
         if let Some(&idx) = self.slot_player.get(&slot) {
             let p = &mut self.rec.players[usize::from(idx)];
             if p.user_id == user_id {
-                p.name = name;
+                (p.name, p.bot, p.hltv, p.steam_id) = (name, bot, hltv, steam_id);
                 return;
             }
         }
-        let has = |k: &str| info_value(info, k).is_some();
         let player = Player {
             slot,
             user_id,
             name,
-            bot: info_value(info, "*bot") == Some("1") || (!has("*sid") && !has("rate") && !has("*hltv")),
-            hltv: has("*hltv"),
-            steam_id: info_value(info, "*sid").unwrap_or("").to_string(),
+            bot,
+            hltv,
+            steam_id,
             first_seen: time,
             last_seen: time,
         };
@@ -332,16 +342,12 @@ impl Builder {
     }
 
     fn entities(&mut self, time: f32, layout: &Layout, ents: &Rc<[Entity]>) {
-        if self.fields_size != layout.size {
-            self.fields = Fields::from_layout(layout);
-            self.fields_size = layout.size;
-        }
+        let fl = &Fields::from_layout(layout);
         let first = self.rec.states.len() as u32;
         let maxc = u16::from(self.rec.max_clients);
         let mut present: FxHashMap<u16, ()> = FxHashMap::default();
         for e in ents.iter() {
             let s = &e.state[..];
-            let fl = &self.fields;
             if e.number >= 1 && e.number <= maxc {
                 let slot = (e.number - 1) as u8;
                 let who = self.slot_player.get(&slot).copied().unwrap_or(u16::MAX);
@@ -452,6 +458,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Recording>, Error> {
             let frame = match frame {
                 Ok(fr) => fr,
                 Err(e) => {
+                    b.file_frames_failed += 1;
                     b.rec
                         .errors
                         .push((last_time, format!("segment {}: {e}", segment.description)));
@@ -470,13 +477,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Recording>, Error> {
                     msg,
                 } => {
                     msgs.clear();
-                    let failed_before = dec.stats.frames_failed;
-                    if let Err(e) = dec.message(msg, incoming_sequence, &mut msgs)
-                        && b.rec.errors.len() < 20
-                    {
-                        b.rec.errors.push((time, e.to_string()));
-                    }
-                    b.frames_failed += dec.stats.frames_failed - failed_before;
+                    let failed = dec.message(msg, incoming_sequence, &mut msgs).err();
                     if segment.kind != 0 && view.maxclients > 0 {
                         saw_view = true;
                         b.rec.commands.push(Command {
@@ -490,14 +491,24 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Recording>, Error> {
                         });
                     }
                     for m in msgs.drain(..) {
-                        if let Msg::ServerInfo { map, .. } = &m
+                        if let Msg::ServerInfo {
+                            map,
+                            stats_before,
+                            models_before,
+                            ..
+                        } = &m
                             && b.started
                         {
-                            let next = Builder::for_map(map, &b.rec.game_dir);
+                            let next = Builder::for_map(map, &b.rec.game_dir, stats_before);
                             let finished = std::mem::replace(&mut b, next);
-                            done.push(finished.finish(&dec, saw_view, last_time));
+                            done.push(finished.finish(stats_before, models_before, saw_view, last_time));
                         }
                         apply(&mut b, &dec, time, m);
+                    }
+                    if let Some(e) = failed
+                        && b.rec.errors.len() < 20
+                    {
+                        b.rec.errors.push((time, e.to_string()));
                     }
                 }
                 FrameData::ClientData { origin, viewangles, .. } => {
@@ -512,8 +523,20 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Recording>, Error> {
             }
         }
     }
-    done.push(b.finish(&dec, saw_view, last_time));
+    done.push(b.finish(&dec.stats, &dec.resources.models, saw_view, last_time));
     Ok(done)
+}
+
+/// What the decoder counted since `base`, an earlier copy of its counts.
+fn stats_since(now: &Stats, base: &Stats) -> Stats {
+    let frames_failed = now.frames_failed.saturating_sub(base.frames_failed);
+    Stats {
+        messages: now.messages.saturating_sub(base.messages),
+        frames_failed,
+        missing_delta_base: now.missing_delta_base.saturating_sub(base.missing_delta_base),
+        count_mismatch: now.count_mismatch.saturating_sub(base.count_mismatch),
+        last_error: now.last_error.clone().filter(|_| frames_failed > 0),
+    }
 }
 
 fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
@@ -555,7 +578,7 @@ fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
                 .cloned()
                 .unwrap_or_else(|| format!("#{}", e.index));
             b.rec.shots.push(Shot {
-                time,
+                time: time + e.delay,
                 event,
                 entity: e.entity,
                 origin: e.args.origin,

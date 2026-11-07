@@ -113,7 +113,8 @@ impl Desc {
                 }
                 DT_ANGLE => {
                     let raw = f64::from(b.read_bits(f.bits)?);
-                    let v = (raw * (360.0 / f64::from(1u32 << f.bits.min(31)))) as f32;
+                    // Fields are at most 32 bits (`read_field_description`): the clamp only keeps the shift in range.
+                    let v = (raw * (360.0 / (1u64 << f.bits.min(32)) as f64)) as f32;
                     to[range].copy_from_slice(&v.to_le_bytes());
                 }
                 DT_TIMEWINDOW_8 => {
@@ -356,6 +357,18 @@ mod tests {
             300,
             "not sent: kept"
         );
+    }
+
+    #[test]
+    fn a_32_bit_angle_is_a_turn_over_two_to_the_32() {
+        let d = Desc {
+            fields: vec![field("angle", DT_ANGLE, 0, 32, 1.0)],
+        };
+        let mut w = Writer::default();
+        w.put(1, 3).put(0b1, 8).put(1 << 30, 32);
+        let mut to = vec![0u8; d.size()];
+        d.decode(&mut Bits::new(&w.bytes), &[0u8; 4], &mut to, 0.0).unwrap();
+        assert_eq!(f32_at(&to, 0), 90.0);
     }
 
     #[test]

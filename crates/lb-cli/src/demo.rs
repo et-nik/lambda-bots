@@ -1,5 +1,6 @@
 //! `lb-cli demo`: what a GoldSrc demo holds, and its timeline as TSV files for analysis.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -20,7 +21,11 @@ fn top<K: Clone + Ord>(counts: FxHashMap<K, u32>, n: usize) -> Vec<(K, u32)> {
 }
 
 pub fn info(path: &Path, opts: &[&str]) -> Result<bool> {
-    let names = opts.contains(&"--names");
+    let names = match opts {
+        [] => false,
+        ["--names"] => true,
+        _ => anyhow::bail!("usage: lb-cli demo info <file.dem> [--names]"),
+    };
     let started = std::time::Instant::now();
     let recs = load(path)?;
     let elapsed = started.elapsed();
@@ -153,7 +158,8 @@ fn info_one(rec: &Recording, names: bool) -> bool {
 }
 
 /// Writes the timeline as TSV files (`players`, `states`, `shots`, `kills`, `sounds`, `explosions`,
-/// `projectiles`, `items`, and for POV demos `views` and `commands`) into `out`.
+/// `projectiles`, `items`, and for POV demos `views` and `commands`) into `out`. Text fields write a backslash, tab
+/// and line breaks as `\\`, `\t`, `\n` and `\r`.
 pub fn export(path: &Path, opts: &[&str]) -> Result<bool> {
     let out = match opts {
         ["--out", dir] => Path::new(dir).to_path_buf(),
@@ -166,12 +172,43 @@ pub fn export(path: &Path, opts: &[&str]) -> Result<bool> {
         let dir = if recs.len() == 1 {
             out.clone()
         } else {
-            out.join(format!("part{}-{}", k + 1, rec.map))
+            out.join(format!("part{}-{}", k + 1, path_part(&rec.map)))
         };
         ok &= export_one(rec, &dir)?;
         println!("{} -> {}", path.display(), dir.display());
     }
     Ok(ok)
+}
+
+/// A map name as one plain path component: the demo names its maps.
+fn path_part(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Text as one TSV field: a backslash, tab and line breaks escaped, so the text reads back as it was.
+fn field(text: &str) -> Cow<'_, str> {
+    if !text.contains(['\\', '\t', '\n', '\r']) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 4);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    Cow::Owned(out)
 }
 
 fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
@@ -181,9 +218,9 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
     };
 
     let mut meta = String::new();
-    let _ = writeln!(meta, "map\t{}", rec.map);
-    let _ = writeln!(meta, "game_dir\t{}", rec.game_dir);
-    let _ = writeln!(meta, "hostname\t{}", rec.hostname);
+    let _ = writeln!(meta, "map\t{}", field(&rec.map));
+    let _ = writeln!(meta, "game_dir\t{}", field(&rec.game_dir));
+    let _ = writeln!(meta, "hostname\t{}", field(&rec.hostname));
     let _ = writeln!(meta, "map_crc\t{:08x}", rec.map_crc);
     let _ = writeln!(meta, "kind\t{}", if rec.is_hltv() { "hltv" } else { "pov" });
     let _ = writeln!(meta, "recorder\t{}", rec.recorder.map_or(-1, i32::from));
@@ -196,7 +233,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
     models.sort();
     let mut s = String::from("index\tmodel\n");
     for (i, m) in models {
-        let _ = writeln!(s, "{i}\t{m}");
+        let _ = writeln!(s, "{i}\t{}", field(m));
     }
     write("models.tsv", s)?;
 
@@ -216,8 +253,8 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
             p.user_id,
             p.first_seen,
             p.last_seen,
-            p.steam_id,
-            p.name.replace(['\t', '\n'], " ")
+            field(&p.steam_id),
+            field(&p.name)
         );
     }
     write("players.tsv", s)?;
@@ -234,7 +271,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
                 .trim_end_matches(".mdl");
             let _ = writeln!(
                 s,
-                "{:.3}\t{:.3}\t{}\t{who}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{weapon}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{:.3}\t{:.3}\t{}\t{who}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 snap.time,
                 snap.server_time,
                 st.slot,
@@ -243,6 +280,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
                 st.origin[2],
                 st.angles[0],
                 st.angles[1],
+                field(weapon),
                 st.sequence,
                 st.gaitsequence,
                 st.effects,
@@ -265,7 +303,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
             s,
             "{:.3}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             sh.time,
-            sh.event,
+            field(&sh.event),
             sh.entity,
             sh.origin[0],
             sh.origin[1],
@@ -285,7 +323,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
 
     let mut s = String::from("time\tkiller\tvictim\tweapon\n");
     for k in &rec.kills {
-        let _ = writeln!(s, "{:.3}\t{}\t{}\t{}", k.time, k.killer, k.victim, k.weapon);
+        let _ = writeln!(s, "{:.3}\t{}\t{}\t{}", k.time, k.killer, k.victim, field(&k.weapon));
     }
     write("kills.tsv", s)?;
 
@@ -297,7 +335,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
             so.time,
             so.entity,
             so.channel,
-            rec.sound_names[usize::from(so.sample)],
+            field(&rec.sound_names[usize::from(so.sample)]),
             so.volume,
             so.origin[0],
             so.origin[1],
@@ -323,7 +361,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
             "{:.3}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}",
             p.time,
             p.entity,
-            rec.model_name(p.model),
+            field(rec.model_name(p.model)),
             p.origin[0],
             p.origin[1],
             p.origin[2],
@@ -339,7 +377,7 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
             "{:.3}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}",
             it.time,
             it.entity,
-            rec.model_name(it.model),
+            field(rec.model_name(it.model)),
             it.origin[0],
             it.origin[1],
             it.origin[2],
@@ -368,6 +406,32 @@ fn export_one(rec: &Recording, out: &Path) -> Result<bool> {
             );
         }
         write("commands.tsv", s)?;
+    } else {
+        for name in ["views.tsv", "commands.tsv"] {
+            match std::fs::remove_file(out.join(name)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| out.join(name).display().to_string());
+                }
+                _ => {}
+            }
+        }
     }
     Ok(rec.stats.frames_failed == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_map_name_makes_one_path_component() {
+        assert_eq!(path_part("dm_snow"), "dm_snow");
+        assert_eq!(path_part("../../etc/x"), ".._.._etc_x");
+    }
+
+    #[test]
+    fn tsv_text_escapes_what_would_split_it() {
+        assert_eq!(field("a\tb\\c\nd\re"), "a\\tb\\\\c\\nd\\re");
+        assert!(matches!(field("plain"), Cow::Borrowed("plain")));
+    }
 }

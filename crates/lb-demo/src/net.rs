@@ -25,12 +25,15 @@ const SND_FL_PITCH: u32 = 1 << 3;
 const SND_FL_SENTENCE: u32 = 1 << 4;
 const TE_BSPDECAL: u8 = 13;
 const TE_TEXTMESSAGE: u8 = 29;
+const TE_LINE: u8 = 30;
 const USER_MESSAGES: u8 = 64;
 const ENTITY: &str = "entity_state_t";
 const PLAYER: &str = "entity_state_player_t";
 const CUSTOM: &str = "custom_entity_state_t";
 
-/// Lengths of temp entities after the type byte: -1 has its own rule, -2 is not a temp entity.
+/// Lengths of temp entities after the type byte: -1 has its own rule, -2 is not a temp entity. The HLTV proxy's
+/// table (ReHLDS `HLTV/Core/src/Server.cpp`), which records as many bytes as it lists; a line is two bytes shorter
+/// as the game writes it.
 const TE_LENGTH: [i8; 128] = [
     24, 20, 6, 11, 6, 10, 12, 17, 16, 6, 6, 6, 8, -1, 9, 19, //
     -2, 10, 16, 24, 24, 24, 10, 11, 16, 19, -2, 12, 16, -1, 19, 17, //
@@ -81,6 +84,8 @@ pub struct Event {
     pub index: u16,
     /// The entity that played the event, -1 when unknown.
     pub entity: i32,
+    /// Completed as the client does for an entity of the frame: the origin and angles the server left out are the
+    /// entity's, a player's ducking is its hull's. A player's angles are its view's (the server sends its model's).
     pub args: EventArgs,
     pub delay: f32,
 }
@@ -88,6 +93,10 @@ pub struct Event {
 #[derive(Clone, Debug)]
 pub enum Msg {
     ServerInfo {
+        /// The decoder's counts before this message, which opens a map.
+        stats_before: Stats,
+        /// The models of the map before, which the new map's resource list replaces.
+        models_before: FxHashMap<u16, String>,
         /// CRC-32 of the BSP's lumps but its entities (the engine's `CRC_MapFile`), to tell builds of a map apart.
         map_crc: u32,
         max_clients: u8,
@@ -136,8 +145,9 @@ pub struct Decoder {
     baselines: Vec<Option<Rc<[u8]>>>,
     instanced: Vec<Rc<[u8]>>,
     max_instanced: u32,
-    frames: Vec<Option<Rc<[Entity]>>>,
-    client_frames: Vec<Option<Rc<[u8]>>>,
+    /// Recent frames by the low byte of their incoming sequence, with the whole sequence.
+    frames: Vec<Option<(i32, Rc<[Entity]>)>>,
+    client_frames: Vec<Option<(i32, Rc<[u8]>)>>,
     current: Option<Rc<[Entity]>>,
     current_client: Option<Rc<[u8]>>,
     time: f64,
@@ -153,7 +163,7 @@ pub struct Stats {
     pub messages: u64,
     pub frames_failed: u64,
     pub missing_delta_base: u64,
-    /// Entity packets whose count disagreed with what was read: a sign of a misread stream.
+    /// Entity packets whose count disagreed with what was read: misread, so dropped.
     pub count_mismatch: u64,
     pub last_error: Option<String>,
 }
@@ -196,10 +206,10 @@ impl Decoder {
         let result = self.message_body(&mut b, incoming_sequence, out);
         let slot = (incoming_sequence & 0xFF) as usize;
         if let Some(entities) = self.current.take() {
-            self.frames[slot] = Some(entities);
+            self.frames[slot] = Some((incoming_sequence, entities));
         }
         if let Some(client) = self.current_client.take() {
-            self.client_frames[slot] = Some(client);
+            self.client_frames[slot] = Some((incoming_sequence, client));
         }
         if let Err(e) = &result {
             self.stats.frames_failed += 1;
@@ -250,7 +260,7 @@ impl Decoder {
                 }
                 14 => self.delta_description(b)?,
                 15 if self.hltv => {}
-                15 => self.client_data(b, out)?,
+                15 => self.client_data(b, seq, out)?,
                 16 => b.skip_bytes(2)?,
                 17 => {
                     while b.read_bit()? {
@@ -262,7 +272,7 @@ impl Decoder {
                 20 => spawn_static(b)?,
                 21 => self.event_reliable(b, out)?,
                 22 => self.baseline(b)?,
-                23 => temp_entity(b, out)?,
+                23 => temp_entity(b, self.hltv, out)?,
                 24 | 25 => b.skip_bytes(1)?,
                 26 => out.push(Msg::CenterPrint(b.read_string()?)),
                 29 => b.skip_bytes(14)?,
@@ -384,6 +394,9 @@ impl Decoder {
             let n = b.read_u8()?;
             b.skip_bytes(usize::from(n) + 16)?;
         }
+        let mut stats_before = self.stats.clone();
+        stats_before.messages = stats_before.messages.saturating_sub(1);
+        let models_before = std::mem::take(&mut self.resources.models);
         let (trace, hltv, stats) = (self.trace, self.hltv, std::mem::take(&mut self.stats));
         *self = Decoder::default();
         self.trace = trace;
@@ -391,6 +404,8 @@ impl Decoder {
         self.stats = stats;
         self.max_clients = max_clients;
         out.push(Msg::ServerInfo {
+            stats_before,
+            models_before,
             map_crc,
             max_clients,
             player_num,
@@ -569,23 +584,20 @@ impl Decoder {
         let count = b.read_u16()?;
         let mut built: Vec<Entity> = Vec::with_capacity(usize::from(count));
         let mut numbase = 0;
+        let mut last = None;
         while b.peek_bits(16)? != 0 {
             let h = self.delta_header(b, &mut numbase, true)?;
             if h.remove {
                 return Err(Error::Message("removal in a full entity packet".into()));
             }
-            if h.number as usize >= MAX_EDICTS {
-                return Err(Error::Message(format!("entity {}", h.number)));
-            }
+            in_order(h.number, &mut last)?;
             let base = self.base_for(&h, &built)?;
             let e = self.decode_entity(b, &h, &base)?;
             built.push(e);
         }
         b.skip_bits(16)?;
         b.align();
-        if built.len() != usize::from(count) {
-            self.stats.count_mismatch += 1;
-        }
+        self.check_count(built.len(), count)?;
         let entities: Rc<[Entity]> = built.into();
         self.current = Some(entities.clone());
         out.push(Msg::Entities(entities));
@@ -600,15 +612,22 @@ impl Decoder {
         seq: i32,
         out: &mut Vec<Msg>,
     ) -> Result<(), Error> {
-        let Some(old) = self.frames[usize::from(from)].clone() else {
+        let want = base_sequence(seq, from);
+        let Some(old) = self.frames[usize::from(from)]
+            .as_ref()
+            .filter(|(s, _)| *s == want)
+            .map(|(_, e)| e.clone())
+        else {
             self.stats.missing_delta_base += 1;
             return Err(Error::Message(format!("delta base {from} unknown (sequence {seq})")));
         };
         let mut built: Vec<Entity> = Vec::with_capacity(old.len() + 8);
         let mut oldi = 0;
         let mut numbase = 0;
+        let mut last = None;
         while b.peek_bits(16)? != 0 {
             let h = self.delta_header(b, &mut numbase, false)?;
+            in_order(h.number, &mut last)?;
             let mut oldnum = old.get(oldi).map_or(u32::MAX, |e| u32::from(e.number));
             while oldnum < h.number {
                 built.push(old[oldi].clone());
@@ -633,25 +652,41 @@ impl Decoder {
         b.skip_bits(16)?;
         b.align();
         built.extend(old.iter().skip(oldi).cloned());
-        if built.len() != usize::from(count) {
-            self.stats.count_mismatch += 1;
-        }
+        self.check_count(built.len(), count)?;
         let entities: Rc<[Entity]> = built.into();
         self.current = Some(entities.clone());
         out.push(Msg::Entities(entities));
         Ok(())
     }
 
-    fn client_data(&mut self, b: &mut Bits<'_>, out: &mut Vec<Msg>) -> Result<(), Error> {
+    /// An entity packet that read another number of entities than it said it had is misread: none of it is kept.
+    fn check_count(&mut self, read: usize, count: u16) -> Result<(), Error> {
+        if read == usize::from(count) {
+            return Ok(());
+        }
+        self.stats.count_mismatch += 1;
+        Err(Error::Message(format!("{read} entities read of {count}")))
+    }
+
+    fn client_data(&mut self, b: &mut Bits<'_>, seq: i32, out: &mut Vec<Msg>) -> Result<(), Error> {
         let size = self.client_layout.size.max(1);
-        let base = if b.read_bit()? {
+        let base: Rc<[u8]> = if b.read_bit()? {
             let from = b.read_u8()?;
-            self.client_frames[usize::from(from)].clone()
+            let want = base_sequence(seq, from);
+            let Some(base) = self.client_frames[usize::from(from)]
+                .as_ref()
+                .filter(|(s, _)| *s == want)
+                .map(|(_, c)| c.clone())
+            else {
+                self.stats.missing_delta_base += 1;
+                return Err(Error::Message(format!(
+                    "client data delta base {from} unknown (sequence {seq})"
+                )));
+            };
+            base
         } else {
-            None
+            vec![0u8; size].into()
         };
-        let zero = vec![0u8; size];
-        let base = base.unwrap_or_else(|| zero.clone().into());
         let mut state = vec![0u8; size];
         self.deltas
             .get("clientdata_t")?
@@ -710,7 +745,16 @@ impl Decoder {
                 0.0
             };
             let entity = match (packet_index, &self.current) {
-                (Some(p), Some(ents)) if p < ents.len() => i32::from(ents[p].number),
+                (Some(p), Some(ents)) if p < ents.len() => {
+                    self.complete_args(&ents[p], &mut args);
+                    i32::from(ents[p].number)
+                }
+                (Some(_), _) if args.entindex > 0 => {
+                    // The server sent the invoker's own angles. The client divides a player's pitch by -3 here (Xash
+                    // `CL_ParseEvent`), which gives no view pitch: it is turned as for an entity of the frame.
+                    view_angles(&mut args.angles, self.is_player(args.entindex as u32));
+                    args.entindex
+                }
                 _ if args.entindex > 0 => args.entindex,
                 _ => -1,
             };
@@ -723,6 +767,25 @@ impl Decoder {
         }
         b.align();
         Ok(())
+    }
+
+    /// What the server leaves out of an event whose invoker is in the frame, filled in as the client does (Xash
+    /// `CL_ParseEvent`): the entity's origin and angles where the event has none, a player's ducking from its hull.
+    fn complete_args(&self, e: &Entity, args: &mut EventArgs) {
+        let l = &self.entity_layout;
+        let f = |name: &str| l.slot(name).map_or(0.0, |s| s.read_f32(&e.state));
+        let player = self.is_player(u32::from(e.number));
+        args.entindex = i32::from(e.number);
+        if args.origin == [0.0; 3] {
+            args.origin = [f("origin[0]"), f("origin[1]"), f("origin[2]")];
+        }
+        if args.angles == [0.0; 3] {
+            args.angles = [f("angles[0]"), f("angles[1]"), f("angles[2]")];
+        }
+        if player {
+            args.ducking = i32::from(l.slot("usehull").is_some_and(|s| s.read_i64(&e.state) == 1));
+        }
+        view_angles(&mut args.angles, player);
     }
 
     fn event_reliable(&mut self, b: &mut Bits<'_>, out: &mut Vec<Msg>) -> Result<(), Error> {
@@ -787,6 +850,35 @@ impl Decoder {
     }
 }
 
+/// Angles into -180..180 (the client's `COM_NormalizeAngles`), and a player's model pitch, its view's divided by -3,
+/// back into the view's.
+fn view_angles(angles: &mut [f32; 3], player: bool) {
+    for a in angles.iter_mut() {
+        if *a > 180.0 {
+            *a -= 360.0;
+        } else if *a < -180.0 {
+            *a += 360.0;
+        }
+    }
+    if player {
+        angles[0] *= -3.0;
+    }
+}
+
+/// The sequence of the frame a delta names by the low byte of its sequence: the latest one up to `seq`.
+fn base_sequence(seq: i32, from: u8) -> i32 {
+    seq.wrapping_sub(i32::from((seq as u8).wrapping_sub(from)))
+}
+
+/// Entities of a packet come in rising numbers below the edict limit; anything else is a misread packet.
+fn in_order(number: u32, last: &mut Option<u32>) -> Result<(), Error> {
+    if number as usize >= MAX_EDICTS || last.is_some_and(|l| number <= l) {
+        return Err(Error::Message(format!("entity {number} after {last:?}")));
+    }
+    *last = Some(number);
+    Ok(())
+}
+
 #[derive(Default)]
 struct EntityHeader {
     number: u32,
@@ -796,9 +888,13 @@ struct EntityHeader {
     offset: usize,
 }
 
-fn temp_entity(b: &mut Bits<'_>, out: &mut Vec<Msg>) -> Result<(), Error> {
+fn temp_entity(b: &mut Bits<'_>, hltv: bool, out: &mut Vec<Msg>) -> Result<(), Error> {
     let kind = b.read_u8()?;
-    let len = TE_LENGTH.get(usize::from(kind)).copied().unwrap_or(-2);
+    let len = if kind == TE_LINE && !hltv {
+        17
+    } else {
+        TE_LENGTH.get(usize::from(kind)).copied().unwrap_or(-2)
+    };
     let data = match len {
         -2 => return Err(Error::Message(format!("temp entity {kind}"))),
         -1 if kind == TE_BSPDECAL => {
@@ -833,4 +929,40 @@ fn spawn_static(b: &mut Bits<'_>) -> Result<(), Error> {
         b.skip_bytes(1 + 3 + 1)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_delta_base_is_the_latest_frame_with_that_low_byte() {
+        assert_eq!(base_sequence(0x102, 0xff), 0xff);
+        assert_eq!(base_sequence(0x102, 0x01), 0x101);
+        assert_eq!(
+            base_sequence(0x102, 0x02),
+            0x102,
+            "no earlier frame: the base is missing"
+        );
+    }
+
+    #[test]
+    fn packet_entities_rise_below_the_edict_limit() {
+        let mut last = None;
+        assert!(in_order(1, &mut last).is_ok());
+        assert!(in_order(5, &mut last).is_ok());
+        assert!(in_order(5, &mut last).is_err());
+        assert!(in_order(3, &mut None).is_ok());
+        assert!(in_order(MAX_EDICTS as u32, &mut None).is_err());
+    }
+
+    #[test]
+    fn a_players_model_pitch_turns_into_its_view_pitch() {
+        let mut a = [350.0, 270.0, 0.0];
+        view_angles(&mut a, true);
+        assert_eq!(a, [30.0, -90.0, 0.0], "a model pitched 10 up is a view 30 down");
+        let mut a = [350.0, 270.0, 0.0];
+        view_angles(&mut a, false);
+        assert_eq!(a, [-10.0, -90.0, 0.0]);
+    }
 }

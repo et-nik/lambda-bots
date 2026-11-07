@@ -85,7 +85,7 @@ impl<'a> Bits<'a> {
     }
 
     pub fn skip_bytes(&mut self, n: usize) -> Result<(), Error> {
-        self.skip_bits(n * 8)
+        self.skip_bits(n.checked_mul(8).ok_or(Error::Overflow)?)
     }
 
     pub fn read_u8(&mut self) -> Result<u8, Error> {
@@ -138,7 +138,7 @@ impl<'a> Bits<'a> {
     }
 
     pub fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>, Error> {
-        if n * 8 > self.remaining_bits() {
+        if n.checked_mul(8).is_none_or(|bits| bits > self.remaining_bits()) {
             return Err(Error::Overflow);
         }
         (0..n).map(|_| self.read_u8()).collect()
@@ -203,5 +203,21 @@ mod tests {
         let mut b = Bits::new(&data);
         b.read_bits(8).unwrap();
         assert_eq!(b.read_u32().unwrap(), 0x1234_5678);
+        let data = [0xffu8, 0x78, 0x56, 0x34, 0x13];
+        let mut b = Bits::new(&data);
+        assert!(b.read_bit().unwrap());
+        assert_eq!(
+            b.read_u32().unwrap(),
+            0x9a2b_3c7f,
+            "the top bit is the fifth byte's lowest"
+        );
+    }
+
+    #[test]
+    fn byte_counts_too_large_for_bits_are_overflows() {
+        let mut b = Bits::new(&[0u8; 4]);
+        assert!(matches!(b.skip_bytes(usize::MAX), Err(Error::Overflow)));
+        assert!(matches!(b.read_bytes(usize::MAX), Err(Error::Overflow)));
+        assert_eq!(b.remaining_bits(), 32);
     }
 }

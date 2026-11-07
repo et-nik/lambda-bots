@@ -147,7 +147,8 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if n > self.end.saturating_sub(self.pos) {
+        // The bytes themselves bound a read too: a segment may come from another file's directory.
+        if n > self.end.min(self.bytes.len()).saturating_sub(self.pos) {
             return Err(Error::Truncated);
         }
         let s = &self.bytes[self.pos..self.pos + n];
@@ -432,5 +433,34 @@ mod tests {
         assert_eq!(d.header.map, "stalker");
         assert_eq!(d.segments.len(), 1);
         assert_eq!(d.segments[0].description, "LOADING");
+    }
+
+    #[test]
+    fn a_segment_of_a_longer_file_ends_cut_short() {
+        let demo = |len: usize| {
+            let start = HEADER_SIZE + 4 + ENTRY_SIZE;
+            let mut b = header(HEADER_SIZE as i32);
+            b.extend_from_slice(&1i32.to_le_bytes());
+            let mut e = vec![0u8; ENTRY_SIZE];
+            e[84..88].copy_from_slice(&(start as i32).to_le_bytes());
+            e[88..92].copy_from_slice(&(len as i32).to_le_bytes());
+            b.extend_from_slice(&e);
+            // A demo start frame: type, time, number.
+            b.push(2);
+            b.resize(start + len, 0);
+            b
+        };
+        let (long, short) = (demo(300), demo(9));
+        let long = DemoFile::open(&long).unwrap();
+        let short = DemoFile::open(&short).unwrap();
+        let frames: Vec<_> = short.frames(&long.segments[0]).collect();
+        assert!(matches!(
+            frames[0],
+            Ok(Frame {
+                data: FrameData::DemoStart,
+                ..
+            })
+        ));
+        assert!(matches!(frames.last(), Some(Err(Error::Truncated))));
     }
 }
