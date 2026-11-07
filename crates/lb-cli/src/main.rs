@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use lb_config::check::{check_file, yaml_files};
 
+mod demo;
 mod nav_try;
 
 const USAGE: &str = "usage:
@@ -20,7 +21,9 @@ const USAGE: &str = "usage:
   lb-cli nav tracecheck <map.bsp> <tracedump.jsonl>
   lb-cli nav try <map.bsp> [<test-id>...|all] [--install <dir>] [--repeat N] [--fps F]
   lb-cli nav try <map.bsp> --to <x,y,z> [--from <x,y,z>] [--give gauss,longjump] [--tricks ...] [--radius R]
-  lb-cli replay <recording.lbrec> [--console] [--keep] [--dir <dir>] [--diffs <n>]";
+  lb-cli replay <recording.lbrec> [--console] [--keep] [--dir <dir>] [--diffs <n>]
+  lb-cli demo info <file.dem> [--names]
+  lb-cli demo export <file.dem> [--out <dir>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,6 +49,8 @@ fn run(args: &[&str]) -> Result<bool> {
         ["nav", "tracecheck", bsp, dump] => trace_check(Path::new(bsp), Path::new(dump)),
         ["nav", "try", bsp, opts @ ..] => nav_try::run(Path::new(bsp), opts),
         ["replay", file, opts @ ..] => replay(Path::new(file), opts),
+        ["demo", "info", file, opts @ ..] => demo::info(Path::new(file), opts),
+        ["demo", "export", file, opts @ ..] => demo::export(Path::new(file), opts),
         _ => bail!(USAGE),
     }
 }

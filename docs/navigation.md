@@ -22,8 +22,12 @@ and its vertical push accelerates the player against gravity, at that many units
    over, then down onto the floor). A column of the grid holds a span per floor (a room above a room). Walking off an
    edge is a fall; a ledge too high to step onto but at most 60 units up is a ledge (a crouch jump reaches 63). Doors
    stand open and breakables are gone while the floor is flooded; the spots they close are marked. Spans in lava,
-   slime or a strong `trigger_hurt`, in push fields, and where a player would touch a ladder are marked too: no node
-   goes there.
+   slime or a harmful `trigger_hurt`, in push fields, and where a player would touch a ladder are marked too: no node
+   goes there. A `trigger_hurt` is harmful from 20 damage a second, or from 5 when its damage stops with the touch
+   (not radiation, poison and the other time-based kinds): a burning floor, freezing water. A ladder is climbed from
+   a spot 14 units off the face of its box; where that spot is not on the ladder (a ladder on a slanted face, or one
+   sunk into its wall but for a sliver) the spot is where a player walking at the ladder from all round stops on it,
+   with the normal of the face it meets.
 2. **Nodes.** Required spots get a node first: spawn points, items, ladder ends and rungs every 64 units, lift
    platforms, teleports, drop edges and landings, push-field entries and landings, a spot in reach of every button, a
    spot inside every trigger that sets a door or a lift off, and one on each side of every door. Then nodes fill the
