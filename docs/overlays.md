@@ -14,6 +14,11 @@ their patches are applied to the graph in order. A patch that does not apply is 
 `lb-cli nav validate-overlay`; the others still apply. A file that does not parse is left out whole, with the error
 and the line in the log.
 
+A third file there, `moves.yaml` (made by `lb-cli demo moves` from recordings of players' games), is not an overlay:
+the generator reads it and makes gauss boosts onto the high ground players climb onto, with the nodes up there
+(`docs/navigation.md`, *High ground players climb onto*). The overlays are applied to that graph: a patch that adds a
+node or a link where the generator now has its own is reported as not applied.
+
 ## The file
 
 ```yaml
@@ -92,8 +97,9 @@ copy the overlay files: the graph there is its own.
 lb-cli nav validate-overlay maps/crossfire.bsp addons/lambdabots/maps/crossfire/overlay.yaml
 ```
 
-makes the graph of the map, applies the overlay and reports what did not apply. The exit code is 0 only when every
-patch applied. `lb-cli config check` checks the schema of any overlay file without the map.
+makes the graph of the map as the server does, with the `moves.yaml` beside the (first) overlay file if there is one
+(`--moves <moves.yaml>` names another), applies the overlay and reports what did not apply. The exit code is 0 only
+when every patch applied. `lb-cli config check` checks the schema of any overlay file without the map.
 
 ## The editor
 

@@ -1959,19 +1959,23 @@ impl BotBrain {
                 seen.or_else(|| through.map(|(p, _)| (p.distance(body.eye), on_target(self.motor.view, body.eye, p))));
             let expected = matches!(self.mind.goal.map(|g| g.kind), Some(GoalKind::Hunt(_))) || through.is_some();
             let fired = self.mind.arms.gauss.fired;
+            // On its way up to a perch the bot shoots plain and dumps a charge held at once: a charged shot's throw
+            // would knock it off the way to the takeoff, and the boost would wait for the gun.
+            let climbing = self.mind.perch_way;
             let input = GaussInput {
                 target,
                 expected,
-                precharge: ch.skill.gauss_precharge,
+                precharge: if climbing { 0.0 } else { ch.skill.gauss_precharge },
                 recoil_room: self.mind.arms.recoil_room,
                 wall_ahead: self.gauss_wall(body, nav),
                 full_damage: body.damages.gauss_charged,
                 heading: body.velocity.truncate().normalize_or_zero(),
                 allowed: body.allows(WeaponId::Gauss),
-                charge_share: ch.skill.gauss_charge,
+                charge_share: if climbing { 0.0 } else { ch.skill.gauss_charge },
                 dump: self.safe_dump(body, nav),
                 backfire: self.mind.arms.gauss_wall.map_or(0.0, |w| w.2),
                 min_damage: through.map_or(0.0, |(_, need)| need),
+                dump_now: climbing,
             };
             if let Some(r) = self.mind.arms.gauss.update(&hands, &input, &mut rng.combat) {
                 requests.push(r);
@@ -2401,9 +2405,13 @@ impl BotBrain {
     /// wall around. Looked for four times a second while charging.
     fn safe_dump(&mut self, body: &Body, tracer: &mut dyn Tracer) -> Option<Vec3> {
         const PERIOD: f64 = 0.25;
-        // Looked for only once a dump draws near: some eighty traces each time.
+        // Looked for only once a dump draws near: some eighty traces each time. On the way to a perch a charge held
+        // is dumped at once, and back the way the bot came its throw would carry it on past the takeoff.
         const SOON: f32 = 5.5;
-        let soon = self.mind.arms.gauss.charge(body.now) >= SOON || body.waterlevel >= 2 || body.on_ladder;
+        let soon = self.mind.arms.gauss.charge(body.now) >= SOON
+            || body.waterlevel >= 2
+            || body.on_ladder
+            || self.mind.perch_way;
         if !self.mind.arms.gauss.active() || !soon {
             return None;
         }

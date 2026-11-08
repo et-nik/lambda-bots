@@ -4,8 +4,9 @@
 //!   go more than 15% out of its way (a greedy spanner);
 //! - special links the classifier checks: drops, ladders, lifts, teleports, doors and breakables in the way, and
 //!   jumps where walking around is more than twice as long;
-//! - tricks: long jumps across gaps a jump does not clear where walking around is more than twice as long. Gauss boosts
-//!   are not made: they are put in by hand (overlays, the map editor), as `add_link` of that kind.
+//! - tricks: long jumps across gaps a jump does not clear where walking around is more than twice as long, and gauss
+//!   boosts up onto high ground where players were seen to make them often enough (`crate::climbs`); other boosts are
+//!   put in by hand (overlays, the map editor), as `add_link` of that kind.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -27,12 +28,13 @@ use lb_nav::validate::{WalkCheck, walk_straight};
 use lb_worldq::{HullKind, TraceQuery, Tracer};
 use rayon::prelude::*;
 
+use crate::climbs::HighGround;
 use crate::field::{FloorField, LEDGE, NONE, STEP, SpanFlags, settle};
-use crate::place::{Spacing, Spot, borders, place, room, spot_at, strip_middle};
+use crate::place::{NO_NODE, Spacing, Spot, borders, place, room, spot_at, strip_middle};
 use crate::push::{PushEntry, field_center, push_sites};
 use crate::site::{LadderSite, SeedKind, Site, TOP_BELOW, USE_REACH, flood_poses, ladder_ends, rest_poses, sites};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GenOptions {
     pub physics: Physics,
     /// Longest walk link considered.
@@ -45,6 +47,9 @@ pub struct GenOptions {
     /// Plan long jumps.
     pub tricks: bool,
     pub spacing: Spacing,
+    /// High ground players were seen to get up onto with gauss boosts often enough (`maps/<map>/moves.yaml`): the
+    /// ways up that check out are made, with the nodes up there.
+    pub high_ground: Vec<HighGround>,
 }
 
 impl Default for GenOptions {
@@ -57,6 +62,7 @@ impl Default for GenOptions {
             jumps: true,
             tricks: true,
             spacing: Spacing::default(),
+            high_ground: Vec::new(),
         }
     }
 }
@@ -71,6 +77,8 @@ pub struct Generated {
     /// Jumps planned, and how many of them made it; the same of long jumps.
     pub jumps: (usize, usize),
     pub longjumps: (usize, usize),
+    /// Ways up onto high ground players were seen to take that check out, and how many were made into gauss boosts.
+    pub climbs: (usize, usize),
     /// Nodes at spawn points and at items.
     pub spawns: Vec<u32>,
     pub items: Vec<u32>,
@@ -595,19 +603,16 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         *t = Instant::now();
     };
 
-    world.pushes = mech.push_fields();
-    let map = sites(world, mech);
-    flood_poses(world, mech);
-    let pushes = push_sites(world, &opts.physics);
-    let mut origins: Vec<Vec3> = map.seeds.iter().map(|s| s.origin).collect();
-    origins.extend(pushes.entries.iter().map(|e| e.origin));
-    origins.extend(pushes.flights.iter().map(|f| f.landing));
-    let field = {
+    let (map, pushes, mut field) = floor(world, mech, opts);
+    // High ground players were seen to get up onto, flooded on from where they came down by the ways up that hold.
+    let (climbs, climb_traces) = if opts.high_ground.is_empty() {
+        (Vec::new(), 0)
+    } else {
         let site = Site::new(world, mech);
-        FloorField::flood(world, &origins, &site)
+        crate::climbs::onto_high_ground(world, &opts.physics, &opts.high_ground, &mut field, &site)
     };
     rest_poses(world, mech);
-    let mut extra_traces = field.traces;
+    let mut extra_traces = field.traces + climb_traces;
     lap("flood", &mut t);
 
     // Required nodes.
@@ -674,6 +679,34 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         extra_traces += v.traces;
         chains
     };
+    // At the very spots the boosts were checked from and onto.
+    let climb_req: Vec<(usize, usize, usize)> = climbs
+        .iter()
+        .filter_map(|c| {
+            let (a, b) = (field.at(c.from)?, field.at(c.to)?);
+            if [a, b]
+                .iter()
+                .any(|&s| field.spans[s as usize].flags.intersects(NO_NODE))
+            {
+                return None;
+            }
+            let (takeoff, landing) = (
+                spot_at(&field, a, NodeFlags::empty()),
+                spot_at(&field, b, NodeFlags::empty()),
+            );
+            Some((
+                c.ground,
+                req.push(Spot {
+                    origin: c.from,
+                    ..takeoff
+                }),
+                req.push(Spot {
+                    origin: c.to,
+                    ..landing
+                }),
+            ))
+        })
+        .collect();
     let drops = drop_pairs(&field, &mut req);
     door_sides(&field, &mut req);
     use_spots(world, mech, &field, &mut req);
@@ -1173,6 +1206,20 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
     } else {
         (0, 0)
     };
+    // A takeoff or a landing merged into a node placed before it stands where that one does: on floor a node goes on.
+    let on_floor = |n: u32| {
+        let s = placement.spots[n as usize].span;
+        s != NONE && !field.spans[s as usize].flags.intersects(NO_NODE)
+    };
+    let climb_ways: Vec<(usize, u32, u32)> = climb_req
+        .iter()
+        .map(|&(g, a, b)| (g, id(a), id(b)))
+        .filter(|&(_, a, b)| on_floor(a) && on_floor(b))
+        .collect();
+    let climbs_made = climb_links(&mut cls, &mut links, &climb_ways, &opts.physics);
+    if !climb_ways.is_empty() {
+        lap("climbs", &mut t);
+    }
 
     let probes = cls.probes(&links.out);
     let traces = cls.world.traces - traces_before + extra_traces;
@@ -1195,9 +1242,60 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         timings,
         jumps,
         longjumps,
+        climbs: (climbs.len(), climbs_made),
         spawns,
         items,
     }
+}
+
+/// Gauss boosts up onto high ground players were seen to make (high ground, takeoff node, landing node), planned
+/// again between the nodes, in the order given: `climbs::BOOSTS` onto each high ground at most, one from each node
+/// (players take off all round it: a bot takes the boost nearest its way). Returns how many were made.
+fn climb_links(cls: &mut Classifier<'_>, links: &mut Links, ways: &[(usize, u32, u32)], phys: &Physics) -> usize {
+    let plans: Vec<Option<TrickPlan>> = {
+        let (w, nodes) = (&*cls.world, &cls.nodes);
+        ways.par_iter()
+            .map(|&(_, a, b)| {
+                let mut v = WorldView::new(w);
+                let (from, to) = (stand_origin(&nodes[a as usize]), stand_origin(&nodes[b as usize]));
+                crate::climbs::plan(&mut v, phys, from, to)
+            })
+            .collect()
+    };
+    let mut onto: rustc_hash::FxHashMap<usize, usize> = rustc_hash::FxHashMap::default();
+    let mut from: rustc_hash::FxHashSet<(usize, u32)> = rustc_hash::FxHashSet::default();
+    for (&(ground, a, b), plan) in ways.iter().zip(plans) {
+        let Some(plan) = plan else { continue };
+        if a == b || from.contains(&(ground, a)) || onto.get(&ground).is_some_and(|&n| n >= crate::climbs::BOOSTS) {
+            continue;
+        }
+        let (na, nb) = (cls.nodes[a as usize], cls.nodes[b as usize]);
+        let c = cls.boost_from_plan(&na, &nb, &plan);
+        let link = cls.link(a as usize, b as usize, c, LinkFlags::empty());
+        links.out[a as usize].push(link);
+        from.insert((ground, a));
+        *onto.entry(ground).or_default() += 1;
+    }
+    onto.values().sum()
+}
+
+/// The floor field `generate` places nodes on, flooded from the map's seeds with the world posed for the flood (doors
+/// open, breakables gone), and the sites it was flooded from.
+pub(crate) fn floor(
+    world: &mut BspWorld,
+    mech: &Mechanisms,
+    opts: &GenOptions,
+) -> (crate::site::MapSites, crate::push::PushSites, FloorField) {
+    world.pushes = mech.push_fields();
+    let map = sites(world, mech);
+    flood_poses(world, mech);
+    let pushes = push_sites(world, &opts.physics);
+    let mut origins: Vec<Vec3> = map.seeds.iter().map(|s| s.origin).collect();
+    origins.extend(pushes.entries.iter().map(|e| e.origin));
+    origins.extend(pushes.flights.iter().map(|f| f.landing));
+    let site = Site::new(world, mech);
+    let field = FloorField::flood(world, &origins, &site);
+    (map, pushes, field)
 }
 
 /// Long jumps across gaps: pairs of standing nodes 160–560 units apart, the first near an edge, that the graph joins

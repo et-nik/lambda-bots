@@ -27,7 +27,7 @@ use lb_game::sounds::SoundKind;
 use lb_game::weapons::WeaponId;
 use lb_knowledge::{EnemyTrack, PlayerKey, TrackState};
 use lb_motor::{Fire, Intents, LookIntent, LookParams, MoveIntent, Prio, StanceIntent, WeaponIntent};
-use lb_nav_api::{MapView, NavService, NavStatus, NavStep};
+use lb_nav_api::{CampKind, MapView, NavService, NavStatus, NavStep};
 use lb_styles::{Emotions, GoalAffinity, HandTraits, TrickLikes};
 use smallvec::SmallVec;
 
@@ -306,6 +306,9 @@ pub struct MindStats {
     /// Cover found from a threat (rather than just away from it).
     pub covers: u32,
     pub camps: u32,
+    /// Perches got onto (high ground a gauss boost took the bot up to), and the climbs taken up in a fight.
+    pub perches: u32,
+    pub perch_fights: u32,
     /// Items waited for and taken as they came back.
     pub controlled: u32,
     pub traps: u32,
@@ -371,9 +374,14 @@ pub struct Mind {
     pub task: Option<Task>,
     /// Moods that come and go around the personality's aggression and fear.
     pub mood: Emotions,
-    /// Spots are not held, and traps not laid, again before these.
+    /// Spots are not held, traps not laid and high ground not taken again before these.
     pub camp_rest_until: SimTime,
     pub trap_rest_until: SimTime,
+    pub perch_rest_until: SimTime,
+    /// The perch whose high ground the bot stands on, got onto by a gauss boost.
+    pub perched: Option<Vec3>,
+    /// On its way up to a perch: the boost is made with an enemy about too.
+    pub perch_way: bool,
     /// The distance weapons are chosen for when no enemy is about: the range a spot held watches.
     pub calm_distance: Option<f32>,
     pub stats: MindStats,
@@ -541,6 +549,14 @@ impl BotBrain {
             self.mind.stats.still[fighting] += f64::from(body.dt);
         }
         self.decide(body, ch, map, rng);
+        self.mind.perch_way = self.mind.perched.is_none()
+            && match (self.mind.goal.map(|g| g.kind), map) {
+                (Some(GoalKind::Camp(i)), Some(map)) => map
+                    .camp_spots()
+                    .get(usize::from(i))
+                    .is_some_and(|c| c.kind == CampKind::Perch),
+                _ => false,
+            };
         let tricks = self.nav_tricks(body, ch, rng);
         nav.set_tricks(tricks);
         self.pursue(body, ch, nav, map, rng);
@@ -738,6 +754,24 @@ impl BotBrain {
         let now = body.now;
         let calm_for = self.calm_for(now);
         let m = &mut self.mind;
+        let was_perched = m.perched.is_some();
+        m.perched = m
+            .perched
+            .filter(|&p| crate::goals::still_perched(p, body.origin) && body.health > 0.0);
+        // Off the high ground, its time up there over or not (come down or knocked off in a fight): it is taken again
+        // after a rest.
+        if was_perched && m.perched.is_none() && body.health > 0.0 && now >= m.perch_rest_until {
+            m.perch_rest_until = crate::goals::perch_rest(now, rng);
+        }
+        // Got onto once it stands there, not as a boost carries it through.
+        if m.perched.is_none()
+            && body.health > 0.0
+            && body.on_ground
+            && let Some(p) = map.and_then(|map| crate::goals::perch_at(map, body.origin))
+        {
+            m.perched = Some(p);
+            m.stats.perches += 1;
+        }
         if !m.urgent && now < m.next_decision && m.decider.current.is_some() {
             return;
         }
@@ -769,6 +803,12 @@ impl BotBrain {
             calm_for,
             camp_ready: now >= m.camp_rest_until,
             trap_ready: now >= m.trap_rest_until,
+            perch_like: crate::tricks::perch_like(ch),
+            perch_ready: now >= m.perch_rest_until,
+            can_boost: matches!(m.arms.active, Some(crate::arms::Active::GaussBoost(_)))
+                || (m.tricks.told.gauss_boost && m.tricks.boost_ready),
+            perched: m.perched.is_some(),
+            perch_fight: m.tricks.perch_fight,
             trap_under_way: match &m.task {
                 Some(Task::Trap {
                     started: Some(_),
@@ -788,6 +828,9 @@ impl BotBrain {
         };
         let goal = m.decider.decide(&s, &mut rng.decision);
         m.goal = Some(goal);
+        if goal.rank == 3 && old != Some(goal.kind) {
+            m.stats.perch_fights += 1;
+        }
         if let Some(old) = old
             && old != goal.kind
         {
@@ -1448,7 +1491,9 @@ pub(crate) fn fight_input(m: &Mind, t: &EnemyTrack, body: &Body, ch: &Character)
     // throw holds its own).
     let throwable = |w: Option<WeaponId>| w.is_some_and(|w| spec(w).class == WeaponClass::Throwable);
     let thrown = throwable(m.choice.map(Choice::weapon)) || throwable(body.weapon);
-    let close_in = if thrown && !crate::patrol::same_level(body.origin, t.pos) {
+    // Nor on high ground a boost took the bot up to: a drop down to the enemy would give it up.
+    let off_level = thrown && !crate::patrol::same_level(body.origin, t.pos);
+    let close_in = if off_level || m.perched.is_some() {
         f32::INFINITY
     } else {
         lb_combat::fight::close_in(body.weapon).min(close).max(keep * 1.25)

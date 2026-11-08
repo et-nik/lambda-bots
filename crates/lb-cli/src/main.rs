@@ -9,21 +9,23 @@ use anyhow::{Result, bail};
 use lb_config::check::{check_file, yaml_files};
 
 mod demo;
+mod moves;
 mod nav_try;
 
 const USAGE: &str = "usage:
   lb-cli config check <file-or-dir>...
-  lb-cli nav gen <map.bsp> [--out <file.lbnav>]
-  lb-cli nav coverage <map.bsp> [--json]
-  lb-cli nav tactics <map.bsp> [--all]
-  lb-cli nav path <map.bsp> <x,y,z> <x,y,z>
-  lb-cli nav validate-overlay <map.bsp> <overlay.yaml>...
+  lb-cli nav gen <map.bsp> [--out <file.lbnav>] [--moves <moves.yaml>]
+  lb-cli nav coverage <map.bsp> [--json] [--moves <moves.yaml>]
+  lb-cli nav tactics <map.bsp> [--all] [--moves <moves.yaml>]
+  lb-cli nav path <map.bsp> <x,y,z> <x,y,z> [--moves <moves.yaml>]
+  lb-cli nav validate-overlay <map.bsp> <overlay.yaml>... [--moves <moves.yaml>]
   lb-cli nav tracecheck <map.bsp> <tracedump.jsonl>
   lb-cli nav try <map.bsp> [<test-id>...|all] [--install <dir>] [--repeat N] [--fps F]
   lb-cli nav try <map.bsp> --to <x,y,z> [--from <x,y,z>] [--give gauss,longjump] [--tricks ...] [--radius R]
   lb-cli replay <recording.lbrec> [--console] [--keep] [--dir <dir>] [--diffs <n>]
   lb-cli demo info <file.dem> [--names]
-  lb-cli demo export <file.dem> [--out <dir>]";
+  lb-cli demo export <file.dem> [--out <dir>]
+  lb-cli demo moves <map.bsp> <file.dem|dir>... [--trusted <file.dem|dir>...] [--out <moves.yaml>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,41 +41,77 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[&str]) -> Result<bool> {
-    match args {
+    // The generator makes gauss boosts onto the high ground of a map's moves file (`maps/<map>/moves.yaml`).
+    let (args, moves) = match args.iter().position(|&a| a == "--moves") {
+        Some(i) if args.first() == Some(&"nav") => {
+            let file = args.get(i + 1).ok_or_else(|| anyhow::anyhow!(USAGE))?;
+            let rest: Vec<&str> = args[..i].iter().chain(&args[i + 2..]).copied().collect();
+            (rest, Some(Path::new(file)))
+        }
+        _ => (args.to_vec(), None),
+    };
+    match args.as_slice() {
         ["config", "check", paths @ ..] if !paths.is_empty() => Ok(config_check(paths)),
-        ["nav", "gen", bsp, opts @ ..] => nav_gen(Path::new(bsp), opts),
-        ["nav", "coverage", bsp, opts @ ..] => nav_coverage(Path::new(bsp), opts),
-        ["nav", "tactics", bsp, opts @ ..] => nav_tactics(Path::new(bsp), opts),
-        ["nav", "path", bsp, from, to] => nav_path(Path::new(bsp), from, to),
-        ["nav", "validate-overlay", bsp, files @ ..] if !files.is_empty() => validate_overlay(Path::new(bsp), files),
+        ["nav", "gen", bsp, opts @ ..] => nav_gen(Path::new(bsp), opts, moves),
+        ["nav", "coverage", bsp, opts @ ..] => nav_coverage(Path::new(bsp), opts, moves),
+        ["nav", "tactics", bsp, opts @ ..] => nav_tactics(Path::new(bsp), opts, moves),
+        ["nav", "path", bsp, from, to] => nav_path(Path::new(bsp), from, to, moves),
+        ["nav", "validate-overlay", bsp, files @ ..] if !files.is_empty() => {
+            validate_overlay(Path::new(bsp), files, moves)
+        }
         ["nav", "tracecheck", bsp, dump] => trace_check(Path::new(bsp), Path::new(dump)),
         ["nav", "try", bsp, opts @ ..] => nav_try::run(Path::new(bsp), opts),
         ["replay", file, opts @ ..] => replay(Path::new(file), opts),
         ["demo", "info", file, opts @ ..] => demo::info(Path::new(file), opts),
         ["demo", "export", file, opts @ ..] => demo::export(Path::new(file), opts),
+        ["demo", "moves", rest @ ..] => moves::run(rest),
         _ => bail!(USAGE),
     }
 }
 
-/// Makes the graph of a map, as the server does with the default physics.
-fn generate(bsp: &Path) -> Result<(lb_bsp::BspWorld, lb_navgen::Generated, lb_nav::store::GraphKey)> {
+/// Makes the graph of a map, as the server does with the default physics: with the moves file `--moves` names, which
+/// must be for this build of the map, or else with the map's own `own`, used as the server uses it.
+fn generate(
+    bsp: &Path,
+    moves: Option<&Path>,
+    own: Option<&Path>,
+) -> Result<(lb_bsp::BspWorld, lb_navgen::Generated, lb_nav::store::GraphKey)> {
     let bytes = std::fs::read(bsp).map_err(|e| anyhow::anyhow!("{}: {e}", bsp.display()))?;
     let mut world = lb_bsp::BspWorld::load(&bytes).map_err(|e| anyhow::anyhow!("{}: {e}", bsp.display()))?;
     let mech = lb_bsp::mech::Mechanisms::from_world(&world);
-    let opts = lb_navgen::GenOptions::default();
     let name = bsp.file_stem().and_then(|s| s.to_str()).unwrap_or("map");
+    let size = world.bsp.fingerprint.1;
+    let high_ground = match (moves, own) {
+        (Some(path), _) => {
+            let (made, note) = lb_navgen::mapload::read_high_ground(path, name, size).map_err(anyhow::Error::msg)?;
+            eprintln!("{note}");
+            made
+        }
+        (None, Some(path)) => {
+            let (made, note) = lb_navgen::mapload::high_ground_in(path, name, size);
+            if let Some(note) = note {
+                eprintln!("{note}");
+            }
+            made
+        }
+        (None, None) => Vec::new(),
+    };
+    let opts = lb_navgen::GenOptions {
+        high_ground,
+        ..lb_navgen::GenOptions::default()
+    };
     let generated = lb_navgen::generate(&mut world, &mech, &opts, name);
     let key = lb_navgen::cache::key(&world, &opts, 0, 0);
     Ok((world, generated, key))
 }
 
-fn nav_gen(bsp: &Path, args: &[&str]) -> Result<bool> {
+fn nav_gen(bsp: &Path, args: &[&str], moves: Option<&Path>) -> Result<bool> {
     let out = match args {
         [] => bsp.with_extension("lbnav"),
         ["--out", path] => Path::new(path).to_path_buf(),
         _ => bail!(USAGE),
     };
-    let (_, generated, key) = generate(bsp)?;
+    let (_, generated, key) = generate(bsp, moves, None)?;
     let s = &generated.graph.stats;
     println!(
         "{} nodes, {} links ({}), {} traces, {} ms",
@@ -86,8 +124,13 @@ fn nav_gen(bsp: &Path, args: &[&str]) -> Result<bool> {
     let stages: Vec<String> = generated.timings.iter().map(|(n, ms)| format!("{n} {ms}")).collect();
     println!("stages, ms: {}", stages.join(", "));
     println!(
-        "jumps {} of {} planned, long jumps {} of {}",
-        generated.jumps.1, generated.jumps.0, generated.longjumps.1, generated.longjumps.0
+        "jumps {} of {} planned, long jumps {} of {}, gauss boosts onto high ground {} of {} ways up that check out",
+        generated.jumps.1,
+        generated.jumps.0,
+        generated.longjumps.1,
+        generated.longjumps.0,
+        generated.climbs.1,
+        generated.climbs.0
     );
     let c = lb_navgen::report::coverage(&generated);
     println!(
@@ -122,13 +165,13 @@ fn places(world: &lb_bsp::BspWorld) -> (Vec<lb_core::Vec3>, Vec<lb_core::Vec3>) 
 }
 
 /// Works out a map's tactics as the server does and prints what came out.
-fn nav_tactics(bsp: &Path, args: &[&str]) -> Result<bool> {
+fn nav_tactics(bsp: &Path, args: &[&str], moves: Option<&Path>) -> Result<bool> {
     let all = match args {
         [] => false,
         ["--all"] => true,
         _ => bail!(USAGE),
     };
-    let (mut world, generated, _) = generate(bsp)?;
+    let (mut world, generated, _) = generate(bsp, moves, None)?;
     let mech = lb_bsp::mech::Mechanisms::from_world(&world);
     lb_navgen::site::rest_poses(&mut world, &mech);
     let vis = lb_bsp::MapVis::build(&world.bsp);
@@ -185,13 +228,13 @@ fn nav_tactics(bsp: &Path, args: &[&str]) -> Result<bool> {
     Ok(true)
 }
 
-fn nav_coverage(bsp: &Path, args: &[&str]) -> Result<bool> {
+fn nav_coverage(bsp: &Path, args: &[&str], moves: Option<&Path>) -> Result<bool> {
     let json = match args {
         [] => false,
         ["--json"] => true,
         _ => bail!(USAGE),
     };
-    let (world, generated, _) = generate(bsp)?;
+    let (world, generated, _) = generate(bsp, moves, None)?;
     let c = lb_navgen::report::coverage(&generated);
     let lost = lb_navgen::report::lost_items(&generated, &world, &c);
     if json {
@@ -241,7 +284,7 @@ fn nav_coverage(bsp: &Path, args: &[&str]) -> Result<bool> {
 }
 
 /// Reads overlays and applies their patches to the map's graph, reporting what does not apply.
-fn validate_overlay(bsp: &Path, files: &[&str]) -> Result<bool> {
+fn validate_overlay(bsp: &Path, files: &[&str], moves: Option<&Path>) -> Result<bool> {
     let mut overlays = Vec::new();
     let mut ok = true;
     for f in files {
@@ -254,7 +297,9 @@ fn validate_overlay(bsp: &Path, files: &[&str]) -> Result<bool> {
             }
         }
     }
-    let (mut world, generated, _) = generate(bsp)?;
+    // Without `--moves`, the graph is made with the moves file beside the overlays, as the server makes it.
+    let own = Path::new(files[0]).with_file_name(lb_navgen::mapload::MOVES);
+    let (mut world, generated, _) = generate(bsp, moves, Some(&own))?;
     for o in &overlays {
         if o.bsp_size.is_some_and(|s| s != world.bsp.fingerprint.1) {
             println!(
@@ -285,7 +330,7 @@ fn validate_overlay(bsp: &Path, files: &[&str]) -> Result<bool> {
     Ok(ok && report.problems.is_empty())
 }
 
-fn nav_path(bsp: &Path, from: &str, to: &str) -> Result<bool> {
+fn nav_path(bsp: &Path, from: &str, to: &str, moves: Option<&Path>) -> Result<bool> {
     let point = |s: &str| -> Result<lb_core::Vec3> {
         let v: Vec<f32> = s
             .split(',')
@@ -297,7 +342,7 @@ fn nav_path(bsp: &Path, from: &str, to: &str) -> Result<bool> {
         }
     };
     let (a, b) = (point(from)?, point(to)?);
-    let (_, generated, _) = generate(bsp)?;
+    let (_, generated, _) = generate(bsp, moves, None)?;
     let g = &generated.graph;
     let near = |p: lb_core::Vec3| g.nearest(p, 512.0, 1).first().map(|(n, _)| *n);
     let (Some(start), Some(goal)) = (near(a), near(b)) else {

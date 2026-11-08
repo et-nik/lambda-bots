@@ -1,0 +1,43 @@
+# High ground nobody walks onto that players got up onto with gauss boosts on levels, from recordings of
+# their games (`lb-cli demo moves`): counts only. The generator makes boosts onto the high ground climbed in
+# a trusted recording, or 5 times by 3 players at least.
+schema: lambdabots/moves@1
+map: levels
+bsp_size: 2083252
+source:
+  recordings: 8
+  minutes: 248.6
+high_ground:
+- seen: 5
+  players: 5
+  recordings: 3
+  ways:
+  - from: [-434.0, 1010.0, 644.0]
+    to: [-554.0, 1524.0, 891.0]
+    seen: 1
+  - from: [831.0, 1793.0, 807.0]
+    to: [-383.0, 1904.0, 996.0]
+    seen: 1
+  - from: [309.0, 1273.0, 644.0]
+    to: [-34.0, 1797.0, 996.0]
+    seen: 1
+  - from: [-828.0, 434.0, 164.0]
+    to: [-1.0, 1326.0, 877.0]
+    seen: 1
+  - from: [357.0, 1875.0, 677.0]
+    to: [14.0, 1892.0, 996.0]
+    seen: 1
+- seen: 1
+  players: 1
+  recordings: 1
+  ways:
+  - from: [-868.0, -722.0, 36.0]
+    to: [-1136.0, -160.0, 388.0]
+    seen: 1
+- seen: 1
+  players: 1
+  recordings: 1
+  ways:
+  - from: [-322.0, 2902.0, -204.0]
+    to: [124.0, 2798.0, 420.0]
+    seen: 1

@@ -727,7 +727,7 @@ fn gather_files(init: &InitData, map: &str) -> Vec<(Root, String, Vec<u8>)> {
         };
         add(root, rel, graph);
     }
-    for name in nav::OVERLAYS {
+    for name in nav::OVERLAYS.into_iter().chain([nav::MOVES]) {
         let overlay = install.join("maps").join(map).join(name);
         if overlay.is_file() {
             add(Root::Install, format!("maps/{map}/{name}"), &overlay);
@@ -1490,6 +1490,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(install.join("maps/flatland/overlay.yaml"), "overlay").unwrap();
+        std::fs::write(install.join("maps/flatland/moves.yaml"), "moves").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(
             install.join("config/lambdabots.yaml"),
@@ -1508,6 +1509,10 @@ mod tests {
         let files = gather_files(&init, "flatland");
         let rels: Vec<&str> = files.iter().map(|(_, rel, _)| rel.as_str()).collect();
         assert!(rels.contains(&"maps/flatland/overlay.yaml"), "{rels:?}");
+        assert!(
+            rels.contains(&"maps/flatland/moves.yaml"),
+            "the graph is made with it: {rels:?}"
+        );
         assert!(!rels.contains(&"maps/flatland/editor.yaml"), "{rels:?}");
         #[cfg(unix)]
         assert!(rels.contains(&"profiles/alias.yaml"), "{rels:?}");

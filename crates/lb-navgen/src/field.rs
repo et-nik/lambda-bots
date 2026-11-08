@@ -377,6 +377,13 @@ impl FloorField {
             ledges: Vec::new(),
             traces: 0,
         };
+        field.extend(world, seeds, hz);
+        field
+    }
+
+    /// Floods on from more seeds: the floor they are on and all it leads to that the field does not hold yet (high
+    /// ground nobody walks onto, from where players came down on it).
+    pub fn extend(&mut self, world: &lb_bsp::BspWorld, seeds: &[Vec3], hz: &dyn Surroundings) {
         let mut wave: Vec<u32> = Vec::new();
         let mut view = WorldView::new(world);
         for &seed in seeds {
@@ -384,22 +391,22 @@ impl FloorField {
             let Some((feet, crouch, support)) = settle(&mut view, seed) else {
                 continue;
             };
-            let (i, new) = field.insert(cell, seed.truncate(), feet, crouch, support, hz);
+            let (i, new) = self.insert(cell, seed.truncate(), feet, crouch, support, hz);
             if new
-                && !field.spans[i as usize]
+                && !self.spans[i as usize]
                     .flags
                     .intersects(SpanFlags::HAZARD | SpanFlags::PUSH)
             {
                 wave.push(i);
             }
         }
-        field.traces += view.traces;
+        self.traces += view.traces;
         while !wave.is_empty() {
             let steps: Vec<([Step; 8], u64)> = wave
                 .par_iter()
                 .map(|&i| {
                     let mut v = WorldView::new(world);
-                    let s = &field.spans[i as usize];
+                    let s = &self.spans[i as usize];
                     let mut out = [Step::Blocked; 8];
                     for (d, o) in out.iter_mut().enumerate() {
                         *o = walk_from(&mut v, s, s.cell.step(d).center());
@@ -409,72 +416,49 @@ impl FloorField {
                 .collect();
             let mut next = Vec::new();
             for (&i, (out, traces)) in wave.iter().zip(steps) {
-                field.traces += traces;
-                let cell = field.spans[i as usize].cell;
+                self.traces += traces;
+                let cell = self.spans[i as usize].cell;
                 for (d, st) in out.into_iter().enumerate() {
                     let to = cell.step(d);
+                    let (feet, crouch, support) = match st {
+                        Step::Walk { feet, crouch, support }
+                        | Step::Fall {
+                            feet, crouch, support, ..
+                        }
+                        | Step::Ledge {
+                            feet, crouch, support, ..
+                        } => (feet, crouch, support),
+                        Step::Blocked => continue,
+                    };
+                    let (j, new) = self.insert(to, to.center(), feet, crouch, support, hz);
                     match st {
-                        Step::Walk { feet, crouch, support } => {
-                            let (j, new) = field.insert(to, to.center(), feet, crouch, support, hz);
-                            field.spans[i as usize].next[d] = j;
-                            if new
-                                && !field.spans[j as usize]
-                                    .flags
-                                    .intersects(SpanFlags::HAZARD | SpanFlags::PUSH)
-                            {
-                                next.push(j);
-                            }
-                        }
-                        Step::Fall {
-                            feet,
-                            crouch,
-                            support,
+                        Step::Walk { .. } => self.spans[i as usize].next[d] = j,
+                        Step::Fall { height, .. } => self.falls.push(Fall {
+                            from: i,
+                            dir: d as u8,
+                            to: j,
                             height,
-                        } => {
-                            let (j, new) = field.insert(to, to.center(), feet, crouch, support, hz);
-                            field.falls.push(Fall {
-                                from: i,
-                                dir: d as u8,
-                                to: j,
-                                height,
-                            });
-                            if new
-                                && !field.spans[j as usize]
-                                    .flags
-                                    .intersects(SpanFlags::HAZARD | SpanFlags::PUSH)
-                            {
-                                next.push(j);
-                            }
-                        }
-                        Step::Ledge {
-                            feet,
-                            crouch,
-                            support,
+                        }),
+                        Step::Ledge { height, .. } => self.ledges.push(Ledge {
+                            from: i,
+                            dir: d as u8,
+                            to: j,
                             height,
-                        } => {
-                            let (j, new) = field.insert(to, to.center(), feet, crouch, support, hz);
-                            field.ledges.push(Ledge {
-                                from: i,
-                                dir: d as u8,
-                                to: j,
-                                height,
-                            });
-                            if new
-                                && !field.spans[j as usize]
-                                    .flags
-                                    .intersects(SpanFlags::HAZARD | SpanFlags::PUSH)
-                            {
-                                next.push(j);
-                            }
-                        }
+                        }),
                         Step::Blocked => {}
+                    }
+                    if new
+                        && !self.spans[j as usize]
+                            .flags
+                            .intersects(SpanFlags::HAZARD | SpanFlags::PUSH)
+                    {
+                        next.push(j);
                     }
                 }
             }
             wave = next;
         }
-        field.edge_distance();
-        field
+        self.edge_distance();
     }
 
     /// Cells to the nearest spot that cannot be walked on, by walking.

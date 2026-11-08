@@ -236,10 +236,15 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     let mechs = Arc::new(MapMechs::from(&world, &mech));
     let overlays = read_overlays(install, map, world.bsp.fingerprint.1);
     let patches: Vec<Patch> = overlays.iter().flat_map(|o| o.nav.patches.iter().cloned()).collect();
+    let (high_ground, moves) = lb_navgen::mapload::high_ground(install, map, world.bsp.fingerprint.1);
+    if let Some(moves) = moves {
+        tracing::info!("{map}: {moves}");
+    }
+    let gen_opts = gen_options(opts, high_ground);
     // The map editor's graph: the one made here with these overlays applied, as it saved it.
     let edited = match opts.source {
         NavSource::Generated if !patches.is_empty() => {
-            let key = lb_navgen::cache::key(&world, &gen_options(opts), 0, 0);
+            let key = lb_navgen::cache::key(&world, &gen_opts, 0, 0);
             lb_navgen::mapload::edited_graph(install, map, &key, &patches)
         }
         _ => None,
@@ -247,7 +252,7 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     let (graph, origin) = match (edited, &opts.source) {
         (Some(g), _) => (Ok(Arc::new(g)), EDITED_ORIGIN),
         (None, NavSource::Yapb) => (load_graph(&files, map, &mut world, &mech, &opts.import), "yapb"),
-        (None, NavSource::Generated) => match generated_graph(install, map, &mut world, &mech, opts) {
+        (None, NavSource::Generated) => match generated_graph(install, map, &mut world, &mech, opts, &gen_opts) {
             Ok((graph, origin)) => (Ok(graph), origin),
             Err(e) => {
                 tracing::warn!("{map}: {e}; trying the yapb graph");
@@ -336,12 +341,14 @@ fn load(game: &Path, install: &Path, map: &str, opts: &LoadOptions) -> Result<Lo
     })
 }
 
-pub use lb_navgen::mapload::{OVERLAYS, read_overlays};
+pub use lb_navgen::mapload::{MOVES, OVERLAYS, read_overlays};
 
-/// Generator settings for the server's physics.
-pub fn gen_options(opts: &LoadOptions) -> GenOptions {
+/// Generator settings for the server's physics, with the high ground players were seen to get up onto
+/// (`mapload::high_ground`).
+pub fn gen_options(opts: &LoadOptions, high_ground: Vec<lb_navgen::climbs::HighGround>) -> GenOptions {
     GenOptions {
         physics: opts.import.physics,
+        high_ground,
         ..GenOptions::default()
     }
 }
@@ -353,16 +360,16 @@ fn generated_graph(
     world: &mut lb_bsp::BspWorld,
     mech: &Mechanisms,
     opts: &LoadOptions,
+    gen_opts: &GenOptions,
 ) -> Result<(Arc<NavGraph>, &'static str), String> {
-    let gen_opts = gen_options(opts);
     let cache = GraphCache::new(&install.join("nav"), map);
-    let key = lb_navgen::cache::key(world, &gen_opts, 0, 0);
+    let key = lb_navgen::cache::key(world, gen_opts, 0, 0);
     if let Some(graph) = cache.load(&key) {
         return Ok((Arc::new(graph), "cache"));
     }
     let pool = pool(opts.threads, "lb-navgen")?;
     let threads = pool.current_num_threads();
-    let generated = pool.install(|| lb_navgen::generate(world, mech, &gen_opts, "generated"));
+    let generated = pool.install(|| lb_navgen::generate(world, mech, gen_opts, "generated"));
     if generated.graph.is_empty() {
         return Err("the generator found no floor".into());
     }
@@ -378,6 +385,15 @@ fn generated_graph(
         report.items_ok,
         report.items
     );
+    if !gen_opts.high_ground.is_empty() {
+        tracing::info!(
+            "{map}: {} of the {} ways up onto high ground players were seen to take check out, {} made into gauss \
+             boosts",
+            generated.climbs.0,
+            gen_opts.high_ground.iter().map(|h| h.ways.len()).sum::<usize>(),
+            generated.climbs.1
+        );
+    }
     match cache.store(&key, &generated.graph) {
         Ok(path) => tracing::debug!("{map}: graph kept in {}", path.display()),
         Err(e) => tracing::warn!("{map}: the graph is not kept: {e}"),
@@ -822,7 +838,7 @@ mod tests {
             threads: 1,
         };
         let world = lb_bsp::BspWorld::load(&std::fs::read(maps.join("crossfire.bsp")).unwrap()).unwrap();
-        let key = lb_navgen::cache::key(&world, &gen_options(&opts), 0, 0);
+        let key = lb_navgen::cache::key(&world, &gen_options(&opts, Vec::new()), 0, 0);
         GraphCache::new(&install.join("nav"), "crossfire")
             .store(&key, &marked("kept"))
             .unwrap();

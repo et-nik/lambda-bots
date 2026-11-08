@@ -130,6 +130,22 @@ pub fn lump_range(bytes: &[u8], i: usize, record: usize) -> Result<(usize, usize
     Ok((ofs as usize, len as usize))
 }
 
+/// The CRC the engine tells builds of a map apart by (`CRC_MapFile`), which a server sends its clients: CRC-32 of the
+/// lumps but the entities, in their order, not inverted at the end.
+pub fn map_crc(bytes: &[u8]) -> Result<u32, BspError> {
+    let mut crc = u32::MAX;
+    for i in (0..LUMPS).filter(|&i| i != LUMP_ENTITIES) {
+        let (ofs, len) = lump_range(bytes, i, 0)?;
+        for &b in &bytes[ofs..ofs + len] {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
+    }
+    Ok(crc)
+}
+
 impl Bsp {
     pub fn parse(bytes: &[u8]) -> Result<Bsp, BspError> {
         let r = Reader { bytes };
@@ -286,5 +302,36 @@ impl Bsp {
     /// Hex of the first 8 bytes of the fingerprint, for file names and logs.
     pub fn short_id(&self) -> String {
         self.fingerprint.0[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A BSP header with `lumps` laid out one after another behind it.
+    fn file(lumps: &[&[u8]; LUMPS]) -> Vec<u8> {
+        let mut out = VERSION.to_le_bytes().to_vec();
+        let mut body = Vec::new();
+        for l in lumps {
+            out.extend_from_slice(&((4 + LUMPS * 8 + body.len()) as i32).to_le_bytes());
+            out.extend_from_slice(&(l.len() as i32).to_le_bytes());
+            body.extend_from_slice(l);
+        }
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn the_map_crc_is_the_engines_and_leaves_the_entities_out() {
+        let mut lumps: [&[u8]; LUMPS] = [&[]; LUMPS];
+        lumps[LUMP_ENTITIES] = b"{ \"classname\" \"worldspawn\" }";
+        lumps[LUMP_PLANES] = b"1234";
+        lumps[LUMP_MODELS] = b"56789";
+        // CRC-32 of "123456789" is cbf43926, which the engine leaves uninverted.
+        assert_eq!(map_crc(&file(&lumps)).unwrap(), !0xcbf4_3926);
+        lumps[LUMP_ENTITIES] = b"{ \"classname\" \"worldspawn\" \"message\" \"another\" }";
+        assert_eq!(map_crc(&file(&lumps)).unwrap(), !0xcbf4_3926);
+        assert!(map_crc(&file(&lumps)[..40]).is_err());
     }
 }

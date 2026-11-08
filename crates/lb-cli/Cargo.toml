@@ -26,6 +26,7 @@ lb-testkit.workspace = true
 serde_json.workspace = true
 lb-demo.workspace = true
 rustc-hash.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,67 @@
+# High ground nobody walks onto that players got up onto with gauss boosts on dam, from recordings of
+# their games (`lb-cli demo moves`): counts only. The generator makes boosts onto the high ground climbed in
+# a trusted recording, or 5 times by 3 players at least.
+schema: lambdabots/moves@1
+map: dam
+bsp_size: 1587732
+source:
+  recordings: 7
+  minutes: 233.2
+high_ground:
+- seen: 13
+  players: 8
+  recordings: 6
+  ways:
+  - from: [1226.0, -65.0, 260.0]
+    to: [1251.0, -839.0, 388.0]
+    seen: 1
+  - from: [1376.0, -675.0, 260.0]
+    to: [1267.0, -1010.0, 388.0]
+    seen: 1
+  - from: [1054.0, -94.0, 4.0]
+    to: [1487.0, 7.0, 388.0]
+    seen: 1
+  - from: [1164.0, -792.0, 260.0]
+    to: [1529.0, -1525.0, 388.0]
+    seen: 1
+  - from: [1581.0, -260.0, 252.0]
+    to: [1550.0, -1031.0, 388.0]
+    seen: 1
+  - from: [1281.0, -1257.0, 276.0]
+    to: [1565.0, -1133.0, 388.0]
+    seen: 1
+  - from: [1391.0, -674.0, 260.0]
+    to: [1573.0, -1136.0, 388.0]
+    seen: 1
+  - from: [1639.0, -628.0, 116.0]
+    to: [1748.0, -1015.0, 388.0]
+    seen: 1
+  - from: [1776.0, -520.0, 260.0]
+    to: [1776.0, -433.0, 388.0]
+    seen: 1
+  - from: [886.0, -187.0, -12.0]
+    to: [1792.0, -272.0, 388.0]
+    seen: 1
+  - from: [1594.0, -134.0, 260.0]
+    to: [1816.0, -48.0, 388.0]
+    seen: 1
+  - from: [1647.0, -305.0, 260.0]
+    to: [1832.0, -7.0, 388.0]
+    seen: 1
+  - from: [1595.0, -752.0, 260.0]
+    to: [1840.0, -761.0, 388.0]
+    seen: 1
+- seen: 1
+  players: 1
+  recordings: 1
+  ways:
+  - from: [-60.0, -121.0, -12.0]
+    to: [-211.0, -241.0, 196.0]
+    seen: 1
+- seen: 1
+  players: 1
+  recordings: 1
+  ways:
+  - from: [1529.0, -941.0, -12.0]
+    to: [1518.0, -1152.0, 84.0]
+    seen: 1
