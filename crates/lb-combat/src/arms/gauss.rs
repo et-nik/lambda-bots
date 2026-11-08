@@ -13,7 +13,8 @@
 //!   its skill's `gauss_precharge`, and lets it go at the first target in its sights.
 //! - **Dump:** a charge held 8 s on the ground (9 s anywhere; the gun shocks its holder at 10 s), in water or on a
 //!   ladder is fired back along the way the bot came and a little down, so the recoil pushes it on. yapb aimed and
-//!   released on the same frame; here the view turns first.
+//!   released on the same frame; here the view turns first. On the way to a gauss boost a charge held is dumped at
+//!   once ([`GaussInput::dump_now`]).
 //! - The charged shot throws its shooter back at five times its damage, further when the view is below the horizon
 //!   (the push lifts it off the ground): a charge is kept small enough, or not started, for the throw to stop short of
 //!   a drop behind ([`recoil_throw`]).
@@ -97,6 +98,9 @@ pub struct GaussInput {
     pub backfire: f32,
     /// The shot at the target needs this much damage at least: one through a wall, to come out with enough left.
     pub min_damage: f32,
+    /// A charge held is dumped now: the bot is on its way to a gauss boost, which the charge would hold up and a
+    /// throw at the target would knock it off the way to.
+    pub dump_now: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -237,7 +241,8 @@ impl Gauss {
                     || age >= DUMP_ANYWHERE
                     || h.waterlevel >= 2
                     || h.on_ladder
-                    || (!combat && !i.expected && i.target.is_none() && age >= READY_HOLD);
+                    || (!combat && !i.expected && i.target.is_none() && age >= READY_HOLD)
+                    || i.dump_now;
                 if must_dump {
                     let angles = i.dump.unwrap_or_else(|| dump_angles(h, i.heading));
                     self.state = State::Dumping { angles, since: now };
@@ -497,6 +502,7 @@ mod tests {
             dump: None,
             backfire: 0.0,
             min_damage: 0.0,
+            dump_now: false,
         }
     }
 
@@ -511,6 +517,17 @@ mod tests {
         target: impl Fn(f64) -> Option<(f32, bool)>,
         secs: f64,
     ) -> (Gauss, Game, Vec<Fire>, Vec<bool>) {
+        run_by(
+            |t| GaussInput {
+                target: target(t),
+                ..base
+            },
+            secs,
+        )
+    }
+
+    /// The input of each frame by its time.
+    fn run_by(input: impl Fn(f64) -> GaussInput, secs: f64) -> (Gauss, Game, Vec<Fire>, Vec<bool>) {
         let mut g = Gauss::default();
         let mut game = Game::default();
         let mut rng = Pcg32::new(4, 4);
@@ -545,12 +562,8 @@ mod tests {
                 gravity: 800.0,
                 deploying: false,
             };
-            let input = GaussInput {
-                target: target(t),
-                ..base
-            };
             let fire = g
-                .update(&h, &input, &mut rng)
+                .update(&h, &input(t), &mut rng)
                 .and_then(|r| r.weapon)
                 .map_or(Fire::Primary, |w| w.fire);
             presses.push(fire);
@@ -676,5 +689,27 @@ mod tests {
         // Nothing expected, nothing in sight: no charge at all.
         let (_, game, presses) = run(|_| None, false, 5.0);
         assert!(game.shots.is_empty() && presses.iter().all(|f| *f == Fire::Primary));
+    }
+
+    #[test]
+    fn a_charge_held_on_the_way_to_a_boost_is_dumped_at_once() {
+        // Charging at a target 1200 units away in its sights (let go at 1.3-1.6 s otherwise); from 1.0 s the bot is
+        // on its way to a boost and starts no charge.
+        let climb = |t: f64| GaussInput {
+            target: Some((1200.0, true)),
+            charge_share: if t < 1.0 { 1.0 } else { 0.0 },
+            dump_now: t >= 1.0,
+            ..input()
+        };
+        let (g, game, presses, _) = run_by(climb, 3.0);
+        assert_eq!((g.dumped, g.fired), (1, 0), "{:?}", game.shots);
+        // The view here never turns to the dump: it goes when the turn's time is up.
+        let turned = 1.0 + DUMP_TURN + 0.05;
+        assert!(
+            game.shots.iter().all(|(at, _)| (1.0..turned).contains(at)),
+            "{:?}",
+            game.shots
+        );
+        assert!(presses[200..].iter().all(|f| *f == Fire::Primary), "no charge after");
     }
 }

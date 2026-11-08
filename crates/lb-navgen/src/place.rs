@@ -244,7 +244,7 @@ impl Placement {
 }
 
 /// Spans no node goes on: inside a door, a hazard, a push field or a ladder.
-const NO_NODE: SpanFlags = SpanFlags::HAZARD
+pub(crate) const NO_NODE: SpanFlags = SpanFlags::HAZARD
     .union(SpanFlags::GATE)
     .union(SpanFlags::PUSH)
     .union(SpanFlags::LADDER);

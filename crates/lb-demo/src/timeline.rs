@@ -151,7 +151,8 @@ pub struct Recording {
     pub map: String,
     pub game_dir: String,
     pub hostname: String,
-    /// CRC of the map's BSP as the server computed it (the demo header leaves it 0 in HLTV demos).
+    /// CRC of the map's BSP as the server computed it, to tell builds of a map apart (`lb_bsp::file::map_crc`); 0 from
+    /// a server that computed none (a game of one).
     pub map_crc: u32,
     pub max_clients: u8,
     /// The slot of the recording player in a POV demo.
@@ -551,6 +552,18 @@ fn stats_since(now: &Stats, base: &Stats) -> Stats {
     }
 }
 
+/// The map CRC the server computed, from the one it sent the client in slot `slot`: munged for that slot
+/// (`COM_Munge3` with `(-1 - slot) & 0xff`).
+fn unmunge_crc(sent: u32, slot: u8) -> u32 {
+    const TABLE: [u8; 4] = [0x20, 0x07, 0x13, 0x61];
+    let seq = u32::from(!slot);
+    let mut bytes = (sent ^ seq).to_le_bytes();
+    for (j, b) in bytes.iter_mut().enumerate() {
+        *b ^= 0xa5 | (j << j) as u8 | j as u8 | TABLE[j];
+    }
+    u32::from_le_bytes(bytes).swap_bytes() ^ !seq
+}
+
 fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
     match m {
         Msg::ServerInfo {
@@ -562,7 +575,7 @@ fn apply(b: &mut Builder, dec: &Decoder, time: f32, m: Msg) {
             ..
         } => {
             b.started = true;
-            b.rec.map_crc = map_crc;
+            b.rec.map_crc = unmunge_crc(map_crc, player_num);
             b.rec.max_clients = max_clients;
             b.rec.hostname = hostname;
             b.rec.recorder = Some(player_num);
@@ -689,5 +702,12 @@ mod tests {
         assert_eq!((s.event.as_str(), s.entity), ("#7", 1));
         assert!((s.time - 12.6).abs() < 1e-4, "{}", s.time);
         assert_eq!((s.origin[0], s.bparam1, s.bparam2), (64.0, 0, 1));
+    }
+
+    #[test]
+    fn the_map_crc_comes_out_the_same_whatever_slot_it_was_sent_to() {
+        // levels.bsp, sent to slots 5 and 3.
+        assert_eq!(unmunge_crc(0x59d9_cbf9, 5), 0x5993_99a3);
+        assert_eq!(unmunge_crc(0x5fd9_cbff, 3), 0x5993_99a3);
     }
 }

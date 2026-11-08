@@ -754,11 +754,19 @@ impl BotBrain {
         let now = body.now;
         let calm_for = self.calm_for(now);
         let m = &mut self.mind;
+        let was_perched = m.perched.is_some();
         m.perched = m
             .perched
             .filter(|&p| crate::goals::still_perched(p, body.origin) && body.health > 0.0);
+        // Off the high ground, its time up there over or not (come down or knocked off in a fight): it is taken again
+        // after a rest.
+        if was_perched && m.perched.is_none() && body.health > 0.0 && now >= m.perch_rest_until {
+            m.perch_rest_until = crate::goals::perch_rest(now, rng);
+        }
+        // Got onto once it stands there, not as a boost carries it through.
         if m.perched.is_none()
             && body.health > 0.0
+            && body.on_ground
             && let Some(p) = map.and_then(|map| crate::goals::perch_at(map, body.origin))
         {
             m.perched = Some(p);

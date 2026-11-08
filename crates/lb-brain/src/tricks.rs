@@ -578,7 +578,7 @@ mod tests {
     use lb_core::rng::Pcg32;
     use lb_game::self_state::{PredictedWeapon, Prediction};
     use lb_knowledge::{BeliefParams, PlayerKey, Relation, RenderCue, Sighting, Stance, parts};
-    use lb_nav_api::{BoostCall, NavStatus, NavStep};
+    use lb_nav_api::{BoostCall, CampKind, CampSpot, MapView, MineSpot, NavStatus, NavStep, NodeId};
     use lb_worldq::{Trace, TraceQuery, Tracer, contents};
 
     /// Open floor at z = -36; tells what the brain asked of it.
@@ -735,6 +735,19 @@ mod tests {
         secs: f64,
         dress: &mut dyn FnMut(f64, &mut Body, &mut Nav),
     ) -> Vec<u16> {
+        frames_on(None, brain, ch, nav, enemy, secs, dress)
+    }
+
+    /// `frames` on `map`.
+    fn frames_on(
+        map: Option<&dyn MapView>,
+        brain: &mut BotBrain,
+        ch: &Character,
+        nav: &mut Nav,
+        enemy: Option<Vec3>,
+        secs: f64,
+        dress: &mut dyn FnMut(f64, &mut Body, &mut Nav),
+    ) -> Vec<u16> {
         let mut rng = BotRng::new(3, 3);
         let mut out = Vec::new();
         let mut t = 1.0;
@@ -745,7 +758,7 @@ mod tests {
             brain.update(SimTime(t), &PARAMS, None, None);
             let mut b = body(t);
             dress(t, &mut b, nav);
-            let cmd = brain.act(&b, ch, nav, None, &mut rng);
+            let cmd = brain.act(&b, ch, nav, map, &mut rng);
             brain.motor.sent(cmd.buttons);
             out.push(cmd.buttons);
             t += 0.01;
@@ -1034,6 +1047,154 @@ mod tests {
         assert!(!told.boost_now && brain.mind.tricks.boost_ready, "an enemy in sight");
         brain.mind.perch_way = true;
         assert!(brain.nav_tricks(&b, &ch, &mut rng).boost_now, "on the way up");
+    }
+
+    /// A perch on high ground 192 up, 400 units along x; nothing else.
+    const PERCH: Vec3 = Vec3::new(400.0, 0.0, 192.0);
+
+    struct Perch([CampSpot; 1]);
+
+    fn perch() -> Perch {
+        Perch([CampSpot {
+            node: 0,
+            pos: PERCH,
+            kind: CampKind::Perch,
+            watch: [180.0, 180.0],
+            pitch: 20.0,
+            range: 800.0,
+            score: 1.0,
+            guards: None,
+        }])
+    }
+
+    impl MapView for Perch {
+        fn node_count(&self) -> usize {
+            1
+        }
+        fn node_origin(&self, _n: NodeId) -> Vec3 {
+            PERCH
+        }
+        fn nearest_node(&self, _p: Vec3, _max: f32) -> Option<NodeId> {
+            Some(0)
+        }
+        fn for_each_link(&self, _n: NodeId, _f: &mut dyn FnMut(NodeId, f32)) {}
+        fn visible(&self, _a: NodeId, _b: NodeId) -> bool {
+            false
+        }
+        fn for_each_visible(&self, _n: NodeId, _f: &mut dyn FnMut(NodeId)) {}
+        fn flow(&self, _n: NodeId) -> f32 {
+            0.0
+        }
+        fn exposure(&self, _n: NodeId) -> f32 {
+            0.0
+        }
+        fn transit(&self, _n: NodeId) -> bool {
+            false
+        }
+        fn danger(&self, _n: NodeId) -> f32 {
+            0.0
+        }
+        fn danger_from(&self, _n: NodeId) -> Option<NodeId> {
+            None
+        }
+        fn camp_spots(&self) -> &[CampSpot] {
+            &self.0
+        }
+        fn mine_spots(&self) -> &[MineSpot] {
+            &[]
+        }
+        fn chokepoints(&self) -> &[NodeId] {
+            &[]
+        }
+    }
+
+    /// A style that takes high ground in every fight it can.
+    fn percher() -> Character {
+        let mut likes = lb_styles::StyleId::Balanced.trick_likes();
+        likes.gauss_jump = 1.0;
+        character(75, likes)
+    }
+
+    fn with_gauss(b: &mut Body) {
+        b.arsenal.push(Armed::new(WeaponId::Gauss, None, Some(60)));
+    }
+
+    fn standing_at(b: &mut Body, p: Vec3) {
+        b.origin = p;
+        b.eye = p + Vec3::Z * 28.0;
+        b.velocity = Vec3::ZERO;
+    }
+
+    #[test]
+    fn in_a_fight_a_bot_making_for_a_perch_tells_navigation_to_boost() {
+        let ch = percher();
+        let enemy = Some(Vec3::new(1000.0, 0.0, 0.0));
+        let run = |map: Option<&dyn MapView>| {
+            let mut brain = new_brain();
+            let mut nav = Nav::new();
+            frames_on(map, &mut brain, &ch, &mut nav, enemy, 0.6, &mut |_, b, _| with_gauss(b));
+            (
+                brain.mind.goal.map(|g| g.kind),
+                brain.mind.stats.perch_fights,
+                nav.tricks,
+            )
+        };
+        let (goal, fights, told) = run(Some(&perch()));
+        assert_eq!((goal, fights), (Some(GoalKind::Camp(0)), 1));
+        assert!(told.boost_now, "{told:?}");
+        let (_, _, told) = run(None);
+        assert!(
+            told.gauss_boost && !told.boost_now,
+            "no perch: no boost with an enemy about"
+        );
+    }
+
+    #[test]
+    fn high_ground_is_got_onto_once_the_bot_stands_on_it() {
+        let ch = percher();
+        // Calm long enough to take the perch; over it all the while, in the air or standing.
+        let run = |on_ground: bool| {
+            let mut brain = new_brain();
+            let mut nav = Nav::new();
+            frames_on(Some(&perch()), &mut brain, &ch, &mut nav, None, 1.5, &mut |_, b, _| {
+                with_gauss(b);
+                standing_at(b, PERCH);
+                b.on_ground = on_ground;
+            });
+            (
+                brain.mind.goal.map(|g| g.kind),
+                brain.mind.perched,
+                brain.mind.stats.perches,
+            )
+        };
+        assert_eq!(
+            run(false),
+            (Some(GoalKind::Camp(0)), None, 0),
+            "carried over it by the boost"
+        );
+        assert_eq!(run(true), (Some(GoalKind::Camp(0)), Some(PERCH), 1));
+    }
+
+    #[test]
+    fn off_high_ground_in_a_fight_the_bot_rests_before_going_up_again() {
+        let ch = percher();
+        let mut brain = new_brain();
+        let mut nav = Nav::new();
+        // Up there with an enemy in sight below, its time up there not over; down on the floor from 1.5 s.
+        let enemy = Some(Vec3::new(1000.0, 0.0, 0.0));
+        frames_on(Some(&perch()), &mut brain, &ch, &mut nav, enemy, 1.0, &mut |t, b, _| {
+            with_gauss(b);
+            if t < 1.5 {
+                standing_at(b, PERCH);
+            }
+        });
+        assert_eq!(brain.mind.perched, None);
+        let rest = brain.mind.perch_rest_until;
+        assert!(rest >= SimTime(21.4), "{rest:?}");
+        assert!(
+            !nav.tricks.boost_now && brain.mind.goal.map(|g| g.kind) != Some(GoalKind::Camp(0)),
+            "not straight back up"
+        );
     }
 
     #[test]

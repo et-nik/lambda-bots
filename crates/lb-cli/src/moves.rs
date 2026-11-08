@@ -304,8 +304,28 @@ fn demo_files(path: &Path) -> Result<Vec<PathBuf>> {
 
 /// A map's name as a demo or a file gives it: no folder, no `.bsp`, lower case.
 fn map_name(name: &str) -> String {
-    let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    name.strip_suffix(".bsp").unwrap_or(name).to_lowercase()
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
+    match name.strip_suffix(".bsp") {
+        Some(stem) => stem.to_string(),
+        None => name,
+    }
+}
+
+/// Each demo once, however often it was named (by itself and in its folder): trusted when named so once.
+fn distinct(inputs: Vec<(PathBuf, bool)>) -> Vec<(PathBuf, bool)> {
+    let mut at: FxHashMap<PathBuf, usize> = FxHashMap::default();
+    let mut out: Vec<(PathBuf, bool)> = Vec::new();
+    for (path, trusted) in inputs {
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        match at.get(&key) {
+            Some(&i) => out[i].1 |= trusted,
+            None => {
+                at.insert(key, out.len());
+                out.push((path, trusted));
+            }
+        }
+    }
+    out
 }
 
 fn point(v: Vec3) -> [f32; 3] {
@@ -380,10 +400,13 @@ pub fn run(args: &[&str]) -> Result<bool> {
     if inputs.is_empty() {
         bail!(USAGE);
     }
+    let inputs = distinct(inputs);
     let bsp = Path::new(bsp);
     let map = map_name(&bsp.display().to_string());
     let bytes = std::fs::read(bsp).with_context(|| bsp.display().to_string())?;
     let mut world = BspWorld::load(&bytes).map_err(|e| anyhow!("{}: {e}", bsp.display()))?;
+    // Recordings are of this build of the map when the server's map CRC is this one's.
+    let crc = lb_bsp::file::map_crc(&bytes).map_err(|e| anyhow!("{}: {e}", bsp.display()))?;
     let mech = Mechanisms::from_world(&world);
     lb_navgen::mapload::prepare_world(&mut world, &mech);
 
@@ -397,9 +420,19 @@ pub fn run(args: &[&str]) -> Result<bool> {
                     .and_then(|b| lb_demo::read(&b).map_err(|e| e.to_string()));
                 match recs {
                     Ok(recs) => {
-                        let shown = recs
-                            .iter()
-                            .filter(|r| map_name(&r.map) == map)
+                        let of_map: Vec<&Recording> = recs.iter().filter(|r| map_name(&r.map) == map).collect();
+                        let other = of_map.iter().filter(|r| r.map_crc != crc && r.map_crc != 0).count();
+                        let unknown = of_map.iter().filter(|r| r.map_crc == 0).count();
+                        if other + unknown > 0 {
+                            eprintln!(
+                                "{}: recordings of {map} left out: {other} on another build of it, {unknown} with no \
+                                 map CRC",
+                                path.display()
+                            );
+                        }
+                        let shown = of_map
+                            .into_iter()
+                            .filter(|r| r.map_crc == crc)
                             .map(|r| shown(r, world))
                             .collect();
                         Some((shown, *trusted))
@@ -672,7 +705,24 @@ mod tests {
     #[test]
     fn map_names_are_compared_without_folder_and_extension() {
         assert_eq!(map_name("maps/DM_Snow.bsp"), "dm_snow");
+        assert_eq!(map_name("maps\\DM_SNOW.BSP"), "dm_snow");
         assert_eq!(map_name("/srv/hl/valve/maps/dm_snow.bsp"), "dm_snow");
         assert_eq!(map_name("dm_snow"), "dm_snow");
+    }
+
+    #[test]
+    fn a_demo_named_twice_is_read_once_trusted_if_named_so_once() {
+        let dir = std::env::temp_dir().join(format!("lb-cli-moves-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.dem"), dir.join("b.dem"));
+        std::fs::write(&a, b"").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        let named = vec![
+            (a.clone(), false),
+            (b.clone(), false),
+            (dir.join(".").join("a.dem"), true),
+        ];
+        assert_eq!(distinct(named), vec![(a, true), (b, false)]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

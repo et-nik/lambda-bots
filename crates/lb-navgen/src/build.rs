@@ -30,7 +30,7 @@ use rayon::prelude::*;
 
 use crate::climbs::HighGround;
 use crate::field::{FloorField, LEDGE, NONE, STEP, SpanFlags, settle};
-use crate::place::{Spacing, Spot, borders, place, room, spot_at, strip_middle};
+use crate::place::{NO_NODE, Spacing, Spot, borders, place, room, spot_at, strip_middle};
 use crate::push::{PushEntry, field_center, push_sites};
 use crate::site::{LadderSite, SeedKind, Site, TOP_BELOW, USE_REACH, flood_poses, ladder_ends, rest_poses, sites};
 
@@ -684,6 +684,12 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
         .iter()
         .filter_map(|c| {
             let (a, b) = (field.at(c.from)?, field.at(c.to)?);
+            if [a, b]
+                .iter()
+                .any(|&s| field.spans[s as usize].flags.intersects(NO_NODE))
+            {
+                return None;
+            }
             let (takeoff, landing) = (
                 spot_at(&field, a, NodeFlags::empty()),
                 spot_at(&field, b, NodeFlags::empty()),
@@ -1200,7 +1206,16 @@ pub fn generate(world: &mut BspWorld, mech: &Mechanisms, opts: &GenOptions, sour
     } else {
         (0, 0)
     };
-    let climb_ways: Vec<(usize, u32, u32)> = climb_req.iter().map(|&(g, a, b)| (g, id(a), id(b))).collect();
+    // A takeoff or a landing merged into a node placed before it stands where that one does: on floor a node goes on.
+    let on_floor = |n: u32| {
+        let s = placement.spots[n as usize].span;
+        s != NONE && !field.spans[s as usize].flags.intersects(NO_NODE)
+    };
+    let climb_ways: Vec<(usize, u32, u32)> = climb_req
+        .iter()
+        .map(|&(g, a, b)| (g, id(a), id(b)))
+        .filter(|&(_, a, b)| on_floor(a) && on_floor(b))
+        .collect();
     let climbs_made = climb_links(&mut cls, &mut links, &climb_ways, &opts.physics);
     if !climb_ways.is_empty() {
         lap("climbs", &mut t);

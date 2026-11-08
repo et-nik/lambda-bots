@@ -97,8 +97,9 @@ copy the overlay files: the graph there is its own.
 lb-cli nav validate-overlay maps/crossfire.bsp addons/lambdabots/maps/crossfire/overlay.yaml
 ```
 
-makes the graph of the map, applies the overlay and reports what did not apply. The exit code is 0 only when every
-patch applied. `lb-cli config check` checks the schema of any overlay file without the map.
+makes the graph of the map as the server does, with the `moves.yaml` beside the (first) overlay file if there is one
+(`--moves <moves.yaml>` names another), applies the overlay and reports what did not apply. The exit code is 0 only
+when every patch applied. `lb-cli config check` checks the schema of any overlay file without the map.
 
 ## The editor
 

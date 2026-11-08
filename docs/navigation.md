@@ -97,10 +97,14 @@ the server disagrees with is switched off. On crossfire, all 1120 special links 
 High ground nobody walks onto (dm_snow's pillar tops, hl_pool_day's roofs) is not in the flooded floor and gets no
 nodes. Players get up there with gauss boosts; the generator makes those boosts, and the nodes up there, only where
 it was shown players do: `maps/<map>/moves.yaml` (schema `lambdabots/moves@1`), taken from recordings of their games.
-Without the file, or with nothing in it climbed often enough, the graph is what it was.
+Without the file, or with nothing in it climbed often enough, the graph is what it was. A file that does not parse, or
+is for another map or another build of it (`map`, `bsp_size`), is not used: the server and the editor say so in the
+log, `lb-cli nav ... --moves <moves.yaml>` stops with the error.
 
 `lb-cli demo moves <map.bsp> <file.dem|dir>... [--trusted <file.dem|dir>...] [--out <moves.yaml>]` reads HLTV and
-POV demos (the recordings of other maps in them are skipped) and finds the climbs of people (not bots) walking about:
+POV demos, each once however often it is named (the recordings of other maps in them are skipped, and those of another
+build of the map, told by the map CRC the server sent, are left out with a line saying so) and finds the climbs of
+people (not bots) walking about:
 
 - a charged gauss shot (`events/gauss.sc` with its first flag clear) by a player off the floor for at most a second,
   then down on floor 72 units higher at least (higher than any jump) within 2.5 s; a touch of the floor in the first

@@ -115,9 +115,8 @@ impl MovesFile {
                     "players, recordings and trusted are counted among the climbs seen",
                 ));
             }
-            if h.ways.iter().map(|w| w.seen).sum::<u32>() != h.seen
-                || h.ways.iter().map(|w| w.trusted).sum::<u32>() != h.trusted
-            {
+            let total = |count: fn(&Way) -> u32| h.ways.iter().try_fold(0u32, |n, w| n.checked_add(count(w)));
+            if total(|w| w.seen) != Some(h.seen) || total(|w| w.trusted) != Some(h.trusted) {
                 return Err(bad(at, "the climbs seen along its ways do not add up to its own"));
             }
             for (k, w) in h.ways.iter().enumerate() {
@@ -194,6 +193,13 @@ high_ground:
         assert!(MovesFile::parse(&more, "m.yaml").is_err());
         let apart = SAMPLE.replace("seen: 5", "seen: 4");
         let e = MovesFile::parse(&apart, "m.yaml").unwrap_err().to_string();
+        assert!(e.contains("add up"), "{e}");
+        // Counts that would come round past the largest number to the total.
+        let round = SAMPLE.replace("seen: 5", "seen: 4294967295").replace(
+            "to: [330, 215, -24]\n        seen: 1",
+            "to: [330, 215, -24]\n        seen: 7",
+        );
+        let e = MovesFile::parse(&round, "m.yaml").unwrap_err().to_string();
         assert!(e.contains("add up"), "{e}");
         let unknown = SAMPLE.replace("seen: 5", "seen: 5\n        speed: 3");
         assert!(MovesFile::parse(&unknown, "m.yaml").is_err());

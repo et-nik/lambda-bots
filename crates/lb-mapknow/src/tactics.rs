@@ -26,7 +26,7 @@ use crate::paths;
 use crate::vis::VisTable;
 
 /// Bump whenever the same graph and map would give other tactics.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// Eye above the player origin, standing and crouched.
 const EYE_STAND: f32 = 28.0;
@@ -250,13 +250,15 @@ impl MapTactics {
             grid,
         };
         t.chokes = t.find_chokes();
-        t.camps = t.overwatch(&near_spawn);
-        t.camps.extend(t.ambushes(&near_spawn));
         let starts: Vec<NodeId> = spawns
             .iter()
             .filter_map(|p| t.grid.nearest(&t.origins, *p, 256.0, |i| !t.transit[i as usize]))
             .collect();
-        t.camps.extend(t.perches(graph, &starts));
+        // High ground only a boost gets onto is held as a perch alone, by bots that can boost.
+        let (walked, boost_only) = walked_and_boosted(graph, n, &starts);
+        t.camps = t.overwatch(&near_spawn, &boost_only);
+        t.camps.extend(t.ambushes(&near_spawn, &boost_only));
+        t.camps.extend(t.perches(graph, &walked, &boost_only));
         let floors: Vec<f32> = (0..n)
             .map(|i| t.origins[i].z - if crouch[i] { FLOOR_CROUCH } else { FLOOR_STAND })
             .collect();
@@ -345,7 +347,7 @@ impl MapTactics {
         ([yaw(best), yaw(second)], pitch, range)
     }
 
-    fn overwatch(&self, near_spawn: &dyn Fn(Vec3) -> bool) -> Vec<CampSpot> {
+    fn overwatch(&self, near_spawn: &dyn Fn(Vec3) -> bool, boost_only: &[bool]) -> Vec<CampSpot> {
         let score = |i: usize| {
             let s = &self.spots[i];
             s.sight - 0.6 * s.near - 0.4 * self.flow[i]
@@ -353,6 +355,7 @@ impl MapTactics {
         let mut cands: Vec<usize> = (0..self.origins.len())
             .filter(|&i| {
                 !self.transit[i]
+                    && !boost_only[i]
                     && self.spots[i].sight >= OVERWATCH_SIGHT
                     && self.spots[i].exits >= 1
                     && !near_spawn(self.origins[i])
@@ -387,7 +390,7 @@ impl MapTactics {
         out
     }
 
-    fn ambushes(&self, near_spawn: &dyn Fn(Vec3) -> bool) -> Vec<CampSpot> {
+    fn ambushes(&self, near_spawn: &dyn Fn(Vec3) -> bool, boost_only: &[bool]) -> Vec<CampSpot> {
         let mut found: Vec<CampSpot> = Vec::new();
         for &c in &self.chokes {
             let at = self.origins[c as usize];
@@ -399,6 +402,7 @@ impl MapTactics {
                     let m = m as usize;
                     let d = self.origins[m].distance(at);
                     !self.transit[m]
+                        && !boost_only[m]
                         && (AMBUSH_RANGE[0]..=AMBUSH_RANGE[1]).contains(&d)
                         && self.flow[m] <= 0.6 * fc
                         && !near_spawn(self.origins[m])
@@ -438,37 +442,18 @@ impl MapTactics {
         out
     }
 
-    /// Perches: floors a gauss boost gets onto from where players go on foot (from `starts`, their spawn nodes) and
-    /// nothing else does, left by a drop or another plain way, overlooking traffic below; the best spread apart.
-    fn perches(&self, graph: &NavGraph, starts: &[NodeId]) -> Vec<CampSpot> {
+    /// Perches: floors only a gauss boost gets onto from where players go on foot (`walked_and_boosted`), left by a
+    /// drop or another plain way, overlooking traffic below; the best spread apart.
+    fn perches(&self, graph: &NavGraph, walked: &[bool], boost_only: &[bool]) -> Vec<CampSpot> {
         let n = self.origins.len();
-        let reach = |from: &[NodeId], boosts: bool| {
-            let mut seen = vec![false; n];
-            for &s in from {
-                seen[s as usize] = true;
-            }
-            let mut stack = from.to_vec();
-            while let Some(a) = stack.pop() {
-                for l in graph.links(a) {
-                    let go = l.plain() || (boosts && l.valid() && l.kind == LinkKind::GaussBoost);
-                    if go && !seen[l.to as usize] {
-                        seen[l.to as usize] = true;
-                        stack.push(l.to);
-                    }
-                }
-            }
-            seen
-        };
-        let walked = reach(starts, false);
         let mut stack: Vec<NodeId> = (0..n as NodeId).filter(|&i| walked[i as usize]).collect();
-        let boosted = reach(&stack, true);
         let mut into: Vec<Vec<NodeId>> = vec![Vec::new(); n];
         for a in 0..n as NodeId {
             for l in graph.links(a).iter().filter(|l| l.plain()) {
                 into[l.to as usize].push(a);
             }
         }
-        let mut back = walked.clone();
+        let mut back = walked.to_vec();
         while let Some(b) = stack.pop() {
             for &a in &into[b as usize] {
                 if !back[a as usize] {
@@ -489,7 +474,7 @@ impl MapTactics {
                 .sum()
         };
         let mut cands: Vec<(usize, f32)> = (0..n)
-            .filter(|&i| boosted[i] && !walked[i] && back[i] && !self.transit[i])
+            .filter(|&i| boost_only[i] && back[i] && !self.transit[i])
             .map(|i| (i, traffic(i, true)))
             .collect();
         if cands.is_empty() {
@@ -807,6 +792,34 @@ fn flow(graph: &NavGraph, ends: &[NodeId]) -> Vec<f32> {
     counts.iter().map(|&c| (c as f32 / max).sqrt()).collect()
 }
 
+/// The nodes of `n` reached from `from` by plain links, and by gauss boosts too when `boosts`.
+fn reach(graph: &NavGraph, n: usize, from: &[NodeId], boosts: bool) -> Vec<bool> {
+    let mut seen = vec![false; n];
+    for &s in from {
+        seen[s as usize] = true;
+    }
+    let mut stack = from.to_vec();
+    while let Some(a) = stack.pop() {
+        for l in graph.links(a) {
+            let go = l.plain() || (boosts && l.valid() && l.kind == LinkKind::GaussBoost);
+            if go && !seen[l.to as usize] {
+                seen[l.to as usize] = true;
+                stack.push(l.to);
+            }
+        }
+    }
+    seen
+}
+
+/// The nodes players walk to from `starts` (their spawn nodes), and those only a gauss boost gets onto from there.
+fn walked_and_boosted(graph: &NavGraph, n: usize, starts: &[NodeId]) -> (Vec<bool>, Vec<bool>) {
+    let walked = reach(graph, n, starts, false);
+    let from: Vec<NodeId> = (0..n as NodeId).filter(|&i| walked[i as usize]).collect();
+    let boosted = reach(graph, n, &from, true);
+    let boost_only = (0..n).map(|i| boosted[i] && !walked[i]).collect();
+    (walked, boost_only)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -890,7 +903,11 @@ mod tests {
             spots: vec![SpotStats::default(); n],
             ..MapTactics::default()
         };
-        let perches = t.perches(&graph(LinkKind::GaussBoost, true), &[0]);
+        let perches_of = |g: &NavGraph| {
+            let (walked, boost_only) = walked_and_boosted(g, n, &[0]);
+            t.perches(g, &walked, &boost_only)
+        };
+        let perches = perches_of(&graph(LinkKind::GaussBoost, true));
         assert_eq!(perches.len(), 2, "{perches:?}");
         assert!(
             perches
@@ -899,13 +916,29 @@ mod tests {
             "{perches:?}"
         );
         assert!(
-            t.perches(&graph(LinkKind::Ladder, true), &[0]).is_empty(),
+            perches_of(&graph(LinkKind::Ladder, true)).is_empty(),
             "a ladder leads up"
         );
         assert!(
-            t.perches(&graph(LinkKind::GaussBoost, false), &[0]).is_empty(),
+            perches_of(&graph(LinkKind::GaussBoost, false)).is_empty(),
             "no way back down"
         );
+        // Up there is the best overwatch too, which only bots that can boost are to take: as a perch.
+        let wide = SpotStats {
+            sight: 1.0,
+            exits: 2,
+            ..SpotStats::default()
+        };
+        let t = MapTactics {
+            spots: (0..n)
+                .map(|i| if i < floor { SpotStats::default() } else { wide })
+                .collect(),
+            ..t
+        };
+        let (_, boost_only) = walked_and_boosted(&graph(LinkKind::GaussBoost, true), n, &[0]);
+        assert!(t.overwatch(&|_| false, &boost_only).is_empty());
+        let (_, by_ladder) = walked_and_boosted(&graph(LinkKind::Ladder, true), n, &[0]);
+        assert!(!t.overwatch(&|_| false, &by_ladder).is_empty(), "a ladder leads up");
     }
 
     /// Lanes run where a player laid tripmine trails on crossfire on the stand: across the yard and along its edges,

@@ -112,10 +112,15 @@ pub fn plan(v: &mut WorldView<'_>, phys: &Physics, from: Vec3, to: Vec3) -> Opti
 
 /// The takeoff and the landing a boost checks out between for a way up: the players' own spots first, then the spots
 /// round them. Also the traces it took.
-fn check(world: &BspWorld, phys: &Physics, way: &Climb) -> (Option<(Vec3, Vec3)>, u64) {
+fn check(world: &BspWorld, phys: &Physics, way: &Climb, hz: &dyn Surroundings) -> (Option<(Vec3, Vec3)>, u64) {
     let mut v = WorldView::new(world);
-    let landings = spots(&mut v, way.to, &LANDING_RINGS);
-    let takeoffs = spots(&mut v, way.from, &TAKEOFF_RINGS);
+    // Neither end where no node goes: in a hazard, a closed door, a push field or on a ladder.
+    let fit = |p: &Vec3| !(hz.hazard(*p) || hz.gate(*p) || hz.push(*p) || hz.ladder(*p));
+    let landings: Vec<Vec3> = spots(&mut v, way.to, &LANDING_RINGS).into_iter().filter(fit).collect();
+    let takeoffs: Vec<Vec3> = spots(&mut v, way.from, &TAKEOFF_RINGS)
+        .into_iter()
+        .filter(fit)
+        .collect();
     let found = takeoffs.iter().find_map(|&from| {
         landings
             .iter()
@@ -139,7 +144,7 @@ pub fn onto_high_ground(
         .flat_map(|(g, h)| h.ways.iter().map(move |w| (g, w)))
         .filter(|(_, w)| field.at(w.to).is_none())
         .collect();
-    let found: Vec<(Option<(Vec3, Vec3)>, u64)> = ways.par_iter().map(|(_, w)| check(world, phys, w)).collect();
+    let found: Vec<(Option<(Vec3, Vec3)>, u64)> = ways.par_iter().map(|(_, w)| check(world, phys, w, hz)).collect();
     let traces = found.iter().map(|(_, t)| t).sum();
     let checked: Vec<Checked> = ways
         .iter()
@@ -193,6 +198,59 @@ pub fn high_ground_of(
 mod tests {
     use super::*;
     use lb_config::moves::{Source, Way};
+
+    /// The map's own surroundings, and a volume that hurts round `.1` too.
+    struct HurtsAt<'a>(crate::site::Site<'a>, Vec3);
+
+    impl Surroundings for HurtsAt<'_> {
+        fn hazard(&self, origin: Vec3) -> bool {
+            let d = origin - self.1;
+            (d.truncate().length() < 128.0 && d.z.abs() < 72.0) || self.0.hazard(origin)
+        }
+        fn gate(&self, origin: Vec3) -> bool {
+            self.0.gate(origin)
+        }
+        fn water(&self, origin: Vec3) -> bool {
+            self.0.water(origin)
+        }
+        fn push(&self, origin: Vec3) -> bool {
+            self.0.push(origin)
+        }
+        fn ladder(&self, origin: Vec3) -> bool {
+            self.0.ladder(origin)
+        }
+    }
+
+    /// dm_snow's pillar top (skipped without the map): the way players take up holds, and is left out once where
+    /// they take off or come down hurts.
+    #[test]
+    fn no_boost_takes_off_or_comes_down_where_it_hurts() {
+        let Some(dir) = lb_bsp::test_maps_dir() else { return };
+        let Ok(bsp) = std::fs::read(dir.join("dm_snow.bsp")) else {
+            return;
+        };
+        let mut world = BspWorld::load(&bsp).unwrap();
+        let mech = Mechanisms::from_world(&world);
+        let opts = GenOptions::default();
+        let way = Climb {
+            from: Vec3::new(1050.0, 250.0, -252.0),
+            to: Vec3::new(900.0, 500.0, -60.0),
+        };
+        let high = [HighGround { ways: vec![way] }];
+        let mut made = |hurts: Option<Vec3>| {
+            let (_, _, mut field) = crate::build::floor(&mut world, &mech, &opts);
+            let world: &BspWorld = &world;
+            let site = crate::site::Site::new(world, &mech);
+            let checked = match hurts {
+                Some(at) => onto_high_ground(world, &opts.physics, &high, &mut field, &HurtsAt(site, at)).0,
+                None => onto_high_ground(world, &opts.physics, &high, &mut field, &site).0,
+            };
+            checked.len()
+        };
+        assert_eq!(made(None), 1);
+        assert_eq!(made(Some(way.to)), 0, "the landing hurts");
+        assert_eq!(made(Some(way.from)), 0, "the takeoff hurts");
+    }
 
     fn ground(seen: u32, players: u32, trusted: u32, to: f32) -> lb_config::moves::HighGround {
         let way = |y: f32, seen: u32, trusted: u32| Way {

@@ -69,23 +69,32 @@ fn run(args: &[&str]) -> Result<bool> {
     }
 }
 
-/// Makes the graph of a map, as the server does with the default physics (and the moves file `--moves` names).
+/// Makes the graph of a map, as the server does with the default physics: with the moves file `--moves` names, which
+/// must be for this build of the map, or else with the map's own `own`, used as the server uses it.
 fn generate(
     bsp: &Path,
     moves: Option<&Path>,
+    own: Option<&Path>,
 ) -> Result<(lb_bsp::BspWorld, lb_navgen::Generated, lb_nav::store::GraphKey)> {
     let bytes = std::fs::read(bsp).map_err(|e| anyhow::anyhow!("{}: {e}", bsp.display()))?;
     let mut world = lb_bsp::BspWorld::load(&bytes).map_err(|e| anyhow::anyhow!("{}: {e}", bsp.display()))?;
     let mech = lb_bsp::mech::Mechanisms::from_world(&world);
     let name = bsp.file_stem().and_then(|s| s.to_str()).unwrap_or("map");
-    let high_ground = match moves {
-        Some(path) => {
-            let (made, note) = lb_navgen::mapload::high_ground_in(path, name, world.bsp.fingerprint.1);
-            let note = note.ok_or_else(|| anyhow::anyhow!("{}: cannot be read", path.display()))?;
+    let size = world.bsp.fingerprint.1;
+    let high_ground = match (moves, own) {
+        (Some(path), _) => {
+            let (made, note) = lb_navgen::mapload::read_high_ground(path, name, size).map_err(anyhow::Error::msg)?;
             eprintln!("{note}");
             made
         }
-        None => Vec::new(),
+        (None, Some(path)) => {
+            let (made, note) = lb_navgen::mapload::high_ground_in(path, name, size);
+            if let Some(note) = note {
+                eprintln!("{note}");
+            }
+            made
+        }
+        (None, None) => Vec::new(),
     };
     let opts = lb_navgen::GenOptions {
         high_ground,
@@ -102,7 +111,7 @@ fn nav_gen(bsp: &Path, args: &[&str], moves: Option<&Path>) -> Result<bool> {
         ["--out", path] => Path::new(path).to_path_buf(),
         _ => bail!(USAGE),
     };
-    let (_, generated, key) = generate(bsp, moves)?;
+    let (_, generated, key) = generate(bsp, moves, None)?;
     let s = &generated.graph.stats;
     println!(
         "{} nodes, {} links ({}), {} traces, {} ms",
@@ -162,7 +171,7 @@ fn nav_tactics(bsp: &Path, args: &[&str], moves: Option<&Path>) -> Result<bool> 
         ["--all"] => true,
         _ => bail!(USAGE),
     };
-    let (mut world, generated, _) = generate(bsp, moves)?;
+    let (mut world, generated, _) = generate(bsp, moves, None)?;
     let mech = lb_bsp::mech::Mechanisms::from_world(&world);
     lb_navgen::site::rest_poses(&mut world, &mech);
     let vis = lb_bsp::MapVis::build(&world.bsp);
@@ -225,7 +234,7 @@ fn nav_coverage(bsp: &Path, args: &[&str], moves: Option<&Path>) -> Result<bool>
         ["--json"] => true,
         _ => bail!(USAGE),
     };
-    let (world, generated, _) = generate(bsp, moves)?;
+    let (world, generated, _) = generate(bsp, moves, None)?;
     let c = lb_navgen::report::coverage(&generated);
     let lost = lb_navgen::report::lost_items(&generated, &world, &c);
     if json {
@@ -288,7 +297,9 @@ fn validate_overlay(bsp: &Path, files: &[&str], moves: Option<&Path>) -> Result<
             }
         }
     }
-    let (mut world, generated, _) = generate(bsp, moves)?;
+    // Without `--moves`, the graph is made with the moves file beside the overlays, as the server makes it.
+    let own = Path::new(files[0]).with_file_name(lb_navgen::mapload::MOVES);
+    let (mut world, generated, _) = generate(bsp, moves, Some(&own))?;
     for o in &overlays {
         if o.bsp_size.is_some_and(|s| s != world.bsp.fingerprint.1) {
             println!(
@@ -331,7 +342,7 @@ fn nav_path(bsp: &Path, from: &str, to: &str, moves: Option<&Path>) -> Result<bo
         }
     };
     let (a, b) = (point(from)?, point(to)?);
-    let (_, generated, _) = generate(bsp, moves)?;
+    let (_, generated, _) = generate(bsp, moves, None)?;
     let g = &generated.graph;
     let near = |p: lb_core::Vec3| g.nearest(p, 512.0, 1).first().map(|(n, _)| *n);
     let (Some(start), Some(goal)) = (near(a), near(b)) else {

@@ -192,6 +192,11 @@ pub(crate) fn still_perched(spot: Vec3, origin: Vec3) -> bool {
     (origin - spot).truncate().length() <= PERCHED_AREA && (origin.z - spot.z).abs() <= PERCHED_LEVEL
 }
 
+/// When high ground left at `now` is taken again at the soonest.
+pub(crate) fn perch_rest(now: SimTime, rng: &mut BotRng) -> SimTime {
+    now + f64::from(rng.decision.range_f32(PERCH_REST[0], PERCH_REST[1]))
+}
+
 /// The perch a bot at `origin` stands by on its high ground, however it got up there.
 pub(crate) fn perch_at(map: &dyn MapView, origin: Vec3) -> Option<Vec3> {
     map.camp_spots()
@@ -582,13 +587,15 @@ impl BotBrain {
         let until = match until {
             Some(u) => u,
             None => {
-                let status = if at_spot(body, spot.pos) {
+                // High ground is got onto once the bot stands on it, not as the boost carries it over the spot.
+                let landed = body.on_ground || spot.kind != CampKind::Perch;
+                let status = if at_spot(body, spot.pos) && landed {
                     NavStatus::Arrived
                 } else {
                     self.walk(spot.pos, body, nav)
                 };
                 match status {
-                    NavStatus::Arrived => {
+                    NavStatus::Arrived if landed => {
                         let (range, fond) = match spot.kind {
                             CampKind::Overwatch => (CAMP_FOR, ch.affinity.camp >= FOND),
                             CampKind::Ambush => (AMBUSH_FOR, ch.affinity.ambush >= FOND),
@@ -612,7 +619,7 @@ impl BotBrain {
                         self.give_up(now, rng);
                         return;
                     }
-                    NavStatus::Moving => return,
+                    NavStatus::Arrived | NavStatus::Moving => return,
                 }
             }
         };
@@ -951,8 +958,7 @@ impl BotBrain {
                 // Called off up there for a fight, the high ground is held again after it.
                 Some(Task::Camp { perch: true, until, .. }) => {
                     if until.is_none_or(|u| now >= u) || self.mind.perched.is_none() {
-                        let rest = f64::from(rng.decision.range_f32(PERCH_REST[0], PERCH_REST[1]));
-                        self.mind.perch_rest_until = now + rest;
+                        self.mind.perch_rest_until = perch_rest(now, rng);
                     }
                 }
                 _ => {

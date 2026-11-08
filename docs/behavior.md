@@ -72,8 +72,9 @@ few tens of them on the standard maps; `lb map` shows it):
   *ambush* spots are out of the way, little seen, 150–650 units from a chokepoint they see; *perches* are high ground
   that only a gauss boost gets onto from where players go on foot (dm_snow's pillars, with the boost links of its
   overlay), with a plain way back down, overlooking traffic 64 units or more below within 1500 units (as much of it as
-  15% of the most any place of the map sees within that reach at least): up to eight, 256 units apart. Each comes with
-  the directions worth watching.
+  15% of the most any place of the map sees within that reach at least): up to eight, 256 units apart. No overwatch or
+  ambush spot is on floor only a boost gets onto: up there is for bots that can boost, as a perch. Each comes with the
+  directions worth watching.
 - **Walls for tripmines:** across busy corridors (the beam at 20 units above the floor trips standing and crouching
   players alike) and just past turns, where a player rounds the corner into the beam (yapb's corner mines, worked out
   ahead for the whole map). None within 256 units of a spawn point.
@@ -141,14 +142,17 @@ GunGame kill):
   controller), whatever its aggression, with any gun (the crossbow, the 357, the gauss or the RPG best);
 - **in a fight** (`camp` at rank 3, over the fight itself), when the style's roll says so (its liking as the chance,
   rolled every 6–10 s), the enemy fought 300 units off or more and a perch 3 s away at most by the straight way. It
-  fights on the way there with plain gauss shots (a charged shot's throw would knock it off the takeoff); at the
-  takeoff it turns away for the boost, enemy or not. A climb under way (a calm one
+  fights on the way there with plain gauss shots (a charged shot's throw would knock it off the takeoff), and a charge
+  it holds as it sets off it dumps at once (see *Dumping a charge* under *Tricks*); at the takeoff it turns away for
+  the boost, enemy or not. A climb under way (a calm one
   too) goes on through a fight while the bot can boost and the enemy keeps 150 units off.
 
 Its way there takes the boost. Up there, calm, it holds the spot standing for 4–12 s, watching the floor below, and
 holds the perches within 700 units on its level without a boost; in a fight it fights (`engage`) and holds again
-after. It takes one again 20–35 s after. The bot stands on a perch's high ground once it is on its level within 128
-units of the spot, however it got there, and stays on it within 700 units on that level. In a fight on the high
+after. It takes one again 20–35 s after, and as long after it leaves the high ground before its time up there is over
+(down in a fight, knocked off). The bot stands on a perch's high ground once it stands on its level within 128 units
+of the spot (on the floor: not as the boost carries it over), however it got there, and stays on it within 700 units
+on that level. In a fight on the high
 ground it does not close in (the way to the enemy would drop it down); the fight's ledge rule keeps its strafes from
 walking off.
 

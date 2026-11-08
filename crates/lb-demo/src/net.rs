@@ -97,7 +97,7 @@ pub enum Msg {
         stats_before: Stats,
         /// The models of the map before, which the new map's resource list replaces.
         models_before: FxHashMap<u16, String>,
-        /// CRC-32 of the BSP's lumps but its entities (the engine's `CRC_MapFile`), to tell builds of a map apart.
+        /// The map's CRC (the engine's `CRC_MapFile`) as sent: munged for the slot of the client it went to.
         map_crc: u32,
         max_clients: u8,
         player_num: u8,
